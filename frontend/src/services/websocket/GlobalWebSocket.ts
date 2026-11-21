@@ -1,5 +1,6 @@
 /** 全局单连接 WebSocket 服务 设计原则： */
 
+import { API_BASE_URL } from '@/constants/api'
 import {
   buildGlobalWebSocketUrl,
   WS_LOCAL_EVENTS,
@@ -8,11 +9,11 @@ import {
 } from '@/constants/websocket'
 import { isAuthFailureFromError, isExpired, refresh, getAccessToken } from '@/services/auth/tokenLifecycle'
 import { fetchWsTicket } from '@/services/auth/wsTicket'
-import { resolveRelayWsUrl } from '@/services/wsRelay'
-import { API_BASE_URL } from '@/constants/api'
 import { triggerAuthExpired } from '@/services/authCallbacks'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { maybeRequestConnectionSelfHeal } from '@/services/connectionSelfHeal'
+import { resolveRelayWsUrl } from '@/services/wsRelay'
 import { useChatInputStore } from '@/stores/chatInputStore'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
 import { generateUUID } from '@/utils/uuid'
 
@@ -321,6 +322,11 @@ class GlobalWebSocketService {
                 serverAware: true,
               },
             })
+          } else if (cmid) {
+            // ack 受理对账（2026-11-18）：内核已收货 → 发送态落定计时放宽到
+            // 宽限窗口（闸门等待/抢占腾槽的启动延迟），5s 判死不再误杀已受理
+            // 消息（超时不自动停 run，chatInputStore 语义见其头注）。
+            useChatInputStore.getState().markSendAcked(cmid)
           }
         }
         // stream_start：该管道已有轮次在跑（内核→前端方向实测可达），按 pipeline_id
@@ -428,7 +434,8 @@ class GlobalWebSocketService {
   sendUserInput(threadId: string, content: string, opts?: {
     pipelineId?: string
     attachments?: unknown[]
-    /** 思考强度（参数组 JSON 串；内核透传 → llm_core 白名单过滤直覆盖） */
+    /** 思考强度（参数组 JSON 串；内核落管道持久 state → llm_core 白名单过滤
+     *  直覆盖；'' = 本轮未选择，继承管道上次选择） */
     thinkingStrength?: string
     clientMessageId?: string
     /**
@@ -497,13 +504,19 @@ class GlobalWebSocketService {
       let reason: string
       let content: string | undefined
       if (idx !== -1) {
-        // 仍在队列：断线未发出，剔除并广播（既有排队语义）
+        // 仍在队列：超 TTL 未发出，剔除并广播（既有排队语义）。reason 按连接
+        // 真实状态分路——已连接下的滞留（bufferedAmount 背压/通道拥塞）不得
+        // 谎报「连接断开」
         const [dropped] = this._queue.splice(idx, 1)
-        reason = `连接断开超过 ${USER_INPUT_QUEUE_TTL_MS / 1000}s，消息未送达已撤回`
+        const offline = this._status !== 'connected'
+        reason = offline
+          ? `连接断开超过 ${USER_INPUT_QUEUE_TTL_MS / 1000}s，消息未送达已撤回`
+          : `消息滞留发送队列超过 ${USER_INPUT_QUEUE_TTL_MS / 1000}s 未发出（通道拥塞），已撤回`
         content = typeof dropped.content === 'string' ? dropped.content : undefined
         _wsLogger.warn(
-          '[GlobalWS] user_input 排队 %dms 未发出（连接未恢复），丢弃并广播 send_timeout: cmid=%s',
+          '[GlobalWS] user_input 排队 %dms 未发出（%s），丢弃并广播 send_timeout: cmid=%s',
           USER_INPUT_QUEUE_TTL_MS,
+          offline ? '连接未恢复' : '已连接但通道拥塞',
           cmid.slice(0, 8),
         )
       } else {
@@ -838,6 +851,10 @@ class GlobalWebSocketService {
       state: 'reconnecting',
       reconnectAttempt: this._reconnectAttempts,
     })
+    // 连接池毒化自愈（2026-11-18 装机事故批次 2）：重连计数达降级阈值时请求
+    // 主进程探活+重建 Electron 网络连接池（内核健康门控与 5 分钟冷却限频都在
+    // 主进程侧；无宿主能力 no-op）。死毒化下重连永不自愈，这是唯一逃生通道。
+    maybeRequestConnectionSelfHeal(this._reconnectAttempts)
     // 认证拒绝需先 refresh：置标志，防止退避期间外部 connect(oldToken) 打断 refresh
     if (authRejected) {
       this._refreshingForReconnect = true

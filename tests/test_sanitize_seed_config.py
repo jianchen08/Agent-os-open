@@ -211,3 +211,115 @@ class TestCli:
         assert ssc.main(["assert-seed", "--seed", str(bad)]) == 1
         assert "sk-cli-leak" not in capsys.readouterr().out  # 明文值不落 stdout（零口令外泄面）
         assert ssc.main(["assert-seed", "--seed", str(good)]) == 0
+
+
+class TestFactoryProfileDrift:
+    """出厂画像对账（2026-11-18 个人信息出仓处置）：种子内 config/users/**/profile.md
+    必须与仓内出厂模板逐字节一致——种子面出现用户真值画像即违约。"""
+
+    def _repo_users(self, tmp_path: Path, content: str) -> Path:
+        repo_users = tmp_path / "repo_users"
+        (repo_users / "default").mkdir(parents=True, exist_ok=True)
+        (repo_users / "default" / "profile.md").write_bytes(content.encode())  # write_bytes：对账是字节面，避免 Windows 换行翻译
+        return repo_users
+
+    def test_drift_reported(self, tmp_path: Path) -> None:
+        repo_users = self._repo_users(tmp_path, "# 出厂占位\n")
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes({"opt/agentos/config/users/default/profile.md": "# 真值画像\n".encode()})
+        )
+        hits = ssc.seed_config_violations(seed, repo_users_dir=repo_users)
+        assert hits == ["opt/agentos/config/users/default/profile.md#<profile-factory-drift>"]
+
+    def test_equal_factory_passes(self, tmp_path: Path) -> None:
+        repo_users = self._repo_users(tmp_path, "# 出厂占位\n")
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes({"opt/agentos/config/users/default/profile.md": "# 出厂占位\n".encode()})
+        )
+        assert ssc.seed_config_violations(seed, repo_users_dir=repo_users) == []
+
+    def test_missing_repo_counterpart_reported(self, tmp_path: Path) -> None:
+        repo_users = tmp_path / "repo_users"  # 空目录：种子多出的画像无出厂对应
+        repo_users.mkdir()
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes({"opt/agentos/config/users/default/profile.md": b"# x\n"})
+        )
+        hits = ssc.seed_config_violations(seed, repo_users_dir=repo_users)
+        assert hits == ["opt/agentos/config/users/default/profile.md#<profile-factory-drift>"]
+
+    def test_no_profile_entries_passes(self, tmp_path: Path) -> None:
+        # 缺席不判（种子未含 users 面属打包完整性问题，由 build 自身完整性检查承载）
+        repo_users = self._repo_users(tmp_path, "# 出厂占位\n")
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(_tar_bytes({"opt/agentos/config/a.yaml": b"k: v\n"}))
+        assert ssc.seed_config_violations(seed, repo_users_dir=repo_users) == []
+
+
+class TestForbiddenSeedPaths:
+    """部署真值面禁入：fmin local mcp 真值配置与审计日志不得出现在种子里。"""
+
+    def test_real_value_config_forbidden(self, tmp_path: Path) -> None:
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes(
+                {
+                    "opt/agentos/deploy/remote/local_mcp_server/config.json": b"{}",
+                    "opt/agentos/deploy/remote/local_mcp_server/logs/audit.jsonl": b"{}\n",
+                }
+            )
+        )
+        hits = ssc.seed_config_violations(seed)
+        assert hits == [
+            "opt/agentos/deploy/remote/local_mcp_server/config.json#<forbidden-path>",
+            "opt/agentos/deploy/remote/local_mcp_server/logs/audit.jsonl#<forbidden-path>",
+        ]
+
+    def test_example_json_not_forbidden(self, tmp_path: Path) -> None:
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes(
+                {"opt/agentos/deploy/remote/local_mcp_server/config.example.json": b"{}\n"}
+            )
+        )
+        assert ssc.seed_config_violations(seed) == []
+
+
+class TestPublicIpv4InConfig:
+    """公网 IPv4 禁入出厂 config 面：保留/私网/环回段放行，可路由公网值违约。"""
+
+    def test_public_ip_reported(self, tmp_path: Path) -> None:
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes({"opt/agentos/config/plugins/x/x.yaml": b"url: http://62.1.2.3/e\n"})
+        )
+        hits = ssc.seed_config_violations(seed)
+        assert hits == ["opt/agentos/config/plugins/x/x.yaml#<public-ipv4:62.1.2.3>"]
+
+    def test_reserved_and_private_ips_pass(self, tmp_path: Path) -> None:
+        body = "\n".join(
+            f"h{i}: {ip}" for i, ip in enumerate(
+                ["127.0.0.1", "0.0.0.0", "172.20.0.1", "10.1.2.3",
+                 "192.0.2.147", "198.51.100.9", "203.0.113.153", "169.254.1.1"]
+            )
+        )
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(_tar_bytes({"opt/agentos/config/net.yaml": body.encode()}))
+        assert ssc.seed_config_violations(seed) == []
+
+    def test_non_config_entries_not_scanned(self, tmp_path: Path) -> None:
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes({"opt/agentos/plugins/shared/x/server.py": b"DNS = '8.8.8.8'\n"})
+        )
+        assert ssc.seed_config_violations(seed) == []
+
+    def test_ipv4_face_scans_md_and_txt_too(self, tmp_path: Path) -> None:
+        seed = tmp_path / "seed.tar"
+        seed.write_bytes(
+            _tar_bytes({"opt/agentos/config/users/default/notes.md": b"server 62.9.9.9 down\n"})
+        )
+        hits = ssc.seed_config_violations(seed)
+        assert hits == ["opt/agentos/config/users/default/notes.md#<public-ipv4:62.9.9.9>"]

@@ -170,6 +170,14 @@ BASE_TEST_PATHS: list[str] = [
     # （不存在的基集路径会让 pytest 用法错误整车道退出）。
     "plugins/shared/todo_track/",
     "plugins/shared/agent_manager/",
+    # project_manager 进程内测试接线（2026-11-12 异步阻塞审计 A-5 同刀）：改动
+    # 落在 project_create_tool/project_registry/server 上，目录内测试不进插桩
+    # 度量面（coverage.xml 无此文件）→ plugins-diff-coverage fail-loud。
+    "plugins/shared/project_manager/",
+    # plugin_verifier 进程内测试接线（2026-11-12 异步阻塞审计 P2-7 同刀）：改动
+    # 落在 server.py 的 plugin_verify 下放面上，目录内测试不进插桩度量面
+    # （coverage.xml 无此文件）→ plugins-diff-coverage fail-loud。
+    "plugins/shared/plugin_verifier/",
     "plugins/shared/approval/",
     # evaluation 读面/执行面行为测试（2026-08-26 A5.3 P0 批：server.py 50%→93%）
     "plugins/shared/evaluation/",
@@ -182,7 +190,6 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/memory/",
     "plugins/shared/resource_merge/",
     "plugins/shared/simple/",
-    "plugins/shared/spill_retrieve/",
     # 2026-08-26 批次G：LLM/隔离/任务链孤儿测试接线（12 文件单跑 107 绿
     # 10.2s 后接入；此前在车道名单外 → llm_core adapter 16.6%/system.llm
     # adapter 17.8%/isolation workspace 三件 7.6-17.9% 的覆盖率失真）。
@@ -194,6 +201,8 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_workspace_git_exclude.py",
     "tests/test_lifecycle_plugins.py",
     "tests/test_task_submit_params.py",
+    # sync_agent 远端文件面（/ext/sync_agent/fs/**；SFTP 浏览/读写）单测
+    "tests/test_sync_agent_remote_fs.py",
     "tests/test_bug_fixes.py",
     # 2026-08-26 批次H：剩余顶层散落测试全量接线（tests/ 根最后一批车道外
     # 文件 + bash 工具套件 tests/tools/builtin/ + 测试工具箱自检 tests/test_utils/
@@ -283,6 +292,26 @@ BASE_TEST_PATHS: list[str] = [
     # 冲突（故只登记单文件，同上）；本文件自带唯一模块名装载 + 追加式 sys.path
     # 追加（不夺平铺名首位），与车道共跑实测绿。
     "plugins/shared/llm_core/test_llm_core_model_binding.py",
+    # 2026-11-18 LLM 两类收敛批 3（llm_core 适配服务面 / 方言注册表 / wire 复制
+    # 改造 / 内存定案）：新增 llm_wire/llm_stream/llm_dialects/llm_adapter 与
+    # provider adapter 复制件必须进插桩度量面，否则 diff coverage fail-loud
+    # （coverage.xml 无新文件）——llm_core 目录整体收集仍与 shared/llm 平铺
+    # `import adapter` 裸名冲突（同上两条），故逐文件登记；各文件均自带唯一
+    # 模块名装载 + 追加式 sys.path（llm_core 压 llm 首位）。
+    "plugins/shared/llm_core/test_llm_adapter_face.py",
+    "plugins/shared/llm_core/test_llm_adapter_wire_parity.py",
+    # 2026-11-19 LLM 两类收敛批 5（生产改接适配面 + 模型意图收窄）：改接路径/
+    # 网关信封契约/意图收窄断言进插桩度量面（同批 3 理由，逐文件登记、自带
+    # sys.path + llm_core 目录优先装载）。
+    "plugins/shared/llm_core/test_llm_core_adapter_rewire.py",
+    "plugins/shared/llm_core/test_llm_dialects.py",
+    # 2026-11-19 LLM 两类收敛批 4（dsh 方言注册表扩展）：新增 llm_dsh.py 必须
+    # 进插桩度量面（同上批 3 理由，逐文件登记、自带 sys.path 装载）。
+    "plugins/shared/llm_core/test_llm_dsh_dialect.py",
+    "plugins/shared/llm_core/test_llm_minimax_copy.py",
+    "plugins/shared/llm_core/test_llm_provider_adapters_copy.py",
+    "plugins/shared/llm_core/test_llm_stream_copy.py",
+    "plugins/shared/llm_core/test_llm_wire_copy.py",
     # 2026-09-14 覆盖率补测批十（簇 B/C）：shared 根散模块 + 三个未登记插件目录
     # 的缺口补测——这些文件不在任何已登记目录下，缺此条目则模块覆盖率失真。
     "tests/test_host_shared_modules_gaps.py",  # project_registry/tenant_data/repo_anchor/proc_tree/user_space/state_fields/uploads_path
@@ -307,6 +336,11 @@ BASE_TEST_PATHS: list[str] = [
     # oauth_broker 的协议面/流程面/工具面不进插桩度量面，diff coverage
     # 度量面漂移必红）。夹具起真实 HTTP 假授权服务器（127.0.0.1 随机端口）。
     "plugins/shared/oauth_broker/tests/",
+    # ui_bridge 状态上报/感知工具进程内测试（2026-11-18 侧边栏 UI 对象化 P0）：
+    # 目录内 TestClient 直测 create_app 自含 FastAPI + 注入时钟 freshness 面 +
+    # sidecar http.handle/分发面缺口测试；缺此条目则 server.py 不进插桩度量面 →
+    # plugins-diff-coverage 度量面漂移必红。
+    "plugins/shared/ui_bridge/",
 ]
 
 # 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，

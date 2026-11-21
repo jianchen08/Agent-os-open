@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -163,8 +164,80 @@ def test_remove_index_lock(host: _GitOpsHost, tmp_path: Path) -> None:
     lock = tmp_path / ".git" / "index.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("pid", encoding="utf-8")  # index.lock 是文件而非目录
+    # 活锁（新鲜）：并发 git 正在持有，必须保留
+    assert host._remove_index_lock(tmp_path) is False
+    assert lock.exists()
+    # 陈旧锁（mtime 拨回 1h）才删除
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
     assert host._remove_index_lock(tmp_path) is True
     assert not lock.exists()
+
+
+def test_run_git_injects_no_maintenance_env(
+    host: _GitOpsHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """所有 git 调用统一 gc.auto=0 / maintenance.auto=false（防后台 repack）。"""
+    captured: dict[str, Any] = {}
+
+    def _fake_run(args: Any, **kw: Any) -> Any:
+        captured["env"] = kw.get("env")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", _fake_run)
+    host._run_git("status", cwd=tmp_path)
+    env = captured["env"]
+    assert env is not None
+    pairs = {
+        env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+        for i in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert pairs["gc.auto"] == "0"
+    assert pairs["maintenance.auto"] == "false"
+
+
+def test_git_env_tolerates_invalid_config_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """宿主环境里损坏的 GIT_CONFIG_COUNT 不得中断注入（按 0 起编）。"""
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "not-a-number")
+    env = _MOD._git_env()
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_0"] == "gc.auto"
+
+
+def test_ws_config_returns_empty_for_non_dict_host_config(tmp_path: Path) -> None:
+    host = _GitOpsHost(tmp_path)
+    host._config = "broken"  # type: ignore[assignment]
+    assert host._ws_config() == {}
+
+
+def test_remove_index_lock_stat_failure_keeps_lock(
+    host: _GitOpsHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """stat 失败（权限/瞬态 IO）不得删锁——无法判定陈旧即按活锁保留。"""
+    lock = tmp_path / ".git" / "index.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("pid", encoding="utf-8")
+    real_stat = Path.stat
+
+    def _failing_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path.name == "index.lock":
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _failing_stat)
+    assert host._remove_index_lock(tmp_path) is False
+    assert os.path.exists(lock)
+
+
+def test_remove_index_lock_invalid_stale_config_falls_back(tmp_path: Path) -> None:
+    """index_lock_stale_seconds 非法值按缺省阈值处理（陈旧锁仍可清）。"""
+    host = _GitOpsHost(tmp_path, {"workspace": {"index_lock_stale_seconds": "bad"}})
+    lock = tmp_path / ".git" / "index.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("pid", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
+    assert host._remove_index_lock(tmp_path) is True
 
 
 # ──────────────────────────────────────────────
@@ -312,6 +385,20 @@ class TestDirtyCommit:
         h = host._git_add_commit_if_dirty(ws, "modify")
         assert h and len(h) == 40
 
+    def test_dirty_commit_ignores_untracked_artifacts(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        """auto-save 只提交 tracked diff：untracked 构建产物不得入库。"""
+        ws = _init_repo(tmp_path / "ws6b")
+        (ws / "artifact.bin").write_bytes(b"x" * 1024)
+        assert host._git_add_commit_if_dirty(ws, "only-untracked") is None
+        assert "artifact.bin" not in _git(["ls-files"], ws)
+
+        (ws / "README.md").write_text("changed", encoding="utf-8")
+        h = host._git_add_commit_if_dirty(ws, "tracked-only")
+        assert h is not None
+        assert len(h) == 40
+        assert "artifact.bin" not in _git(["ls-files"], ws)
+        assert (ws / "artifact.bin").exists()  # 未跟踪文件原样保留
+
     def test_tracked_only_commit_ignores_untracked(self, host: _GitOpsHost, tmp_path: Path) -> None:
         ws = _init_repo(tmp_path / "ws7")
         (ws / "README.md").write_text("changed", encoding="utf-8")
@@ -381,6 +468,53 @@ class TestWorktree:
         with pytest.raises(RuntimeError, match="瞬态失败"):
             host._worktree_add_with_repair(repo, "task/3", tmp_path / "wt3", "task-3")
 
+    def test_worktree_timeout_reclaims_completed_worktree(
+        self, host: _GitOpsHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """add 超时但工作树已完整落地 → 认领并解锁，不判失败、不删分支。"""
+        repo = _init_repo(tmp_path / "r3b")
+        ws_dir = tmp_path / "wt3b"
+        _git(["worktree", "add", "-b", "task/3b", str(ws_dir), "HEAD"], repo)
+        real_run = _MOD.subprocess.run
+
+        def _timeout_add(args: Any, **kw: Any) -> Any:
+            if args[:3] == ["git", "worktree", "add"]:
+                raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+            return real_run(args, **kw)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(_MOD.subprocess, "run", _timeout_add)
+            host._worktree_add_with_repair(repo, "task/3b", ws_dir, "task-3b")
+        assert (ws_dir / "README.md").exists()
+        assert _git(["rev-parse", "--abbrev-ref", "HEAD"], ws_dir) == "task/3b"
+        assert not (repo / ".git" / "worktrees" / ws_dir.name / "locked").exists()
+
+    def test_worktree_timeout_incomplete_fails_closed(
+        self, host: _GitOpsHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """add 超时且现场不完整（半截目录）→ 仍 fail-closed 抛错。"""
+        repo = _init_repo(tmp_path / "r3c")
+        ws_dir = tmp_path / "wt3c"
+        ws_dir.mkdir()
+        (ws_dir / ".git").write_text("gitdir: nowhere\n", encoding="utf-8")
+        real_run = _MOD.subprocess.run
+
+        def _timeout_worktree(args: Any, **kw: Any) -> Any:
+            if args[:3] == ["git", "worktree", "add"]:
+                raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+            return real_run(args, **kw)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(_MOD.subprocess, "run", _timeout_worktree)
+            with pytest.raises(RuntimeError, match="瞬态失败"):
+                host._worktree_add_with_repair(repo, "task/3c", ws_dir, "task-3c")
+
+    def test_worktree_add_timeout_config_override(self, tmp_path: Path) -> None:
+        host = _GitOpsHost(tmp_path, {"workspace": {"worktree_add_timeout_seconds": 240}})
+        assert host._worktree_add_timeout() == 240
+        bad = _GitOpsHost(tmp_path, {"workspace": {"worktree_add_timeout_seconds": "bad"}})
+        assert bad._worktree_add_timeout() == _MOD._DEFAULT_WORKTREE_ADD_TIMEOUT
+
     def test_link_dependencies_creates_dir_and_file_links(self, host: _GitOpsHost, tmp_path: Path) -> None:
         repo = _init_repo(tmp_path / "r4")
         ws_dir = tmp_path / "wt4"
@@ -398,6 +532,118 @@ class TestWorktree:
         assert not (ws_dir / "missing").exists()  # 源不存在 → 跳过
         # 幂等：目标已存在 → 不重复创建不报错
         host._link_worktree_dependencies(ws_dir, repo)
+
+
+class TestWorktreeReclaimHelpers:
+    """超时认领辅助面：注册表解析 / 解锁 / 未完成现场拒绝。"""
+
+    def test_worktree_entries_empty_when_git_fails(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        assert host._worktree_entries(tmp_path / "not-a-repo") == []
+
+    def test_find_entry_returns_none_when_target_unresolvable(
+        self, host: _GitOpsHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        real_resolve = Path.resolve
+
+        def _resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+            if path == ws_dir:
+                raise OSError("unresolvable")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", _resolve)
+        assert host._find_worktree_entry(tmp_path, ws_dir) is None
+
+    def test_find_entry_skips_entries_without_path_or_unresolvable(
+        self, host: _GitOpsHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        ghost = tmp_path / "ghost"
+
+        def _entries(repo: Path) -> list[dict[str, str]]:
+            return [{"bare": ""}, {"worktree": str(ghost)}]
+
+        host._worktree_entries = _entries  # type: ignore[method-assign]
+        real_resolve = Path.resolve
+
+        def _resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+            if path == ghost:
+                raise OSError("unresolvable")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", _resolve)
+        assert host._find_worktree_entry(tmp_path, ws_dir) is None
+
+    def test_unlock_worktree_git_success(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def _run_git(*args: str, **kwargs: Any) -> tuple[int, str, str]:
+            calls.append(args)
+            return 0, "", ""
+
+        host._run_git = _run_git  # type: ignore[method-assign]
+        host._unlock_worktree(tmp_path, tmp_path / "ws")
+        assert calls
+        assert calls[0][:2] == ("worktree", "unlock")
+
+    def test_unlock_worktree_admin_locked_fallback(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        locked = repo / ".git" / "worktrees" / ws_dir.name / "locked"
+        locked.parent.mkdir(parents=True)
+        locked.write_text("initializing", encoding="utf-8")
+
+        def _run_git(*args: str, **kwargs: Any) -> tuple[int, str, str]:
+            return 1, "", "unlock unsupported"
+
+        host._run_git = _run_git  # type: ignore[method-assign]
+        host._unlock_worktree(repo, ws_dir)
+        assert not locked.exists()
+
+    def test_reclaim_rejects_unresolvable_head(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        (ws_dir / ".git").write_text("gitdir: x", encoding="utf-8")
+
+        def _find(repo: Path, ws: Path) -> dict[str, str]:
+            return {"branch": "refs/heads/task/x"}
+
+        def _run_git(*args: str, **kwargs: Any) -> tuple[int, str, str]:
+            return 1, "", ""
+
+        host._find_worktree_entry = _find  # type: ignore[method-assign]
+        host._run_git = _run_git  # type: ignore[method-assign]
+        assert host._reclaim_completed_worktree(tmp_path, "task/x", ws_dir, "t-x") is False
+
+    def test_reclaim_rejects_dirty_worktree(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        (ws_dir / ".git").write_text("gitdir: x", encoding="utf-8")
+        responses = iter([(0, "", ""), (0, " M src/a.py", "")])
+
+        def _find(repo: Path, ws: Path) -> dict[str, str]:
+            return {"branch": "refs/heads/task/y"}
+
+        def _run_git(*args: str, **kwargs: Any) -> tuple[int, str, str]:
+            return next(responses)
+
+        host._find_worktree_entry = _find  # type: ignore[method-assign]
+        host._run_git = _run_git  # type: ignore[method-assign]
+        assert host._reclaim_completed_worktree(tmp_path, "task/y", ws_dir, "t-y") is False
+
+    def test_reclaim_swallows_unexpected_exception(self, host: _GitOpsHost, tmp_path: Path) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        (ws_dir / ".git").write_text("gitdir: x", encoding="utf-8")
+
+        def _raise(repo: Path, ws: Path) -> dict[str, str]:
+            raise RuntimeError("registry broken")
+
+        host._find_worktree_entry = _raise  # type: ignore[method-assign]
+        assert host._reclaim_completed_worktree(tmp_path, "task/z", ws_dir, "t-z") is False
 
 
 # ──────────────────────────────────────────────

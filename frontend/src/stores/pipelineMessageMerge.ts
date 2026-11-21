@@ -208,3 +208,48 @@ export function buildTransientPlaceholder(
     _lastUpdated: Date.now(),
   } as Message
 }
+
+/**
+ * 全量对账降级守卫（2026-11-18 装机实测：展开工具卡翻「已中断（无结果）」）。
+ *
+ * 渲染原则：工具卡的显示状态只能由后端消息的权威证据（结果消息是否存在/
+ * status）决定，不得由「渲染数据能否取到」决定。initFromAPI 全量对账用 API
+ * 版整体替换同 id 消息——若结果消息行已被内核侧压缩/清理移走（多代压缩模型
+ * 的正常行为），新映射的 tool_call part 无 result 且 state 停在 streaming，
+ * 旧版里已有的结果预览随之丢失 → 卡头从 completed 翻「已中断（无结果）」。
+ *
+ * 本守卫在替换前逐 part 保全：新 part 无结果而旧 part 有 → 旧 result/
+ * resultData/state 保留（对账只能补全/升级，不能降级已有工具结果）。
+ * 只处理 assistant 的 tool_call part；新 part 自带结果（补全/升级）时以新为准。
+ */
+export function preserveExistingToolResults(apiSorted: Message[], existing: Message[]): Message[] {
+  const existingById = new Map(existing.map((m) => [m.id, m]))
+  return apiSorted.map((m) => {
+    if (m.role !== 'assistant' || !m.parts) return m
+    const old = existingById.get(m.id)
+    if (!old?.parts) return m
+    const oldParts = old.parts.filter((p): p is Extract<MessagePart, { type: 'tool_call' }> => p.type === 'tool_call')
+    if (oldParts.length === 0) return m
+    let changed = false
+    const parts = m.parts.map((p) => {
+      if (p.type !== 'tool_call') return p
+      const prev = oldParts.find((op) => op.callId === p.callId)
+      if (!prev) return p
+      const incomingEmpty = p.result == null && p.resultData == null
+      const hadResult = prev.result != null || prev.resultData != null
+      if (incomingEmpty && hadResult) {
+        changed = true
+        return {
+          ...p,
+          result: prev.result,
+          resultData: prev.resultData,
+          // 旧版已是终态（有结果即 done）→ 不回退 streaming；后端判失败的
+          // 升级路径不受影响（incoming error/result 缺席时无从升级，保守保留）。
+          state: prev.state === 'done' || prev.state === 'error' ? prev.state : p.state,
+        } as MessagePart
+      }
+      return p
+    })
+    return changed ? { ...m, parts } : m
+  })
+}

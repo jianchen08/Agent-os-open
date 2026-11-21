@@ -106,7 +106,6 @@ system_prompt: |-
 
   ## 工作空间
 
-
   - 审核报告输出到 reviews/ 目录下
 
 dynamic_vars:
@@ -118,6 +117,18 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 每个维度评分必须有具体段落引用作为依据，不能仅给抽象评价
 - 评分≤5的维度必须在问题段落定位中列出至少一个具体问题

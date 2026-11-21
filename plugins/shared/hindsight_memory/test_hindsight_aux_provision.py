@@ -324,7 +324,7 @@ def test_on_load_init_defers_to_background_provision(srv: Any, tmp_path: Path, m
     import asyncio
 
     async def drive() -> None:
-        await srv._on_load_init()
+        await srv._on_load_init(asyncio.Event())  # 供给分支：事件所有权不移交（返回 False）
         # 让被调度任务有机会执行（FastAPI 事件循环外的裸 loop：手动 tick）
         await asyncio.sleep(0)
 

@@ -246,8 +246,10 @@ fn run(state: &Value, config: &Value, host: Option<&dyn HostServices>) -> HashMa
 }
 
 /// 命中预填结果（对齐 plugin.py `_match_pre_decided`）：state 里 guard 拦截
-/// 优先；无命中再读内核异步预派发注入 config 的结果。有 id 按 call_id 匹配，
-/// 无 id（或 id 未命中）按工具名兜底（名字匹配只对没有 call_id 的 entry 生效）。
+/// 优先；无命中再读内核异步预派发注入 config 的结果。有 id 按 call_id 精确
+/// 匹配（R15：id 键调用禁消费无 id entry——guard 预填逐调用 id 键入，无 id
+/// entry 属无 id 调用专属，跨消费 = 并发同工具调用结果串线通道）；无 id 调用
+/// 按工具名匹配无 id entry（内部/测试调用兼容面，行为不变）。
 fn match_pre_decided<'a>(state: &'a Value, config: &'a Value, tc: &ToolCall) -> Option<&'a Value> {
     match_entries(
         state
@@ -268,11 +270,10 @@ fn match_pre_decided<'a>(state: &'a Value, config: &'a Value, tc: &ToolCall) -> 
 fn match_entries<'a>(entries: Option<&'a Vec<Value>>, tc: &ToolCall) -> Option<&'a Value> {
     let entries = entries?;
     if let Some(id) = tc.call_id.as_deref().filter(|s| !s.is_empty()) {
-        for entry in entries {
-            if entry.get("call_id").and_then(|v| v.as_str()) == Some(id) {
-                return Some(entry);
-            }
-        }
+        // R15 逐 callId 精确配对：id 键调用只认同 id entry，不回落工具名。
+        return entries
+            .iter()
+            .find(|entry| entry.get("call_id").and_then(|v| v.as_str()) == Some(id));
     }
     entries.iter().find(|entry| {
         let idless = entry
@@ -516,6 +517,13 @@ fn emit_tool_event(
         Value::String(tc.call_id.clone().unwrap_or_default()),
     );
     payload.insert("tool_name".into(), Value::String(tc.name.clone()));
+    // 宿主消息权威槽位（引擎开轮时注入 state["_message_seq"]，与
+    // stream_start.sequence 同源）：工具卡容器从第一刻起有排序坐标——
+    // 前端建容器/补落 seq，中断后不因缺 seq 恒排消息流末尾。旧引擎无该键
+    // 时省略字段（前端回落既有挂空路径，只增兼容）。
+    if let Some(seq) = state.get("_message_seq").and_then(|v| v.as_i64()) {
+        payload.insert("sequence".into(), serde_json::json!(seq));
+    }
 
     if kind == "tool_start" {
         payload.insert("args".into(), tc.args.clone());
@@ -651,28 +659,45 @@ mod tests {
             .to_string()
     }
 
+    /// current_call 的 id（R15 逐 callId 配对：替身 entry 与真内核
+    /// result_entry 同形——有 id 必随 entry，禁靠无 id 兜底命中）。
+    fn current_call_id(state: &Value) -> Option<String> {
+        state[StateKey::CURRENT_CALL]["id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+
     /// 内核 native.pre_dispatch 成功结果的测试替身（按 current_call 工具名）。
     fn predecided_success(state: &Value, data: Value) -> Value {
-        json!({ CONFIG_PRE_DECIDED_RESULTS: [{
+        let mut entry = json!({
             "tool_name": current_tool_name(state),
             "success": true,
             "error": null,
             "data": data,
             "metadata": null,
             "duration_ms": 1.5,
-        }]})
+        });
+        if let Some(id) = current_call_id(state) {
+            entry["call_id"] = Value::String(id);
+        }
+        json!({ CONFIG_PRE_DECIDED_RESULTS: [entry] })
     }
 
     /// 内核 native.pre_dispatch 失败结果（success=false + error 文本）。
     fn predecided_failure(state: &Value, error: &str) -> Value {
-        json!({ CONFIG_PRE_DECIDED_RESULTS: [{
+        let mut entry = json!({
             "tool_name": current_tool_name(state),
             "success": false,
             "error": error,
             "data": null,
             "metadata": null,
             "duration_ms": 2.0,
-        }]})
+        });
+        if let Some(id) = current_call_id(state) {
+            entry["call_id"] = Value::String(id);
+        }
+        json!({ CONFIG_PRE_DECIDED_RESULTS: [entry] })
     }
 
     /// 自定义 entry 注入（metadata/扩展位等场景）。
@@ -680,6 +705,9 @@ mod tests {
         if let Some(obj) = entry.as_object_mut() {
             obj.entry("tool_name")
                 .or_insert_with(|| Value::String(current_tool_name(state)));
+            if let Some(id) = current_call_id(state) {
+                obj.entry("call_id").or_insert_with(|| Value::String(id));
+            }
         }
         json!({ CONFIG_PRE_DECIDED_RESULTS: [entry] })
     }
@@ -1004,6 +1032,69 @@ mod tests {
         let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
         assert_eq!(results[0]["success"], false, "无 id 调用按工具名兜底命中");
         assert!(results[0]["error"].as_str().unwrap().contains("幻觉调用"));
+    }
+
+    /// R15 逐 callId 精确配对：有 id 调用不得消费无 id entry（并发同工具
+    /// 调用串线通道——另一调用的 guard 预填被本调用抢用）。id 未命中 state
+    /// 预填 → 回落内核预派发结果（config 面，逐迭代注入）。
+    #[test]
+    fn id_keyed_call_never_consumes_idless_entry() {
+        let host = MockHost::new();
+        let state = json!({
+            StateKey::CURRENT_CALL: {"name": "bash_execute", "id": "call_real", "args": {"command": "echo A"}},
+            // 无 id entry（其他无 id 调用的 guard 预填，工具名相同）
+            StateKey::PRE_DECIDED_RESULTS: [
+                {
+                    "tool_name": "bash_execute",
+                    "success": false,
+                    "error": "别人的拒绝结果",
+                    "duration_ms": 0.0,
+                }
+            ],
+        });
+        let updates = run(
+            &state,
+            &predecided_with(
+                &state,
+                json!({"call_id": "call_real", "success": true, "data": {"output": "A"}}),
+            ),
+            Some(&host),
+        );
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(results[0]["success"], true, "id 键调用走自己的预派发结果");
+        assert_eq!(results[0]["data"], json!({"output": "A"}));
+        assert!(
+            !results[0]["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("别人的拒绝结果"),
+            "禁消费无 id entry（串线通道堵死）"
+        );
+    }
+
+    /// R15 对照臂：无 id 调用与 id 键 entry 同场——不误用 id 键 entry。
+    #[test]
+    fn idless_call_never_consumes_id_keyed_entry() {
+        let host = MockHost::new();
+        let state = json!({
+            StateKey::CURRENT_CALL: {"name": "bash_execute", "args": {"command": "echo A"}},
+            StateKey::PRE_DECIDED_RESULTS: [
+                {"call_id": "call_other", "tool_name": "bash_execute", "success": false, "error": "他人专属", "duration_ms": 0.0},
+            ],
+        });
+        let updates = run(&state, &json!({}), Some(&host));
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(
+            results[0]["success"], false,
+            "无 id 调用无预派发 → fail-closed 出失败结果"
+        );
+        assert!(
+            !results[0]["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("他人专属"),
+            "无 id 调用禁消费 id 键 entry"
+        );
     }
 
     /// entry 解析缺省：success 缺省 fail-closed 为 false；tool_name 回退调用名。
@@ -1674,6 +1765,86 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("command not found"));
+    }
+
+    /// 宿主消息权威槽位（引擎开轮注入 state["_message_seq"]）：tool_start /
+    /// tool_result 载荷都携带 sequence——前端据此给工具卡容器落位/补落，
+    /// 中断后不因缺 seq 恒排消息流末尾。缺失（旧引擎）时字段缺席。
+    #[test]
+    fn emit_tool_event_carries_host_message_seq() {
+        let host = MockHost::new();
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+            "_message_seq": 7,
+        });
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({"command": "echo hi"}),
+            call_id: Some("call_seq".into()),
+        };
+        let result = ToolResult::failed("bash_execute", "boom", 1.0);
+
+        emit_tool_event(
+            Some(&host),
+            &state,
+            "tool_start",
+            &tc,
+            None,
+            &ToolOutputLimits::default(),
+        );
+        emit_tool_event(
+            Some(&host),
+            &state,
+            "tool_result",
+            &tc,
+            Some(&result),
+            &ToolOutputLimits::default(),
+        );
+
+        assert_eq!(
+            host.params_of("event-bus", 0)["payload"]["sequence"],
+            7,
+            "tool_start 携带宿主槽位"
+        );
+        assert_eq!(
+            host.params_of("event-bus", 1)["payload"]["sequence"],
+            7,
+            "tool_result 携带宿主槽位"
+        );
+    }
+
+    /// 旧引擎 state 无 `_message_seq` → 载荷省略 sequence（不回填 0/负数，
+    /// 前端回落既有挂空路径，只增兼容）。
+    #[test]
+    fn emit_tool_event_omits_seq_without_state_key() {
+        let host = MockHost::new();
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+        });
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({}),
+            call_id: Some("call_noseq".into()),
+        };
+
+        emit_tool_event(
+            Some(&host),
+            &state,
+            "tool_start",
+            &tc,
+            None,
+            &ToolOutputLimits::default(),
+        );
+
+        let payload = &host.params_of("event-bus", 0)["payload"];
+        assert!(
+            payload.get("sequence").is_none(),
+            "无槽位来源时不得伪造 sequence：{payload}"
+        );
     }
 
     /// 失败路径 data 为 Null：result_data 契约要 object，null 载荷会被网关

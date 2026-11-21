@@ -10,10 +10,15 @@
 ``kind`` 分派两家前端：``codex``（A 批）与 ``claude_code``（B 批，三形态自动识别，
 ``entry`` 选市场条目）。``allow_undeclared_license`` / ``apply_mcp`` 原值透传给落地层
 校验（不在此做真值转换——``"false"`` 的布尔转换是 True，静默转换会破坏 fail-closed）。
+
+落地段（``apply_plugin``：整树复制/覆盖换入/来源快照）是纯同步文件操作，必须
+``asyncio.to_thread`` 下放——async handler 在合宿宿主事件循环里执行，同步阻塞
+超 watchdog 阈值会拖整组宿主自杀。
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from claude_translator import translate_claude_code
@@ -79,7 +84,8 @@ class EcosystemApplyTool:
             )
         try:
             ir = _translate(kind, source_dir, entry)
-            report = apply_plugin(
+            report = await asyncio.to_thread(
+                apply_plugin,
                 ir,
                 user_root=user_root(),
                 force=force,

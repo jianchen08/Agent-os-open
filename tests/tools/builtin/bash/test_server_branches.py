@@ -2,7 +2,7 @@
 """bash 工具 sidecar 接口适配层（server.py）分支补测。
 
 覆盖缺口（2026-09-13 实测 32/83）补齐：
-- bash_execute：无 _call_context 直通、失败结果 → {error, error_code} 映射、
+- bash 工具入口：无 _call_context 直通、失败结果 → {error, error_code} 映射、
   进度前向器构建失败降级（执行不受阻）、带 call_context 的全链路进度推送
   （真实短命令 + fake emitter）；
 - _progress_forwarder：路由键缺失降级、frontend capability 缺失降级、
@@ -48,14 +48,15 @@ for _bare in ("server", "tool", "process_manager", "bash_types", "progress_repor
             sys.modules.pop(_bare, None)
 
 _spec = importlib.util.spec_from_file_location("bash_tool_server_under_test", _SERVER_PATH)
-assert _spec is not None and _spec.loader is not None
+assert _spec is not None
+assert _spec.loader is not None
 server = importlib.util.module_from_spec(_spec)
 sys.modules["bash_tool_server_under_test"] = server
 _spec.loader.exec_module(server)
 
-from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 from tool import BashTool  # noqa: E402
 
+from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 
 # ─────────────────────────── 桩 ───────────────────────────
 
@@ -93,7 +94,7 @@ def _patch_emitter(monkeypatch: pytest.MonkeyPatch, emitter: Any) -> None:
     monkeypatch.setattr(
         cap_mod.FrontendEmitter,
         "from_plugin",
-        classmethod(lambda cls, plugin: emitter),  # type: ignore[method-assign]
+        classmethod(lambda *_a, **_k: emitter),  # type: ignore[method-assign]
     )
 
 
@@ -105,21 +106,52 @@ def _real_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> BashTool:
     return tool
 
 
-# ─────────────────────────── bash_execute 入口 ───────────────────────────
+# ─────────────────────────── bash 工具入口 ───────────────────────────
 
 
-async def test_bash_execute_maps_failure_result_to_error_payload(
+async def test_bash_maps_failure_result_to_error_payload(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _real_tool(monkeypatch, tmp_path)
 
-    out = await server.bash_execute(**{"command": "rm -rf /"})  # type: ignore[arg-type]
+    out = await server.bash(**{"command": "rm -rf /"})  # type: ignore[arg-type]
 
     assert out["error_code"] == "SECURITY_CHECK_FAILED"
     assert "安全检查失败" in out["error"]
 
 
-async def test_bash_execute_success_with_progress_forwarding(
+async def test_bash_nonzero_exit_carries_exit_code_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """命令跑完但退出码非零：失败信封透传 metadata.exit_code。
+
+    该字段是 duplicate_check 失败熔断区分「命令已执行、业务报错」与
+    「工具本身执行不了」的唯一结构化信号（2026-11-11 用户裁定）。
+    """
+    _real_tool(monkeypatch, tmp_path)
+
+    out = await server.bash(
+        **{"command": "false", "working_dir": str(tmp_path), "timeout": 15}
+    )
+
+    assert out["success"] is False
+    assert out["error_code"] == "COMMAND_FAILED"
+    assert out["metadata"]["exit_code"] == 1
+
+
+async def test_bash_unexecuted_failure_has_no_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """未执行就失败（安全拒绝）：无 exit_code 痕迹，失败熔断照旧计连败。"""
+    _real_tool(monkeypatch, tmp_path)
+
+    out = await server.bash(**{"command": "rm -rf /"})  # type: ignore[arg-type]
+
+    assert out["success"] is False
+    assert "metadata" not in out
+
+
+async def test_bash_success_with_progress_forwarding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """带 call_context 的真实短命令：结果成功 + 收尾冲刷出 tool_progress 事件。"""
@@ -127,9 +159,9 @@ async def test_bash_execute_success_with_progress_forwarding(
     _patch_emitter(monkeypatch, emitter)
     _real_tool(monkeypatch, tmp_path)
 
-    out = await server.bash_execute(
+    out = await server.bash(
         **{
-            "command": "echo bash_execute_progress_e2e",
+            "command": "echo bash_progress_e2e",
             "working_dir": str(tmp_path),
             "timeout": 15,
             "_call_context": {
@@ -142,15 +174,15 @@ async def test_bash_execute_success_with_progress_forwarding(
     )
 
     assert out["status"] == "completed"
-    assert "bash_execute_progress_e2e" in out["output"]
+    assert "bash_progress_e2e" in out["output"]
     assert out["exit_code"] == 0
     forwarded = [payload for evt, payload in emitter.events if evt == "tool_progress"]
     assert forwarded, "finalize 冲刷后应有 tool_progress 事件推给前端"
-    assert any("bash_execute_progress_e2e" in p["delta"] for p in forwarded)
+    assert any("bash_progress_e2e" in p["delta"] for p in forwarded)
     assert all(p["call_id"] == "c-e2e" for p in forwarded)
 
 
-async def test_bash_execute_degrades_when_forwarder_build_fails(
+async def test_bash_degrades_when_forwarder_build_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """前向器构建抛错 → 降级继续执行，工具结果不受影响。"""
@@ -167,7 +199,7 @@ async def test_bash_execute_degrades_when_forwarder_build_fails(
     )
     _real_tool(monkeypatch, tmp_path)
 
-    out = await server.bash_execute(
+    out = await server.bash(
         **{
             "command": "echo still_runs",
             "working_dir": str(tmp_path),
@@ -178,6 +210,18 @@ async def test_bash_execute_degrades_when_forwarder_build_fails(
 
     assert out["status"] == "completed"
     assert "still_runs" in out["output"]
+
+
+async def test_input_maps_failure_result_to_error_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """input 入口：工具失败结果 → {success, error, error_code} 信封（畸形 handle）。"""
+    _real_tool(monkeypatch, tmp_path)
+
+    out = await server.input(**{"handle": "not-a-handle", "text": "hi"})  # type: ignore[arg-type]
+
+    assert out["success"] is False
+    assert out["error_code"] == "INVALID_HANDLE"
 
 
 # ─────────────────────────── _progress_forwarder ───────────────────────────
@@ -233,8 +277,9 @@ async def test_progress_forwarder_throttles_and_flushes_via_consumer(
     assert payload["thread_id"] == "t-1"
     assert payload["pipeline_id"] == "p-1"
     assert payload["message_id"] == "m-1"
-    assert payload["tool_name"] == "bash_execute"
-    assert "hello" in payload["delta"] and "xxxxx" in payload["delta"]
+    assert payload["tool_name"] == "bash"
+    assert "hello" in payload["delta"]
+    assert "xxxxx" in payload["delta"]
     assert payload["bytes_read"] == len(("hello " * 100 + "x" * 500).encode("utf-8"))
     assert payload["elapsed_ms"] >= 0
 
@@ -249,7 +294,8 @@ async def test_progress_forwarder_finalizer_swallows_consumer_failure(
     report, finalize = server._progress_forwarder(
         {"call_id": "c-2", "thread_id": "t-2"}
     )
-    assert report is not None and finalize is not None
+    assert report is not None
+    assert finalize is not None
     report("y" * 1100)  # 触发 flush → 消费者 emit 抛错
 
     await finalize()  # 不抛

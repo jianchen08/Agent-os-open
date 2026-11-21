@@ -2,7 +2,9 @@
 """任务表单服务（task_form）TDD 测试。
 
 验证内容：
-1. GET /ext/task_form/form 返回 config/task_form.yaml 声明的字段（前端 fieldsUri 消费）
+1. GET /ext/task_form/form 返回 manifest 声明路径
+   （config/plugins/task_form/task_form.yaml）里的字段（前端 fieldsUri 消费）；
+   声明文件缺席 → 空字段表 + 告警（读面不崩）
 2. GET /ext/task_form/options/agents 返回 {value:config_id,label:name}（含嵌套子目录）
 3. GET /ext/task_form/options/projects 返回登记行选项（共享 project_registry）
 4. 登记簿真空（可读、无项目）→ 空列表且无提示；登记簿故障（模块缺失/实例化
@@ -14,10 +16,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
 import json
+import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,13 +50,17 @@ def _load_module() -> Any:
 
 @pytest.fixture
 def form_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """临时项目根：config/task_form.yaml + config/agents/**/*.yaml。"""
+    """临时项目根：config/plugins/task_form/task_form.yaml + config/agents/**/*.yaml。
+
+    声明文件落点与 manifest ``config_files[0].path`` 一致（唯一真相源）。
+    """
     config_dir = tmp_path / "config"
+    form_dir = config_dir / "plugins" / "task_form"
     agents_main = config_dir / "agents" / "main"
     agents_exec = config_dir / "agents" / "executor"
-    for d in (config_dir / "agents", agents_main, agents_exec):
+    for d in (form_dir, config_dir / "agents", agents_main, agents_exec):
         d.mkdir(parents=True, exist_ok=True)
-    (config_dir / "task_form.yaml").write_text(
+    (form_dir / "task_form.yaml").write_text(
         """
 form:
   id: task_create
@@ -98,6 +107,21 @@ async def test_form_returns_declared_fields(form_project: dict[str, Any]) -> Non
     assert target["datasourceUri"] == "/ext/task_form/options/agents"
     project = next(f for f in d["payload"]["fields"] if f["name"] == "project_id")
     assert project["datasourceUri"] == "/ext/task_form/options/projects"
+
+
+async def test_form_missing_declaration_returns_empty_with_warning(
+    form_project: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """声明文件缺席 → 空字段表 + 告警留痕（读面不崩，不缺省伪造字段）。"""
+    (form_project["config"] / "plugins" / "task_form" / "task_form.yaml").unlink()
+    mod = _load_module()
+    with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+        res = await mod.http_handle(path="/ext/task_form/form", method="GET", query={})
+    d = _resp_data(res)
+    assert d["status"] == 200
+    assert d["payload"]["fields"] == []
+    assert "表单声明读取失败" in caplog.text
+    assert "task_form.yaml" in caplog.text
 
 
 async def test_agents_options_shape(form_project: dict[str, Any]) -> None:
@@ -195,3 +219,91 @@ async def test_unknown_path_404(form_project: dict[str, Any]) -> None:
     payload = json.loads(base64.b64decode(res["data"]["body"]))
     assert res["data"]["status"] == 404
     assert "not found" in payload.get("error", "")
+
+
+# ── 事件循环活性：执行 Agent 选项取数不冻合宿心跳 ──────────────────
+#
+# 审计 P2-14 同族：``http_handle`` 是 async handler（合宿 light 组同宿主连坐），
+# ``_agent_options()`` 是同步全量扫描——``config/agents/**`` 逐文件 yaml.safe_load，
+# 量级随配置树增长。锁面 = 取数段出事件循环（心跳 tick 间隔不出现 ≥0.1s 空窗）。
+
+_MAX_TICK_GAP = 0.1
+_BLOCK_SECS = 0.3
+
+
+class _Ticker:
+    """心跳协程：记录 tick 间隔 + 被测段收尾时刻（末段计入，防整段停滞漏判）。"""
+
+    def __init__(self, interval: float = 0.01) -> None:
+        self._interval = interval
+        self._ticks: list[float] = []
+        self._stop: asyncio.Event | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._end = 0.0
+
+    async def __aenter__(self) -> _Ticker:
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._run())
+        await asyncio.sleep(self._interval * 3)
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        assert self._stop is not None
+        assert self._task is not None
+        self._end = time.monotonic()
+        self._stop.set()
+        await self._task
+
+    async def _run(self) -> None:
+        assert self._stop is not None
+        while not self._stop.is_set():
+            self._ticks.append(time.monotonic())
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
+            except TimeoutError:
+                continue
+
+    @property
+    def max_gap(self) -> float:
+        points = [*self._ticks, self._end]
+        return max(
+            (b - a for a, b in zip(points, points[1:], strict=False)), default=0.0
+        )
+
+
+async def test_ticker_detects_blocking_call() -> None:
+    """仪器的区分度自证：协程内同步 sleep 必被 max_gap 捕获。"""
+    async with _Ticker() as ticker:
+        time.sleep(_BLOCK_SECS)
+    assert ticker.max_gap >= 0.2
+
+
+async def test_agents_options_scan_keeps_event_loop_ticking(
+    form_project: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置树全量解析（0.3s 量级）期间心跳持续打点；选项载荷照旧。"""
+    mod = _load_module()
+    real = mod._agent_options
+    calls: list[int] = []
+
+    def _slow_options() -> list[dict[str, Any]]:
+        calls.append(1)
+        time.sleep(_BLOCK_SECS)
+        return real()
+
+    monkeypatch.setattr(mod, "_agent_options", _slow_options)
+
+    async with _Ticker() as ticker:
+        res = await mod.http_handle(
+            path="/ext/task_form/options/agents", method="GET", query={}
+        )
+
+    assert ticker.max_gap < _MAX_TICK_GAP, (
+        f"选项取数冻结事件循环（期间心跳最大空窗 {ticker.max_gap:.3f}s）"
+    )
+    assert calls == [1]
+    d = _resp_data(res)
+    assert d["status"] == 200
+    assert {"value": "agentos", "label": "灵汐"} in d["payload"]["data"]
+    labels = [o["label"] for o in d["payload"]["data"]]
+    assert labels == sorted(labels)

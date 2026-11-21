@@ -21,7 +21,6 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-dirs.workspace = true
 agentos-core.workspace = true
 agentos-memory.workspace = true
 agentos-tenant.workspace = true

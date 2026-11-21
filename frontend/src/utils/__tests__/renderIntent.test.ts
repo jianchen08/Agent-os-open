@@ -456,3 +456,30 @@ describe('deriveCardMeta（条目元信息提取：summary/filePath）', () => {
     expect(meta('generic', {}, {})).toEqual({})
   })
 })
+
+describe('deriveCardMeta — 发消息卡开管道入口（用户实测 2026-11-19）', () => {
+  const meta = (args: Record<string, unknown>, result: Record<string, unknown>) =>
+    deriveCardMeta(ctx(args, result), intent('form'))
+
+  it('task_manage 发消息（带 message + task_id）→ pipelineId 开跳转入口，summary=消息', () => {
+    expect(meta({ action: 'continue', task_id: 'abc123def456', message: '继续跑' }, {})).toEqual({
+      summary: '继续跑',
+      pipelineId: 'abc123def456',
+      taskId: 'abc123def456',
+    })
+  })
+
+  it('批量 task_ids：取首个作目标管道', () => {
+    expect(meta({ task_ids: ['111aaa222bbb', '333ccc444ddd'], message: '批量' }, {}).pipelineId)
+      .toBe('111aaa222bbb')
+  })
+
+  it('参数无 task_id 时回退结果投影 result.pipeline_id', () => {
+    expect(meta({ message: 'x' }, { pipeline_id: '999888777666' }).pipelineId).toBe('999888777666')
+  })
+
+  it('不发消息（查询/停止/删除）或两处都无目标 id → 不给跳转闸门', () => {
+    expect(meta({ action: 'get', task_id: 'abc123def456' }, {})).toEqual({})
+    expect(meta({ message: 'x' }, {})).toEqual({})
+  })
+})

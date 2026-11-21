@@ -383,6 +383,32 @@ class TestSkillsCopy:
         assert (ws / "skills" / "s_root" / "SKILL.md").is_file()
         assert (ws / "skills" / "s_mode" / "SKILL.md").is_file()
 
+    def test_mode_packages_scope_copy_per_call(self, tmp_path: Path) -> None:
+        """按调用收窄：只复制传入模式包的技能，其他模式包不进工作空间；
+        仓根技能仍复制（mode_packages 只替换模式包枚举，不替换仓根源）。"""
+        (tmp_path / "skills" / "s_root").mkdir(parents=True)
+        (tmp_path / "skills" / "s_root" / "SKILL.md").write_text("r", encoding="utf-8")
+        pkg_a = tmp_path / "mode_a"
+        pkg_b = tmp_path / "mode_b"
+        for pkg, name in ((pkg_a, "s_a"), (pkg_b, "s_b")):
+            (pkg / "skills" / name).mkdir(parents=True)
+            (pkg / "skills" / name / "SKILL.md").write_text(name, encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # 推导模式 manager（mode_skill_sources=None）：mode_packages 按调用收窄
+        # 才生效（显式注入 mode_skill_sources 是测试替换面，优先级更高）。
+        m = WorkspaceLifecycleManager(
+            resource_merge=None,
+            config={"workspace": {"default_mode": "worktree", "root": str(tmp_path / "wsroot")}},
+            task_tree=_FakeTree(),
+            ws_meta_store={},
+            base_path=str(tmp_path),
+        )
+        m._copy_skills_to_workspace(str(ws), mode_packages=[pkg_a])
+        assert (ws / "skills" / "s_a" / "SKILL.md").is_file()
+        assert not (ws / "skills" / "s_b").exists()
+        assert (ws / "skills" / "s_root" / "SKILL.md").is_file()
+
 
 class TestUserRootSkillsSource:
     """用户根 skills/ 源（R300 装机悬空引用根治）：推导加入并集、同名用户赢、

@@ -73,7 +73,7 @@ const stubs = vi.hoisted(() => ({
     model?: string
     config?: { model?: string }
   }>,
-  runs: {} as Record<string, { status: string }>,
+  runs: {} as Record<string, { status: string; title?: string }>,
   llmView: null as null | {
     models: Record<string, { provider: string; model_name: string; display_name: string; default_params?: Record<string, unknown> }>
     providers: Record<string, unknown>
@@ -283,7 +283,7 @@ describe('ChatContainer — 加载态', () => {
 })
 
 describe('ChatContainer — Tab 栏映射与回调', () => {
-  it('主 Tab 兜底名「灵汐」，子 Tab 用 agentName；未读/激活/可关闭逐项映射', async () => {
+  it('标题取管道标题（runs.title）；无标题时主 Tab 落「灵汐」、子 Tab 落「未命名任务」，不落 agentName', async () => {
     useAgentTabStore.setState({
       tabs: [makeMainTab({ agentId: 'agent-1' }), makeSubTab()],
       activeTabId: 'main-1',
@@ -303,15 +303,47 @@ describe('ChatContainer — Tab 栏映射与回调', () => {
       canClose: false,
       agentLevel: 1,
     })
+    // 子 Tab 的 agentName='子任务' 是开签快照里的 agent 侧词汇，不得占标题位
     expect(subBar).toMatchObject({
       id: 'sub-1',
-      name: '子任务',
-      agentName: '子任务',
+      name: '未命名任务',
+      agentName: '未命名任务',
       isActive: false,
       unreadCount: 0,
       canClose: true,
       agentLevel: 2,
     })
+  })
+
+  it('管道标题在场时标签名 = 管道标题（主/子同权），agentName 只留悬浮提示', async () => {
+    useAgentTabStore.setState({
+      tabs: [
+        makeMainTab({ agentName: '会话旧名' }),
+        makeSubTab({ agentName: '交互工具' }),
+      ],
+      activeTabId: 'main-1',
+    })
+    stubs.runs = {
+      'pipe-1': { status: 'running', title: 'DSH 生态兼容可行性调研' },
+      'pipe-sub-1': { status: 'running', title: 'ZCode 右上角悬浮窗调研' },
+    }
+    await mountContainer()
+
+    const [mainBar, subBar] = stubs.tabBar?.tabs ?? []
+    expect(mainBar).toMatchObject({ name: 'DSH 生态兼容可行性调研' })
+    // 复现缺陷场景：agentName 被写成工具标题（'交互工具'），标题位必须仍是管道标题
+    expect(subBar).toMatchObject({ name: 'ZCode 右上角悬浮窗调研' })
+  })
+
+  it('管道标题为空串时不冒充标题，落降级名（不回落 agentName）', async () => {
+    useAgentTabStore.setState({
+      tabs: [makeSubTab({ agentName: '交互工具' })],
+      activeTabId: 'sub-1',
+    })
+    stubs.runs = { 'pipe-sub-1': { status: 'running', title: '' } }
+    await mountContainer()
+
+    expect(stubs.tabBar?.tabs[0]).toMatchObject({ name: '未命名任务' })
   })
 
   it('onTabChange/onTabClose 分发到 agentTabStore', async () => {
@@ -332,6 +364,71 @@ describe('ChatContainer — Tab 栏映射与回调', () => {
   it('无 Tab 时不渲染 Tab 栏', async () => {
     const { queryByTestId } = await mountContainer()
     expect(queryByTestId('stub-tab-bar')).not.toBeInTheDocument()
+  })
+})
+
+describe('ChatContainer — Tab 状态权威投影（runs 快照覆盖开签快照）', () => {
+  /** 用户实证场景（2026-11-07）：管道恢复运行后标签仍显示旧终态 ✕——
+   *  store 快照开签后无回写，标签状态须以 runs 权威态（任务管理页同源）
+   *  实时投影覆盖。 */
+  it('快照 failed 而 runs 行 running → 标签显示 running（错位修复正向）', async () => {
+    useAgentTabStore.setState({
+      tabs: [makeSubTab({ status: 'failed' })],
+      activeTabId: 'sub-1',
+    })
+    stubs.runs = { 'pipe-sub-1': { status: 'running' } }
+    await mountContainer()
+
+    expect(stubs.tabBar?.tabs[0]).toMatchObject({ id: 'sub-1', status: 'running' })
+  })
+
+  it('runs 无行时保持 store 快照（缺数据不猜，failed 不误翻绿）', async () => {
+    useAgentTabStore.setState({
+      tabs: [makeSubTab({ status: 'failed' })],
+      activeTabId: 'sub-1',
+    })
+    stubs.runs = {}
+    await mountContainer()
+
+    expect(stubs.tabBar?.tabs[0]).toMatchObject({ id: 'sub-1', status: 'failed' })
+  })
+
+  it.each([
+    ['completed', 'completed'],
+    ['suspended', 'waiting_input'],
+    ['cancelled', 'waiting_input'],
+    ['failed', 'failed'],
+  ] as const)('runs 态 %s → 标签态 %s（投影词表）', async (runStatus, tabStatus) => {
+    useAgentTabStore.setState({
+      tabs: [makeSubTab({ status: 'running' })],
+      activeTabId: 'sub-1',
+    })
+    stubs.runs = { 'pipe-sub-1': { status: runStatus } }
+    await mountContainer()
+
+    expect(stubs.tabBar?.tabs[0]).toMatchObject({ id: 'sub-1', status: tabStatus })
+  })
+
+  it('主标签同权投影：快照 running 而 runs 行 failed → 主标签 failed', async () => {
+    useAgentTabStore.setState({
+      tabs: [makeMainTab()],
+      activeTabId: 'main-1',
+    })
+    stubs.runs = { 'pipe-1': { status: 'failed' } }
+    await mountContainer()
+
+    expect(stubs.tabBar?.tabs[0]).toMatchObject({ id: 'main-1', status: 'failed' })
+  })
+
+  it('无 pipelineRunId 的 Tab 不投影（保持快照，防御脏数据）', async () => {
+    useAgentTabStore.setState({
+      tabs: [makeSubTab({ pipelineRunId: undefined, status: 'completed' })],
+      activeTabId: 'sub-1',
+    })
+    stubs.runs = { 'pipe-sub-1': { status: 'running' } }
+    await mountContainer()
+
+    expect(stubs.tabBar?.tabs[0]).toMatchObject({ id: 'sub-1', status: 'completed' })
   })
 })
 
@@ -445,11 +542,38 @@ describe('ChatContainer — 生成态单一真值（runs 快照 + 收尾快照�
     expect(stubs.messageList?.isGenerating).toBe(true)
   })
 
-  it('停止受理中（stopping）→ 仍视为执行中（不回可发送空闲态）', async () => {
+  it('点停受理中（stoppingLive）→ 生成观感立即让位 isGenerating=false（不等 round_finished）', async () => {
+    // 点停即时反馈（2026-11-07）：停止受理期间转圈/生成动画立即让位，发送按钮
+    // 恢复可用；runs 快照的 running/suspended 真值不再把停止窗口顶回生成态。
     setupActivePipeline([])
-    stubs.runs = { 'pipe-1': { status: 'suspended' } }
+    stubs.runs = { 'pipe-1': { status: 'running' } }
     usePipelineMessageStore.setState({ stoppingByPipeline: { 'pipe-1': true } })
     await mountContainer()
+    expect(stubs.chatInput?.isGenerating).toBe(false)
+    expect(stubs.messageList?.isGenerating).toBe(false)
+
+    // 区分度输入：run_status 已 suspended（后端受理停止、引擎未退出）→ 同样让位
+    stubs.runs = { 'pipe-1': { status: 'suspended' } }
+    await mountContainer()
+    expect(stubs.chatInput?.isGenerating).toBe(false)
+  })
+
+  it('点停受理中压住 runs running 与队列深度；护栏解除（stopping 清）后恢复生成观感（可辨别、可再点）', async () => {
+    setupActivePipeline([])
+    stubs.runs = { 'pipe-1': { status: 'running' } }
+    usePipelineMessageStore.setState({
+      roundQueueDepthByPipeline: { 'pipe-1': 2 },
+      stoppingByPipeline: { 'pipe-1': true },
+    })
+    await mountContainer()
+    expect(stubs.chatInput?.isGenerating).toBe(false)
+
+    // 护栏 TTL 过期仍无终态事件：stopping 被翻转解除（翻转机制见
+    // streaming handlers stopImmediateFeedback.test.ts）→ 生成观感回落 runs
+    // 真值：run 仍在跑则转圈恢复，停止未生效可辨别、可再点，不静默装作已停。
+    await act(async () => {
+      usePipelineMessageStore.setState({ stoppingByPipeline: {} })
+    })
     expect(stubs.chatInput?.isGenerating).toBe(true)
   })
 

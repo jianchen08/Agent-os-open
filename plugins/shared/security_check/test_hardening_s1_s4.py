@@ -79,9 +79,12 @@ def test_s1_any_host_context_fails_closed():
     未知形态（无 tool_name）保守按执行平面处理。宿主路由的只读辅助工具
     （file_read）不拖垮整批——归 2026-09-29 ADR 行为锁。"""
     plugin = _plugin()
+    # 工具名用现行命令面单工具 ``bash``（bash_execute 已随 ADR 2026-11-07 T2
+    # 四单词重构退役；退役名落 isolation_policy 默认 host_direct，不再承载
+    # 「宿主裸跑命令执行类」语义，S1 判定必须用 command_in_container 键）。
     host_bash = [
-        {"tool_name": "bash_execute", "provider": "docker", "level": "isolated", "task_isolated": True},
-        {"tool_name": "bash_execute", "provider": "host", "level": "non_isolated", "task_isolated": False},
+        {"tool_name": "bash", "provider": "docker", "level": "isolated", "task_isolated": True},
+        {"tool_name": "bash", "provider": "host", "level": "non_isolated", "task_isolated": False},
     ]
     assert plugin._is_isolated(_ctx([], host_bash), host_bash) is False
     unknown_host = [
@@ -189,9 +192,10 @@ async def test_d7_degraded_respects_remembered_fingerprint():
     )
     plugin._rules_degraded = True
     sig = plugin._make_signature("bash_execute", {"command": "deploy.sh"})
-    plugin._approved_signatures.add(sig)
     calls = [{"name": "bash_execute", "args": {"command": "deploy.sh"}}]
+    ctx = _ctx(calls)
+    ctx.state[_mod.APPROVED_SIGNATURES_KEY] = f'["{sig}"]'
     decision = await plugin._authorize_tool_calls(
-        _ctx(calls), calls, isolated=False, mode="default"
+        ctx, calls, isolated=False, mode="default"
     )
     assert decision is None  # 已记忆指纹放行，降级不吞豁免

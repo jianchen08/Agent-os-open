@@ -130,8 +130,9 @@ class TestInit:
         assert provider._auto_build is True
         assert provider._build_timeout == 1800.0
         assert provider._extra_cache_volumes == []
-        # 默认 dockerfile/build_context 相对仓库根解析
-        assert provider._dockerfile_path == provider._repo_root / "docker" / "agentos" / "Dockerfile"
+        # 默认 dockerfile/build_context 相对仓库根解析（仓根目录已更名
+        # docker_assets/——消除对 pip docker SDK 的命名空间遮蔽，cb60c916f）
+        assert provider._dockerfile_path == provider._repo_root / "docker_assets" / "agentos" / "Dockerfile"
         assert provider._build_context == provider._repo_root / "."
 
     def test_custom_config(self, tmp_path: Path) -> None:

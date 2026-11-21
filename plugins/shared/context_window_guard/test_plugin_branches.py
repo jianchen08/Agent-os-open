@@ -8,7 +8,8 @@
 - 服务层：llm_call_fn 延迟注入与逐调用覆盖、顶层异常返回 None、多轮压缩；
 - 插件层：无窗口/空消息/无服务早退、on_chunk 进度通知、压缩失败前端
   事件（推送一次 + 失败不反噬）、块槽位不重复置 null、clean+降级合并 ops；
-- 守卫辅助：trim/clean 的 backend 异常与边界、seq 标签解析、窗口值解析。
+- 守卫辅助：trim 的已应用块证据边界（与记忆库解耦）、clean 的 backend
+  异常与边界、seq 标签解析、窗口值解析。
 
 LLM / capability caller / memory backend 是外部依赖，以记录型伪对象注入；
 不 mock 插件内部协作对象的行为（压缩主链路走真实 CompressionService）。
@@ -791,7 +792,6 @@ class TestPluginBasics:
         """
         mod = _load_plugin_module()
         plugin = mod.ContextWindowGuardPlugin()
-        plugin._tracked_msg_count = 2
         ctx = mod._make_minimal_ctx(
             state={"track.llm_usage": {"last_input_tokens": 1000}},
         )
@@ -800,29 +800,31 @@ class TestPluginBasics:
             {"role": "assistant", "content": "m2", "seq": 2},
             {"role": "user", "content": "x" * 30, "seq": 3},
         ]
-        estimate = _run(plugin._estimate_effective_tokens(messages, ctx))
-        assert estimate == 1000 + mod.ContextWindowGuardPlugin._estimate_msg_tokens(messages[2])
-        assert estimate >= 1000
+        estimate = _run(plugin._estimate_effective_tokens(messages, ctx, 2))
+        assert estimate.tokens == 1000 + mod.ContextWindowGuardPlugin._estimate_msg_tokens(messages[2])
+        assert estimate.tokens >= 1000
+        assert estimate.basis == "prev_delta"
+        assert estimate.prev_input == 1000
 
     def test_estimate_effective_tokens_track_fallback_legacy_key(self) -> None:
         """旧桶键 input_tokens 仍兼容（历史 state / 其他写入方）。"""
         mod = _load_plugin_module()
         plugin = mod.ContextWindowGuardPlugin()
-        plugin._tracked_msg_count = 5
         ctx = mod._make_minimal_ctx(
             state={"track.llm_usage": {"input_tokens": 700}},
         )
         messages = [{"role": "user", "content": "x" * 100, "seq": i} for i in range(3)]
-        assert _run(plugin._estimate_effective_tokens(messages, ctx)) == 700
+        assert _run(plugin._estimate_effective_tokens(messages, ctx, 5)).tokens == 700
 
     def test_estimate_effective_tokens_no_delta(self) -> None:
         """消息数未超追踪计数 → 直接沿用上一轮真实 input_tokens。"""
         mod = _load_plugin_module()
         plugin = mod.ContextWindowGuardPlugin()
-        plugin._tracked_msg_count = 5
         ctx = mod._make_minimal_ctx(state={"llm_usage": {"input_tokens": 800}})
         messages = [{"role": "user", "content": "x" * 1000, "seq": i} for i in range(3)]
-        assert _run(plugin._estimate_effective_tokens(messages, ctx)) == 800
+        estimate = _run(plugin._estimate_effective_tokens(messages, ctx, 5))
+        assert estimate.tokens == 800
+        assert estimate.basis == "prev_no_delta"
 
 
 class TestExecuteEarlyExits:
@@ -1210,96 +1212,100 @@ class TestCompressAppliedNotification:
 
 
 # ═══════════════════════════════════════════════════════════
-# trim / clean / 拼接估算的 backend 边界
+# trim / clean / 拼接估算的边界（trim 证据源 = 历史已应用块，2026-11-16）
 # ═══════════════════════════════════════════════════════════
 
 
+def _applied_block(seq_range: list[int], seq: int = 0) -> dict[str, Any]:
+    """构造一条已应用压缩块消息（_build_batch_blocks 生产形态）。"""
+    return {
+        "role": "system",
+        "name": "compressed",
+        "content": f'<compressed seq="{seq_range[0]}-{seq_range[1]}" level="L1">x</compressed>',
+        "seq": seq,
+        "metadata": {
+            "compression_ref": {
+                "kind": "process",
+                "seq_range": list(seq_range),
+                "stored_at": "2026-11-16T00:00:00+00:00",
+                "memory_ids": [],
+            }
+        },
+    }
+
+
 class TestTrimCoveredMessagesGuards:
-    def test_missing_pipeline_or_backend_returns_original(self) -> None:
-        """无 pipeline_id 或无 backend → 原消息原样返回。"""
+    def test_no_applied_blocks_returns_original(self) -> None:
+        """历史无已应用块 → 原消息原样返回；记忆库孤儿 chunk 在场也不裁
+        （trim 与记忆库解耦，backend 注入与否均不影响）。"""
         mod = _load_plugin_module()
-        mod._memory_backend = None
         plugin = mod.ContextWindowGuardPlugin()
         messages = [{"role": "user", "content": "x", "seq": 1}]
-        ctx = mod._make_minimal_ctx()  # 无 pipeline_id
-        assert _run(plugin._trim_covered_messages(ctx, messages)) is messages
-        ctx2 = mod._make_minimal_ctx(pipeline_id="pipe-x")
-        assert _run(plugin._trim_covered_messages(ctx2, messages)) is messages
+        assert _run(plugin._trim_covered_messages(messages)) is messages
+        # backend 在场且带 chunk（孤儿覆盖声明形态）→ 仍不裁
+        mod.set_memory_backend(_FakeBackend([_l1_chunk(["pipeline:p", "seq:1-4"])]))
+        plugin2 = mod.ContextWindowGuardPlugin()
+        assert _run(plugin2._trim_covered_messages(messages)) is messages
 
-    def test_backend_error_returns_original(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """检索异常 → 原消息原样返回并 warning。"""
+    def test_malformed_seq_range_returns_original(self) -> None:
+        """块 seq_range 缺失/非 int/start>end → 不作为证据，不裁剪。"""
         mod = _load_plugin_module()
-        mod.set_memory_backend(_BoomBackend())
         plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="pipe-boom")
         messages = [{"role": "user", "content": "x", "seq": 1}]
-        with caplog.at_level(logging.WARNING):
-            result = _run(plugin._trim_covered_messages(ctx, messages))
-        assert result is messages
-        assert any("记忆后端检索失败" in r.getMessage() for r in caplog.records)
+        cases = [
+            _applied_block([1, 4]) | {"metadata": {"compression_ref": {"kind": "process"}}},
+            _applied_block([1, 4]) | {"metadata": {"compression_ref": {"kind": "process", "seq_range": ["1", 4]}}},
+            _applied_block([4, 1]),
+        ]
+        for bad_block in cases:
+            history = [bad_block] + messages
+            assert _run(plugin._trim_covered_messages(history)) == history
 
-    def test_no_l1_chunks_returns_original(self) -> None:
-        """检索无 L1 块 → 原消息原样返回。"""
+    def test_multiple_blocks_take_max_end(self) -> None:
+        """多块取 seq_range[1] 最大值：块 [1,20] + 块 [1,50] → 裁到 50。"""
         mod = _load_plugin_module()
-        mod.set_memory_backend(_FakeBackend([]))
         plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="pipe-empty")
-        messages = [{"role": "user", "content": "x", "seq": 1}]
-        assert _run(plugin._trim_covered_messages(ctx, messages)) is messages
-
-    def test_l1_without_seq_tags_returns_original(self) -> None:
-        """L1 块无 seq 标签（max_end=0）→ 不裁剪。"""
-        mod = _load_plugin_module()
-        mod.set_memory_backend(_FakeBackend([_l1_chunk(["pipeline:p"])]))
-        plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="pipe-noseq")
-        messages = [{"role": "user", "content": "x", "seq": 1}]
-        assert _run(plugin._trim_covered_messages(ctx, messages)) is messages
+        messages = [
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
+        ]
+        history = [_applied_block([1, 20]), _applied_block([1, 50])] + messages
+        result = _run(plugin._trim_covered_messages(history))
+        kept_seqs = [m["seq"] for m in result if m["role"] != "system"]
+        assert kept_seqs == list(range(51, 61))
 
     def test_trim_keeps_system_messages(self) -> None:
         """裁剪保留全部 system 消息，仅移除被覆盖的非 system 消息。"""
         mod = _load_plugin_module()
-        mod.set_memory_backend(
-            _FakeBackend([_l1_chunk(["pipeline:p", "seq:1-4"])])
-        )
         plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="p")
         messages = [
+            _applied_block([1, 4]),
             {"role": "system", "content": "系统提示", "seq": 0},
             *[{"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 5)],
             *[{"role": "user", "content": f"r{i}", "seq": i} for i in range(5, 9)],
         ]
-        result = _run(plugin._trim_covered_messages(ctx, messages))
+        result = _run(plugin._trim_covered_messages(messages))
         kept_seqs = [m["seq"] for m in result if m["role"] != "system"]
         assert kept_seqs == [5, 6, 7, 8]
-        assert any(m["role"] == "system" for m in result)
+        assert sum(1 for m in result if m["role"] == "system") == 2
 
     def test_protection_keeps_original_when_trim_too_aggressive(self) -> None:
         """裁剪后非 system 消息不足原 10% → 放弃裁剪保留原消息。"""
         mod = _load_plugin_module()
-        mod.set_memory_backend(
-            _FakeBackend([_l1_chunk(["pipeline:p", "seq:1-10"])])
-        )
         plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="p")
         messages = [{"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 12)]
-        assert _run(plugin._trim_covered_messages(ctx, messages)) is messages
+        history = [_applied_block([1, 10])] + messages
+        assert _run(plugin._trim_covered_messages(history)) is history
 
     def test_messages_without_seq_survive(self) -> None:
         """非 system 消息缺 int seq → 视为不可裁剪对象，全量保留。"""
         mod = _load_plugin_module()
-        mod.set_memory_backend(
-            _FakeBackend([_l1_chunk(["pipeline:p", "seq:1-5"])])
-        )
         plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="p")
         messages = [
             {"role": "user", "content": "no-seq-a"},
             {"role": "assistant", "content": "no-seq-b"},
         ]
-        assert _run(plugin._trim_covered_messages(ctx, messages)) is messages
+        history = [_applied_block([1, 5])] + messages
+        assert _run(plugin._trim_covered_messages(history)) is history
 
 
 class TestCleanIfWindowChangedGuards:

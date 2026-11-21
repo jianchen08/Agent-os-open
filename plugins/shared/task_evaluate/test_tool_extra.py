@@ -61,7 +61,8 @@ def _load_module() -> Any:
     if mod_name in sys.modules:
         return sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, _TE_DIR / "tool.py")
-    assert spec is not None and spec.loader is not None, "cannot load tool.py"
+    assert spec is not None, "cannot load tool.py"
+    assert spec.loader is not None, "cannot load tool.py"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -305,7 +306,8 @@ class TestStateRead:
             "会话残留行不得解析为任务对象"
         )
         task = await tool._get_task_from_state("p-real")
-        assert task is not None and task.id == "p-real", "真任务行解析不受影响"
+        assert task is not None, "真任务行解析不受影响"
+        assert task.id == "p-real", "真任务行解析不受影响"
 
     @pytest.mark.asyncio
     async def test_get_task_from_state_ws_meta_backfills_workspace_injection(
@@ -758,7 +760,8 @@ class TestMergeGate:
         monkeypatch.setattr(mod, "_state_reader", None)
         err = await mod.TaskEvaluateTool()._try_merge_before_complete(SimpleNamespace(id="t1", metadata=None))
         assert err is not None
-        assert "t1" in err and "ws_meta" in err
+        assert "t1" in err
+        assert "ws_meta" in err
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -957,7 +960,8 @@ class TestHelpers:
         task.metadata = {"evaluation_history": "not-a-list"}
         assert mod.TaskEvaluateTool._all_metrics_passed(task, ["a"]) is False
         passed2, remaining2 = mod.TaskEvaluateTool._get_eval_progress(task, ["a"])
-        assert passed2 == 0 and remaining2 == ["a"]
+        assert passed2 == 0
+        assert remaining2 == ["a"]
 
     def test_get_metric_ids_sources(self, mod: Any) -> None:
         tool = mod.TaskEvaluateTool()
@@ -1000,10 +1004,14 @@ class TestHelpers:
         mod.TaskEvaluateTool._append_eval_history(task, r)
         entry = task.metadata["evaluation_history"][-1]
         # compute_overall 在构造时重算 summary：全过 → "全部 N 项指标通过"
-        assert entry["passed"] is True and entry["summary"] == "全部 1 项指标通过"
+        assert entry["passed"] is True
+        assert entry["summary"] == "全部 1 项指标通过"
         m = entry["metrics"][0]
-        assert m["metric_id"] == "m1" and m["passed"] is True and m["score"] == 95.0
-        assert m["message"] == "msg" and m["error"] is None
+        assert m["metric_id"] == "m1"
+        assert m["passed"] is True
+        assert m["score"] == 95.0
+        assert m["message"] == "msg"
+        assert m["error"] is None
         assert m["details"] == {"failed_conditions": ["c1"]}
         assert m["evaluator_input"] == {"path": "x"}
         assert m["evaluator_output"] == {"issues": ["i1"]}
@@ -1044,8 +1052,10 @@ class TestHelpers:
         passed_metric = next(m for m in data["metrics"] if m["metric_id"] == "ok_m")
         bad_metric = next(m for m in data["metrics"] if m["metric_id"] == "bad_m")
         assert passed_metric == {"metric_id": "ok_m", "passed": True}
-        assert bad_metric["score"] == 3.0 and bad_metric["message"] == "文件不对"
-        assert bad_metric["issues"] == ["a"] and bad_metric["suggestions"] == ["fix"]
+        assert bad_metric["score"] == 3.0
+        assert bad_metric["message"] == "文件不对"
+        assert bad_metric["issues"] == ["a"]
+        assert bad_metric["suggestions"] == ["fix"]
         # report_path 经 sanitize 脱敏：独立绝对路径前缀不出现，保留文件名供定位
         assert bad_metric["report_path"] == "report.md" or bad_metric["report_path"].endswith("report.md")
         assert bad_metric["failed_conditions"] == ["c1"]
@@ -1112,9 +1122,11 @@ class TestInputParams:
         params = tool._get_input_params(task)
         assert params["a"]["path"] == "src/a.py"
         assert params["b"]["path"] == "src/b.py"
-        assert "expected_output" not in params["b"] and "pass_threshold" not in params["b"]
+        assert "expected_output" not in params["b"]
+        assert "pass_threshold" not in params["b"]
         # 未配置 criteria 不兜底：原样保留，不拿任务描述顶替
-        assert "criteria" not in params["a"] and "criteria" not in params["b"]
+        assert "criteria" not in params["a"]
+        assert "criteria" not in params["b"]
 
     def test_workspace_and_templates_injected(self, mod: Any, tmp_path: Path) -> None:
         ws = tmp_path / "ws"
@@ -1132,7 +1144,8 @@ class TestInputParams:
         params = tool._get_input_params(task)
         p = params["m1"]
         assert p["workspace"] == str(ws)
-        assert str(ws) in p["criteria"] and "t-9" in p["criteria"]
+        assert str(ws) in p["criteria"]
+        assert "t-9" in p["criteria"]
         # 非字符串参数原样保留
         task.metadata["acceptance_criteria"]["m1"]["input_params"]["min_size"] = 5
         params2 = tool._get_input_params(task)

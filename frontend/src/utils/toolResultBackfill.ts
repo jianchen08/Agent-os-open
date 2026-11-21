@@ -14,8 +14,8 @@
  * 如实显示失败态（保留预览，禁止假装已全文）。
  */
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import type { ToolCallPart } from '@/types/messageParts'
 import { loggers } from '@/utils/logger'
+import type { ToolCallPart } from '@/types/messageParts'
 
 const logger = loggers.sessionStore
 
@@ -76,6 +76,18 @@ async function doExpand(key: string, p: ExpandToolResultParams): Promise<boolean
   const msgs = usePipelineMessageStore.getState().getMessages(pipelineId)
   const full = msgs.find((m) => m.role === 'tool' && m.sequence === p.sequence)
   if (!full) return false
+  // 取回内容为空（服务端 spill/映射缺口等导致 toolResult 缺失，含空串兜底）→
+  // 回填失败：绝不用空值顶掉已有预览——顶掉后 hasResult 变 false，卡头会从
+  // completed 翻成「已中断（无结果）」（2026-11-18 装机用户实测展开即中断）。
+  // 失败不落已回填标记，保留预览下次展开可重试（与失败态同一口径）。
+  if (!full.toolResult && !full.toolResultData) {
+    logger.warn(
+      '[toolResultBackfill] 全量消息无工具结果（seq=%s msg=%s）——保留预览不回填',
+      p.sequence,
+      String(full.id ?? ''),
+    )
+    return false
+  }
   if (p.partIndex !== undefined && p.messageId && p.partIndex >= 0) {
     usePipelineMessageStore.getState().updatePart(pipelineId, p.messageId, p.partIndex, {
       result: full.toolResult,

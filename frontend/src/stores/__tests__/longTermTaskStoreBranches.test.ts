@@ -11,9 +11,9 @@ import { readLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import * as longTermTaskApi from '@/services/api/longTermTasks'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 import { useLongTermTaskStore } from '../longTermTaskStore'
 import type { Task } from '@/types/task'
-import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 vi.mock('@/services/api/longTermTasks', () => ({
   fetchLongTermTasks: vi.fn(),

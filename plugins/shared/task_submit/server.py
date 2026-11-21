@@ -112,8 +112,8 @@ async def _on_load(_params: dict[str, Any]) -> None:
 # 合宿契约（light 组）：tool 裸名被多个成员持有，静息态 sys.modules 槽位常驻
 # 他人模块——模块引用必须在装载期捕获（此刻本成员目录置顶 sys.path，裸名解析
 # 到自身），on_load 经捕获引用接线，运行期不解析裸名。
-from tool import TaskSubmitTool  # noqa: E402
 import tool as _tool_mod  # noqa: E402
+from tool import TaskSubmitTool  # noqa: E402
 
 _TASK_SUBMIT_DEF = TaskSubmitTool.get_tool_definition()
 

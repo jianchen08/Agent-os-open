@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-backup-restore
+type: standard
+status: active
+---
+
 # SQLite 备份与恢复操作指南
 
 > 适用：0.2 架构默认存储（SQLite 单文件承载全量数据：runs / messages / traces /

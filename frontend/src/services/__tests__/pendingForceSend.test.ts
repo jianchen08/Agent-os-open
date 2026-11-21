@@ -9,8 +9,9 @@
  *   队列 + drain 首个消费目标）；前端零 DELETE 零停止零重发——旧「DELETE→
  *   停止→重发」编排会把其余排队条目一并退回输入框（2026-10-27 用户实测），
  *   已退役。
- * - 目标条目不在本地队列视图：零 WS 发送 + 权威 GET 对账 + 通知
- *   （防重复发送）。
+ * - 目标条目不在本地队列视图：仍发帧由内核裁决（2026-11-14 修「按钮点了没
+ *   反应」——本地视图只是镜像，不是发送前置条件），同时权威 GET 对账 + 提示；
+ *   条目真已消费则由后端 route_error 回执呈现原因。
  *
  * GlobalWebSocket 是外部依赖（网络面），mock 替换；store 用真实实现断言。
  */
@@ -55,7 +56,7 @@ describe('forceSendPendingInput', () => {
     })
   })
 
-  it('目标条目不在本地队列视图：零 WS 发送 + 权威 GET 对账 + 通知', async () => {
+  it('目标条目不在本地队列视图：仍发帧（内核裁决）+ 权威 GET 对账 + 提示', async () => {
     usePendingInputStore.setState({
       byPipeline: { 'pipe-1': [queued('b', '其他消息')] },
     })
@@ -64,12 +65,17 @@ describe('forceSendPendingInput', () => {
 
     await forceSendPendingInput({ sessionId: 'sess-1', pipelineId: 'pipe-1', inputId: 'ghost' })
 
-    expect(globalWS.sendForcePendingInput).not.toHaveBeenCalled()
+    // 本地未命中不得阻断发送：强制发送必须真正触达后端
+    expect(globalWS.sendForcePendingInput).toHaveBeenCalledTimes(1)
+    expect(globalWS.sendForcePendingInput).toHaveBeenCalledWith('sess-1', {
+      pipelineId: 'pipe-1',
+      inputId: 'ghost',
+    })
     expect(loadSpy).toHaveBeenCalledWith('pipe-1')
     await waitFor(() => {
       const notif = useNotificationStore
         .getState()
-        .notifications.find((n) => n.title === '未发送该消息')
+        .notifications.find((n) => n.title === '正在发送该消息')
       expect(notif).toBeDefined()
     })
   })

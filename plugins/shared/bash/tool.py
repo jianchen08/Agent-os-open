@@ -1,5 +1,5 @@
 """
-增强版 Bash 命令执行工具（0.2 自包含版）
+bash 工具面（0.2 自包含版）—— 四单词工具：bash / log / input / kill
 
 ⚠️ 安全威胁模型（H3）
 =================
@@ -15,36 +15,43 @@ SecurityChecker 的正则黑名单只拦**不可逆灾难**（rm -rf /、mkfs、
 本工具作为独立 sidecar 进程运行（MCP stdio），不依赖 src 树；
 隔离决策由内核统一处理，本工具只负责执行命令。
 
-进程生命周期：
+进程生命周期与 handle（ADR 2026-11-07 决策 1，工具面四单词重构）：
 - 本模块被 server.py 以**模块级单例**持有——所有 MCP 调用共享同一个
-  BashTool/ProcessManager，跨调用保留 active_processes（execute→input→
-  continue→terminate 全链路可用）。
-- 每个进程记录 owner（内核注入的会话身份，见 _owner_from_inputs），
-  pid 级操作（continue/input/terminate/read_log）强制校验调用方身份，
-  防跨会话越权。
+  BashTool/ProcessManager，跨调用保留 active_processes。
+- 四工具统一凭 handle（不透明串）定位进程，取代裸 pid：内含 pid + owner
+  + 校验和（encode_handle/decode_handle），越权校验分两段——handle 内
+  owner vs 调用方注入 owner（防伪造句柄）、handle 内 owner vs 活进程
+  metadata / 磁盘日志头 owner（防 pid 复用劫持）。
+- 捕获契约（T1，SDK process_runtime）：绝对路径持久日志、击杀前有界排空、
+  终止原因如实透传——kill 后 log 仍可读完整输出。
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 import re
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-from agentos_plugin_sdk.process_runtime import (
-    BashAction,
-    InputHandler,
-    ProcessLogReadError,
-    ProcessManager,
-)
-from agentos_plugin_sdk.workspace_aware import WorkspaceAwareMixin
 from result_types import (
     ToolResult,
     create_failure_result,
     create_success_result,
 )
+
+from agentos_plugin_sdk.process_runtime import (
+    BackendUnhealthyError,
+    ProcessInfo,
+    ProcessLogReadError,
+    ProcessManager,
+    SpawnFirstLineTimeoutError,
+)
+from agentos_plugin_sdk.workspace_aware import WorkspaceAwareMixin
 
 # POSIX 信号编号 → 名称映射。进程在 Linux 容器内运行，退出码遵循 POSIX
 # 128+n 语义，但本工具的宿主可能是 Windows——Windows 的 signal.Signals 枚举
@@ -91,6 +98,74 @@ def describe_exit_code(exit_code: int | None) -> str | None:
     signum = exit_code - 128
     name = _POSIX_SIGNAL_NAMES.get(signum, f"signal {signum}")
     return f"信号 {signum} ({name}) 终止"
+
+
+# ── 图片产物引导（2026-11-16） ─────────────────────────────────────
+# bash/log 结果检测到图片文件产物时附一行引导。背景：端到端验证实证，模型用
+# bash 截图后只 ls/rm 管产物、从不读图，以文本正则代行视觉判定产出假绿。
+# 本层只做「存在性验证过的路径浮出」；是否看、看哪张仍由模型决策，注图闸门
+# 依旧在 tool_core inject_multimodal——本层绝不注图。
+
+_IMAGE_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/])?[\w.\\/-]+\.(?:png|jpe?g|gif|webp|bmp)\b",
+    re.IGNORECASE,
+)
+_IMAGE_HINT_MAX_LISTED = 3
+_IMAGE_HINT_MAX_COLLECT = 20
+IMAGE_HINT_MARK = "[图片产物提示]"
+
+
+def build_image_artifact_hint(
+    text: str | None, working_dir: str | None
+) -> str | None:
+    """从命令与输出文本提取图片产物路径，组装一行看图引导（无产物返回 None）。
+
+    只认「存在性验证过」的路径——相对路径按 working_dir 解析（无锚点则跳过），
+    绝对路径直取；输出里仅提及但不存在的路径不提示。命中去重保序，列出前
+    _IMAGE_HINT_MAX_LISTED 个，其余以计数带过（收集上限
+    _IMAGE_HINT_MAX_COLLECT，防目录级清单拖慢结果组装）。
+    """
+    if not text:
+        return None
+    base = Path(working_dir) if working_dir else None
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _IMAGE_PATH_RE.finditer(text):
+        token = m.group(0)
+        cand = Path(token)
+        if cand.is_absolute():
+            pass
+        elif base is not None:
+            cand = base / cand
+        else:
+            # 相对路径无解析锚点（working_dir 缺席）：无法有意义地验证存在性，
+            # 不提示——防误挂宿主 CWD 同名文件。
+            continue
+        try:
+            if not cand.is_file():
+                continue
+        except OSError:
+            continue
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(token)
+        if len(found) >= _IMAGE_HINT_MAX_COLLECT:
+            break
+    if not found:
+        return None
+    listed = "、".join(found[:_IMAGE_HINT_MAX_LISTED])
+    if len(found) >= _IMAGE_HINT_MAX_COLLECT:
+        count_suffix = f" 等共 {len(found)}+ 个"
+    elif len(found) > _IMAGE_HINT_MAX_LISTED:
+        count_suffix = f" 等共 {len(found)} 个"
+    else:
+        count_suffix = ""
+    return (
+        f"{IMAGE_HINT_MARK} {listed}{count_suffix}"
+        "——UI/界面证据请用 file_read 查看核验，勿以文本匹配代行视觉判定"
+    )
 
 
 # 失败时回传给 LLM 的错误消息由 LogCompressor 提取行组装（信号描述 + 错误行 +
@@ -155,8 +230,8 @@ class SecurityChecker:
     ]
 
     # 手动后台化模式：降级标 warning（不阻断）。
-    # 本工具自带后台执行+轮询语义，手动 nohup/setsid/disown/行尾& 会让进程
-    # 脱离 ProcessManager 管理（continue/terminate 看不见），沦为孤儿。
+    # 本工具自带后台执行（background=true）+ log 轮询语义，手动 nohup/
+    # setsid/disown/行尾& 会让进程脱离 ProcessManager 管理，沦为孤儿。
     BACKGROUND_PATTERNS: ClassVar[list[str]] = [
         r"(?:^|[;|&]\s*)\s*nohup\b",  # nohup 作为命令 token
         r"(?:^|[;|&]\s*)\s*setsid\b",  # setsid 作为命令 token
@@ -202,26 +277,80 @@ class SecurityChecker:
                     True,
                     True,
                     (
-                        "命令包含手动后台化操作，本工具已自带后台执行+轮询，"
-                        "手动后台化会使进程脱离管理；直接 execute 启动，"
-                        "长任务返回 pid 后用 continue 轮询即可"
+                        "命令包含手动后台化操作，本工具已自带 background=true 后台执行，"
+                        "手动后台化会使进程脱离管理；长任务用 background=true 启动，"
+                        "或前台超时返回 handle 后用 log 轮询即可"
                     ),
                 )
 
         return True, False, None
 
 
-# ── 单一事实源导出（punch C17）──────────────────────────────
-# 危险命令黑名单分类以本文件 SecurityChecker 为准；
-# builtin_tools/src/agentos_builtin_tools/bash_tool.py 直接导入以下常量，
-# 禁止再各维护一份正则清单（语义漂移：如 "| bash" 在此为 CAUTION 降级而非硬拦）。
-DANGEROUS_PATTERNS: list[str] = SecurityChecker.DANGEROUS_PATTERNS
-CAUTION_PATTERNS: list[str] = SecurityChecker.CAUTION_PATTERNS
-BACKGROUND_PATTERNS: list[str] = SecurityChecker.BACKGROUND_PATTERNS
+# ── handle 编解码（ADR 2026-11-07 决策 1）─────────────────────────
+# 形态：`bs1.<base64url(json{pid,owner})>.<sha256 前 8 位>`。校验和拦手误与
+# 注入串（畸形 handle → INVALID_HANDLE，不进任何查询/路径拼接）；owner 经
+# base64 内嵌不外露明文（不透明引用），解码后供两段越权校验。
+
+_HANDLE_SCHEME = "bs1"
+
+
+def encode_handle(pid: int, owner: str | None) -> str:
+    """把进程身份编码为不透明 handle（内含 pid + owner + 校验和）。
+
+    Args:
+        pid: 进程 ID（SDK ProcessManager 的定位键，仅内部消费不外露）。
+        owner: 会话身份（spawn 时刻记录；None = 无身份会话）。
+
+    Returns:
+        `bs1.<body>.<digest>` 形态的不透明串；digest = body 的 sha256 前 8 位。
+    """
+    payload = json.dumps({"pid": pid, "owner": owner}, ensure_ascii=False, separators=(",", ":"))
+    body = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    digest = hashlib.sha256(body.encode("ascii")).hexdigest()[:8]
+    return f"{_HANDLE_SCHEME}.{body}.{digest}"
+
+
+def decode_handle(handle: str) -> tuple[int, str | None] | None:
+    """解码 handle → (pid, owner)；形态/校验和不符返回 None（不猜不兜）。
+
+    任何篡改（body 或 digest 任一位）都会因 sha256 不匹配被拒绝；非字符串
+    输入安全返回 None。pid <= 0 视为非法（OS pid 从 1 起）。
+    """
+    if not isinstance(handle, str):
+        return None
+    parts = handle.split(".")
+    if len(parts) != 3:
+        return None
+    scheme, body, digest = parts
+    if scheme != _HANDLE_SCHEME:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{8}", digest):
+        return None
+    if hashlib.sha256(body.encode("ascii", errors="ignore")).hexdigest()[:8] != digest:
+        return None
+    pad = "=" * (-len(body) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(body + pad).decode("utf-8"))
+        pid = int(payload["pid"])
+        owner = payload.get("owner")
+    except (KeyError, TypeError, ValueError):
+        # KeyError: payload 缺 pid；TypeError/ValueError: base64 非法字符
+        # （binascii.Error 为 ValueError 子类）/JSON 结构错/int() 失败。
+        return None
+    if pid <= 0:
+        return None
+    if owner is not None and not isinstance(owner, str):
+        return None
+    return pid, owner
 
 
 class BashTool(WorkspaceAwareMixin):
-    """增强版 Bash 命令执行工具（0.2 sidecar）。
+    """bash 工具面（0.2 sidecar）—— 四单词工具入口。
+
+    - run_command：bash 工具（执行命令，前台阻塞或 background 立即返回）
+    - read_log：log 工具（block=false 读当前态 / block=true 等到完成）
+    - send_input：input 工具（向等待输入的进程发文本）
+    - terminate：kill 工具（终止进程，reason=agent 透传）
 
     隔离决策由内核统一处理，本工具只负责执行命令。
     进程状态由内部 ProcessManager 维护，**实例需在 sidecar 进程内长期存活**
@@ -231,8 +360,10 @@ class BashTool(WorkspaceAwareMixin):
     # 默认超时时间（秒）
     DEFAULT_TIMEOUT: ClassVar[int] = 30
 
-    # 最大允许超时（秒），不得超过内核侧 MCP 调用外层超时
-    MAX_TIMEOUT: ClassVar[int] = 290
+    # 最大允许超时（秒）。ADR 2026-11-07 决策 3：290 → 600 per-call 可调；
+    # 旧 290 上限的动因（内核 invoker 缺省工具界 300s）由 plugin.json 的
+    # bash 工具 timeout_ms: 660000 声明同批解除（600s + 启动余量）。
+    MAX_TIMEOUT: ClassVar[int] = 600
 
     # 短输出阈值（字符数）：低于此值直接全量返回原始 output，不走任何提取——
     # 短输出本身信息量小、噪音少，提取反而可能切坏（如半行被截）。
@@ -240,9 +371,24 @@ class BashTool(WorkspaceAwareMixin):
     # 字符数才是真实体积。约 2KB（~500 token）是 LLM 一次能轻松消化的量。
     SHORT_OUTPUT_CHAR_THRESHOLD: ClassVar[int] = 2000
 
+    def _append_image_hint(
+        self,
+        data: dict[str, Any],
+        command: str | None,
+        working_dir: str | None,
+    ) -> None:
+        """向结果 output 追加图片产物引导行（幂等；无产物/非文本 output 不追加）。"""
+        output = data.get("output")
+        if not isinstance(output, str):
+            return
+        scan_text = f"{command}\n{output}" if command else output
+        hint = build_image_artifact_hint(scan_text, working_dir)
+        if hint and hint not in output:
+            data["output"] = output + "\n" + hint
+
     @staticmethod
     def _compact_result_data(
-        pid: int,
+        handle: str,
         output: str | None,
         summary_obj: dict[str, Any],
         exit_code: int | None,
@@ -251,8 +397,8 @@ class BashTool(WorkspaceAwareMixin):
         """精简 result_data，去掉 LLM 不需要的字段以节省 token。
 
         核心原则：**短输出全量返回，长输出附语义提取、原文不截断**。同一套逻辑
-        覆盖 completed（进程结束）和 running（长任务轮询超时返回中间态）两种场景
-        ——区别仅是 status 字段 + exit_code 有无，提取策略完全一致。
+        覆盖 completed（进程结束）和 running（超时/background 返回中间态）两种
+        场景——区别仅是 status 字段 + exit_code 有无，提取策略完全一致。
 
         - 短输出（<=SHORT_OUTPUT_CHAR_THRESHOLD 字符）：信息量小、噪音少，直接
           全量返回原始 output，不走提取——提取反而可能切坏（如半行被截）。
@@ -262,7 +408,7 @@ class BashTool(WorkspaceAwareMixin):
           progress（LogCompressor 已筛掉刷屏噪音的高价值信息）。
 
         保留字段：
-        - pid/output/status：始终保留（exit_code 仅 completed 时有）
+        - handle/output/status：始终保留（exit_code 仅 completed 时有）
         - terminated_by_signal：信号终止时附加（如实暴露原始信号，不编造归因）
         - errors/warnings/error_lines：非空时保留（LogCompressor 过滤后的错误，去重）
         - summary/latest_message/progress：仅长输出时保留（统计摘要 + 最新输出行）
@@ -271,7 +417,7 @@ class BashTool(WorkspaceAwareMixin):
         is_short = output_len <= BashTool.SHORT_OUTPUT_CHAR_THRESHOLD
 
         data: dict[str, Any] = {
-            "pid": pid,
+            "handle": handle,
             "output": output,
             "status": status,
         }
@@ -325,8 +471,9 @@ class BashTool(WorkspaceAwareMixin):
         exit_code: int,
         output: str | None,
         summary_obj: dict[str, Any],
+        command: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """组装失败时的 error_msg + metadata（execute/continue/read_log 共用）。
+        """组装失败时的 error_msg + metadata（bash 完成路径与 log block=true 共用）。
 
         按"短全量、长提取"原则：
         - 短输出（<=SHORT_OUTPUT_CHAR_THRESHOLD 字符）：直接全量原文，信息量小、
@@ -334,12 +481,19 @@ class BashTool(WorkspaceAwareMixin):
         - 长输出：信号描述 + LogCompressor 提取的错误列表（已去重筛噪音）+
           latest_message——不拼原始输出尾部（大输出兜底由 spill_guard 统一负责，
           task_spill_guard.md 任务 2：工具只保留"执行 + 语义提取"）。
+
+        R9 信封上下文：失败信封必须让模型免猜——error_msg 首行带实际执行的
+        命令原文；metadata 携带 command / stdout / stderr / exit_code 四件
+        （stdout/stderr 按 reader 的 `[stderr] ` 行前缀从合并捕获里拆分；
+        单字段超 64KB 截断并留痕，防病态大输出打爆信封）。
         """
         signal_desc = describe_exit_code(exit_code)
         output_len = len(output or "")
         is_short = output_len <= BashTool.SHORT_OUTPUT_CHAR_THRESHOLD
 
         parts: list[str] = []
+        if command:
+            parts.append(f"实际执行的命令：\n{command}")
         if signal_desc:
             parts.append(f"{signal_desc}（退出码 {exit_code}）")
         else:
@@ -359,10 +513,39 @@ class BashTool(WorkspaceAwareMixin):
                 parts.append(f"最新输出：{latest}")
 
         error_msg = "\n".join(parts)
-        fail_meta: dict[str, Any] = {"exit_code": exit_code}
+        stdout_text, stderr_text = BashTool._split_streams(output or "")
+        fail_meta: dict[str, Any] = {
+            "exit_code": exit_code,
+            "command": BashTool._clip_envelope_field(command or ""),
+            "stdout": BashTool._clip_envelope_field(stdout_text),
+            "stderr": BashTool._clip_envelope_field(stderr_text),
+        }
         if signal_desc:
             fail_meta["terminated_by_signal"] = signal_desc
         return error_msg, fail_meta
+
+    FAILURE_CONTEXT_FIELD_LIMIT: ClassVar[int] = 65536
+
+    @staticmethod
+    def _clip_envelope_field(text: str) -> str:
+        """信封字段截断（64KB 上限，截断留痕防病态大输出打爆信封）。"""
+        limit = BashTool.FAILURE_CONTEXT_FIELD_LIMIT
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n…（截断，原始 {len(text)} 字符）"
+
+    @staticmethod
+    def _split_streams(output: str) -> tuple[str, str]:
+        """合并捕获（stderr 行带 ``[stderr] `` 前缀）拆回 stdout / stderr 全文。"""
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        prefix = "[stderr] "
+        for line in output.splitlines():
+            if line.startswith(prefix):
+                stderr_lines.append(line[len(prefix) :])
+            else:
+                stdout_lines.append(line)
+        return "\n".join(stdout_lines), "\n".join(stderr_lines)
 
     def __init__(
         self,
@@ -378,9 +561,6 @@ class BashTool(WorkspaceAwareMixin):
         # 进程管理器（跨 MCP 调用共享——单例持有本实例时状态得以保留）
         self.process_manager = ProcessManager()
 
-        # 输入处理器
-        self.input_handler = InputHandler()
-
     # ── 会话身份（owner） ────────────────────────────────────────
 
     @staticmethod
@@ -388,7 +568,7 @@ class BashTool(WorkspaceAwareMixin):
         """从调用参数提取会话身份（owner）。
 
         0.2 内核在 tool-executor.invoke 时向 args 注入 `_owner`
-        （thread_id/session_id 派生），插件据此做 pid 级越权防护。
+        （thread_id/session_id 派生），插件据此做 handle 级越权防护。
         优先级：_owner > session_id > thread_id > workspace > project_root。
         全部缺失返回 None（无身份调用——仅双无身份场景放行）。
         """
@@ -404,7 +584,7 @@ class BashTool(WorkspaceAwareMixin):
         caller_owner: str | None,
         proc_owner: str | None,
     ) -> tuple[bool, str]:
-        """pid 级操作的 owner 校验（拒绝分支 err 非空，放行分支 err 为空串）。
+        """handle/pid 级操作的 owner 校验（拒绝分支 err 非空，放行分支 err 为空串）。
 
         严格语义（防跨会话越权/劫持）：
         - 双方身份一致 → 放行
@@ -424,54 +604,73 @@ class BashTool(WorkspaceAwareMixin):
             )
         return True, ""
 
-    # ── 主入口 ───────────────────────────────────────────────────
+    # ── handle 解析与身份链 ──────────────────────────────────────
 
-    async def execute(self, inputs: dict[str, Any], on_output: Callable[[str], None] | None = None) -> ToolResult:
-        """执行工具（0.2 侧唯一入口，由 server.py 的 MCP handler 调用）。
+    def _resolve_handle(self, inputs: dict[str, Any]) -> tuple[int, str | None, ToolResult | None]:
+        """解码 handle 并完成第一段身份校验 → (pid, handle_owner) 或失败结果。
 
-        on_output（task_observability 任务 2）：execute action 的每行输出回调，
-        供执行中进度推送（server.py 经 ProgressReporter 节流后推前端）。
+        校验链第一段：handle 缺失 → MISSING_HANDLE；形态/校验和不符 →
+        INVALID_HANDLE（畸形串不进任何查询/路径拼接）；handle 内 owner vs
+        调用方注入 owner（_check_owner 严格语义）→ 不符即 PROCESS_FORBIDDEN。
+        第二段（handle owner vs 活进程 metadata / 磁盘日志头 owner）由各操作
+        定位到目标后执行（_check_live_owner / 磁盘路径内联）。
+        """
+        handle = inputs.get("handle")
+        if not handle or not str(handle).strip():
+            return 0, None, create_failure_result("handle 不能为空", "MISSING_HANDLE")
+        decoded = decode_handle(str(handle).strip())
+        if decoded is None:
+            return 0, None, create_failure_result(
+                f"handle 无效或已损坏（不匹配任何已知进程引用）: {handle!r}",
+                "INVALID_HANDLE",
+            )
+        pid, handle_owner = decoded
+        caller_owner = self._owner_from_inputs(inputs)
+        ok, err = self._check_owner(pid, caller_owner, handle_owner)
+        if not ok:
+            return 0, None, create_failure_result(err, "PROCESS_FORBIDDEN")
+        return pid, handle_owner, None
+
+    def _check_live_owner(
+        self,
+        pid: int,
+        handle_owner: str | None,
+        proc_info: ProcessInfo,
+    ) -> ToolResult | None:
+        """身份链第二段（活进程）：handle 内 owner vs 进程 metadata owner。
+
+        不符（含 pid 复用后新进程归属另一会话）→ PROCESS_FORBIDDEN；
+        相符返回 None 放行。
+        """
+        ok, err = self._check_owner(pid, handle_owner, proc_info.metadata.get("owner"))
+        if not ok:
+            return create_failure_result(err, "PROCESS_FORBIDDEN")
+        return None
+
+    # ── bash 工具（执行命令） ────────────────────────────────────
+
+    async def run_command(
+        self,
+        inputs: dict[str, Any],
+        on_output: Callable[[str], None] | None = None,
+        abort_event: asyncio.Event | None = None,
+    ) -> ToolResult:
+        """bash 工具：执行 Shell 命令。
+
+        - 前台（background 缺省 false）：阻塞到完成或等待上限（timeout，默认
+          30 / 上限 MAX_TIMEOUT=600）。**超时不杀进程**：返回 running + handle
+          并附带全部已捕获输出（ADR 决策 3 用户裁定修正版——控制权经 handle
+          留给 agent，进程不死，完整输出恒可从 log 取回）。
+        - background=true：立即返回 running + handle，不等命令完成。
+
+        on_output：每行输出回调（server.py 经 ProgressReporter 节流后推
+        tool_progress 进度）。
+
+        abort_event：run 中止信号（run_abort_watch 检出 run_status=suspended 时
+        置位）。前台等待期间置位 → 整树杀子进程并返回 RUN_ABORTED，run 立刻回到
+        step 边界收尾。不置位/缺席时行为与旧版一致（看门狗关闭不改变本函数语义）。
         """
         self._init_workspace(inputs)
-        action = inputs.get("action", BashAction.EXECUTE)
-
-        # 根据 action 分发到不同处理器
-        handlers = {
-            BashAction.EXECUTE: self._handle_execute,
-            BashAction.CONTINUE: self._handle_continue,
-            BashAction.TERMINATE: self._handle_terminate,
-            BashAction.INPUT: self._handle_input,
-            BashAction.READ_LOG: self._handle_read_log,
-        }
-
-        handler = handlers.get(action)
-        if not handler:
-            return create_failure_result(
-                error=f"未知的 action: {action}",
-                error_code="INVALID_ACTION",
-            )
-
-        # pid 入口收口：pid 声明 integer 但 SDK 无 schema 强制，非整型输入
-        # （路径穿越串等）会拼进磁盘日志名 bash_<pid>.log，构成任意 .log
-        # 读取原语——统一在此整型化，非整型即参数错误（空值仍由各 handler
-        # 的 MISSING_PID 分支报错，契约不变）
-        if action != BashAction.EXECUTE and inputs.get("pid"):
-            try:
-                inputs["pid"] = int(inputs["pid"])
-            except (TypeError, ValueError):
-                return create_failure_result(
-                    error=f"pid 必须为整数，实际为: {inputs.get('pid')!r}",
-                    error_code="INVALID_PID",
-                )
-
-        if action == BashAction.EXECUTE and on_output is not None:
-            return await self._handle_execute(inputs, on_output=on_output)
-        return await handler(inputs)
-
-    async def _handle_execute(
-        self, inputs: dict[str, Any], on_output: Callable[[str], None] | None = None
-    ) -> ToolResult:
-        """处理 execute 操作"""
         command = inputs.get("command")
         if not command:
             return create_failure_result(
@@ -512,46 +711,9 @@ class BashTool(WorkspaceAwareMixin):
         raw_exec_backend = inputs.get("_exec_backend") if container_id else None
         exec_backend = raw_exec_backend if isinstance(raw_exec_backend, dict) else None
 
-        return await self._execute_local_unified(
-            command=command,
-            timeout=timeout,
-            working_dir=working_dir,
-            warning=warning,
-            container_id=container_id,
-            owner=owner,
-            on_output=on_output,
-            exec_backend=exec_backend,
-        )
-
-    async def _execute_local_unified(
-        self,
-        command: str,
-        timeout: int,
-        working_dir: str | None,
-        warning: str | None = None,
-        container_id: str | None = None,
-        owner: str | None = None,
-        on_output: Callable[[str], None] | None = None,
-        exec_backend: dict[str, Any] | None = None,
-    ) -> ToolResult:
-        """
-        本地执行命令（统一返回格式）
-
-        返回数据结构（由 _compact_result_data 精简）：
-        {
-            "status": "completed" | "running",
-            "pid": 12345,           # 后续 continue/read_log/terminate 凭此操作
-            "output": "命令输出...",  # completed 时含完整结果
-            "exit_code": 0,          # 始终保留
-            "elapsed": 1.5,          # 已运行秒数
-            "summary": [...],        # 仅长输出（>10行）时保留
-            "warnings": [...],       # 仅非空时保留
-            "errors": [...],         # 仅非空时保留
-        }
-        """
         try:
             # 启动进程。start_process 收到 log_dir 时会同步更新 process_manager.log_dir，
-            # 保证后续 read_log_by_pid/get_summary 降级读磁盘时用同一目录。
+            # 保证后续 log 磁盘降级读时用同一目录。
             project_root = getattr(self, "_project_root", None)
             bash_log_dir = Path(project_root) / "logs" / "bash" if project_root else None
             pid, log_file = await self.process_manager.start_process(
@@ -563,54 +725,79 @@ class BashTool(WorkspaceAwareMixin):
                 on_output=on_output,
                 exec_backend=exec_backend,
             )
+            handle = encode_handle(pid, owner)
 
-            start_time = time.time()
-
-            while True:
-                # 检查进程状态（需要在超时检查前获取 proc_info，以便使用 proc_info.start_time）
+            if bool(inputs.get("background", False)):
+                # background=true：立即返回 handle（进程状态经 log/input/kill 管理）
                 proc_info = self.process_manager.get_process_info(pid)
+                summary = self.process_manager.get_summary(pid) or {}
+                data = self._compact_result_data(
+                    handle=handle,
+                    output=self.process_manager.get_output(pid),
+                    summary_obj=summary,
+                    exit_code=None,
+                    status="running",
+                )
+                data["elapsed"] = (
+                    round(time.time() - proc_info.start_time, 1) if proc_info is not None else 0.0
+                )
+                self._append_image_hint(data, command, working_dir)
+                return create_success_result(
+                    data=data,
+                    metadata={"tool": "bash", "command": command, "warning": warning},
+                )
 
-                elapsed = time.time() - start_time
-
-                if elapsed >= timeout:
-                    summary = self.process_manager.get_summary(pid)
-
-                    if summary:
-                        running_output = self.process_manager.get_output(pid)
-                        running_data = BashTool._compact_result_data(
-                            pid=pid,
-                            output=running_output,
-                            summary_obj=summary,
-                            exit_code=None,
-                            status="running",
-                        )
-                        running_data["elapsed"] = round(
-                            time.time() - proc_info.start_time, 1
-                        ) if proc_info is not None else None
-                        return create_success_result(
-                            data=running_data,
-                            metadata={
-                                "action": "execute",
-                                "command": command,
-                                "warning": warning,
-                            },
-                        )
+            # 前台：轮询到完成或等待上限（超时进程不死，返回 running+handle+已捕获输出）
+            start_time = time.time()
+            while True:
+                proc_info = self.process_manager.get_process_info(pid)
+                # run 中止（先于超时判定）：run 已被停止时立刻收口，run 回到 step
+                # 边界即按既有 suspended 语义收尾，注入队列随派发链 drain 消费。
+                # 仅在进程确实还在跑时执行——已自然结束的调用按正常完成路径返回，
+                # 不得伪造成「被中止」。
+                if (
+                    abort_event is not None
+                    and abort_event.is_set()
+                    and proc_info is not None
+                    and proc_info.status == "running"
+                ):
+                    return await self._abort_result(pid, handle, command, warning)
+                if time.time() - start_time >= timeout:
+                    # 超时：running + handle + 全部已捕获输出（summary 缺失不阻拦
+                    # 返回——输出即契约，get_output 恒可用）
+                    summary = self.process_manager.get_summary(pid) or {}
+                    data = self._compact_result_data(
+                        handle=handle,
+                        output=self.process_manager.get_output(pid),
+                        summary_obj=summary,
+                        exit_code=None,
+                        status="running",
+                    )
+                    data["elapsed"] = (
+                        round(time.time() - proc_info.start_time, 1)
+                        if proc_info is not None
+                        else None
+                    )
+                    self._append_image_hint(data, command, working_dir)
+                    return create_success_result(
+                        data=data,
+                        metadata={"tool": "bash", "command": command, "warning": warning},
+                    )
                 if not proc_info or proc_info.status != "running":
                     break
 
-                # 短暂等待
                 await asyncio.sleep(0.5)
 
             # 进程已完成，等输出读取任务收尾再获取摘要和输出
             # （_sync_poll_process 可能抢在输出 flush 落盘前观测到退出）
             await self.process_manager.wait_output_settled(pid)
-            summary = self.process_manager.get_summary(pid)
+            summary = self.process_manager.get_summary(pid) or {}
             output = self.process_manager.get_output(pid)
 
             if summary:
                 exit_code = summary.get("exit_code", 0)
                 result_data = self._compact_result_data(
-                    pid=pid,
+                    handle=handle,
                     output=output,
                     summary_obj=summary,
                     exit_code=exit_code,
@@ -618,7 +805,7 @@ class BashTool(WorkspaceAwareMixin):
 
                 if exit_code != 0:
                     error_msg, fail_meta = BashTool._build_failure_message(
-                        exit_code, output, summary,
+                        exit_code, output, summary, command=command,
                     )
                     return create_failure_result(
                         error=error_msg,
@@ -626,111 +813,263 @@ class BashTool(WorkspaceAwareMixin):
                         metadata=fail_meta,
                     )
 
+                self._append_image_hint(result_data, command, working_dir)
                 return create_success_result(
                     data=result_data,
-                    metadata={
-                        "action": "execute",
-                        "command": command,
-                        "warning": warning,
-                    },
+                    metadata={"tool": "bash", "command": command, "warning": warning},
                 )
-            return create_failure_result(
-                error="无法获取进程摘要",
-                error_code="SUMMARY_ERROR",
+            # summary 不可得（记录已清且磁盘兜底双 miss）：观测失败 ≠ 调用
+            # 失败——降级返回 handle + 已捕获输出（输出即契约，同超时路径
+            # 口径）。退出码未知，不得伪造缺省 0。degraded 标记 + log_dir
+            # 现场随 metadata 落痕，下次发生自动留证。
+            degraded = self._compact_result_data(
+                handle=handle,
+                output=output,
+                summary_obj={},
+                exit_code=None,
+                status="completed",
+            )
+            degraded.pop("exit_code", None)
+            degraded["degraded"] = "summary_unavailable"
+            degraded["note"] = "进程已完成但摘要不可得；可凭 handle 用 log 工具重读"
+            self._append_image_hint(degraded, command, working_dir)
+            return create_success_result(
+                data=degraded,
+                metadata={
+                    "tool": "bash",
+                    "command": command,
+                    "warning": warning,
+                    "degraded": "summary_unavailable",
+                    "log_dir": str(getattr(self.process_manager, "log_dir", "") or ""),
+                },
             )
 
+        except SpawnFirstLineTimeoutError as e:
+            return create_failure_result(
+                error=(
+                    f"命令未能启动：{e.timeout:.0f}s 内未收到执行环境 pid 上报"
+                    f"（attempt {e.attempt}/{e.max_attempts}），判定 spawn 通道阻塞。"
+                    f"已终止挂起的执行客户端（host_pid={e.host_pid}），命令未确认执行、"
+                    f"不会造成重复副作用。可先排查隔离后端（如 WSL："
+                    f"`wsl -d Ubuntu --exec true`）后重试。"
+                ),
+                error_code="SPAWN_NO_FIRST_LINE",
+                metadata={
+                    "tool": "bash",
+                    "command": command,
+                    "host_pid": e.host_pid,
+                    "attempt": e.attempt,
+                    "max_attempts": e.max_attempts,
+                    "log_file": str(e.log_file) if e.log_file else None,
+                },
+            )
+        except BackendUnhealthyError as e:
+            return create_failure_result(
+                error=(
+                    f"执行后端不可用：{e.reason}。已快速失败，未启动命令"
+                    f"（避免再次挂起与客户端泄漏）。排查：WSL 场景先执行 "
+                    f"`wsl -d Ubuntu --exec true`，无响应则重启 WSL 服务"
+                    f"（管理员 PowerShell：`Restart-Service WSLService`）。"
+                ),
+                error_code="BACKEND_UNHEALTHY",
+                metadata={"tool": "bash", "command": command, "backend": e.backend_key},
+            )
         except Exception as e:
             return create_failure_result(
                 error=f"执行命令失败: {str(e)}",
                 error_code="EXECUTION_FAILED",
             )
 
-    async def _handle_continue(self, inputs: dict[str, Any]) -> ToolResult:  # noqa: PLR0911
-        """处理 continue 操作"""
-        pid = inputs.get("pid")
-        if not pid:
-            return create_failure_result(
-                error="pid 不能为空",
-                error_code="MISSING_PID",
-            )
+    # 终止等待宽限（秒）：终止走 SDK 整树杀，超此宽限视为后端路径不可用，
+    # 转直杀兜底（见 `_abort_result`）。取 1.5s：psutil 在场时整树杀是毫秒级，
+    # 宽限只是兜底阈值；取大值会把「停止」拖成秒级等待。
+    ABORT_TERMINATE_GRACE_SECS: ClassVar[float] = 1.5
 
-        caller_owner = self._owner_from_inputs(inputs)
-        # 等待时长与 execute 路径同规收口（MAX_TIMEOUT），防止超长阻塞占用 sidecar
-        timeout = min(inputs.get("timeout", self.timeout), self.MAX_TIMEOUT)
+    async def _abort_result(
+        self,
+        pid: int,
+        handle: str,
+        command: str,
+        warning: str | None,
+    ) -> ToolResult:
+        """run 中止收口：整树杀前台子进程并返回结构化失败（RUN_ABORTED）。
+
+        调用前提由 [`run_command`] 保证：abort_event 已置位且进程仍在跑。
+
+        两级终止（先整树、后兜底）：
+        1. SDK `terminate_process(force=True, reason="run_abort")`——整树杀防
+           孙子进程孤儿，并落终止行簿记；终止原因如实穿透（不伪装 user/agent）。
+        2. 宽限内未收口或进程仍活（后端不可用，如 psutil 缺席导致树杀空转）时，
+           直接杀 asyncio 子进程句柄——run 不被卡住是硬要求，簿记可缺、
+           进程必须死。
+        """
+        proc_info = self.process_manager.get_process_info(pid)
+        success, err = False, None
+        try:
+            success, err = await asyncio.wait_for(
+                self.process_manager.terminate_process(pid, force=True, reason="run_abort"),
+                self.ABORT_TERMINATE_GRACE_SECS,
+            )
+        except TimeoutError:
+            err = f"整树杀 {self.ABORT_TERMINATE_GRACE_SECS}s 内未收口"
+        if proc_info is not None and proc_info.process is not None:
+            if proc_info.process.returncode is None:
+                try:
+                    proc_info.process.kill()
+                    await asyncio.wait_for(proc_info.process.wait(), 5.0)
+                    success = True
+                except ProcessLookupError:
+                    success = True  # 已退出：等价于终止达成
+                except TimeoutError:
+                    err = (err + "；" if err else "") + "子进程句柄强杀 5s 内未退出"
+        output = self.process_manager.get_output(pid)
+        data = self._compact_result_data(
+            handle=handle,
+            output=output,
+            summary_obj=self.process_manager.get_summary(pid) or {},
+            exit_code=None,
+            status="terminated",
+        )
+        data["terminated_by"] = "run_abort"
+        if not success and err:
+            data["terminate_error"] = err
+        return create_failure_result(
+            error=(
+                "命令因 run 被停止而中止（run_status=suspended，看门狗整树杀进程）；"
+                "本条失败是停止语义的如实结果，不是命令自身出错"
+                + (f"；终止返回: {err}" if not success and err else "")
+            ),
+            error_code="RUN_ABORTED",
+            metadata={
+                "tool": "bash",
+                "command": command,
+                "terminated_by": "run_abort",
+                "data": data,
+                "warning": warning,
+            },
+        )
+        data = self._compact_result_data(
+            handle=handle,
+            output=output,
+            summary_obj=self.process_manager.get_summary(pid) or {},
+            exit_code=None,
+            status="terminated",
+        )
+        data["terminated_by"] = "run_abort"
+        if not success and err:
+            data["terminate_error"] = err
+        return create_failure_result(
+            error=(
+                "命令因 run 被停止而中止（run_status=suspended，看门狗整树杀进程）；"
+                "本条失败是停止语义的如实结果，不是命令自身出错"
+                + (f"；终止返回: {err}" if not success and err else "")
+            ),
+            error_code="RUN_ABORTED",
+            metadata={
+                "tool": "bash",
+                "command": command,
+                "terminated_by": "run_abort",
+                "data": data,
+                "warning": warning,
+            },
+        )
+
+    # ── log 工具（读当前态 / 等待完成） ──────────────────────────
+
+    async def read_log(self, inputs: dict[str, Any]) -> ToolResult:
+        """log 工具：凭 handle 读日志。
+
+        - block=false（缺省）：立即返回当前态/完整日志。进程活跃 → 内存路径
+          （实时 status + 输出）；进程已清 → 磁盘路径（T1 持久日志，任何时候
+          可读，含 sidecar 重启后凭 handle 解码 pid 跨会话定位）。
+        - block=true：等到完成或等待上限（min(默认 30s, MAX_TIMEOUT)，承接旧
+          continue 的轮询节奏）；完成返回 completed/失败结果，到上限返回
+          running+handle。
+        """
+        self._init_workspace(inputs)
+        pid, handle_owner, failure = self._resolve_handle(inputs)
+        if failure:
+            return failure
+        handle = str(inputs["handle"]).strip()
+        block = bool(inputs.get("block", False))
+        _wd = self.get_working_dir(inputs)
+        working_dir = str(_wd) if _wd else None
 
         proc_info = self.process_manager.get_process_info(pid)
-        if not proc_info:
-            # 进程已被即时清理（completed 后 _on_output_task_done 触发）。
-            # 降级走磁盘日志。
-            disk_result = self._continue_result_from_disk(pid, caller_owner)
-            if disk_result is not None:
-                return disk_result
+
+        if not block:
+            # block=false：立即读（承接旧 read_log 双路径）
+            if proc_info is not None:
+                forbidden = self._check_live_owner(pid, handle_owner, proc_info)
+                if forbidden:
+                    return forbidden
+                summary = self.process_manager.get_summary(pid)
+                data: dict[str, Any] = {
+                    "status": proc_info.status,
+                    "handle": handle,
+                    "command": proc_info.command,
+                    "output": self.process_manager.get_output(pid),
+                    "summary": summary.get("summary", []) if summary else [],
+                    "warnings": summary.get("warnings", 0) if summary else 0,
+                    "errors": summary.get("errors", 0) if summary else 0,
+                }
+                if proc_info.exit_code is not None:
+                    data["exit_code"] = proc_info.exit_code
+                self._append_image_hint(data, proc_info.command, working_dir)
+                return create_success_result(
+                    data=data,
+                    metadata={"tool": "log", "source": "memory"},
+                )
+            disk = self._log_result_from_disk(pid, handle, handle_owner)
+            if disk is not None:
+                return disk
             return create_failure_result(
                 error=(
-                    f"进程 {pid} 不存在或已结束，且无对应日志文件（logs/bash/bash_{pid}.log）。"
+                    f"进程 {pid} 不存在且无对应日志文件（可能从未执行过，"
+                    "或日志文件已被外部清理）。"
+                ),
+                error_code="LOG_FILE_NOT_FOUND",
+            )
+
+        # block=true：等到完成或等待上限（承接旧 continue 等待语义）
+        if proc_info is None:
+            # 进程已被即时清理（completed 后 _on_output_task_done 触发）。
+            # 降级走磁盘日志。
+            disk = self._log_result_from_disk(pid, handle, handle_owner)
+            if disk is not None:
+                return disk
+            return create_failure_result(
+                error=(
+                    f"进程 {pid} 不存在或已结束，且无对应日志文件。"
                     "可能从未执行过或日志已被清理。"
                 ),
                 error_code="PROCESS_NOT_FOUND",
             )
 
-        # owner 校验（内存进程）
-        ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
-        if not ok:
-            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
+        forbidden = self._check_live_owner(pid, handle_owner, proc_info)
+        if forbidden:
+            return forbidden
 
-        # 如果进程已完成，直接返回结果（对齐 execute 完成路径，带 output）
+        # 已完成：直接返回结果（对齐 bash 完成路径，带 output）
         if proc_info.status != "running":
-            await self.process_manager.wait_output_settled(pid)
-            summary = self.process_manager.get_summary(pid)
-            exit_code = proc_info.exit_code
-            if exit_code is not None and exit_code != 0:
-                output_fail = self.process_manager.get_output(pid)
-                error_msg, fail_meta = BashTool._build_failure_message(
-                    exit_code, output_fail, summary or {},
-                )
-                return create_failure_result(
-                    error=error_msg,
-                    error_code="COMMAND_FAILED",
-                    metadata=fail_meta,
-                )
-            output = self.process_manager.get_output(pid)
-            result_data = self._compact_result_data(
-                pid=pid,
-                output=output,
-                summary_obj=summary or {},
-                exit_code=exit_code if exit_code is not None else 0,
-            )
-            result_data["elapsed"] = summary.get("elapsed_seconds", 0) if summary else 0
-            return create_success_result(
-                data=result_data,
-                metadata={"action": "continue"},
-            )
+            return await self._completed_result(pid, handle, proc_info, working_dir)
 
-        # 继续等待
+        # 等待循环（等待上限 = min(默认 30s, MAX_TIMEOUT)）
+        timeout = min(self.timeout, self.MAX_TIMEOUT)
         start_time = time.time()
-
         while True:
-            elapsed = time.time() - start_time
-
-            if elapsed >= timeout:
-                # 再次触发回调
-                summary = self.process_manager.get_summary(pid)
-
-                running_output = self.process_manager.get_output(pid)
-                running_data = BashTool._compact_result_data(
-                    pid=pid,
-                    output=running_output,
-                    summary_obj=summary or {},
+            if time.time() - start_time >= timeout:
+                summary = self.process_manager.get_summary(pid) or {}
+                data = self._compact_result_data(
+                    handle=handle,
+                    output=self.process_manager.get_output(pid),
+                    summary_obj=summary,
                     exit_code=None,
                     status="running",
                 )
-                running_data["elapsed"] = round(
-                    time.time() - proc_info.start_time, 1
-                )
-                return create_success_result(
-                    data=running_data,
-                    metadata={"action": "continue"},
-                )
+                data["elapsed"] = round(time.time() - proc_info.start_time, 1)
+                self._append_image_hint(data, proc_info.command, working_dir)
+                return create_success_result(data=data, metadata={"tool": "log"})
 
             proc_info = self.process_manager.get_process_info(pid)
             if not proc_info or proc_info.status != "running":
@@ -738,57 +1077,72 @@ class BashTool(WorkspaceAwareMixin):
 
             await asyncio.sleep(0.5)
 
-        # 进程已完成（对齐 execute 完成路径，带 output）
-        await self.process_manager.wait_output_settled(pid)
+        # 等待循环跨过了退出清理时点：记录已被 _on_output_task_done 在
+        # 「置终态→清内存」同瞬间移除，轮询下一拍只能拿到 None。此刻
+        # exit_code 只存在于磁盘日志尾部，必须回读——禁止把真实退出码
+        # 兜成 0（等待期恰逢进程退出时的固定竞态，非偶发）。
         if proc_info is None:
-            # 等待循环跨过了退出清理时点：记录已被 _on_output_task_done 在
-            # 「置终态→清内存」同瞬间移除，轮询下一拍只能拿到 None。此刻
-            # exit_code 只存在于磁盘日志尾部，必须回读——禁止把真实退出码
-            # 兜成 0（continue 等待期恰逢进程退出时的固定竞态，非偶发）。
-            disk_result = self._continue_result_from_disk(pid, caller_owner)
-            if disk_result is not None:
-                return disk_result
+            disk = self._log_result_from_disk(pid, handle, handle_owner)
+            if disk is not None:
+                return disk
             return create_failure_result(
                 error=f"进程 {pid} 已结束且日志不可读，无法取回退出码。",
                 error_code="PROCESS_NOT_FOUND",
             )
+        return await self._completed_result(pid, handle, proc_info)
+
+    async def _completed_result(
+        self,
+        pid: int,
+        handle: str,
+        proc_info: ProcessInfo,
+        working_dir: str | None = None,
+    ) -> ToolResult:
+        """进程已完成态的统一结果（log block=true 的完成路径）。
+
+        非零退出走 COMMAND_FAILED 失败信封（携带信号归因与提取行），
+        零退出返回 completed + output + exit_code + elapsed。
+        """
+        await self.process_manager.wait_output_settled(pid)
         summary = self.process_manager.get_summary(pid)
         exit_code = proc_info.exit_code
         if exit_code is not None and exit_code != 0:
             output_fail = self.process_manager.get_output(pid)
             error_msg, fail_meta = BashTool._build_failure_message(
-                exit_code, output_fail, summary or {},
+                exit_code, output_fail, summary or {}, command=proc_info.command,
             )
             return create_failure_result(
                 error=error_msg,
                 error_code="COMMAND_FAILED",
                 metadata=fail_meta,
             )
-
         output = self.process_manager.get_output(pid)
         result_data = self._compact_result_data(
-            pid=pid,
+            handle=handle,
             output=output,
             summary_obj=summary or {},
             exit_code=exit_code if exit_code is not None else 0,
         )
         # 补回 elapsed（_compact_result_data 不带此字段）
         result_data["elapsed"] = summary.get("elapsed_seconds", 0) if summary else 0
-        return create_success_result(
-            data=result_data,
-            metadata={"action": "continue"},
-        )
+        self._append_image_hint(result_data, proc_info.command, working_dir)
+        return create_success_result(data=result_data, metadata={"tool": "log"})
 
-    def _continue_result_from_disk(self, pid: int, caller_owner: str | None) -> ToolResult | None:
-        """从磁盘日志恢复 continue 结果（内存记录已被清理时的唯一真值源）。
+    def _log_result_from_disk(
+        self,
+        pid: int,
+        handle: str,
+        handle_owner: str | None,
+    ) -> ToolResult | None:
+        """从磁盘日志恢复 log 结果（内存记录已被清理时的唯一真值源）。
 
-        进程结束的「置终态→清内存」是原子的，continue 无论是入口即查不到
-        记录，还是等待循环跨过清理时点，exit_code/output 都只能从日志文件
-        回读（尾部 "# Process ended with exit code: N"）。owner 校验走磁盘
-        日志头 # Owner:。
+        进程结束的「置终态→清内存」是原子的，log 无论是入口即查不到
+        记录，还是等待循环跨过清理时点，output/exit_code 都只能从日志
+        文件回读（尾部 "# Process ended with exit code: N"）。身份链
+        第二段走磁盘日志头 # Owner:（handle owner vs 日志头 owner）。
 
         Returns:
-            ToolResult；日志文件不存在返回 None（调用方负责 PROCESS_NOT_FOUND）。
+            ToolResult；日志文件不存在返回 None（调用方负责 NOT_FOUND）。
         """
         try:
             file_data = self.process_manager.read_log_by_pid(pid)
@@ -799,45 +1153,109 @@ class BashTool(WorkspaceAwareMixin):
             )
         if file_data is None:
             return None
-        ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
+        ok, err = self._check_owner(pid, handle_owner, file_data.get("owner"))
         if not ok:
             return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
+        data: dict[str, Any] = {
+            "status": "completed",
+            "handle": handle,
+            "output": file_data["output"],
+            "summary": file_data["summary"],
+            "exit_code": file_data.get("exit_code") or 0,  # 磁盘日志可能无 exit_code
+        }
+        command = file_data.get("command")
+        if command:
+            data["command"] = command
+        terminated_by = file_data.get("terminated_by")
+        if terminated_by:
+            data["terminated_by"] = terminated_by
         return create_success_result(
-            data={
-                "status": "completed",
-                "pid": pid,
-                "output": file_data["output"],
-                "summary": file_data["summary"],
-                "exit_code": file_data.get("exit_code") or 0,  # 磁盘日志可能无 exit_code
-            },
-            metadata={"action": "continue", "source": "file"},
+            data=data,
+            metadata={"tool": "log", "source": "file"},
         )
 
-    async def _handle_terminate(self, inputs: dict[str, Any]) -> ToolResult:
-        """处理 terminate 操作"""
-        pid = inputs.get("pid")
-        if not pid:
+    # ── input 工具（向进程发文本） ───────────────────────────────
+
+    async def send_input(self, inputs: dict[str, Any]) -> ToolResult:
+        """input 工具：凭 handle 向等待输入的进程发文本（yes/no、密码等）。"""
+        self._init_workspace(inputs)
+        pid, handle_owner, failure = self._resolve_handle(inputs)
+        if failure:
+            return failure
+        handle = str(inputs["handle"]).strip()
+        text = inputs.get("text")
+        if text is None:
             return create_failure_result(
-                error="pid 不能为空",
-                error_code="MISSING_PID",
+                error="text 不能为空",
+                error_code="MISSING_TEXT",
             )
 
-        caller_owner = self._owner_from_inputs(inputs)
         proc_info = self.process_manager.get_process_info(pid)
         if proc_info is None:
             return create_failure_result(
                 error=f"进程 {pid} 不存在或已结束",
                 error_code="PROCESS_NOT_FOUND",
             )
-        # owner 校验（终止是破坏性操作，必须严格）
-        ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
-        if not ok:
-            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
+        forbidden = self._check_live_owner(pid, handle_owner, proc_info)
+        if forbidden:
+            return forbidden
 
-        force = inputs.get("force", False)
+        # 获取当前状态。
+        # ⚠️ 顺序说明（WSL 竞态）：send_input 后 ~ms 窗口内若读取该进程日志文件，
+        # Windows WSL2 的 stdio relay 会丢失进程退出前的最后一批输出（预存在
+        # 环境问题）。因此摘要在**发送前**取（发送前/后语义等价，都是"输入已
+        # 发送"时刻的状态快照），发送后不再落盘任何读操作，避开竞态窗口。
+        summary = self.process_manager.get_summary(pid)
 
-        # 终止进程
-        success, error = await self.process_manager.terminate_process(pid, force)
+        # 发送输入
+        success, error = await self.process_manager.send_input(pid, text)
+
+        if not success:
+            return create_failure_result(
+                error=error or "发送输入失败",
+                error_code="INPUT_FAILED",
+            )
+
+        return create_success_result(
+            data={
+                "status": "running",
+                "handle": handle,
+                "message": "输入已发送",
+                "summary": summary.get("summary", []) if summary else [],
+            },
+            metadata={"tool": "input"},
+        )
+
+    # ── kill 工具（终止进程） ────────────────────────────────────
+
+    async def terminate(self, inputs: dict[str, Any]) -> ToolResult:
+        """kill 工具：凭 handle 终止进程。
+
+        reason="agent" 透传 SDK（ADR 决策 3：agent 发起即 agent 语义，穿透
+        到日志终止行，不再伪装 user）；SDK graceful 终止 5s 未退即兜底强杀，
+        整树杀防孙子进程孤儿。
+        """
+        self._init_workspace(inputs)
+        pid, handle_owner, failure = self._resolve_handle(inputs)
+        if failure:
+            return failure
+        handle = str(inputs["handle"]).strip()
+
+        proc_info = self.process_manager.get_process_info(pid)
+        if proc_info is None:
+            return create_failure_result(
+                error=f"进程 {pid} 不存在或已结束",
+                error_code="PROCESS_NOT_FOUND",
+            )
+        # 身份校验（终止是破坏性操作，必须严格）
+        forbidden = self._check_live_owner(pid, handle_owner, proc_info)
+        if forbidden:
+            return forbidden
+
+        # 终止进程（reason=agent：agent 发起即 agent 语义）
+        success, error = await self.process_manager.terminate_process(
+            pid, force=False, reason="agent"
+        )
 
         if not success:
             return create_failure_result(
@@ -850,134 +1268,9 @@ class BashTool(WorkspaceAwareMixin):
         return create_success_result(
             data={
                 "status": "terminated",
-                "pid": pid,
-                "message": "进程已终止" + ("（强制）" if force else ""),
+                "handle": handle,
+                "message": "进程已终止",
                 "summary": summary.get("summary", []) if summary else [],
             },
-            metadata={"action": "terminate", "force": force},
-        )
-
-    async def _handle_input(self, inputs: dict[str, Any]) -> ToolResult:
-        """处理 input 操作"""
-        pid = inputs.get("pid")
-        if not pid:
-            return create_failure_result(
-                error="pid 不能为空",
-                error_code="MISSING_PID",
-            )
-
-        input_text = inputs.get("input_text")
-        if input_text is None:
-            return create_failure_result(
-                error="input_text 不能为空",
-                error_code="MISSING_INPUT",
-            )
-
-        caller_owner = self._owner_from_inputs(inputs)
-        proc_info = self.process_manager.get_process_info(pid)
-        if proc_info is None:
-            return create_failure_result(
-                error=f"进程 {pid} 不存在或已结束",
-                error_code="PROCESS_NOT_FOUND",
-            )
-        # owner 校验（向进程注入输入是敏感操作，必须严格）
-        ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
-        if not ok:
-            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
-
-        # 获取当前状态。
-        # ⚠️ 顺序说明（WSL 竞态）：send_input 后 ~ms 窗口内若读取该进程日志文件，
-        # Windows WSL2 的 stdio relay 会丢失进程退出前的最后一批输出（预存在
-        # 环境问题）。因此摘要在**发送前**取（发送前/后语义等价，都是"输入已
-        # 发送"时刻的状态快照），发送后不再落盘任何读操作，避开竞态窗口。
-        summary = self.process_manager.get_summary(pid)
-
-        # 发送输入
-        success, error = await self.process_manager.send_input(pid, input_text)
-
-        if not success:
-            return create_failure_result(
-                error=error or "发送输入失败",
-                error_code="INPUT_FAILED",
-            )
-
-        return create_success_result(
-            data={
-                "status": "running",
-                "pid": pid,
-                "message": "输入已发送",
-                "summary": summary.get("summary", []) if summary else [],
-            },
-            metadata={"action": "input"},
-        )
-
-    async def _handle_read_log(self, inputs: dict[str, Any]) -> ToolResult:
-        """处理 read_log 操作。
-
-        双路径：
-        1. 进程活跃（在 active_processes）→ 从内存读，返回实时 status + output + summary
-        2. 进程已清（completed 后被 _on_output_task_done 清理）→ 按 pid 算日志文件名
-           (logs/bash/bash_<pid>.log) 读磁盘
-        """
-        pid = inputs.get("pid")
-        if not pid:
-            return create_failure_result(
-                error="pid 不能为空",
-                error_code="MISSING_PID",
-            )
-
-        caller_owner = self._owner_from_inputs(inputs)
-
-        # 路径1：进程活跃 → 从内存读（含实时 status、summary）
-        proc_info = self.process_manager.get_process_info(pid)
-        if proc_info:
-            # owner 校验
-            ok, err = self._check_owner(pid, caller_owner, proc_info.metadata.get("owner"))
-            if not ok:
-                return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
-            summary = self.process_manager.get_summary(pid)
-            output = self.process_manager.get_output(pid)
-            return create_success_result(
-                data={
-                    "status": proc_info.status,
-                    "pid": pid,
-                    "output": output,
-                    "summary": summary.get("summary", []) if summary else [],
-                    "warnings": summary.get("warnings", 0) if summary else 0,
-                    "errors": summary.get("errors", 0) if summary else 0,
-                },
-                metadata={"action": "read_log", "source": "memory"},
-            )
-
-        # 路径2：进程已清 → 按 pid 算文件名读磁盘
-        try:
-            file_data = self.process_manager.read_log_by_pid(pid)
-        except ProcessLogReadError as e:
-            return create_failure_result(
-                error=f"日志文件读取失败（IO 错误）：{e}",
-                error_code="LOG_FILE_IO_ERROR",
-            )
-        if file_data is None:
-            return create_failure_result(
-                error=(
-                    f"进程 {pid} 不存在且无对应日志文件（logs/bash/bash_{pid}.log）。"
-                    "可能从未执行过，或日志文件已被外部清理。"
-                ),
-                error_code="LOG_FILE_NOT_FOUND",
-            )
-        # owner 校验（磁盘日志头 # Owner:）
-        ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
-        if not ok:
-            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
-        return create_success_result(
-            data={
-                # 能从磁盘读到的都是已结束的进程（活跃的会在路径1处理）
-                "status": "completed",
-                "pid": pid,
-                "output": file_data["output"],
-                "summary": file_data["summary"],
-                "warnings": file_data["warnings"],
-                "errors": file_data["errors"],
-            },
-            metadata={"action": "read_log", "source": "file"},
+            metadata={"tool": "kill"},
         )

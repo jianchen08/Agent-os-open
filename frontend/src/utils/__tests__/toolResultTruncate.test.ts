@@ -127,18 +127,28 @@ describe('resolveTruncatedToolResultForDisplay：展示面字段取舍', () => {
 })
 
 describe('buildTruncatedResultDetailBlock：截断详情块', () => {
-  it('label 如实标注总量与引导、content 为预览、onExpand 原样接线', async () => {
+  it('缺省静态：label 标注「与 LLM 所见一致」、content 为预览、无 onExpand（不回取全文）', () => {
+    const block = buildTruncatedResultDetailBlock(
+      { __truncated: true, preview: 'PREVIEW', totalBytes: 20 * 1024, sequence: 7 },
+    )
+    expect(block.id).toBe('result-truncated')
+    expect(block.label).toContain('20.0 KB')
+    expect(block.label).toContain('与 LLM 所见一致')
+    expect(block.label).not.toContain('展开加载全文')
+    expect(block.content).toBe('PREVIEW')
+    expect(block.collapsible).toBe(true)
+    expect(block.defaultExpanded).toBe(false)
+    expect(block.onExpand).toBeUndefined()
+  })
+
+  it('接线 onExpand 时原样保留（卡型自管语义，如 file_card 自带 label）', async () => {
     const onExpand = async () => true
     const block = buildTruncatedResultDetailBlock(
       { __truncated: true, preview: 'PREVIEW', totalBytes: 20 * 1024, sequence: 7 },
       onExpand,
+      '差异对比（共 20.0 KB），展开加载全文',
     )
-    expect(block.id).toBe('result-truncated')
-    expect(block.label).toContain('20.0 KB')
     expect(block.label).toContain('展开加载全文')
-    expect(block.content).toBe('PREVIEW')
-    expect(block.collapsible).toBe(true)
-    expect(block.defaultExpanded).toBe(false)
     expect(block.onExpand).toBe(onExpand)
     await expect(block.onExpand!()).resolves.toBe(true)
   })

@@ -7,8 +7,8 @@
  * 在槽房为空时解析落空——夹具统一经本入口装载，与生产同批两表。
  */
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { slotRegistry, type SlotLoaderDeps } from '@/services/slots/slotRegistry'
 import { widgetRegistry, type WidgetComponent } from '@/services/schema/WidgetRegistry'
+import { slotRegistry, type SlotLoaderDeps } from '@/services/slots/slotRegistry'
 
 type SchemaPayload = Parameters<typeof contributionRegistry.loadFromSchema>[0]
 

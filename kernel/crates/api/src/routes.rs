@@ -1024,9 +1024,9 @@ pub async fn pending_inputs_list_handler(
         .map(|r| {
             serde_json::json!({
                 "id": r.id,
-                "pipeline_id": r.pipeline_id,
-                "content": r.content,
-                "source": r.source,
+                "pipeline_id": r.request.pipeline_id,
+                "content": r.request.content,
+                "source": r.request.source,
                 "created_at": r.created_at,
             })
         })
@@ -1097,7 +1097,7 @@ pub async fn pending_inputs_delete_handler(
     let cmid = records
         .into_iter()
         .find(|r| r.id == input_id)
-        .map(|r| r.client_message_id);
+        .map(|r| r.request.client_message_id);
     let deleted = store
         .delete_pending_input(&tenant_ctx.tenant_id, &pipeline_id, &input_id)
         .await
@@ -1165,7 +1165,10 @@ pub async fn pending_inputs_clear_handler(
                 message: "pending-inputs 暂时不可用（存储异常），请稍后重试".to_string(),
             }
         })?;
-    let cmids: Vec<String> = rows.iter().map(|r| r.client_message_id.clone()).collect();
+    let cmids: Vec<String> = rows
+        .iter()
+        .map(|r| r.request.client_message_id.clone())
+        .collect();
     let entry_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
     let deleted = store
         .clear_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
@@ -1220,9 +1223,9 @@ async fn emit_pending_inputs_changed_endpoint(
             .map(|r| {
                 serde_json::json!({
                     "id": r.id,
-                    "pipeline_id": r.pipeline_id,
-                    "content": r.content,
-                    "source": r.source,
+                    "pipeline_id": r.request.pipeline_id,
+                    "content": r.request.content,
+                    "source": r.request.source,
                     "created_at": r.created_at,
                 })
             })

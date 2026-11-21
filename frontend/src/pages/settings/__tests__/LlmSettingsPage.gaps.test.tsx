@@ -1,18 +1,16 @@
 // @feature FP-T12 前端适配 | @ci frontend-test
 /**
- * LlmSettingsPage 覆盖缺口补充测试（与既有 LlmSettingsPage.test 互补，不重复）：
+ * LlmSettingsPage 覆盖缺口补充测试（单界面重构版，与 LlmSettingsPage.test 互补）：
  * - 配置加载失败（OBS-R258-1 四态）：整页 ErrorState + 重试（refetch），
  *   不渲染零数据伪装物；非 Error 拒绝回退固定文案；预置声明副面降级不阻断主面
- * - 错误路径族：默认模型保存/添加模型/删除模型/模型设置保存/更新 Key/
- *   并发保存/添加提供商/删除提供商 全部失败 → toast.error 带 getApiMsg 描述
- *   （含 reject(undefined) 萰底描述）
- * - 成功路径补全：删除模型/删除提供商/并发设置（展开+输入+保存）/添加提供商
- *   （含表单重置）
- * - 自定义提供商表单：懒加载 litellm 类型目录（成功渲染 / 失败回退声明常用类型 /
- *   已加载幂等不重复拉）
- * - 拉取添加部分失败 → toast.warning 带失败清单
- * - 同组多提供者按 has_key 排序（未配置排前）
- * - 默认模型五个下拉的 onChange（chat/tiers×3/embedding）
+ * - 错误路径族：默认模型保存/删除模型/模型设置保存/更新 Key/并发保存/
+ *   添加提供商/删除提供商 全部失败 → toast.error 带 getApiMsg 描述
+ * - 成功路径补全：删除模型/删除提供商/并发设置（展开+输入+保存）
+ * - 自定义提供商表单：选中「自定义」懒加载 litellm 类型目录（成功渲染 /
+ *   失败回退声明常用类型 / 已加载幂等不重复拉）
+ * - 拉取添加部分失败 → toast.warning 带失败清单；全部失败 → toast.error
+ * - 无提供商时落「自定义」：提示语 + 表单直接可用
+ * - 已注册模型行的「参数」面板：完整字段保存 → updateModel 合并保留原字段
  */
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -86,11 +84,15 @@ vi.mock('@/components/ui/select', async () => {
   }
 })
 
-/** 同一预置组放两个 provider 且 has_key 相异（驱动排序比较器真实执行） */
 const configFixture = {
   models: {
     'm-1': { provider: 'openai', model_name: 'm-1', display_name: '模型一' },
-    'm-2': { provider: 'anthropic', model_name: 'm-2', display_name: '模型二' },
+    'm-2': {
+      provider: 'anthropic',
+      model_name: 'm-2',
+      display_name: '模型二',
+      default_params: { temperature: 0.5, max_tokens: 100000 },
+    },
   },
   providers: {
     openai: {
@@ -102,6 +104,7 @@ const configFixture = {
     },
     anthropic: {
       type: 'openai',
+      api_base: 'https://api.anthropic.com/v1',
       keys: [{ id: 'anthropic_main', api_key: '${ANTHROPIC_KEY}', max_concurrent: 6, rpm: 10 }],
       has_key: false,
       env_var: 'ANTHROPIC_KEY',
@@ -128,11 +131,12 @@ async function renderLoaded() {
   mock.getLLMConfig.mockResolvedValue(configFixture)
   mock.getLLMPresets.mockResolvedValue(presetsFixture)
   mock.getProviderTypes.mockResolvedValue({ types: ['openai', 'anthropic', 'zai', 'gemini'] })
-  // 变更端点默认成功响应：组件把返回值写回 config，缺省 undefined 会把
-  // providers/models 置空导致后续查询全空（真返回形状对齐 services/api/config）
   mock.getRemoteModels.mockResolvedValue({
     provider: 'openai',
-    models: [{ id: 'gpt-a', owned_by: 'openai' }, { id: 'gpt-b', owned_by: 'openai' }],
+    models: [
+      { id: 'gpt-a', owned_by: 'openai' },
+      { id: 'gpt-b', owned_by: 'openai' },
+    ],
   })
   // 返回形状对齐组件消费契约：provider/model 变更端点直接返回映射本身
   // （仅 addModel 包 {models, added_ids} 信封）；双层包裹会把 config 写坏
@@ -144,17 +148,17 @@ async function renderLoaded() {
   mock.updateModel.mockResolvedValue(configFixture.models)
   mock.addModel.mockResolvedValue({ models: configFixture.models, added_ids: ['x'] })
   renderWithProviders(<LlmSettingsPage />)
-  await waitFor(() => expect(screen.getByText('国际（2）')).toBeInTheDocument())
-}
-
-async function gotoModelsTab() {
-  fireEvent.click(screen.getByRole('tab', { name: '模型' }))
   await waitFor(() => expect(screen.getByText('已注册模型 (2)')).toBeInTheDocument())
 }
 
-/** 取 provider 卡片根节点（卡片含显示名） */
-function cardOf(name: string): HTMLElement {
-  return screen.getByText(name).closest('div[class*="bg-card"]') as HTMLElement
+/** 模型区容器（模型选择段：拉取/手填） */
+function modelSection(): HTMLElement {
+  return screen.getByRole('heading', { name: '模型', level: 3 }).closest('section') as HTMLElement
+}
+
+/** 已注册模型段容器（逐行条目） */
+function modelRegistrySection(): HTMLElement {
+  return screen.getByRole('heading', { name: /已注册模型/ }).closest('section') as HTMLElement
 }
 
 beforeEach(() => {
@@ -167,7 +171,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('LlmSettingsPage 缺口：加载失败与重试', () => {
+describe('LlmSettingsPage 缺口：加载失败与降级', () => {
   it('配置加载失败（Error 实例）：整页 ErrorState + 重试，不渲染零数据伪装物（OBS-R258-1 铁律 1/2）', async () => {
     mock.getLLMConfig.mockRejectedValue(new Error('net down'))
     mock.getLLMPresets.mockResolvedValue(presetsFixture)
@@ -175,10 +179,9 @@ describe('LlmSettingsPage 缺口：加载失败与重试', () => {
 
     expect(await screen.findByText('net down')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /重试/ })).toBeInTheDocument()
-    // 失败态不渲染任何"零数据"伪装物：空态文案与 Tab 数据面均不出现
-    expect(screen.queryByText('暂无提供商')).not.toBeInTheDocument()
-    expect(screen.queryByText('暂无模型')).not.toBeInTheDocument()
-    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+    // 失败态不渲染任何"零数据"伪装物
+    expect(screen.queryByText(/暂无模型/)).not.toBeInTheDocument()
+    expect(screen.queryByText('已注册模型 (0)')).not.toBeInTheDocument()
 
     // 重试 → refetch（仍然失败不崩）
     fireEvent.click(screen.getByRole('button', { name: /重试/ }))
@@ -199,29 +202,38 @@ describe('LlmSettingsPage 缺口：加载失败与重试', () => {
     mock.getLLMPresets.mockRejectedValue(new Error('presets down'))
     renderWithProviders(<LlmSettingsPage />)
 
-    // 声明缺席 → 分组全部归「自定义」，提供商/模型列表照常渲染
-    expect(await screen.findByText('自定义（2）')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('tab', { name: '模型' }))
-    await waitFor(() => expect(screen.getByText('已注册模型 (2)')).toBeInTheDocument())
+    // 声明缺席 → 全部提供商落「其他已添加」组，模型列表照常渲染
+    expect(await screen.findByText('其他已添加')).toBeInTheDocument()
+    expect(screen.getByText('已注册模型 (2)')).toBeInTheDocument()
+    // 无提供商时也能选到「自定义」
+    expect(screen.getByRole('button', { name: '自定义（新增提供商）' })).toBeInTheDocument()
   })
 
-  it('同组多提供者按 has_key 排序：未配置排前', async () => {
-    await renderLoaded()
-    const section = screen.getByText('国际（2）').closest('section') as HTMLElement
-    const ids = within(section).getAllByText(/^(openai|anthropic)$/).map((e) => e.textContent)
-    expect(ids.indexOf('anthropic')).toBeLessThan(ids.indexOf('openai'))
+  it('无提供商配置：选中项落「自定义」，提示先新增提供商', async () => {
+    mock.getLLMConfig.mockResolvedValue({
+      models: {},
+      providers: {},
+      defaults: { chat: '', embedding: '', tiers: {} },
+    })
+    mock.getLLMPresets.mockResolvedValue(presetsFixture)
+    mock.getProviderTypes.mockResolvedValue({ types: ['openai'] })
+    renderWithProviders(<LlmSettingsPage />)
+
+    expect(await screen.findByText('已注册模型 (0)')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Base URL')).toBeInTheDocument()
+    expect(screen.getByText(/暂无模型——在上方选择提供商后/)).toBeInTheDocument()
   })
 })
 
-describe('LlmSettingsPage 缺口：提供商卡片操作', () => {
+describe('LlmSettingsPage 缺口：提供商操作', () => {
   it('并发设置：展开 → 修改并发与 RPM → 保存成功；失败 toast', async () => {
     await renderLoaded()
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: /并发设置/ }))
+    fireEvent.click(screen.getByRole('button', { name: /并发设置/ }))
 
-    const inputs = within(cardOf('OpenAI')).getAllByRole('spinbutton')
-    fireEvent.change(inputs[0], { target: { value: '9' } })
-    fireEvent.change(inputs[1], { target: { value: '30' } })
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: '保存并发设置' }))
+    const spins = screen.getAllByRole('spinbutton')
+    fireEvent.change(spins[0], { target: { value: '9' } })
+    fireEvent.change(spins[1], { target: { value: '30' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存并发设置' }))
     await waitFor(() =>
       expect(mock.updateProviderConfig).toHaveBeenCalledWith('openai', {
         keys: [{ id: 'openai_main', max_concurrent: 9, rpm: 30 }],
@@ -229,51 +241,75 @@ describe('LlmSettingsPage 缺口：提供商卡片操作', () => {
     )
     expect(toast.success).toHaveBeenCalledWith('已保存 openai 的并发设置')
 
-    // 失败 → toast.error 带 API 描述
     mock.updateProviderConfig.mockRejectedValueOnce({ message: 'busy' })
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: '保存并发设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存并发设置' }))
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('保存并发设置失败', { description: 'busy' }),
     )
   })
 
-  it('更新 Key 失败 → toast.error；已配置掩码回显', async () => {
+  it('更新 Key：已配置时点「更换 Key」展开输入 → 保存明文；失败 toast', async () => {
     await renderLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '更换 Key' }))
+    const input = await screen.findByLabelText('填写 openai 的 API Key')
+    fireEvent.change(input, { target: { value: 'sk-rotated' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存 Key' }))
+    await waitFor(() =>
+      expect(mock.updateProviderConfig).toHaveBeenCalledWith('openai', {
+        keys: [{ id: 'openai_main', api_key: 'sk-rotated' }],
+      }),
+    )
+    expect(toast.success).toHaveBeenCalledWith('已保存 openai 的 Key（写入 .env，立即生效）')
+
+    // 失败路径：再次点「更换 Key」展开后提交 → toast + spinner 退场（诚实复位可重试）
     mock.updateProviderConfig.mockRejectedValueOnce({ message: 'key rejected' })
-    const card = cardOf('OpenAI')
-    fireEvent.change(screen.getByPlaceholderText('输入新的 API Key'), {
+    fireEvent.click(await screen.findByRole('button', { name: '更换 Key' }))
+    fireEvent.change(await screen.findByLabelText('填写 openai 的 API Key'), {
       target: { value: 'sk-bad' },
     })
-    fireEvent.click(within(card).getByRole('button', { name: '更新 Key' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存 Key' }))
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('保存密钥失败', { description: 'key rejected' }),
     )
   })
 
+  it('未配置提供商：Key 输入直填保存（无需先点「更换 Key」）', async () => {
+    await renderLoaded()
+    fireEvent.click(screen.getByRole('button', { name: 'Claude' }))
+    const input = await screen.findByLabelText('填写 anthropic 的 API Key')
+    fireEvent.change(input, { target: { value: 'sk-anthropic' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存 Key' }))
+    await waitFor(() =>
+      expect(mock.updateProviderConfig).toHaveBeenCalledWith('anthropic', {
+        keys: [{ id: 'anthropic_main', api_key: 'sk-anthropic' }],
+      }),
+    )
+  })
+
   it('删除提供商：成功静默更新配置；失败 toast', async () => {
     await renderLoaded()
-    fireEvent.click(within(cardOf('Claude')).getByRole('button', { name: '删除' }))
-    await waitFor(() => expect(mock.deleteProvider).toHaveBeenCalledWith('anthropic'))
+    // 删除按钮在提供商段与模型条目都有，按段限定作用域
+    const providerSection = screen
+      .getByRole('heading', { name: '提供商', level: 3 })
+      .closest('section') as HTMLElement
+    fireEvent.click(within(providerSection).getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(mock.deleteProvider).toHaveBeenCalledWith('openai'))
     expect(toast.error).not.toHaveBeenCalled()
-    // 返回剩余 providers → openai 卡仍在
-    expect(within(cardOf('OpenAI')).getByText('已配置')).toBeInTheDocument()
 
     mock.deleteProvider.mockRejectedValueOnce({ message: 'has children' })
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: '删除' }))
+    fireEvent.click(within(providerSection).getByRole('button', { name: '删除' }))
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('删除提供商失败', { description: 'has children' }),
     )
   })
+})
 
-  it('添加自定义提供商：懒加载类型目录、表单提交成功后重置；失败 toast', async () => {
+describe('LlmSettingsPage 缺口：自定义提供商表单', () => {
+  it('选中「自定义」懒加载类型目录；提交成功后重置；失败 toast', async () => {
     await renderLoaded()
-    fireEvent.click(screen.getByText(/添加自定义提供商/))
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
 
-    // 展开 details 触发懒加载目录；目录加载完成后组件渲染的是「终态」：组头
-    // 计数 = litellm 已知类型全量（4），组内条目 = 全量剔除常用（zai/gemini）。
-    // presets 就绪态（组头（2）、条目为空）与懒加载态（组头（4）、含独占项）
-    // 是两个互斥形态——「（2）+zai」的同笼等待要求组件从不渲染的中间态，
-    // 只能确定性红（批九 FE 车道两次实测），故断言终态四类型齐全。
+    // 目录加载完成后渲染全量类型（常用 2 + litellm 独占 zai/gemini）
     await waitFor(
       () => {
         expect(screen.getByText('litellm 全部（4）')).toBeInTheDocument()
@@ -284,9 +320,8 @@ describe('LlmSettingsPage 缺口：提供商卡片操作', () => {
     )
 
     fireEvent.change(screen.getByLabelText('提供商 ID'), { target: { value: 'myproxy2' } })
-    fireEvent.change(screen.getByLabelText('API Base'), { target: { value: 'https://p2/v1' } })
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://p2/v1' } })
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-p2' } })
-    mock.addProvider.mockResolvedValueOnce({ providers: configFixture.providers })
     fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
     await waitFor(() =>
       expect(mock.addProvider).toHaveBeenCalledWith('myproxy2', {
@@ -295,151 +330,251 @@ describe('LlmSettingsPage 缺口：提供商卡片操作', () => {
         api_key: 'sk-p2',
       }),
     )
-    // 表单重置
-    expect(screen.getByLabelText('提供商 ID')).toHaveValue('')
 
     // 失败 → toast.error
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
     fireEvent.change(screen.getByLabelText('提供商 ID'), { target: { value: 'p3' } })
     mock.addProvider.mockRejectedValueOnce({ message: 'dup' })
     fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('添加提供商失败', { description: 'dup' }),
     )
-  }, 30_000) // 整页多次渲染+懒目录加载，FE 全量车道与其他重负载共跑时 10s 默认会被饿死（批九三次实测）
+  }, 30_000)
 
-  it('类型目录拉取失败回退声明常用类型；已加载后再展开不重复拉取', async () => {
+  it('类型目录拉取失败：回退声明常用类型（不阻塞表单）', async () => {
     await renderLoaded()
     mock.getProviderTypes.mockRejectedValueOnce(new Error('catalog down'))
-    fireEvent.click(screen.getByText(/添加自定义提供商/))
-    // 回退：目录失败但声明常用类型仍在「常用」组
-    await waitFor(() => expect(mock.getProviderTypes).toHaveBeenCalled())
-    expect(screen.getAllByText('anthropic').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
+    // 回退：组头计数 = 声明常用类型数（2），无 litellm 独占项
+    await waitFor(() => expect(screen.getByText('litellm 全部（2）')).toBeInTheDocument())
+    expect(screen.queryByText('zai')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('提供商 ID')).toBeInTheDocument()
+  })
 
-    // 关闭再展开：已加载（或已回退置位）→ 不再重复拉取
-    const calls = mock.getProviderTypes.mock.calls.length
-    fireEvent.click(screen.getByText(/添加自定义提供商/))
-    fireEvent.click(screen.getByText(/添加自定义提供商/))
-    expect(mock.getProviderTypes.mock.calls.length).toBe(calls)
+  it('类型目录成功加载后：再进「自定义」不重复拉取', async () => {
+    await renderLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
+    await waitFor(() => expect(screen.getByText('zai')).toBeInTheDocument())
+    const callsAfterFirst = mock.getProviderTypes.mock.calls.length
+
+    fireEvent.click(screen.getByRole('button', { name: 'OpenAI' }))
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
+    await waitFor(() => expect(screen.getByLabelText('提供商 ID')).toBeInTheDocument())
+    expect(mock.getProviderTypes.mock.calls.length).toBe(callsAfterFirst)
   })
 })
 
-describe('LlmSettingsPage 缺口：模型 Tab 操作', () => {
-  it('五个默认模型下拉可改选；保存成功更新配置，失败 toast（含 undefined 错误的兜底描述）', async () => {
+describe('LlmSettingsPage 缺口：默认模型指派与添加参数草稿', () => {
+  it('默认对话/向量模型下拉选择 → 保存默认模型带上草稿值', async () => {
     await renderLoaded()
-    await gotoModelsTab()
-    const section = screen.getByText('默认模型').closest('section') as HTMLElement
+    // FieldRow 根 = label 的父 div；下拉项按钮 = mocked SelectItem
+    const chatRow = screen.getByText('默认对话模型').closest('div') as HTMLElement
+    const embeddingRow = screen.getByText('默认向量模型').closest('div') as HTMLElement
+    fireEvent.click(within(chatRow).getByRole('button', { name: 'm-1' }))
+    fireEvent.click(within(embeddingRow).getByRole('button', { name: 'm-2' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存默认模型' }))
+    await waitFor(() =>
+      expect(mock.saveDefaults).toHaveBeenCalledWith(
+        expect.objectContaining({ chat: 'm-1', embedding: 'm-2' }),
+      ),
+    )
+    expect(toast.success).toHaveBeenCalledWith('默认模型已保存')
+  })
 
-    // 每个下拉（chat/large/medium/small/embedding）点击同一个模型选项 → onChange 全走
-    const labels = ['默认对话模型', 'large 档位', 'medium 档位', 'small 档位', '默认向量模型']
-    expect(within(section).getAllByText(/档位|默认对话模型|默认向量模型/).length).toBe(5)
-    for (const label of labels) {
-      const labelEl = within(section).getByText(label)
-      // FieldRow：label 与内容 div 是兄弟，经共同父行（sm:flex-row）定位
-      const row = labelEl.closest('div[class*="sm:flex-row"]') as HTMLElement
-      fireEvent.click(within(row).getByRole('button', { name: 'm-1' }))
-    }
+  it('「添加时一并填写模型参数」：展开落触碰标记、编辑参数随添加模型提交；收起早退', async () => {
+    await renderLoaded()
+    const details = screen
+      .getByText('添加时一并填写模型参数（可选）')
+      .closest('details') as HTMLDetailsElement
+    expect(details).not.toBeNull()
 
-    mock.saveDefaults.mockResolvedValueOnce({
-      chat: 'm-1', embedding: 'm-1', tiers: { large: 'm-1', medium: 'm-1', small: 'm-1' },
+    // 展开（jsdom 不自动派发 toggle，手工置 open 后派发，与真实展开同形）
+    details.open = true
+    fireEvent(details, new Event('toggle'))
+    // 展开（触碰标记落位）后编辑思考模式 → onChange 落草稿
+    fireEvent.change(within(details).getByLabelText('思考模式'), {
+      target: { value: 'enabled' },
     })
-    fireEvent.click(within(section).getByRole('button', { name: '保存默认模型' }))
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('默认模型已保存'))
-    expect(mock.saveDefaults).toHaveBeenCalledWith(
-      expect.objectContaining({ chat: 'm-1', embedding: 'm-1' }),
+
+    // 手填模型走添加链路：草稿参与提交（default_params 合并 thinking.type）
+    mock.addModel.mockResolvedValueOnce({ models: configFixture.models, added_ids: ['manual-x'] })
+    const panel = modelSection()
+    fireEvent.change(within(panel).getByLabelText('自定义模型名'), {
+      target: { value: 'manual-x' },
+    })
+    fireEvent.keyDown(within(panel).getByLabelText('自定义模型名'), { key: 'Enter' })
+    // 草稿计数上屏后再点（负载下 Enter→草稿落位有异步窗口，即时点会找不到 (1)）
+    await waitFor(() =>
+      expect(within(panel).getByRole('button', { name: /添加模型 \(1\)/ })).toBeInTheDocument(),
+    )
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型 \(1\)/ }))
+    await waitFor(() =>
+      expect(mock.addModel).toHaveBeenCalledWith(
+        'manual-x',
+        expect.objectContaining({
+          default_params: expect.objectContaining({ thinking: { type: 'enabled' } }),
+        }),
+      ),
     )
 
-    // 失败：reject(undefined) → getApiMsg 落回调用方兜底文案
+    // 收起路径：toggle 且 open=false → 早退（不重复置触碰标记，不抛错）
+    details.open = false
+    fireEvent(details, new Event('toggle'))
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('未展开参数面板时手填模型：草稿不参与提交（远端事实上限不被默认值覆盖）', async () => {
+    await renderLoaded()
+    mock.addModel.mockResolvedValueOnce({ models: configFixture.models, added_ids: ['plain-1'] })
+    const panel = modelSection()
+    fireEvent.change(within(panel).getByLabelText('自定义模型名'), {
+      target: { value: 'plain-1' },
+    })
+    fireEvent.keyDown(within(panel).getByLabelText('自定义模型名'), { key: 'Enter' })
+    // 草稿计数上屏后再点（负载下 Enter→草稿落位有异步窗口，即时点会找不到 (1)）
+    await waitFor(() =>
+      expect(within(panel).getByRole('button', { name: /添加模型 \(1\)/ })).toBeInTheDocument(),
+    )
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型 \(1\)/ }))
+    await waitFor(() => expect(mock.addModel).toHaveBeenCalledTimes(1))
+    expect(mock.addModel).toHaveBeenCalledWith(
+      'plain-1',
+      expect.not.objectContaining({ context_window: expect.anything() }),
+    )
+  })
+})
+
+describe('LlmSettingsPage 缺口：错误路径与成功路径', () => {
+  it('默认模型保存失败 / 删除模型失败 / 模型设置保存失败 → toast.error 带描述', async () => {
+    await renderLoaded()
     mock.saveDefaults.mockRejectedValueOnce(undefined)
-    fireEvent.click(within(section).getByRole('button', { name: '保存默认模型' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存默认模型' }))
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('保存默认模型失败', {
         description: '保存默认模型失败',
       }),
     )
-  })
 
-  it('删除模型：成功更新列表；失败 toast', async () => {
-    await renderLoaded()
-    await gotoModelsTab()
-    const modelSection = (screen.getByText('已注册模型 (2)').closest('section')) as HTMLElement
-
-    mock.deleteModel.mockResolvedValueOnce({ 'm-1': configFixture.models['m-1'] })
-    fireEvent.click(within(modelSection).getAllByRole('button', { name: '删除' })[0])
-    await waitFor(() => expect(mock.deleteModel).toHaveBeenCalled())
-    expect(toast.error).not.toHaveBeenCalled()
-
-    mock.deleteModel.mockRejectedValueOnce({ message: 'in use' })
-    fireEvent.click(within(modelSection).getAllByRole('button', { name: '删除' })[0])
+    mock.deleteModel.mockRejectedValueOnce({ message: 'has refs' })
+    fireEvent.click(within(modelRegistrySection()).getAllByRole('button', { name: '删除' })[1])
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('删除模型失败', { description: 'in use' }),
+      expect(toast.error).toHaveBeenCalledWith('删除模型失败', { description: 'has refs' }),
+    )
+
+    mock.updateModel.mockRejectedValueOnce({ message: 'bad params' })
+    fireEvent.click(within(modelRegistrySection()).getAllByRole('button', { name: /参数/ })[1])
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('保存模型设置失败', { description: 'bad params' }),
     )
   })
 
-  it('模型参数保存失败 → toast.error（成功路径归既有测试）', async () => {
+  it('删除模型成功：静默更新配置（不弹错）', async () => {
     await renderLoaded()
-    await gotoModelsTab()
-    const modelSection = (screen.getByText('已注册模型 (2)').closest('section')) as HTMLElement
-    fireEvent.click(within(modelSection).getAllByRole('button', { name: '参数' })[0])
+    mock.deleteModel.mockResolvedValueOnce({ 'm-2': configFixture.models['m-2'] })
+    fireEvent.click(within(modelRegistrySection()).getAllByRole('button', { name: '删除' })[0])
+    await waitFor(() => expect(mock.deleteModel).toHaveBeenCalledWith('m-1'))
+    await waitFor(() => expect(screen.getByText('已注册模型 (1)')).toBeInTheDocument())
+    expect(toast.error).not.toHaveBeenCalled()
+  })
 
-    mock.updateModel.mockRejectedValueOnce({ message: 'validation down' })
-    fireEvent.click(within(modelSection).getByRole('button', { name: '保存设置' }))
+  it('模型行「参数」面板：完整字段保存 → updateModel 合并保留原字段', async () => {
+    await renderLoaded()
+    const paramButtons = within(modelRegistrySection()).getAllByRole('button', { name: /参数/ })
+    fireEvent.click(paramButtons[1])
+    const panel = paramButtons[1].closest('div.bg-card') as HTMLElement
+
+    // 上下文窗口（样例模型未设置 → 空输入）
+    fireEvent.change(within(panel).getByPlaceholderText('未设置'), { target: { value: '1000000' } })
+    // 采样参数 temperature 0.5 → 0.9
+    fireEvent.change(within(panel).getByDisplayValue('0.5'), { target: { value: '0.9' } })
+    // think 参数
+    fireEvent.change(within(panel).getByLabelText('思考模式'), { target: { value: 'enabled' } })
+    fireEvent.change(within(panel).getByLabelText('推理力度'), { target: { value: 'high' } })
+    // 自定义参数：字符串与数字各一条（类型自动解析）
+    fireEvent.change(within(panel).getByLabelText('自定义参数名'), {
+      target: { value: 'service_tier' },
+    })
+    fireEvent.change(within(panel).getByLabelText('自定义参数值'), { target: { value: 'auto' } })
+    fireEvent.click(within(panel).getByRole('button', { name: '加入' }))
+    fireEvent.change(within(panel).getByLabelText('自定义参数名'), { target: { value: 'top_k' } })
+    fireEvent.change(within(panel).getByLabelText('自定义参数值'), { target: { value: '50' } })
+    fireEvent.keyDown(within(panel).getByLabelText('自定义参数值'), { key: 'Enter' })
+    expect(within(panel).getByText(/service_tier=auto/)).toBeInTheDocument()
+    expect(within(panel).getByText(/top_k=50/)).toBeInTheDocument()
+
+    fireEvent.click(within(panel).getByRole('button', { name: '保存设置' }))
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('保存模型设置失败', {
-        description: 'validation down',
+      expect(mock.updateModel).toHaveBeenCalledWith('m-2', {
+        context_window: 1000000,
+        reasoning_model: false,
+        default_params: {
+          temperature: 0.9,
+          max_tokens: 100000,
+          top_p: 1,
+          thinking: { type: 'enabled' },
+          reasoning_effort: 'high',
+          service_tier: 'auto',
+          top_k: 50,
+        },
       }),
     )
+    expect(toast.success).toHaveBeenCalledWith('已保存 m-2 的模型设置')
   })
 
-  it('手动添加模型失败 → toast.error（reject(undefined) 走兜底描述）', async () => {
+  it('拉取添加部分失败 → toast.warning 带失败清单；全部失败 → toast.error', async () => {
     await renderLoaded()
-    await gotoModelsTab()
-    fireEvent.change(screen.getByLabelText('模型名称'), { target: { value: 'm-new' } })
-    fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: '新模型' } })
-    // 提供商下拉：选 anthropic（label 与内容 div 是兄弟，经父行定位）
-    const providerLabel = screen.getByText('提供商')
-    const providerRow = providerLabel.closest('div[class*="sm:flex-row"]') as HTMLElement
-    fireEvent.click(within(providerRow).getByRole('button', { name: 'anthropic' }))
-
-    mock.addModel.mockRejectedValueOnce(undefined)
-    fireEvent.click(screen.getByRole('button', { name: '添加模型' }))
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('添加模型失败', { description: '添加模型失败' }),
-    )
-  })
-
-  it('拉取添加部分失败 → toast.warning 带失败清单；全部成功 → success', async () => {
-    await renderLoaded()
-    const card = cardOf('OpenAI')
+    const panel = modelSection()
     // 第一轮：两个模型一成一败 → warning
-    mock.addModel.mockResolvedValueOnce({
-      models: configFixture.models, added_ids: ['gpt-a'],
-    })
+    mock.addModel.mockResolvedValueOnce({ models: configFixture.models, added_ids: ['gpt-a'] })
     mock.addModel.mockRejectedValueOnce({ message: 'dup' })
-    fireEvent.click(within(card).getByRole('button', { name: /拉取模型/ }))
-
-    const customInput = await screen.findByPlaceholderText(/自定义模型名/)
+    fireEvent.click(within(panel).getByRole('button', { name: /拉取模型列表/ }))
+    const customInput = within(panel).getByLabelText('自定义模型名')
+    await waitFor(() => expect(within(panel).getByText('gpt-a')).toBeInTheDocument())
     fireEvent.change(customInput, { target: { value: 'gpt-a' } })
     fireEvent.keyDown(customInput, { key: 'Enter' })
     fireEvent.change(customInput, { target: { value: 'gpt-b' } })
     fireEvent.keyDown(customInput, { key: 'Enter' })
-    fireEvent.click(screen.getByRole('button', { name: /添加所选/ }))
-    await waitFor(() => expect(mock.addModel).toHaveBeenCalledTimes(2))
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型 \(2\)/ }))
     await waitFor(() =>
       expect(toast.warning).toHaveBeenCalledWith('已添加 1 个模型', {
         description: expect.stringContaining('gpt-b'),
       }),
     )
 
-    // 第二轮：全部成功 → success toast
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: /拉取模型/ }))
-    const input2 = await screen.findByPlaceholderText(/自定义模型名/)
-    fireEvent.change(input2, { target: { value: 'gpt-c' } })
-    fireEvent.keyDown(input2, { key: 'Enter' })
-    fireEvent.click(screen.getByRole('button', { name: /添加所选/ }))
+    // 第二轮：全部失败 → error
+    mock.addModel.mockRejectedValue({ message: 'dup' })
+    fireEvent.change(within(panel).getByLabelText('自定义模型名'), { target: { value: 'gpt-c' } })
+    fireEvent.keyDown(within(panel).getByLabelText('自定义模型名'), { key: 'Enter' })
+    // 草稿计数上屏后再点（负载下 Enter→草稿落位有异步窗口，即时点会找不到 (1)）
     await waitFor(() =>
-      expect(toast.success).toHaveBeenCalledWith(
-        '已添加 1 个模型到 openai',
-      ),
+      expect(within(panel).getByRole('button', { name: /添加模型 \(1\)/ })).toBeInTheDocument(),
     )
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型 \(1\)/ }))
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('添加模型失败', { description: 'gpt-c' }),
+    )
+  })
+
+  it('拉取失败：同界面显示错误并可继续手填模型名', async () => {
+    await renderLoaded()
+    mock.getRemoteModels.mockRejectedValueOnce({ message: 'provider down' })
+    const panel = modelSection()
+    fireEvent.click(within(panel).getByRole('button', { name: /拉取模型列表/ }))
+    await waitFor(() => expect(within(panel).getByText('provider down')).toBeInTheDocument())
+    expect(within(panel).getByText(/仍可在下方手动输入模型名添加/)).toBeInTheDocument()
+
+    // 手填路径仍可用
+    mock.addModel.mockResolvedValueOnce({ models: configFixture.models, added_ids: ['x'] })
+    fireEvent.change(within(panel).getByLabelText('自定义模型名'), {
+      target: { value: 'manual-1' },
+    })
+    fireEvent.keyDown(within(panel).getByLabelText('自定义模型名'), { key: 'Enter' })
+    // 草稿计数上屏后再点（负载下 Enter→草稿落位有异步窗口，即时点会找不到 (1)）
+    await waitFor(() =>
+      expect(within(panel).getByRole('button', { name: /添加模型 \(1\)/ })).toBeInTheDocument(),
+    )
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型 \(1\)/ }))
+    await waitFor(() => expect(mock.addModel).toHaveBeenCalledTimes(1))
   })
 })

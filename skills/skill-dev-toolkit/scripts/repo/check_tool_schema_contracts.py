@@ -231,7 +231,6 @@ _R5_EXEMPT = {
     ("channel_qq", "qq.send_message", "user_id"),
     ("channel_wecom", "wecom.send_message", "user_id"),
     ("resource_merge", "resource_merge", "workspace"),
-    ("spill_retrieve", "spill_retrieve", "pipeline_id"),
 }
 
 

@@ -5,8 +5,12 @@
 执法面：变更集中**新增**的 docs/**.md 必带三字段 frontmatter——doc_id/type/status，
 枚举真值单源 = graph_model（DOC_ID_RE/DOC_TYPES/DOC_STATUSES），解析复用
 parse_frontmatter（零 PyYAML）。存量不回填（方案已裁）：只查新增，存量由
-「触碰即补」写面纪律兜底。docs/decisions/ 豁免（ADR 五段格式是独立既有约定，
-frontmatter 化属另一个决策）。
+「触碰即补」写面纪律兜底。
+
+``docs/decisions/`` 自 2026-11-14（文档治理方案 D3 部分解除）起**不再豁免**：
+新增 ADR 必带三字段且 ``type`` 必须为 ``adr``——否则 supersede 链与 status 无从
+机械审计。存量 479 件无 fm 按季度窗口收敛（每年 ≥30%），不设硬期限、不批量回填，
+故本闸仍只查变更集新增件，存量红面恒为 0。
 
 变更集口径：暂存区新增（git diff --cached --diff-filter=A，pre-commit 主战场）
 ∪ 基线范围新增（--base 或 GITHUB_BASE_REF 的 merge-base..HEAD，PR CI 复核）。
@@ -27,7 +31,10 @@ import graph_model as gm  # noqa: E402 —— 枚举真值单源
 
 ROOT = Path(__file__).resolve().parent.parent
 SCOPE_PREFIX = "docs/"
-EXCLUDED_PREFIXES = ("docs/decisions/",)
+#: ADR 层目录：不豁免，但要求 type 恒为 adr（D3「新件 100% 必带 + type 必为 adr」）。
+DECISIONS_PREFIX = "docs/decisions/"
+#: 模板件不是文档实例（它自身演示三字段），不参与 type 归属执法。
+TEMPLATE_FILES = frozenset({"docs/decisions/_TEMPLATE.md"})
 
 
 def _git_new_files(args: list[str]) -> set[str]:
@@ -63,11 +70,7 @@ def range_new(base: str) -> set[str]:
 
 def in_scope(rel: str) -> bool:
     posix = rel.replace("\\", "/")
-    return (
-        posix.startswith(SCOPE_PREFIX)
-        and posix.endswith(".md")
-        and not any(posix.startswith(p) for p in EXCLUDED_PREFIXES)
-    )
+    return posix.startswith(SCOPE_PREFIX) and posix.endswith(".md")
 
 
 def check(rel: str) -> str | None:
@@ -90,6 +93,9 @@ def check(rel: str) -> str | None:
         problems.append(f"type 非法或缺失: {fields.get('type', '')!r}（允许 {sorted(gm.DOC_TYPES)}）")
     if fields.get("status", "") not in gm.DOC_STATUSES:
         problems.append(f"status 非法或缺失: {fields.get('status', '')!r}（允许 {sorted(gm.DOC_STATUSES)}）")
+    posix = rel.replace("\\", "/")
+    if posix.startswith(DECISIONS_PREFIX) and posix not in TEMPLATE_FILES and fields.get("type") != "adr":
+        problems.append(f"docs/decisions/ 下新增件 type 必为 adr，现 {fields.get('type', '')!r}（D3/§二）")
     return f"{rel}: {'；'.join(problems)}" if problems else None
 
 

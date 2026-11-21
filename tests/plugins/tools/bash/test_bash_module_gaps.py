@@ -10,8 +10,9 @@ input_handler / encoding 四个模块的未覆盖行）。
    支持单进程采样时的降级契约），对照组覆写实现返回真实值；
 4. input_handler.InputHandler.format_input 不加换行分支：add_newline=False
    与文本已以换行结尾两条路径同回原文，且二次格式化幂等（不叠加换行）；
-5. encoding.EncodingHandler._try_decode 的 surrogateescape 分支不变量：
-   任意无效字节序列均不抛，非 NUL 字节可无损 round-trip。
+5. encoding.EncodingHandler 解码不变量：任意无效字节序列均不抛；低坏字节
+   占比走 surrogateescape 裁决后，出口清洗孤立代理为 U+FFFD（8ed6af99f 起
+   出口保证可严格 UTF-8 编码，防 MCP stdio 序列化炸退），合法字节段逐字保留。
 
 不可达说明（encoding.py 140-141）：该 ``except UnicodeDecodeError`` 挂在
 ``data.decode("utf-8", errors="surrogateescape")`` 之后——surrogateescape
@@ -275,13 +276,21 @@ class TestDecodeNeverRaisesOnInvalidBytes:
             b"hello world this line is valid " * 3 + b"\xff\xfe\x80",  # 长有效前缀 + 3 坏字节
         ],
     )
-    def test_surrogateescape_path_round_trips_losslessly(self, data: bytes) -> None:
-        """低坏字节占比时走 surrogateescape（encoding.py:128-139）→ 无损可回溯。"""
+    def test_surrogateescape_path_sanitized_at_exit(self, data: bytes) -> None:
+        """低坏字节占比走 surrogateescape 裁决（encoding.py 分支阈值不变量）→
+        出口清洗孤立代理为 U+FFFD（8ed6af99f 起出口保证无孤立代理，可严格
+        UTF-8 编码 = JSON/pydantic 可序列化），合法字节段逐字保留。"""
         decoded = EncodingHandler.decode_output_line(data)
 
-        restored = decoded.encode("utf-8", errors="surrogateescape")
-
-        assert restored == data
+        # 性质：出口可无抛严格编码（孤立代理已被清洗，MCP stdio 炸点根因）
+        decoded.encode("utf-8")
+        assert not any("\ud800" <= c <= "\udfff" for c in decoded)
+        # 字面：合法段保留，坏字节逐个变 U+FFFD（无信息混入其他形态）
+        bad = sum(1 for b in data if b >= 0x80)
+        assert decoded.count("\ufffd") == bad
+        assert decoded.replace("\ufffd", "").encode("utf-8") == bytes(
+            b for b in data if b < 0x80
+        )
 
     @pytest.mark.parametrize(
         "data",

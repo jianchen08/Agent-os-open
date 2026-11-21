@@ -4,8 +4,8 @@
     "packaging"
   ],
   "name": "Task Evaluate Tool",
-  "description": "任务评估 MCP 工具，评估任务的验收指标是否满足；完赛前按任务 metadata.required_files 声明前置校验交付文件证据（存在且晚于任务创建基线 + 基线后有新 commit），未声明 required_files 时仍校验工作空间基线后须有新 commit（无 git 记录拒绝完赛并要求先提交）",
-  "version": "1.0.8",
+  "description": "任务评估 MCP 工具，评估任务的验收指标是否满足；完赛证据闸双轨：声明 acceptance_criteria.files 的非 worktree 任务按文件面完赛（required_files 与 acceptance files 并集逐一核对存在且晚于任务创建基线，commit 面跳过），未声明 acceptance files 或 worktree 挂靠项目任务走 commit 面（基线后须有新 commit，无 git 记录拒绝完赛并要求先提交；声明 required_files 时另加文件面 AND 校验）",
+  "version": "1.0.10",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",

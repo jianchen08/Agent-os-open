@@ -129,139 +129,198 @@ def test_resolve_user_root_refuses_install_dir(tmp_path: Path, mod: Any, monkeyp
     assert ok == (tmp_path / "real_user_root").resolve()
 
 
-# ── D4（审查总册 P1-15）：版本生效检查 + 未生效 id 清单 ──
+# ── Tier2 覆盖规则四态（ADR 2026-11-07 决策 2.1；双源版本闸已退役）──
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected_major"),
-    [
-        ("1.2.3", 1),  # 组 A：纯 semver
-        ("v1.2.3", 1),  # 组 B：小写 v 前缀（sync 链常见写坏形态）
-        ("V1.2.3", 1),  # 组 B：大写 V 前缀
-        ("  1.2.3  ", 1),  # 首尾空白
-        ("1.2.3-rc.1+build.7", 1),  # 预发布 + 构建元数据
-    ],
-)
-def test_parse_semver_lenient_accepts(raw: str, expected_major: int, mod: Any) -> None:
-    key = mod.parse_semver_lenient(raw)
-    assert key is not None, f"{raw!r} 必须宽容解析成功"
-    assert key[0] == expected_major
+def _fake_repo(tmp_path: Path, tier1_ids: list[str] | None = None) -> Path:
+    """假仓根：config/kernel/plugin_tiers.yaml（可指定 Tier1 id）+ 空布局。"""
+    repo = tmp_path / "repo"
+    cfg = repo / "config" / "kernel"
+    cfg.mkdir(parents=True, exist_ok=True)
+    tier1_list = "\n".join(f"    - {i}" for i in (tier1_ids or []))
+    (cfg / "plugin_tiers.yaml").write_text(
+        "tier1:\n  safety_plugins:\n" + tier1_list + "\n  shared_modules: []\n",
+        encoding="utf-8",
+    )
+    return repo
 
 
-@pytest.mark.parametrize("raw", ["not-semver", "1.2", "v1", "1.2.x", "", "version 1.2.3"])
-def test_parse_semver_lenient_rejects(raw: str, mod: Any) -> None:
-    assert mod.parse_semver_lenient(raw) is None, f"{raw!r} 必须判不可解析"
-
-
-def test_parse_semver_lenient_ordering_properties(mod: Any) -> None:
-    """性质断言：strip 前缀后与纯 semver 同序；正式版 > 预发布；位数比较。"""
-    assert mod.parse_semver_lenient("v1.0.0") == mod.parse_semver_lenient("1.0.0")
-    assert mod.parse_semver_lenient("v1.10.0") > mod.parse_semver_lenient("1.9.0")
-    assert mod.parse_semver_lenient("1.0.0") > mod.parse_semver_lenient("1.0.0-rc.1")
-    assert mod.parse_semver_lenient("1.0.0-rc.2") > mod.parse_semver_lenient("1.0.0-rc.1")
-    assert mod.parse_semver_lenient("1.0.0-rc.1") < mod.parse_semver_lenient("1.0.0-rc.1.1")
-    assert mod.parse_semver_lenient("0.2.0") > mod.parse_semver_lenient("v0.1.9")
-
-
-def _make_plugin_with_version(src: Path, version: str) -> Path:
-    """_make_plugin 基础上写 version 字段（D4 生效检查用）。"""
-    src = _make_plugin(src)
-    data = {"id": "demo", "version": version}
-    (src / "plugin.json").write_text(json.dumps(data), encoding="utf-8")
+def _repo_plugin(
+    repo: Path, name: str = "demo_plugin", version: str = "1.0.0", body: str = "print('hi')\n"
+) -> Path:
+    """假仓内插件目录（带 .venv 桩走整树复制分支，不触发 uv 子进程）。"""
+    src = repo / "plugins" / "shared" / name
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "plugin.json").write_text(
+        json.dumps({"id": "demo", "version": version}), encoding="utf-8"
+    )
+    (src / "server.py").write_text(body, encoding="utf-8")
+    venv = src / ".venv" / "Scripts"
+    venv.mkdir(parents=True, exist_ok=True)
+    (venv / "python.exe").write_text("venv-marker", encoding="utf-8")
     return src
 
 
-def _make_install_dir(tmp_path: Path, version: str | None) -> Path:
-    """假装机包安装位 + 内置副本（resources/plugins/shared 布局）。"""
-    install = tmp_path / "inst" / "agent-os"
-    builtin = install / "resources" / "plugins" / "shared" / "demo_plugin"
-    builtin.mkdir(parents=True)
-    manifest: dict[str, Any] = {"id": "demo"}
-    if version is not None:
-        manifest["version"] = version
-    (builtin / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
-    return install
-
-
-def test_check_version_ineffective_when_builtin_newer_or_equal(
+def test_sync_plugin_first_install_seeds_and_writes_baseline(
     tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """组 A/B 区分度输入：纯 semver 更旧与 v 前缀更旧都必须判未生效。"""
-    for src_version, builtin_version in [("0.9.0", "1.0.0"), ("v0.2.0", "0.2.0"), ("v1.0.0", "1.0.0")]:
-        src = _make_plugin_with_version(tmp_path / f"src_{src_version}_{builtin_version}", src_version)
-        install = _make_install_dir(tmp_path / f"ins_{src_version}_{builtin_version}", builtin_version)
-        monkeypatch.setattr(mod, "_existing_install_dirs", lambda install=install: [install])
-        reason = mod.check_version_effective(src)
-        assert reason is not None, f"源 {src_version} vs 内置 {builtin_version} 必须判未生效"
-        assert src_version in reason, "源版本号须如实透出"
-        assert builtin_version in reason, "内置版本号须如实透出"
+    """首装态：无基线、副本缺席 → 解包 + 基线立目 + 冲突文件不写。"""
+    repo = _fake_repo(tmp_path)
+    _repo_plugin(repo, version="1.0.0")
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+
+    warnings = mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+
+    assert warnings == []
+    dst = user_root / "plugins" / "demo_plugin"
+    assert (dst / "plugin.json").is_file()
+    assert (dst / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "venv-marker"
+    baseline = json.loads((user_root / mod.BASELINE_FILENAME).read_text(encoding="utf-8"))
+    assert baseline["schema"] == 1
+    entry = baseline["plugins"]["demo"]
+    assert entry["tier"] == 2
+    assert entry["version"] == "1.0.0"
+    assert "server.py" in entry["files"], "基线立目必须含全树哈希"
+    assert not (user_root / mod.CONFLICTS_FILENAME).exists(), "无冲突不写告警面"
 
 
-def test_check_version_effective_when_strictly_newer(
+def test_sync_plugin_unchanged_overwrites_and_refreshes_baseline(
     tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """v 前缀 strip 后严格大于内置 → 生效（None），修复路径可见。"""
-    src = _make_plugin_with_version(tmp_path / "src", "v1.1.0")
-    install = _make_install_dir(tmp_path / "ins", "1.0.0")
-    monkeypatch.setattr(mod, "_existing_install_dirs", lambda: [install])
-    assert mod.check_version_effective(src) is None
+    """未改态：副本与基线一致 → 覆盖 + 基线翻新为仓内新版本。"""
+    repo = _fake_repo(tmp_path)
+    _repo_plugin(repo, version="1.0.0")
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+    mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+
+    # 仓内升版 + 改内容
+    src = _repo_plugin(repo, version="1.1.0", body="print('v2')\n")
+
+    warnings = mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+
+    assert warnings == []
+    dst = user_root / "plugins" / "demo_plugin"
+    assert (dst / "server.py").read_text(encoding="utf-8") == "print('v2')\n", "未改态必须覆盖"
+    assert json.loads((dst / "plugin.json").read_text(encoding="utf-8"))["version"] == "1.1.0"
+    baseline = json.loads((user_root / mod.BASELINE_FILENAME).read_text(encoding="utf-8"))
+    assert baseline["plugins"]["demo"]["version"] == "1.1.0", "基线条目翻新"
+    assert baseline["plugins"]["demo"]["files"] == mod._hash_plugin_tree(src), "基线哈希=新仓树"
+    assert not (user_root / mod.CONFLICTS_FILENAME).exists()
 
 
-def test_check_version_flags_unparseable_without_builtin(
+def test_sync_plugin_user_modified_keeps_and_writes_conflict(
     tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """无装机包（比较跳过）时源版本写坏仍必须告警——静默失效零容忍。"""
-    src = _make_plugin_with_version(tmp_path / "src", "v broken")
-    monkeypatch.setattr(mod, "_existing_install_dirs", lambda: [])
-    reason = mod.check_version_effective(src)
-    assert reason is not None, "写坏版本号必须告警"
-    assert "非 semver" in reason
+    """改过态：副本偏离基线 → 保留用户版 + 冲突记录（seed/user/changed_files）。"""
+    repo = _fake_repo(tmp_path)
+    _repo_plugin(repo, version="1.0.0")
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+    mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+
+    # 用户改副本 + 仓内升版
+    dst = user_root / "plugins" / "demo_plugin"
+    (dst / "server.py").write_text("USER_EDIT = True\n", encoding="utf-8")
+    _repo_plugin(repo, version="1.2.0", body="print('v3')\n")
+
+    warnings = mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+
+    assert warnings == []
+    assert (dst / "server.py").read_text(encoding="utf-8") == "USER_EDIT = True\n", "改过态绝不覆盖"
+    assert json.loads((dst / "plugin.json").read_text(encoding="utf-8"))["version"] == "1.0.0"
+    conflicts = json.loads((user_root / mod.CONFLICTS_FILENAME).read_text(encoding="utf-8"))
+    assert conflicts["schema"] == 1
+    assert len(conflicts["conflicts"]) == 1
+    rec = conflicts["conflicts"][0]
+    assert rec["plugin_id"] == "demo"
+    assert rec["seed_version"] == "1.2.0", "seed_version=本轮仓内版本"
+    assert rec["user_version"] == "1.0.0"
+    assert rec["changed_files"] == ["server.py"]
+    # 基线条目保持旧值（后续轮仍可对账）
+    baseline = json.loads((user_root / mod.BASELINE_FILENAME).read_text(encoding="utf-8"))
+    assert baseline["plugins"]["demo"]["version"] == "1.0.0"
 
 
-def test_check_version_no_builtin_skips_comparison(
+def test_sync_plugin_no_baseline_evidence_keeps_existing_copy(
     tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """装机包未装（找不到内置副本）→ 无法判定，不入清单。"""
-    src = _make_plugin_with_version(tmp_path / "src", "0.1.0")
-    monkeypatch.setattr(mod, "_existing_install_dirs", lambda: [])
-    assert mod.check_version_effective(src) is None
-
-
-def test_check_version_builtin_unparseable_reports_ineffective(
-    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """内置版本不可解析 → 仲裁保守判内置赢 → 未生效（与内核逐位同源）。"""
-    src = _make_plugin_with_version(tmp_path / "src", "9.9.9")
-    install = _make_install_dir(tmp_path / "ins", "what-version")
-    monkeypatch.setattr(mod, "_existing_install_dirs", lambda: [install])
-    reason = mod.check_version_effective(src)
-    assert reason is not None, "内置版本不可解析必须判未生效"
-    assert "不可解析" in reason
-
-
-def test_sync_plugin_returns_reason_and_warns(
-    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """sync_plugin 端到端：镜像照常执行，同时返回未生效原因并打 [WARN]。"""
-    monkeypatch.setattr(mod, "_REPO_ROOT", tmp_path / "repo")
-    src = tmp_path / "repo" / "plugins" / "shared" / "demo_plugin"
-    src.mkdir(parents=True)
-    (src / "plugin.json").write_text(
-        json.dumps({"id": "demo", "version": "v0.2.0"}), encoding="utf-8"
+    """无基线证据而副本在（前代残留）→ 保留 + 冲突留痕，绝不覆盖。"""
+    repo = _fake_repo(tmp_path)
+    _repo_plugin(repo, version="1.0.0")
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+    dst = user_root / "plugins" / "demo_plugin"
+    dst.mkdir(parents=True)
+    (dst / "plugin.json").write_text(
+        json.dumps({"id": "demo", "version": "0.9.0"}), encoding="utf-8"
     )
-    # 最小 venv 桩（源侧有 .venv → 整树复制分支，不触发 uv 现建子进程）
-    (src / ".venv" / "Scripts").mkdir(parents=True)
-    (src / ".venv" / "Scripts" / "python.exe").write_text("venv-marker", encoding="utf-8")
-    install = _make_install_dir(tmp_path / "ins", "0.2.0")
-    monkeypatch.setattr(mod, "_existing_install_dirs", lambda: [install])
+    (dst / "server.py").write_text("LEGACY = 1\n", encoding="utf-8")
 
-    reason = mod.sync_plugin("shared/demo_plugin", tmp_path / "user_root", dry_run=False)
+    mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
 
-    assert reason is not None, "未生效必须返回原因"
-    assert "demo_plugin" in reason
-    out = capsys.readouterr().out
-    assert "[WARN] 未生效" in out, "失效必须显式可见"
-    assert (tmp_path / "user_root" / "plugins" / "demo_plugin" / "plugin.json").exists(), "镜像照常执行"
+    assert (dst / "server.py").read_text(encoding="utf-8") == "LEGACY = 1\n"
+    conflicts = json.loads((user_root / mod.CONFLICTS_FILENAME).read_text(encoding="utf-8"))
+    assert conflicts["conflicts"][0]["user_version"] == "0.9.0"
+    assert not (user_root / mod.BASELINE_FILENAME).exists(), "保留态不立基线"
+
+
+def test_sync_plugin_refuses_tier1(
+    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tier1 拒动：清单内 id（按 manifest id 或目录名命中）拒绝写入用户目录。"""
+    repo = _fake_repo(tmp_path, tier1_ids=["demo"])
+    _repo_plugin(repo, version="9.9.9")
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+
+    with pytest.raises(SystemExit, match="Tier1"):
+        mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+
+    assert not (user_root / "plugins" / "demo_plugin").exists()
+    assert not (user_root / mod.BASELINE_FILENAME).exists()
+
+    # 目录名命中同样拒（id 缺失回落目录名的插件形态）
+    repo2 = _fake_repo(tmp_path, tier1_ids=["demo_plugin"])
+    src2 = repo2 / "plugins" / "shared" / "demo_plugin"
+    src2.mkdir(parents=True, exist_ok=True)
+    (src2 / "plugin.json").write_text(json.dumps({"version": "1.0.0"}), encoding="utf-8")
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo2)
+    with pytest.raises(SystemExit, match="Tier1"):
+        mod.sync_plugin("shared/demo_plugin", tmp_path / "ur2", dry_run=False)
+
+
+def test_sync_plugin_refuses_on_corrupt_baseline(
+    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """基线损坏 → 拒绝覆盖性动作（不可读证据不删，与安装器同语义）。"""
+    repo = _fake_repo(tmp_path)
+    _repo_plugin(repo)
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+    user_root.mkdir(parents=True)
+    (user_root / mod.BASELINE_FILENAME).write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="plugin-baseline.json"):
+        mod.sync_plugin("shared/demo_plugin", user_root, dry_run=False)
+    assert (user_root / mod.BASELINE_FILENAME).read_text(encoding="utf-8") == "{broken"
+
+
+def test_sync_plugin_dry_run_writes_nothing(
+    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dry-run：四态照常打印决策，但零落盘（副本/基线/冲突全不写）。"""
+    repo = _fake_repo(tmp_path)
+    _repo_plugin(repo)
+    monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+    user_root = tmp_path / "user_root"
+
+    mod.sync_plugin("shared/demo_plugin", user_root, dry_run=True)
+
+    assert not (user_root / "plugins" / "demo_plugin").exists()
+    assert not (user_root / mod.BASELINE_FILENAME).exists()
+    assert not (user_root / mod.CONFLICTS_FILENAME).exists()
 
 
 def test_check_import_closure_accepts_manifestless_shared_module(
@@ -394,9 +453,6 @@ def test_check_import_closure_skips_in_plugin_modules(tmp_path: Path, mod: Any) 
     assert reason is None, f"插件内模块不得判为跨插件依赖，实际: {reason}"
 
 
-# ── --prune-stale：BuiltinFirst 影子副本隔离 ────────────────────────────────
-
-
 def _make_manifest(plugin_dir: Path, pid: str, version: str) -> Path:
     plugin_dir.mkdir(parents=True, exist_ok=True)
     (plugin_dir / "plugin.json").write_text(
@@ -407,7 +463,7 @@ def _make_manifest(plugin_dir: Path, pid: str, version: str) -> Path:
 
 @pytest.fixture
 def prune_env(tmp_path: Path) -> tuple[Path, Path]:
-    """(user_root, install_root)：内置 alpha 2.0 / beta 1.0。"""
+    """(user_root, install_root)：种子 alpha 2.0 / beta 1.0。"""
     user_root = tmp_path / "user"
     install = tmp_path / "ins"
     shared = install / "resources" / "plugins" / "shared"
@@ -416,25 +472,27 @@ def prune_env(tmp_path: Path) -> tuple[Path, Path]:
     return user_root, install
 
 
-def test_prune_stale_moves_shadow_and_keeps_user_override(
+# ── --prune-stale：单副本模型（影子判据随双源仲裁退役，ADR 2026-11-07 §2.5）──
+
+
+def test_prune_stale_keeps_seed_named_copy_regardless_of_version(
     prune_env: tuple[Path, Path], mod: Any
 ) -> None:
-    """旧/持平版本影子被隔离；严格高于内置的用户覆盖保留。"""
+    """种子仍有同名 id 的副本一律不动（版本无关）：运行期真值无「影子」概念。
+
+    退役回归钉：旧 BuiltinFirst 判据（版本 <= 种子 = 隔离）会误删运行期
+    唯一副本，必须保持退役（判据移交基线对账）。
+    """
     user_root, install = prune_env
     _make_manifest(user_root / "plugins" / "alpha_old", "alpha_tool", "1.0.0")
-    _make_manifest(user_root / "plugins" / "beta_new", "beta_tool", "1.1.0")
+    _make_manifest(user_root / "plugins" / "alpha_equal", "alpha_tool", "2.0.0")
 
     moved = mod.prune_stale_plugins(user_root, install_roots=[install])
 
-    assert [m["id"] for m in moved] == ["alpha_tool"]
-    assert not (user_root / "plugins" / "alpha_old").exists()
-    assert (user_root / "plugins" / "beta_new" / "plugin.json").is_file(), "严格更新版必须保留"
-    quarantined = list(user_root.glob(f"{mod.QUARANTINE_PREFIX}*/plugins/alpha_old"))
-    assert quarantined, "影子必须移入隔离区而非删除"
-    assert quarantined[0].is_dir()
-    manifest = json.loads((quarantined[0].parents[1] / "prune-manifest.json").read_text(encoding="utf-8"))
-    assert manifest[0]["id"] == "alpha_tool"
-    assert manifest[0]["version"] == "1.0.0"
+    assert moved == [], "种子有同名 id 的副本不得被任何版本判据处置"
+    assert (user_root / "plugins" / "alpha_old" / "plugin.json").is_file()
+    assert (user_root / "plugins" / "alpha_equal" / "plugin.json").is_file()
+    assert not list(user_root.glob(f"{mod.QUARANTINE_PREFIX}*"))
 
 
 def test_prune_stale_keeps_orphan_user_plugin(
@@ -478,7 +536,7 @@ def test_prune_stale_without_install_roots_is_noop(tmp_path: Path, mod: Any) -> 
 def test_prune_stale_handles_nested_group_layout(
     prune_env: tuple[Path, Path], mod: Any
 ) -> None:
-    """两层布局 plugins/<组>/<id>/ 同样识别（modes 子树另受恒用户赢豁免）。"""
+    """两层布局 plugins/<组>/<id>/ 同样识别（种子同名 id 副本不动）。"""
     user_root, install = prune_env
     _make_manifest(
         user_root / "plugins" / "legacy_group" / "alpha_mode", "alpha_tool", "2.0.0"
@@ -486,8 +544,8 @@ def test_prune_stale_handles_nested_group_layout(
 
     moved = mod.prune_stale_plugins(user_root, install_roots=[install])
 
-    assert [m["dir"] for m in moved] == ["alpha_mode"]
-    assert not (user_root / "plugins" / "legacy_group" / "alpha_mode").exists()
+    assert moved == []
+    assert (user_root / "plugins" / "legacy_group" / "alpha_mode" / "plugin.json").is_file()
 
 
 # ── --prune-stale：孤儿甄别 + modes 豁免（E4-P0 回填 2026-11-05 装机现场判据）──
@@ -527,7 +585,7 @@ class TestOrphanImportSmoke:
         manifest = json.loads(
             (quarantined[0].parents[1] / "prune-manifest.json").read_text(encoding="utf-8")
         )
-        assert manifest[0]["why"].startswith("内置已下架且 import 失败")
+        assert manifest[0]["why"].startswith("种子已下架且 import 失败")
 
     def test_orphan_with_healthy_import_is_kept(
         self,
@@ -601,3 +659,113 @@ class TestModesSubtreeExemption:
         assert moved == []
         assert (user_root / "plugins" / "modes" / "alpha_mode" / "plugin.json").is_file()
         assert (user_root / "plugins" / "modes" / "broken_mode" / "server.py").is_file()
+
+
+class TestPostCopyVerify:
+    """复制后回读（ADR 2026-11-10-deploy-freshness-verification）。
+
+    「同步动作打印了」不等于「文件真的到位」——三类复制（plugin/config/skills）
+    结束都必须重算目标哈希，不一致即 [VERIFY-FAIL] + exit 1。
+    """
+
+    def test_verify_mirror_equal_then_tampered(self, tmp_path: Path, mod: Any) -> None:
+        src = _make_plugin(tmp_path)
+        dst = tmp_path / "dst" / "demo_plugin"
+        mod._mirror_tree(src, dst)
+
+        checked, problems = mod._verify_mirror(src, dst)
+        assert problems == []
+        assert checked >= 2  # .venv/__pycache__ 不在比对面
+
+        (dst / "server.py").write_text("print('stale')\n", encoding="utf-8")
+        _, problems = mod._verify_mirror(src, dst)
+        assert problems == ["server.py"]
+
+    def test_verify_mirror_missing_dst_lists_all(self, tmp_path: Path, mod: Any) -> None:
+        src = _make_plugin(tmp_path)
+        checked, problems = mod._verify_mirror(src, tmp_path / "absent")
+        assert checked >= 2
+        assert len(problems) == checked
+
+    def test_assert_mirror_verified_fails_closed(self, tmp_path: Path, mod: Any) -> None:
+        src = _make_plugin(tmp_path)
+        dst = tmp_path / "dst" / "demo_plugin"
+        mod._mirror_tree(src, dst)
+        (dst / "extra.py").write_text("x", encoding="utf-8")
+        with pytest.raises(SystemExit, match="VERIFY-FAIL"):
+            mod._assert_mirror_verified(src, dst, "插件 demo")
+
+    def _fake_repo(self, tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch) -> Path:
+        repo = tmp_path / "repo"
+        plugin = repo / "plugins" / "demo_plugin"
+        (plugin / "sub").mkdir(parents=True)
+        (plugin / "plugin.json").write_text('{"id": "demo", "version": "1.0.0"}', encoding="utf-8")
+        (plugin / "server.py").write_text("print(1)\n", encoding="utf-8")
+        (plugin / "sub" / "helper.py").write_text("X = 1\n", encoding="utf-8")
+        tiers = repo / "config" / "kernel" / "plugin_tiers.yaml"
+        tiers.parent.mkdir(parents=True)
+        tiers.write_text("tier1:\n  safety_plugins: []\n  shared_modules: []\n", encoding="utf-8")
+        monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+        monkeypatch.setattr(mod, "_provision_venv", lambda *a, **k: "venv skipped")
+        monkeypatch.setattr(mod, "check_import_closure", lambda *a, **k: [])
+        return repo
+
+    def test_sync_plugin_verifies_after_copy(
+        self, tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fake_repo(tmp_path, mod, monkeypatch)
+        user_root = tmp_path / "user_root"
+        user_root.mkdir()
+
+        mod.sync_plugin("demo_plugin", user_root, dry_run=False)
+        assert (user_root / "plugins" / "demo_plugin" / "server.py").is_file()
+
+        # 二次调用走「副本与基线一致 → 覆盖」分支，同样过回读
+        mod.sync_plugin("demo_plugin", user_root, dry_run=False)
+
+    def test_sync_plugin_fails_closed_when_copy_missed(
+        self, tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fake_repo(tmp_path, mod, monkeypatch)
+        user_root = tmp_path / "user_root"
+        user_root.mkdir()
+        monkeypatch.setattr(mod, "_mirror_tree", lambda *a, **k: [])
+
+        with pytest.raises(SystemExit, match="VERIFY-FAIL"):
+            mod.sync_plugin("demo_plugin", user_root, dry_run=False)
+
+    def test_sync_config_verifies_bytes(
+        self, tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = tmp_path / "repo"
+        cfg = repo / "config" / "pipelines" / "x.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("a: 1\n", encoding="utf-8")
+        monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+        user_root = tmp_path / "user_root"
+
+        mod.sync_config("pipelines/x.yaml", user_root, dry_run=False)
+        assert (user_root / "config" / "pipelines" / "x.yaml").read_text(encoding="utf-8") == "a: 1\n"
+
+        cfg.write_text("a: 2\n", encoding="utf-8")
+        monkeypatch.setattr(mod.shutil, "copy2", lambda *a, **k: None)  # 模拟复制未生效
+        with pytest.raises(SystemExit, match="VERIFY-FAIL"):
+            mod.sync_config("pipelines/x.yaml", user_root, dry_run=False)
+
+    def test_sync_skills_verifies_mirror(
+        self, tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = tmp_path / "repo"
+        skill = repo / "skills" / "demo"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# demo\n", encoding="utf-8")
+        monkeypatch.setattr(mod, "_REPO_ROOT", repo)
+        user_root = tmp_path / "user_root"
+
+        mod.sync_skills("demo", user_root, dry_run=False)
+        assert (user_root / "skills" / "demo" / "SKILL.md").is_file()
+
+        (skill / "SKILL.md").write_text("# demo v2\n", encoding="utf-8")
+        monkeypatch.setattr(mod, "_mirror_tree", lambda *a, **k: [])  # 模拟复制未生效
+        with pytest.raises(SystemExit, match="VERIFY-FAIL"):
+            mod.sync_skills("demo", user_root, dry_run=False)

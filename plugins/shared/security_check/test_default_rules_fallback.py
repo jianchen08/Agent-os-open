@@ -40,10 +40,15 @@ pytestmark = pytest.mark.unit
 
 
 def _ctx_for(command: str) -> Any:
-    """构造危险命令执行的最小上下文（host provider、非隔离）。"""
+    """构造危险命令执行的最小上下文（host provider、非隔离）。
+
+    工具名用现行命令面单工具 ``bash``（ADR 2026-11-07 T2 四单词重构：
+    bash_execute 退役，isolation_policy 精确匹配键已换名——轨道 1 判定依赖
+    policy.resolve(name).execution == command_in_container，退役名会落默认
+    host_direct 而绕过危险分类）。"""
     state = {
         "core_type": "tool_execute",
-        "raw_tool_calls": [{"name": "bash_execute", "args": {"command": command}}],
+        "raw_tool_calls": [{"name": "bash", "args": {"command": command}}],
         "execution_contexts": [{"provider": "host", "task_isolated": False}],
         "session_id": "sess-fallback-probe",
     }

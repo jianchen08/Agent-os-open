@@ -359,6 +359,72 @@ class TestSecondEventWithPriorBlocks:
 
 
 # ═══════════════════════════════════════════════════════════
+# 4b. trim 冻结与成功压缩冻结同轮并存（2026-11-16 裁剪修复）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestTrimFreezeCoexistsWithCompressFreeze:
+    def test_trim_freeze_and_compress_freeze_same_round(self) -> None:
+        """同一轮 execute：trim 冻结 op（被裁原文 1..50）与成功压缩批次的
+        冻结 op 在同一 messages._ops 批次并存（改动 2：凡携带 trim 删除
+        ops 就必须携带对应冻结 op；压缩成功路径已有的压缩批次冻结并存）。
+
+        场景构造：历史含已应用块（seq_range=[1,50]）+ 消息 seq 1..70（各
+        200 tok）。trim 裁掉 1..50（members 50 条）；剩余 seq 51..70 触发
+        压缩（cw=2000，recent 360 留 m70，old=m51..m69 切 4 批）→ 4 个
+        压缩冻结段；阈值之下不触发压缩的反例由 trim 专属测试覆盖。
+        """
+        mod = _load_guard_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        block = {
+            "role": "system",
+            "name": "compressed",
+            "content": '<compressed seq="1-50" level="L1">\n## 过程摘要\nx\n</compressed>',
+            "metadata": {
+                "compression_ref": {
+                    "kind": "process",
+                    "seq_range": [1, 50],
+                    "stored_at": "2026-11-16T00:00:00+00:00",
+                    "memory_ids": [],
+                }
+            },
+        }
+        roles = ["user", "assistant"]
+        messages = [block] + [
+            {"role": roles[i % 2], "content": "A" * 400, "seq": i}
+            for i in range(1, 71)
+        ]
+
+        svc = _make_service(mod, _compact_compress_json())
+        state: dict[str, Any] = {"context_window": 2000, "messages": messages}
+
+        result = _execute_compress(mod, svc, state)
+        ops_list = result.state_updates["messages"]["_ops"]
+
+        freezes = _freeze_ops(ops_list)
+        # trim 冻结段：members = 被裁原文 seq 1..50 全文
+        trim_freezes = [f for f in freezes if f["base_seq"] == 1 and f["base_len"] == 50]
+        assert len(trim_freezes) == 1, "trim 删除必须携带同批冻结 op"
+        assert [m["seq"] for m in trim_freezes[0]["members"]] == list(range(1, 51))
+        assert all(m["content"] == "A" * 400 for m in trim_freezes[0]["members"])
+        # 压缩成功冻结段：每批一个，members 全部来自保留段（seq ≥ 51）
+        compress_freezes = [f for f in freezes if f is not trim_freezes[0]]
+        assert len(compress_freezes) >= 1, "压缩成功路径冻结语义不变"
+        for freeze in compress_freezes:
+            assert freeze["base_seq"] >= 51
+            assert freeze["base_len"] == len(freeze["members"])
+        # 两类冻结 op 同一批次并存
+        assert len(freezes) == 1 + len(compress_freezes)
+        # trim 删除的 null ops 也在同一批次
+        null_seqs = {
+            op["seq"] for op in ops_list if op.get("op") == "set" and op.get("msg") is None
+        }
+        assert {1, 25, 50} <= null_seqs
+
+
+# ═══════════════════════════════════════════════════════════
 # 5. chatMessages 声明与卡资产管道
 # ═══════════════════════════════════════════════════════════
 

@@ -72,6 +72,8 @@ def test_vocabulary_consistency(translator: Any, server: Any) -> None:
         set(translator.DSH_SLOT_LINGXI_MAP)
         | set(server._DSH_SLOT_DOM_ANCHORS)
         | {"sidebar.settings"}  # 复合形规则载体，挂在主表不进锚点表
+        # 真实包在用、暂无渲染位的槽位（2026-11-10 bundle 实测扫描，防漂移登记）
+        | {"shell.overlay", "conversation.input.right", "conversation.hero.options"}
     )
     assert vocab == expected_union
     # 主表 data-slot 规则触达的槽位名全部在词汇内（含复合形 sidebar.settings）

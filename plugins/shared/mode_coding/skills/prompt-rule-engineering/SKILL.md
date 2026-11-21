@@ -158,3 +158,7 @@ Baseline（代表性样本跑当前版，记录评分与证据）→ Failure Clu
 - 信息诚实：事实与来源标注按 `config/rules/information_integrity_rules.md`；本方法论中一切「事实锚点」引用同样适用（写路径前先验证存在）。
 - 防过拟合：自进化提案的「禁止哪里错补哪条」「新规则必须表述为通用规则」与 §五 Holdout 同源，见 `plugins/shared/mode_evolution/rules/evolution_rules.md`。
 - 双真值防线：方法论/技能类物料单源放 `skills/`，其他环境用薄指针引用（credit-delegation 先例）。
+
+## 十、技能写作参考
+
+写/改 `skills/**/SKILL.md` 前，读 `references/skill-authoring.md`：技能只写能力与流程（角色/执行空间归任务书与 agent 配置）、description 承担触发、正文程序化+验证、脚本非交互/结构化输出、本仓 `skill_audit` 准入与三层解耦约束。

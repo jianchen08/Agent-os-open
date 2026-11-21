@@ -54,6 +54,30 @@ LLMCore = _mod.LLMCore
 set_capability_caller = _mod.set_capability_caller
 
 
+@pytest.fixture(autouse=True)
+def _llm_model_config(monkeypatch: Any) -> None:
+    """注入最小 llm.yaml 视图：模型空解析现在显式报错（本模块不测模型解析）。"""
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "stub-model": {
+                        "provider": "stub",
+                        "model_name": "stub-model",
+                        "api_base": "https://stub.example.com",
+                        "api_key": "stub-key",
+                    }
+                },
+                "defaults": {"chat": "stub-model"},
+            }
+        },
+    )
+
+
 def _make_plugin() -> Any:
     return LLMCore({"provider": "openai", "model_name": "gpt-4", "default_params": {}})
 

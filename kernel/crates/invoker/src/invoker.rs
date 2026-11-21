@@ -65,8 +65,9 @@ use host_key::LightPacking;
 use mcp_result::{pipeline_error_params, tool_error_params};
 pub use timeout::state_plugin_call_timeout;
 use timeout::{
-    raised_need_from_inputs, resolve_call_limit, tool_timeout_ms, with_capability_timeout,
-    with_raisable_call_timeout, RaisedCallNeeds,
+    pre_dispatch_timeout_error, raised_need_from_inputs, resolve_call_limit, tool_timeout_ms,
+    with_capability_timeout, with_pre_dispatch_timeout, with_pre_dispatch_timeout_opt,
+    with_raisable_call_timeout, RaisedCallNeeds, PRE_DISPATCH_TIMEOUT_MS,
 };
 
 // tests.rs 以 `use super::*` 全量 glob 取名；符号搬入子模块后经本组 cfg(test)
@@ -515,12 +516,18 @@ impl PluginInvokerImpl {
         Ok(())
     }
 
-    /// 插件权限声明的前置日志校验（P2-2）。
+    /// 插件权限声明的留痕校验（P2-2；覆盖面见 ADR 2026-11-16-plugin-permission-surface）。
     ///
-    /// 0.2 只做声明 + 日志告警，不做硬 enforce（filesystem/system_calls 留 0.3 沙箱）。
-    /// 当前检测项：
-    /// - 若 manifest 声明了 network 权限（`permissions.network.allowed_hosts` 非空），
-    ///   则认为该插件可能联网；这是声明性记录，不阻断调用。
+    /// **当前是纯留痕面，零强制**：`permissions` 四组声明（filesystem / network /
+    /// env_vars / system_calls）在内核侧没有任何执行点消费——sidecar 照常继承宿主
+    /// env、`entry` 命令照常 spawn、网络与文件系统不做白名单拦截（沙箱属 0.3）。
+    /// 因此本函数的信息**不得**被读作安全裁决：日志显式带 `enforced = false`，
+    /// 审计取数时"有声明"≠"被强制"。
+    ///
+    /// 覆盖面（谁产生这条留痕）：管道插件调用（`invoke_pipeline_plugin`）、工具调用
+    /// （`invoke_tool`）、生命周期钩子（`send_lifecycle_hook` / native 钩子路径）
+    /// ——凡内核侧启动插件代码的入口都已记录，避免"同一插件换个入口调用就没有
+    /// 权限留痕"。
     ///
     /// 该函数不返回错误，**永远不阻断** invoke 流程。
     fn check_permissions(&self, plugin_id: &str, manifest: &PluginManifest) {
@@ -539,6 +546,8 @@ impl PluginInvokerImpl {
             filesystem = has_fs,
             env_vars = has_env,
             system_calls = has_syscalls,
+            // 恒 false：四组声明在内核侧均无执行点（见函数文档与 ADR）。
+            enforced = false,
             "Plugin permission declaration"
         );
 
@@ -548,6 +557,7 @@ impl PluginInvokerImpl {
             info!(
                 plugin_id = plugin_id,
                 hosts = ?perms.network.allowed_hosts,
+                enforced = false,
                 "Plugin declared network access"
             );
         }
@@ -717,6 +727,10 @@ impl PluginInvoker for PluginInvokerImpl {
         let loaded = self.loader.load(plugin_id).await?;
         let manifest = &loaded.manifest;
 
+        // 权限声明留痕：钩子路径同样启动插件代码，须与 invoke 路径同面记录
+        // （否则"换个入口调用就没有权限留痕"，审计面出现按入口分叉的盲区）。
+        self.check_permissions(plugin_id, manifest);
+
         // 组合插件不需要生命周期钩子（ADR ⑥）
         if manifest.plugin_type == PluginType::Composite {
             return Ok(());
@@ -782,6 +796,14 @@ impl PluginInvoker for PluginInvokerImpl {
             Some(manifest) => self.resolve_host_key(&manifest),
             None => plugin_id.to_string(),
         }
+    }
+
+    /// 声明读面（并行 for-each 写集克隆启用判据）：manifest 发现即返回其
+    /// `state.reads`（空 vec 表示"已发现但未声明"）；未发现返回 None。
+    fn plugin_declared_reads(&self, plugin_id: &str) -> Option<Vec<String>> {
+        self.loader
+            .get_manifest(plugin_id)
+            .map(|manifest| manifest.state.map(|s| s.reads).unwrap_or_default())
     }
 
     /// 强制卸载插件（覆盖 trait 默认实现）。
@@ -943,68 +965,111 @@ impl PluginInvoker for PluginInvokerImpl {
 }
 
 impl PluginInvokerImpl {
-    /// 确保生命周期钩子时机 native 插件已加载（钩子当前无 native 消费者，显式 no-op）。
+    /// 生命周期钩子经 execute 的 `hook_json` 约定字段直调 native 插件。
     ///
-    /// native 插件没有 MCP 通知通道，钩子当前也无 native 侧消费者，本函数
-    /// 不传递负载，仅在钩子时机触发一次加载（保持热重载检测一致性）。
+    /// native 插件没有 MCP 通知通道，钩子负载经 PluginCtx.hook_json
+    /// （`{"name": hook_name, "tags": {...}}`，与 `tool_call_json` 同构的
+    /// 约定字段模式）传递；首个消费者 = spill_guard on_pipeline_end 存档清理
+    /// （ADR 2026-11-18-spill-file-face-direct-read）。
     async fn send_hook_via_execute(
         &self,
         plugin_id: &str,
         manifest: &PluginManifest,
-        _hook_name: &str,
-        _tags: &Value,
+        hook_name: &str,
+        tags: &Value,
     ) -> Result<(), PluginError> {
-        // 钩子负载当前无 native 消费者，不构造；仅保留 config_files 读取失败的
-        // Err 传播语义（injected_config 求值即校验）。
-        let _config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
+        // config 注入与 pipeline 路径同源（config_files 读取失败的 Err 传播保留）。
+        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
         if manifest.host_type == HostType::InProcess {
-            // 直接 trait 对象模型：生命周期钩子经 PipelinePlugin trait 之外
-            // 的独立契约传递（当前 tool_core 无 on_load/on_unload 需求，暂 no-op）。
-            // 仅确保插件已加载（保持热重载检测一致性）。
-            //
-            // B2 后注：PluginCtx 已有同构的「约定字段表达特殊调用」先例——
-            // `tool_call_json`（工具调用语义，见 invoke_native_tool）。钩子若将来
-            // 需要 native 侧消费，可按同一模式加 `hook_json` 字段经 execute 直调
-            // （当前无消费者，保持 no-op）。
-            if let Some(loader) = self.native_loader.as_ref() {
-                self.load_native(loader, plugin_id, manifest)?;
+            let Some(loader) = self.native_loader.as_ref() else {
+                return Ok(());
+            };
+            self.load_native(loader, plugin_id, manifest)?;
+
+            let ctx = agentos_native_sdk::PluginCtx {
+                state_json: "{}".to_string(),
+                config_json: serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string()),
+                tenant_id: String::new(),
+                session_id: String::new(),
+                task_id: String::new(),
+                pipeline_id: tags
+                    .get("pipeline_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                tool_call_json: None,
+                hook_json: Some(serde_json::json!({ "name": hook_name, "tags": tags }).to_string()),
+            };
+            // cdylib 同步 execute 跑 blocking 线程（与 invoke_native_pipeline 同规）；
+            // host=None——钩子消费者（如 spill_guard 清理）不走 capability。
+            let loader = std::sync::Arc::clone(loader);
+            let pid = plugin_id.to_string();
+            let joined =
+                tokio::task::spawn_blocking(move || loader.execute(&pid, &ctx, None)).await;
+            // execute 结果 best-effort：钩子约定返回 "{}"（无状态产出），失败仅
+            // 留痕不阻断管道（与 sidecar notification 分支 fire-and-forget 同语义）。
+            match joined {
+                Ok(Ok(out)) if out != "{}" && !out.is_empty() => {
+                    warn!(
+                        "native hook {hook_name} for {plugin_id} produced unexpected output (ignored): {out}"
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    warn!("native hook {hook_name} execute failed for {plugin_id}: {e}")
+                }
+                Err(join_err) => {
+                    warn!("native hook {hook_name} task panicked for {plugin_id}: {join_err}")
+                }
             }
         }
         Ok(())
     }
 
-    /// 递归收集插件 roots：从 AGENTOS_PLUGINS_DIR **与用户插件根**出发，找所有含
-    /// plugin.json 的目录，取其父目录去重作为 discover 的 root_paths（对齐 main 的
-    /// discover_plugin_roots）。
+    /// 递归收集插件 roots：从 Tier1 根（`AGENTOS_PLUGINS_DIR`）与 Tier2 根
+    /// （`AGENTOS_PLUGIN_TIER2_ROOT`）出发，找所有含 plugin.json 的目录，取其
+    /// 父目录去重作为 discover 的 root_paths（对齐 main 的 discover_plugin_roots）。
     ///
-    /// 双根都要递归：`scan_root` 只扫一级，`tools/<name>/` 这类二级嵌套靠本函数补
-    /// roots。此前只从内置根出发，用户根里放 `tools/foo/` 布局根本不会被发现
-    /// （ADR 2026-09-13 §2.3 缺口二）；用户根因此被迫只支持平铺。
+    /// 双根由 boot 从实例启动配置解析后回写（ADR 2026-11-07
+    /// plugin-tiered-single-copy-model：env 只承载已解析值，零推导零回落）；
+    /// Tier2 根缺席 = 仅 Tier1 根。双根都要递归：`scan_root` 只扫一级，
+    /// `tools/<name>/` 与 `modes/<pkg>/` 这类二级嵌套靠本函数补 roots。
     fn collect_plugin_roots(&self) -> Vec<String> {
+        const TIER2_ROOT_ENV: &str = "AGENTOS_PLUGIN_TIER2_ROOT";
         let mut base_paths: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(d) = std::env::var("AGENTOS_PLUGINS_DIR") {
-            if !d.trim().is_empty() {
-                base_paths.push(std::path::PathBuf::from(d));
-            }
-        }
-        if let Some(user_root) = agentos_core::user_space::user_plugins_dir() {
-            if !base_paths.contains(&user_root) {
-                base_paths.push(user_root);
+        for key in ["AGENTOS_PLUGINS_DIR", TIER2_ROOT_ENV] {
+            if let Ok(d) = std::env::var(key) {
+                let trimmed = d.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let path = std::path::PathBuf::from(trimmed);
+                if !base_paths.contains(&path) {
+                    base_paths.push(path);
+                }
             }
         }
 
-        let mut parent_set = std::collections::HashSet::new();
+        // 有序去重（保持 base_paths 顺序：tier1 根的父目录恒先于 tier2）。
+        // 2026-11-08 装机实证：此处置曾用 HashSet——迭代序随机使热路径每轮
+        // 重发现的根序掷硬币，同版双源（安装器把用户副本刷成与包同版）的平版
+        // 胜者随之翻转（装载清单 tier1 vs spawn 用户目录分叉 → venv 缺失/
+        // 合宿 _host 探测落空）。平版裁决语义依赖根序确定（tier1 先），故
+        // 必须有序；admit 侧另有「平版包内副本胜出」优先级兜底（双保险）。
+        let mut roots: Vec<String> = Vec::new();
         for base_path in &base_paths {
             // 发现面收集原语单点在 plugin-loader（此前与 main 各持一份拷贝，收敛）。
             for dir in agentos_plugin_loader::collect_plugin_dirs(base_path) {
                 if let Some(parent) = dir.parent() {
                     if let Some(s) = parent.to_str() {
-                        parent_set.insert(s.to_string());
+                        if !roots.contains(&s.to_string()) {
+                            roots.push(s.to_string());
+                        }
                     }
                 }
             }
         }
-        parent_set.into_iter().collect()
+        roots
     }
 }
 

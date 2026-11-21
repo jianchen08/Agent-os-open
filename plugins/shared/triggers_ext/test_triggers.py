@@ -1256,7 +1256,8 @@ class TestDomainEventBridge:
             assert "📋 评估结论: 全部 2 项指标通过" in msg, "通知应包含评估结论"
             assert "🔀 合并备注: docs/working/台账.md→backed_up_to=" in msg, "通知应包含合并备注（上级对账）"
             assert "📊 上下文使用率: 30.0% (38,400/128,000 tokens)" in msg, "通知应包含上下文使用率"
-            assert "不建议继续向此 Agent 继承提交" in msg, "30% 应命中 25-50% 档提示"
+            assert "可直接继续向此 Agent 派发任务" in msg, "30% 低于 50% 阈值，不告警继承提交"
+            assert "25%" not in msg, "文案不应残留旧阈值数字"
         finally:
             mgr.stop_check_loop()
 

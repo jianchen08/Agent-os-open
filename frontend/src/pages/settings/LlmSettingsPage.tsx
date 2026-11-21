@@ -1,21 +1,24 @@
 /**
- * LLM 模型配置页面
+ * LLM 模型设置页（单界面形态）
  *
- * 两个 Tab：
- * 1. 提供商与密钥（默认）——预置提供者分组展示，填入 API Key 即可用
- *    （自动写入 .env、热生效免重启）；支持拉取远端模型列表、勾选或
- *    自定义输入模型名直接写入配置；可编辑每提供者的并发/RPM（KeyPool 消费）。
- * 2. 模型——默认模型选择（chat/tiers/embedding）、模型列表管理、
- *    每模型采样参数编辑（default_params，PUT /llm/models/{id}）。
- * 添加模型表单与模型行「参数」面板共用 ModelParamsEditor（上下文/采样/
- * 思考模式/思考强度映射/多模态/自定义参数），添加时即可一并填写。
+ * 布局按主流软件惯用形态排列，一屏四段：
+ * 1. 提供商——一个选择控件，内置提供商各占一个选项（原卡片即选项），末尾
+ *    「自定义」选项；选中内置提供商无需填 URL/API Key（端点随配置自带，
+ *    Key 仅未配置时给填写入口），选中「自定义」时同屏展开 Base URL 与
+ *    API Key 等新增表单。
+ * 2. 模型——与提供商同界面完成：可从提供商拉取模型列表勾选，也可手填
+ *    自定义模型名；可选一并填写参数。
+ * 3. 已注册模型——简洁条目逐行列出，注册一个即多一行。
+ * 4. 默认模型——大/中/小档位与对话/向量模型的选择栏位与当前值（不展示
+ *    已注册模型清单，模型清单在上方独立成段）。
  *
- * 数据面四态统一（OBS-R258-1）：主面（LLM 配置）加载失败显式 ErrorState + 重试，
- * 不伪装空态；副面（预置声明）失败降级由数据源注释声明。
+ * 数据面四态统一（OBS-R258-1）：主面（LLM 配置）加载失败显式 ErrorState +
+ * 重试，不伪装空态；副面（预置声明）失败降级由数据源注释声明。
  */
 
+import { useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { ChevronDown, Loader2, Plus } from '@/assets/icons'
+import { Loader2, Plus } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
@@ -31,10 +34,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { toast } from '@/components/ui/sonner'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { useLlmConfigQuery, useLlmPresetsQuery } from '@/hooks/queries/useLlmQueries'
-import { useQueryClient } from '@tanstack/react-query'
-import { queryKeys } from '@/services/query/queryKeys'
 import { useAsyncResource } from '@/hooks/useAsyncResource'
 import {
   getProviderTypes,
@@ -51,16 +51,27 @@ import {
   type RemoteModel,
   type LLMDefaults,
 } from '@/services/api/config'
-import { FetchModelsModal } from './FetchModelsModal'
-import { ProviderCard } from './LlmProviderCard'
+import { queryKeys } from '@/services/query/queryKeys'
 import {
   buildModelFields,
   buildRemoteModelFields,
-  draftFromModel,
   emptyModelParamsDraft,
   DEFAULT_STRENGTH_LEVELS,
 } from './modelParams'
 import { ModelParamsEditor } from './ModelParamsEditor'
+import { ModelPickerPanel } from './ModelPickerPanel'
+import { ModelRegistryList } from './ModelRegistryList'
+import { ProviderDetailPanel } from './ProviderDetailPanel'
+
+/** 「自定义提供商」选项值（选中即展开新增表单，不指向任何已存在提供商） */
+const CUSTOM_PROVIDER = '__custom__'
+
+/** 大/中/小档位（llm.yaml defaults.tiers 的键，供 agent model_tier 解析） */
+const TIER_ROWS: { key: string; label: string }[] = [
+  { key: 'large', label: '大模型' },
+  { key: 'medium', label: '中模型' },
+  { key: 'small', label: '小模型' },
+]
 
 /**
  * 从被 reject 的对象中提取后端错误消息。
@@ -76,29 +87,24 @@ const getApiMsg = (e: unknown, fallback = '操作失败'): string =>
  */
 export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [config, setConfig] = useState<LLMConfigResponse | null>(null)
-  const [activeTab, setActiveTab] = useState('providers')
 
-  const [fetchTarget, setFetchTarget] = useState<string | null>(null)
+  /** 当前操作的提供商（内置提供商 ID 或 CUSTOM_PROVIDER） */
+  const [selectedProvider, setSelectedProvider] = useState('')
 
   /** 进行中的保存动作键（per-action savingKey，await 窗口对应按钮 disabled+spinner
    *  防连点；失败 toast 已在各 handler 落点，状态复位可重试）。运行时态。 */
   const [savingAction, setSavingAction] = useState<string | null>(null)
 
-  // 默认模型草稿（Tab2「默认模型」段，随 config.defaults 同步）
+  // 默认模型草稿（档位段，随 config.defaults 同步）
   const [defaultsDraft, setDefaultsDraft] = useState<LLMDefaults>({
     chat: '',
     embedding: '',
     tiers: {},
   })
 
-  // 新模型表单（模型名称即身份：模型 ID 由名称派生，后端冲突时自动改名；
-  // 参数随添加一并填写，走共享 ModelParamsEditor 草稿）
-  const [newModelConfig, setNewModelConfig] = useState<ModelConfig>({
-    provider: '',
-    model_name: '',
-    display_name: '',
-  })
+  // 添加模型时可选一并填写的参数草稿（未触碰则不参与提交，远端事实上限不被覆盖）
   const [addParams, setAddParams] = useState(emptyModelParamsDraft)
+  const [addParamsTouched, setAddParamsTouched] = useState(false)
 
   const [newProviderId, setNewProviderId] = useState('')
   const [newProviderType, setNewProviderType] = useState('openai')
@@ -111,7 +117,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   // 配置面预置声明（llm_service /ext 端点下发，声明驱动——前端零硬编码词典）：
   // provider 分组/显示名、常用类型置顶、思考强度档位白名单
   // 副面降级决策（OBS-R258-1 铁律 4）：声明拉取失败不阻断主配置面——
-  // 分组归「自定义」、思考强度走内置缺省档位、类型目录回退常用类型
+  // 分组归「其他已添加」、思考强度走内置缺省档位、类型目录回退常用类型
   const presetsResource = useAsyncResource(useLlmPresetsQuery(), {
     fallbackErrorText: '获取预置声明失败',
   })
@@ -127,7 +133,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     if (presets && !providerTypesLoaded) setProviderTypes(presets.common_provider_types)
   }, [presets, providerTypesLoaded])
 
-  // 声明到达后把添加表单草稿的档位对齐到声明词汇（草稿初值走缺省档位）
+  // 声明到达后把添加参数草稿的档位对齐到声明词汇（草稿初值走缺省档位）
   useEffect(() => {
     if (!presets) return
     setAddParams((prev) => {
@@ -150,11 +156,14 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   // 以服务器全量态覆盖本地可编辑副本，会打断其他字段编辑；直写与下方 setConfig
   // 同一切片，缓存与本地副本保持一致。
   const queryClient = useQueryClient()
-  const syncConfigCache = useCallback((patch: Partial<LLMConfigResponse>) => {
-    queryClient.setQueryData<LLMConfigResponse>(queryKeys.llmConfig, (prev) =>
-      prev ? { ...prev, ...patch } : prev,
-    )
-  }, [queryClient])
+  const syncConfigCache = useCallback(
+    (patch: Partial<LLMConfigResponse>) => {
+      queryClient.setQueryData<LLMConfigResponse>(queryKeys.llmConfig, (prev) =>
+        prev ? { ...prev, ...patch } : prev,
+      )
+    },
+    [queryClient],
+  )
 
   useEffect(() => {
     if (configResource.data) {
@@ -174,7 +183,58 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   }, [config])
 
   const modelIds = config ? Object.keys(config.models ?? {}) : []
-  const providerIds = config ? Object.keys(config.providers ?? {}) : []
+  // 引用稳定：providers 直接取配置切片，避免 ?? {} 每次渲染产生新对象让下游 useMemo 失效
+  const providers = useMemo(() => config?.providers ?? {}, [config])
+
+  // 生效的选中项是派生值（不是回写 state 的副作用）：选中项失效（首次进入 / 被删除）
+  // 时直接回落到第一个提供商，无提供商则落「自定义」——避免多一轮渲染窗口里
+  // 界面短暂显示「暂无提供商」。
+  const effectiveProvider = useMemo(() => {
+    if (!config) return ''
+    if (selectedProvider === CUSTOM_PROVIDER) return CUSTOM_PROVIDER
+    if (selectedProvider && providers[selectedProvider]) return selectedProvider
+    return Object.keys(providers)[0] ?? CUSTOM_PROVIDER
+  }, [config, selectedProvider, providers])
+
+  const isCustomProvider = effectiveProvider === CUSTOM_PROVIDER
+  const currentProvider: ProviderConfig | undefined = isCustomProvider
+    ? undefined
+    : providers[effectiveProvider]
+
+  // 选中「自定义」时懒加载 litellm 动态类型目录（失败回退声明常用类型，不阻塞表单）
+  useEffect(() => {
+    if (!isCustomProvider || providerTypesLoaded) return
+    getProviderTypes()
+      .then(({ types }) => {
+        setProviderTypes(types)
+        setProviderTypesLoaded(true)
+      })
+      .catch(() => {
+        if (presets) setProviderTypes(presets.common_provider_types)
+      })
+  }, [isCustomProvider, providerTypesLoaded, presets])
+
+  const currentDisplayName = useMemo(() => {
+    for (const g of presets?.provider_groups ?? []) {
+      const hit = g.providers.find(([id]) => id === effectiveProvider)
+      if (hit) return hit[1]
+    }
+    return undefined
+  }, [presets, effectiveProvider])
+
+  // 提供商选项分组：预置声明分组（内置）→ 其余已添加（自定义添加过的）→ 自定义
+  const providerOptionGroups = useMemo(() => {
+    const groups = (presets?.provider_groups ?? []).map((g) => ({
+      label: g.label,
+      items: g.providers
+        .filter(([id]) => providers[id])
+        .map(([id, name]) => ({ id, name: name || id })),
+    }))
+    const rest = Object.keys(providers)
+      .filter((id) => !presetProviderIds.has(id))
+      .map((id) => ({ id, name: id }))
+    return [...groups, { label: '其他已添加', items: rest }].filter((g) => g.items.length > 0)
+  }, [presets, providers, presetProviderIds])
 
   // 保存默认模型选择（chat/embedding/tiers 部分更新，PUT /llm/defaults）
   const handleSaveDefaults = useCallback(async () => {
@@ -189,48 +249,23 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setSavingAction(null)
     }
-  }, [defaultsDraft])
+  }, [defaultsDraft, syncConfigCache])
 
-  // 添加新模型（模型 ID = 模型名称；同名模型已在其他提供商下时后端自动改名）
-  const handleAddModel = useCallback(async () => {
-    const modelName = newModelConfig.model_name.trim()
-    if (!modelName) return
-    setSavingAction('add-model')
-    try {
-      const { models, added_ids } = await addModel(modelName, {
-        provider: newModelConfig.provider,
-        model_name: modelName,
-        display_name: newModelConfig.display_name,
-        ...buildModelFields(addParams),
-      })
-      setConfig((prev) => (prev ? { ...prev, models } : prev))
-      syncConfigCache({ models })
-      setNewModelConfig({ provider: '', model_name: '', display_name: '' })
-      setAddParams(emptyModelParamsDraft(strengthLevels))
-      if (added_ids[0] !== modelName) {
-        toast.success('模型已添加，ID 自动命名以避开其他提供商的同名模型', {
-          description: `${modelName} → ${added_ids[0]}`,
-        })
+  const handleDeleteModel = useCallback(
+    async (modelId: string) => {
+      setSavingAction(`del-model:${modelId}`)
+      try {
+        const models = await deleteModel(modelId)
+        setConfig((prev) => (prev ? { ...prev, models } : prev))
+        syncConfigCache({ models })
+      } catch (e) {
+        toast.error('删除模型失败', { description: getApiMsg(e, '删除模型失败') })
+      } finally {
+        setSavingAction(null)
       }
-    } catch (e) {
-      toast.error('添加模型失败', { description: getApiMsg(e, '添加模型失败') })
-    } finally {
-      setSavingAction(null)
-    }
-  }, [newModelConfig, addParams, strengthLevels])
-
-  const handleDeleteModel = useCallback(async (modelId: string) => {
-    setSavingAction(`del-model:${modelId}`)
-    try {
-      const models = await deleteModel(modelId)
-      setConfig((prev) => (prev ? { ...prev, models } : prev))
-      syncConfigCache({ models })
-    } catch (e) {
-      toast.error('删除模型失败', { description: getApiMsg(e, '删除模型失败') })
-    } finally {
-      setSavingAction(null)
-    }
-  }, [])
+    },
+    [syncConfigCache],
+  )
 
   // 保存模型设置（上下文窗口/推理标记/default_params——拉取或自定义添加的
   // 模型初始只有最小字段，上下文与 think 参数都靠这里补全）
@@ -248,7 +283,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         setSavingAction(null)
       }
     },
-    [],
+    [syncConfigCache],
   )
 
   // 填写 / 更新提供商 API Key（明文经后端写入 .env，yaml 保持 ${VAR} 占位）
@@ -262,9 +297,9 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
           id: firstKey?.id ?? `${providerId}_main`,
           api_key: apiKey.trim(),
         }
-        const providers = await updateProviderConfig(providerId, { keys: [entry] })
-        setConfig((prev) => (prev ? { ...prev, providers } : prev))
-        syncConfigCache({ providers })
+        const updated = await updateProviderConfig(providerId, { keys: [entry] })
+        setConfig((prev) => (prev ? { ...prev, providers: updated } : prev))
+        syncConfigCache({ providers: updated })
         toast.success(`已保存 ${providerId} 的 Key（写入 .env，立即生效）`)
       } catch (e) {
         toast.error('保存密钥失败', { description: getApiMsg(e, '保存密钥失败') })
@@ -272,7 +307,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         setSavingAction(null)
       }
     },
-    [],
+    [syncConfigCache],
   )
 
   // 保存提供者并发 / RPM（KeyPool 消费；不带 api_key，后端按条目合并保留占位符）
@@ -286,9 +321,9 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
           max_concurrent: maxConcurrent,
           rpm,
         }
-        const providers = await updateProviderConfig(providerId, { keys: [entry] })
-        setConfig((prev) => (prev ? { ...prev, providers } : prev))
-        syncConfigCache({ providers })
+        const updated = await updateProviderConfig(providerId, { keys: [entry] })
+        setConfig((prev) => (prev ? { ...prev, providers: updated } : prev))
+        syncConfigCache({ providers: updated })
         toast.success(`已保存 ${providerId} 的并发设置`)
       } catch (e) {
         toast.error('保存并发设置失败', { description: getApiMsg(e, '保存并发设置失败') })
@@ -296,7 +331,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         setSavingAction(null)
       }
     },
-    [config],
+    [config, syncConfigCache],
   )
 
   const handleAddProvider = useCallback(async () => {
@@ -308,9 +343,10 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       }
       if (newProviderApiBase.trim()) providerConfig.api_base = newProviderApiBase.trim()
       if (newProviderApiKey.trim()) providerConfig.api_key = newProviderApiKey.trim()
-      const providers = await addProvider(newProviderId.trim(), providerConfig)
-      setConfig((prev) => (prev ? { ...prev, providers } : prev))
-      syncConfigCache({ providers })
+      const updated = await addProvider(newProviderId.trim(), providerConfig)
+      setConfig((prev) => (prev ? { ...prev, providers: updated } : prev))
+      syncConfigCache({ providers: updated })
+      setSelectedProvider(newProviderId.trim())
       setNewProviderId('')
       setNewProviderType('openai')
       setNewProviderApiBase('')
@@ -320,71 +356,67 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setSavingAction(null)
     }
-  }, [newProviderId, newProviderType, newProviderApiBase, newProviderApiKey])
+  }, [newProviderId, newProviderType, newProviderApiBase, newProviderApiKey, syncConfigCache])
 
-  const handleDeleteProvider = useCallback(async (providerId: string) => {
-    setSavingAction(`del-provider:${providerId}`)
-    try {
-      const providers = await deleteProvider(providerId)
-      setConfig((prev) => (prev ? { ...prev, providers } : prev))
-      syncConfigCache({ providers })
-    } catch (e) {
-      toast.error('删除提供商失败', { description: getApiMsg(e, '删除提供商失败') })
-    } finally {
-      setSavingAction(null)
-    }
-  }, [])
+  const handleDeleteProvider = useCallback(
+    async (providerId: string) => {
+      setSavingAction(`del-provider:${providerId}`)
+      try {
+        const updated = await deleteProvider(providerId)
+        setConfig((prev) => (prev ? { ...prev, providers: updated } : prev))
+        syncConfigCache({ providers: updated })
+      } catch (e) {
+        toast.error('删除提供商失败', { description: getApiMsg(e, '删除提供商失败') })
+      } finally {
+        setSavingAction(null)
+      }
+    },
+    [syncConfigCache],
+  )
 
-  // 拉取模型对话框：添加所选（勾选 + 自定义输入）
-  // limits：id → litellm 注册表下发的事实上限（context_window / max_output_tokens）。
-  // 自定义输入的模型名不在拉取列表里 → 无事实，走 DEFAULT_MAX_TOKENS 兜底。
-  const handleAddRemoteModels = useCallback(
+  // 添加模型（拉取列表勾选 + 手填模型名，同一提交入口）
+  // limits：id → litellm 注册表下发的事实上限（context_window / max_output_tokens）；
+  // 手填模型名不在拉取列表里 → 无事实，走 DEFAULT_MAX_TOKENS 兜底。
+  // 添加参数草稿被触碰过才参与提交（否则远端事实上限不被默认值覆盖）。
+  const handleAddModels = useCallback(
     async (providerId: string, modelNames: string[], limits: Map<string, RemoteModel>) => {
+      setSavingAction('add-model')
       let lastModels: Record<string, ModelConfig> | null = null
       const failed: string[] = []
+      const extra = addParamsTouched ? buildModelFields(addParams) : null
       for (const name of modelNames) {
+        const base = buildRemoteModelFields(limits.get(name) ?? {})
         try {
           const { models } = await addModel(name, {
             provider: providerId,
             model_name: name,
             display_name: name,
-            ...buildRemoteModelFields(limits.get(name) ?? {}),
+            ...base,
+            ...(extra ?? {}),
+            default_params: { ...(base.default_params ?? {}), ...(extra?.default_params ?? {}) },
           })
           lastModels = models
         } catch {
           failed.push(name)
         }
       }
-      if (lastModels) {
-        setConfig((prev) => (prev ? { ...prev, models: lastModels! } : prev))
-        syncConfigCache({ models: lastModels })
+      const merged = lastModels
+      if (merged) {
+        setConfig((prev) => (prev ? { ...prev, models: merged } : prev))
+        syncConfigCache({ models: merged })
       }
-      if (failed.length > 0) {
+      setSavingAction(null)
+      if (failed.length === 0) {
+        toast.success(`已添加 ${modelNames.length} 个模型到 ${providerId}`)
+      } else if (failed.length < modelNames.length) {
         toast.warning(`已添加 ${modelNames.length - failed.length} 个模型`, {
           description: `添加失败（可能已存在）: ${failed.join(', ')}`,
         })
       } else {
-        toast.success(`已添加 ${modelNames.length} 个模型到 ${providerId}`)
+        toast.error('添加模型失败', { description: failed.join(', ') })
       }
     },
-    [],
-  )
-
-  // 展开自定义提供商表单时懒加载 litellm 动态类型目录
-  const handleCustomFormToggle = useCallback(
-    (open: boolean) => {
-      if (!open || providerTypesLoaded) return
-      getProviderTypes()
-        .then(({ types }) => {
-          setProviderTypes(types)
-          setProviderTypesLoaded(true)
-        })
-        .catch(() => {
-          // 目录拉取失败回退声明常用类型（非核心路径，不阻塞表单）
-          if (presets) setProviderTypes(presets.common_provider_types)
-        })
-    },
-    [providerTypesLoaded, presets],
+    [addParams, addParamsTouched, syncConfigCache],
   )
 
   if (configResource.status === 'loading') {
@@ -423,6 +455,11 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     )
   }
 
+  const providerNeedsNoKey = effectiveProvider === 'ollama'
+  const canPull = Boolean(
+    currentProvider && (providerNeedsNoKey || (currentProvider.has_key ?? false)),
+  )
+
   return (
     <PageShell
       title="模型设置"
@@ -430,138 +467,92 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       embedded={embedded}
       mainLabel="模型设置表单"
     >
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
-          <TabsTrigger value="providers">提供商与密钥</TabsTrigger>
-          <TabsTrigger value="models">模型</TabsTrigger>
-        </TabsList>
-
-        {/* ── Tab 1：提供商与密钥 ── */}
-        <TabsContent value="providers">
-          <div className="mt-4 space-y-5">
-            <p className="text-muted-foreground text-xs">
-              预置提供者只需填入 API Key 即可使用——Key 自动写入 .env 并热生效（无需重启）。
-              填好后可「拉取模型」获取该 Key 可用的模型列表，勾选或手动输入模型名即可添加。
-            </p>
-
-            {providerIds.length === 0 ? (
-              <div className="text-muted-foreground py-4 text-center text-sm">暂无提供商</div>
-            ) : (
-              (() => {
-                const entries = Object.entries(config!.providers ?? {})
-                // 未配置 Key 的排前面，引导先完成配置
-                const byId = new Map(entries)
-                const sortEntries = (list: [string, ProviderConfig][]) =>
-                  [...list].sort(
-                    (a, b) => Number(a[1].has_key ?? true) - Number(b[1].has_key ?? true),
-                  )
-                // 预置分组来自 llm_service 预置声明（声明驱动）；未列出的归「自定义」组
-                const groups = [
-                  ...(presets?.provider_groups ?? []).map((g) => ({
-                    label: g.label,
-                    nameOf: Object.fromEntries(g.providers) as Record<string, string>,
-                    entries: sortEntries(
-                      g.providers
-                        .map(([id]) => [id, byId.get(id)!] as [string, ProviderConfig])
-                        .filter(([, p]) => p),
-                    ),
-                  })),
-                  {
-                    label: '自定义',
-                    nameOf: {},
-                    entries: sortEntries(entries.filter(([id]) => !presetProviderIds.has(id))),
-                  },
-                ].filter((g) => g.entries.length > 0)
-
-                return groups.map((group) => (
-                  <section key={group.label}>
-                    <h3 className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
-                      {group.label}（{group.entries.length}）
-                    </h3>
-                    <div className="space-y-3">
-                      {group.entries.map(([id, provider]) => (
-                        <ProviderCard
-                          key={id}
-                          providerId={id}
-                          displayName={group.nameOf[id]}
-                          provider={provider}
-                          keySaving={savingAction === `key:${id}`}
-                          concurrencySaving={savingAction === `concurrency:${id}`}
-                          deleting={savingAction === `del-provider:${id}`}
-                          onUpdateKey={handleUpdateApiKey}
-                          onDelete={handleDeleteProvider}
-                          onFetchModels={setFetchTarget}
-                          onSaveConcurrency={handleSaveConcurrency}
-                        />
+      <div className="space-y-6">
+        {/* ── 1. 提供商：一个选择控件 ── */}
+        <section>
+          <h3 className="mb-3 text-sm font-semibold">提供商</h3>
+          <div className="space-y-3">
+            <FieldRow label="提供商" htmlFor="llm-provider">
+              <Select value={effectiveProvider} onValueChange={setSelectedProvider}>
+                <SelectTrigger id="llm-provider" aria-label="提供商">
+                  <SelectValue placeholder="选择提供商" />
+                </SelectTrigger>
+                <SelectContent>
+                  {providerOptionGroups.map((g) => (
+                    <SelectGroup key={g.label}>
+                      <SelectLabel>{g.label}</SelectLabel>
+                      {g.items.map((item) => (
+                        <SelectItem key={item.id} value={item.id}>
+                          {item.name}
+                        </SelectItem>
                       ))}
-                    </div>
-                  </section>
-                ))
-              })()
-            )}
+                    </SelectGroup>
+                  ))}
+                  <SelectGroup>
+                    <SelectLabel>其他</SelectLabel>
+                    <SelectItem value={CUSTOM_PROVIDER}>自定义（新增提供商）</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </FieldRow>
 
-            {/* 添加自定义提供商 */}
-            <div className="mt-2 border-t pt-4">
-              <details
-                onToggle={(e) => handleCustomFormToggle((e.target as HTMLDetailsElement).open)}
-              >
-                <summary className="cursor-pointer text-sm font-semibold select-none">
-                  添加自定义提供商（类型来自 litellm，升级 litellm 后自动出现新提供者）
-                </summary>
-                <div className="mt-3 space-y-2">
-                  <FieldRow label="提供商 ID" htmlFor="new-provider-id">
-                    <Input
-                      id="new-provider-id"
-                      value={newProviderId}
-                      onChange={(e) => setNewProviderId(e.target.value)}
-                      placeholder="如: myproxy"
-                    />
-                  </FieldRow>
-                  <FieldRow label="类型" htmlFor="new-provider-type">
-                    <Select value={newProviderType} onValueChange={setNewProviderType}>
-                      <SelectTrigger id="new-provider-type">
-                        <SelectValue placeholder="选择类型" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectLabel>常用</SelectLabel>
-                          {(presets?.common_provider_types ?? []).map((t) => (
+            {isCustomProvider ? (
+              // 自定义：URL / API Key 在同一界面下方展开
+              <div className="space-y-2">
+                <FieldRow label="提供商 ID" htmlFor="new-provider-id">
+                  <Input
+                    id="new-provider-id"
+                    value={newProviderId}
+                    onChange={(e) => setNewProviderId(e.target.value)}
+                    placeholder="如: myproxy"
+                  />
+                </FieldRow>
+                <FieldRow label="类型" htmlFor="new-provider-type">
+                  <Select value={newProviderType} onValueChange={setNewProviderType}>
+                    <SelectTrigger id="new-provider-type">
+                      <SelectValue placeholder="选择类型" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectLabel>常用</SelectLabel>
+                        {(presets?.common_provider_types ?? []).map((t) => (
+                          <SelectItem key={t} value={t}>
+                            {t}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                      <SelectGroup>
+                        <SelectLabel>litellm 全部（{providerTypes.length}）</SelectLabel>
+                        {providerTypes
+                          .filter((t) => !(presets?.common_provider_types ?? []).includes(t))
+                          .map((t) => (
                             <SelectItem key={t} value={t}>
                               {t}
                             </SelectItem>
                           ))}
-                        </SelectGroup>
-                        <SelectGroup>
-                          <SelectLabel>litellm 全部（{providerTypes.length}）</SelectLabel>
-                          {providerTypes
-                            .filter((t) => !(presets?.common_provider_types ?? []).includes(t))
-                            .map((t) => (
-                              <SelectItem key={t} value={t}>
-                                {t}
-                              </SelectItem>
-                            ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                  </FieldRow>
-                  <FieldRow label="API Base" htmlFor="new-provider-apibase">
-                    <Input
-                      id="new-provider-apibase"
-                      value={newProviderApiBase}
-                      onChange={(e) => setNewProviderApiBase(e.target.value)}
-                      placeholder="选填，留空使用该类型默认端点（OpenAI 兼容端点必填）"
-                    />
-                  </FieldRow>
-                  <FieldRow label="API Key" htmlFor="new-provider-apikey">
-                    <Input
-                      id="new-provider-apikey"
-                      type="password"
-                      autoComplete="new-password"
-                      value={newProviderApiKey}
-                      onChange={(e) => setNewProviderApiKey(e.target.value)}
-                      placeholder="输入 API Key（自动写入 .env）"
-                    />
-                  </FieldRow>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </FieldRow>
+                <FieldRow label="Base URL" htmlFor="new-provider-apibase">
+                  <Input
+                    id="new-provider-apibase"
+                    value={newProviderApiBase}
+                    onChange={(e) => setNewProviderApiBase(e.target.value)}
+                    placeholder="如: https://my.proxy/v1（留空使用该类型默认端点）"
+                  />
+                </FieldRow>
+                <FieldRow label="API Key" htmlFor="new-provider-apikey">
+                  <Input
+                    id="new-provider-apikey"
+                    type="password"
+                    autoComplete="new-password"
+                    value={newProviderApiKey}
+                    onChange={(e) => setNewProviderApiKey(e.target.value)}
+                    placeholder="输入 API Key（自动写入 .env）"
+                  />
+                </FieldRow>
+                <div className="pl-0 sm:pl-[136px]">
                   <Button
                     size="sm"
                     onClick={handleAddProvider}
@@ -575,236 +566,144 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                     {savingAction === 'add-provider' ? '添加中...' : '添加提供商'}
                   </Button>
                 </div>
-              </details>
+                <p className="text-muted-foreground text-xs">
+                  类型目录来自 litellm，升级 litellm 后自动出现新提供者。
+                </p>
+              </div>
+            ) : currentProvider ? (
+              <ProviderDetailPanel
+                key={effectiveProvider}
+                providerId={effectiveProvider}
+                displayName={currentDisplayName}
+                provider={currentProvider}
+                keySaving={savingAction === `key:${effectiveProvider}`}
+                concurrencySaving={savingAction === `concurrency:${effectiveProvider}`}
+                deleting={savingAction === `del-provider:${effectiveProvider}`}
+                onUpdateKey={handleUpdateApiKey}
+                onDelete={handleDeleteProvider}
+                onSaveConcurrency={handleSaveConcurrency}
+              />
+            ) : (
+              <div className="text-muted-foreground py-2 text-sm">
+                暂无提供商——在「提供商」里选「自定义」新增一个
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* ── 2. 模型：与提供商同界面完成选择 ── */}
+        <section className="border-t pt-4">
+          <h3 className="mb-1 text-sm font-semibold">模型</h3>
+          <p className="text-muted-foreground mb-3 text-xs leading-relaxed">
+            从当前提供商拉取模型列表勾选，或直接手填模型名——两种方式添加的模型都会进入下方
+            「已注册模型」。
+          </p>
+          {currentProvider ? (
+            <ModelPickerPanel
+              key={effectiveProvider}
+              providerId={effectiveProvider}
+              providerLabel={currentDisplayName}
+              canPull={canPull}
+              adding={savingAction === 'add-model'}
+              onAdd={handleAddModels}
+            />
+          ) : (
+            <div className="text-muted-foreground py-2 text-sm">
+              先添加一个自定义提供商，之后即可从中拉取或手填模型名。
+            </div>
+          )}
+
+          {/* 添加时可选一并填写参数（不触碰则按模型类型兜底/远端事实写入） */}
+          {currentProvider && (
+            <details
+              className="mt-3"
+              onToggle={(e) => {
+                if (!(e.target as HTMLDetailsElement).open) return
+                if (!addParamsTouched) setAddParamsTouched(true)
+              }}
+            >
+              <summary className="cursor-pointer text-xs font-medium select-none">
+                添加时一并填写模型参数（可选）
+              </summary>
+              <div className="mt-2 rounded-lg border p-3">
+                <ModelParamsEditor
+                  value={addParams}
+                  onChange={(v) => {
+                    setAddParams(v)
+                    setAddParamsTouched(true)
+                  }}
+                  levels={strengthLevels}
+                />
+              </div>
+            </details>
+          )}
+        </section>
+
+        {/* ── 3. 已注册模型：简洁条目逐行 ── */}
+        <section className="border-t pt-4">
+          <h3 className="mb-1 text-sm font-semibold">已注册模型 ({modelIds.length})</h3>
+          <p className="text-muted-foreground mb-3 text-xs">
+            每注册一个模型即增加一行；展开「参数」可设置上下文窗口、采样参数、思考模式、
+            思考强度映射与多模态能力。
+          </p>
+          <ModelRegistryList
+            models={config?.models ?? {}}
+            strengthLevels={strengthLevels}
+            isDeleting={(id) => savingAction === `del-model:${id}`}
+            isSavingSettings={(id) => savingAction === `model-settings:${id}`}
+            onDelete={handleDeleteModel}
+            onSaveSettings={handleSaveModelSettings}
+          />
+        </section>
+
+        {/* ── 4. 默认模型档位：只留选择栏位与当前值 ── */}
+        <section className="border-t pt-4">
+          <h3 className="mb-1 text-sm font-semibold">默认模型</h3>
+          <p className="text-muted-foreground mb-3 text-xs leading-relaxed">
+            为大/中/小档位与对话、向量用途指派默认模型（写入 llm.yaml defaults）；
+            在此只做指派，不列出模型清单。
+          </p>
+          <div className="space-y-2">
+            <DefaultModelSelect
+              id="default-chat"
+              label="默认对话模型"
+              value={defaultsDraft.chat}
+              models={modelIds}
+              onChange={(v) => setDefaultsDraft((p) => ({ ...p, chat: v }))}
+            />
+            {TIER_ROWS.map((tier) => (
+              <DefaultModelSelect
+                key={tier.key}
+                id={`default-tier-${tier.key}`}
+                label={tier.label}
+                value={defaultsDraft.tiers[tier.key] ?? ''}
+                models={modelIds}
+                onChange={(v) =>
+                  setDefaultsDraft((p) => ({ ...p, tiers: { ...p.tiers, [tier.key]: v } }))
+                }
+              />
+            ))}
+            <DefaultModelSelect
+              id="default-embedding"
+              label="默认向量模型"
+              value={defaultsDraft.embedding}
+              models={modelIds}
+              onChange={(v) => setDefaultsDraft((p) => ({ ...p, embedding: v }))}
+            />
+            <div className="flex items-center gap-2 pt-1">
+              <Button size="sm" onClick={handleSaveDefaults} disabled={savingAction === 'defaults'}>
+                {savingAction === 'defaults' ? '保存中...' : '保存默认模型'}
+              </Button>
             </div>
           </div>
-        </TabsContent>
-
-        {/* ── Tab 2：模型 ── */}
-        <TabsContent value="models">
-          <div className="mt-4 space-y-6">
-            {/* 默认模型：chat/tiers/embedding 选择，保存写 llm.yaml defaults 段 */}
-            <section className="rounded-lg border p-4">
-              <h3 className="mb-1 text-sm font-semibold">默认模型</h3>
-              <p className="text-muted-foreground mb-3 text-xs leading-relaxed">
-                默认对话/分级/向量模型——模型须已在下文「已注册模型」列表中；被删模型在保存前保留原值不覆盖。
-              </p>
-              <div className="space-y-2">
-                <DefaultModelSelect
-                  id="default-chat"
-                  label="默认对话模型"
-                  value={defaultsDraft.chat}
-                  models={modelIds}
-                  onChange={(v) => setDefaultsDraft((p) => ({ ...p, chat: v }))}
-                />
-                {['large', 'medium', 'small'].map((tier) => (
-                  <DefaultModelSelect
-                    key={tier}
-                    id={`default-tier-${tier}`}
-                    label={`${tier} 档位`}
-                    value={defaultsDraft.tiers[tier] ?? ''}
-                    models={modelIds}
-                    onChange={(v) =>
-                      setDefaultsDraft((p) => ({ ...p, tiers: { ...p.tiers, [tier]: v } }))
-                    }
-                  />
-                ))}
-                <DefaultModelSelect
-                  id="default-embedding"
-                  label="默认向量模型"
-                  value={defaultsDraft.embedding}
-                  models={modelIds}
-                  onChange={(v) => setDefaultsDraft((p) => ({ ...p, embedding: v }))}
-                />
-                <div className="flex items-center gap-2 pt-1">
-                  <Button
-                    size="sm"
-                    onClick={handleSaveDefaults}
-                    disabled={savingAction === 'defaults'}
-                  >
-                    {savingAction === 'defaults' ? '保存中...' : '保存默认模型'}
-                  </Button>
-                </div>
-              </div>
-            </section>
-
-            {/* 模型列表 */}
-            <section className="border-t pt-4">
-              <h3 className="mb-3 text-sm font-semibold">已注册模型 ({modelIds.length})</h3>
-              <p className="text-muted-foreground mb-3 text-xs">
-                展开「参数」可设置上下文窗口、采样参数、思考模式、思考强度映射与多模态能力；添加模型时也可直接填写同一组参数。
-              </p>
-              {modelIds.length === 0 ? (
-                <div className="text-muted-foreground py-4 text-center text-sm">
-                  暂无模型——到「提供商与密钥」页拉取或手动添加
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {modelIds.map((id) => (
-                    <ModelRow
-                      key={id}
-                      modelId={id}
-                      model={config!.models[id]}
-                      strengthLevels={strengthLevels}
-                      deleting={savingAction === `del-model:${id}`}
-                      settingsSaving={savingAction === `model-settings:${id}`}
-                      onDelete={handleDeleteModel}
-                      onSaveSettings={handleSaveModelSettings}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* 手动添加模型：模型名称即身份（ID 由名称派生，跨提供商同名自动改名） */}
-            <section className="border-t pt-4">
-              <h3 className="mb-3 text-sm font-semibold">添加模型</h3>
-              <div className="space-y-2">
-                <FieldRow label="模型名称" htmlFor="new-model-name">
-                  <Input
-                    id="new-model-name"
-                    value={newModelConfig.model_name}
-                    onChange={(e) =>
-                      setNewModelConfig((prev) => ({ ...prev, model_name: e.target.value }))
-                    }
-                    placeholder="如: gpt-5.1（作为模型 ID 与调用名）"
-                  />
-                </FieldRow>
-                <FieldRow label="提供商" htmlFor="new-model-provider">
-                  <Select
-                    value={newModelConfig.provider}
-                    onValueChange={(v) => setNewModelConfig((prev) => ({ ...prev, provider: v }))}
-                  >
-                    <SelectTrigger id="new-model-provider">
-                      <SelectValue placeholder="选择提供商" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providerIds.map((id) => (
-                        <SelectItem key={id} value={id}>
-                          {id}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </FieldRow>
-                <FieldRow label="显示名称" htmlFor="new-model-display">
-                  <Input
-                    id="new-model-display"
-                    value={newModelConfig.display_name}
-                    onChange={(e) =>
-                      setNewModelConfig((prev) => ({ ...prev, display_name: e.target.value }))
-                    }
-                    placeholder="如: GPT-5.1"
-                  />
-                </FieldRow>
-                <div className="rounded-lg border p-3">
-                  <ModelParamsEditor
-                    value={addParams}
-                    onChange={setAddParams}
-                    levels={strengthLevels}
-                  />
-                </div>
-                <Button
-                  size="sm"
-                  onClick={handleAddModel}
-                  disabled={
-                    !newModelConfig.model_name.trim() ||
-                    !newModelConfig.provider ||
-                    savingAction === 'add-model'
-                  }
-                >
-                  {savingAction === 'add-model' ? '添加中...' : '添加模型'}
-                </Button>
-              </div>
-            </section>
-          </div>
-        </TabsContent>
-      </Tabs>
-
-      {/* 拉取模型对话框 */}
-      <FetchModelsModal
-        open={fetchTarget !== null}
-        providerId={fetchTarget}
-        onClose={() => setFetchTarget(null)}
-        onAdd={handleAddRemoteModels}
-      />
+        </section>
+      </div>
     </PageShell>
   )
 }
 
-
-/**
- * 模型行：展示 + 删除 + 模型设置编辑。
- *
- * 参数编辑（上下文窗口、输出上限、采样、thinking、思考强度映射、多模态、
- * 自定义参数）走共享 ModelParamsEditor 草稿，保存经 buildModelFields
- * 序列化为部分字段 PUT /llm/models/{id}。
- */
-function ModelRow({
-  modelId,
-  model,
-  strengthLevels,
-  deleting,
-  settingsSaving,
-  onDelete,
-  onSaveSettings,
-}: {
-  modelId: string
-  model: ModelConfig
-  /** 思考强度档位（llm_service 预置声明下发） */
-  strengthLevels: readonly string[]
-  /** 删除模型进行中 */
-  deleting: boolean
-  /** 保存模型设置进行中 */
-  settingsSaving: boolean
-  onDelete: (id: string) => void
-  onSaveSettings: (id: string, settings: Partial<ModelConfig>) => Promise<void>
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const [draft, setDraft] = useState(() => draftFromModel(model, strengthLevels))
-
-  const handleSave = () => {
-    onSaveSettings(modelId, buildModelFields(draft, model))
-  }
-
-  return (
-    <div className="bg-card rounded-lg border px-3 py-2">
-      <div className="flex items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">{model.display_name || modelId}</div>
-          <div className="text-muted-foreground text-xs">
-            {model.provider} / {model.model_name}
-          </div>
-        </div>
-        <Button variant="outline" size="xs" onClick={() => setExpanded((v) => !v)}>
-          <ChevronDown
-            className={`mr-1 h-3 w-3 transition-transform ${expanded ? 'rotate-180' : ''}`}
-          />
-          参数
-        </Button>
-        <Button variant="destructive" size="xs" onClick={() => onDelete(modelId)} disabled={deleting}>
-          {deleting ? '删除中...' : '删除'}
-        </Button>
-      </div>
-      {expanded && (
-        <div className="mt-2 space-y-3 border-t pt-2">
-          <ModelParamsEditor value={draft} onChange={setDraft} levels={strengthLevels} />
-          <div className="flex items-center gap-2">
-            <Button size="xs" onClick={handleSave} disabled={settingsSaving}>
-              {settingsSaving ? '保存中...' : '保存设置'}
-            </Button>
-            <p className="text-muted-foreground text-[10px]">
-              「保持原样」不改动对应字段；未自定义的高级参数维持 yaml 原值
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 /* ============================================ */
-/* 共享子组件 (与 ApiSettingsPage 相同模式)       */
+/* 共享子组件                                    */
 /* ============================================ */
 
 /** 默认模型下拉：选项来自已注册模型；当前值已不在列表中时仍展示（防保存前误丢） */

@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use agentos_core::types::PendingInputSource;
+use agentos_core::types::DispatchRequest;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -40,6 +40,17 @@ pub fn valid_config_id(s: &str) -> bool {
         && !s.contains("..")
 }
 
+/// 声明帧字段的**值**形态校验（ADR-2026-11-17）：非空、长度 ≤ `MAX` 字符、
+/// 无控制字符。与 [`valid_config_id`] 的分工——字段名仍是标识符（防保留键
+/// 碰撞/路径形键），但值类型归声明方：`thinking_strength` 是参数组 JSON 串
+/// （可含 `{}/":,` 等字符），用 config-id 形状校验会把它静默丢掉。
+pub fn valid_frame_field_value(s: &str) -> bool {
+    const MAX_FRAME_FIELD_VALUE_CHARS: usize = 4096;
+    !s.is_empty()
+        && s.chars().count() <= MAX_FRAME_FIELD_VALUE_CHARS
+        && !s.chars().any(char::is_control)
+}
+
 /// 管道分发器——session crate 通过此 trait 把入站消息交给引擎层（api crate 实现）。
 ///
 /// 解耦设计：router 不直接依赖 engine，便于测试用 mock 验证路由正确性。
@@ -47,56 +58,26 @@ pub fn valid_config_id(s: &str) -> bool {
 pub trait PipelineDispatcher: Send + Sync {
     /// 转发用户输入到管道引擎。
     ///
-    /// pipeline_id 是前端消息路由键（后端创建会话时回填），引擎回推流式事件时
-    /// 用它定位前端占位气泡。缺失时引擎可回退 thread_id。
-    ///
-    /// thinking_strength 是前端思考强度（off/low/medium/high，空串=未指定），
-    /// 注入引擎初始状态后由 llm_core 路由到具体模型参数（temperature/max_tokens/
-    /// reasoning_effort）。
-    ///
-    /// state_overlay 是自由 state 注入（GAP-1：chat.send_message 的 `state`
-    /// 参数 + 引擎写入的 lineage 扁平键），在 execution_context 合并点之后、
-    /// 引擎恢复合并之后并入 initial_state 顶层扁平键；WS 前端路径不透传前端
-    /// 自由 overlay，router 仅在帧携带 agent_id 时合成单键 overlay
-    /// `{"agent.id": v}`（消息级执行身份，见下），外加插件 widget 声明
-    /// （`frame_overlay_fields`，2026-10-23 用户裁定：名单制传输、名单源自
-    /// ui_schema widget 的 `frame_field` 键）推导的帧字段单键 overlay。
-    ///
-    /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
-    /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；WS 主会话路径
-    /// 传空串 = 未指定，由 dispatcher 实现侧按线程绑定解析
-    /// （registry 热 → 主管道 state `agent.id` 冷真值 → 默认 "agentos"，F2
-    /// 收敛：sessions.agent_id 降为投影不作读源）。
-    /// 帧显式携带时（2026-09-25）：该槽位仍只作派发簿记，run 执行身份由
-    /// router 合成的 state overlay 落管道 state 持久键 `agent.id` 承载——
-    /// 消息级覆盖，管道后续轮次沿用最后写入值；空串 = 不写键，沿用既有身份。
-    ///
-    /// pipeline_config_id 指定执行管道的配置（config/pipelines/{id}.yaml）：
-    /// 显式指定 = 按需加载编译该配置执行（None = autonomous 缺省路径）。
-    /// router 侧已做形态校验（[`valid_config_id`]），非法帧按缺失传 None。
-    ///
-    /// client_message_id 是前端幂等键（ADR 2026-08-21）：随 user 消息
-    /// metadata 落库并在 GET messages 回显，前端据此对账去重乐观消息。
-    /// 空串 = 无幂等键（触发器注入/旧客户端）。
-    ///
-    /// source 是 pending 输入来源标注（ADR-2026-08-26）：前端=User、
-    /// 触发器=Trigger、任务派发=Task、HTTP=Http、系统=System。入队持久化，
-    /// 前端队列条据此标注来源。
-    #[allow(clippy::too_many_arguments)]
-    async fn dispatch_user_input(
-        &self,
-        thread_id: &str,
-        user_id: &str,
-        content: &str,
-        pipeline_id: &str,
-        thinking_strength: &str,
-        execution_context: Option<&serde_json::Value>,
-        state_overlay: Option<&serde_json::Value>,
-        agent_id: &str,
-        pipeline_config_id: Option<&str>,
-        client_message_id: &str,
-        source: PendingInputSource,
-    ) -> Result<(), String>;
+    /// 请求面收敛为单个 [`DispatchRequest`]（ADR-2026-11-17）——不再有
+    /// 逐字段位置参数（同类型形参错位与「加字段忘接线」两个静默窗口一并消灭）：
+    /// - `pipeline_id` 是前端消息路由键（后端创建会话时回填），实现侧解析出
+    ///   真实路由后回写 request，引擎回推流式事件时用它定位前端占位气泡。
+    /// - `state_overlay` 是派发 overlay（chat.send_message 的 `state` 参数 +
+    ///   路由器合成的帧字段单键 overlay），在引擎恢复合并之后并入
+    ///   initial_state 顶层扁平键。WS 前端路径只合成两类键：帧携带 `agent_id`
+    ///   时的 `{"agent.id": v}`，以及插件 widget 声明
+    ///   （`frame_overlay_fields`，2026-10-23 用户裁定：名单制传输、名单源自
+    ///   ui_schema widget 的 `frame_field` 键）推导的帧字段单键——前端自由
+    ///   overlay 不透传、执行身份与思考强度都走这条声明通道。
+    /// - `execution_context` 是任务级执行上下文（opaque，键归插件声明面）。
+    /// - `pipeline_config_id` 指定执行管道配置（None = autonomous 缺省路径）；
+    ///   router 侧已做形态校验（[`valid_config_id`]），非法帧按缺失传 None。
+    /// - `client_message_id` 是前端幂等键（ADR 2026-08-21）：随 user 消息
+    ///   metadata 落库并在 GET messages 回显，前端据此对账去重乐观消息。
+    ///   空串 = 无幂等键（触发器注入/旧客户端）。
+    /// - `source` 是 pending 输入来源标注（ADR-2026-08-26）：前端=User、
+    ///   触发器=Trigger、任务派发=Task、HTTP=Http、系统=System。
+    async fn dispatch_user_input(&self, request: DispatchRequest) -> Result<(), String>;
 
     /// 帧字段 overlay 名单（名单制传输，2026-10-23 用户裁定）。
     ///
@@ -163,6 +144,22 @@ pub trait PipelineDispatcher: Send + Sync {
         _input_id: &str,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    /// 强制发送通道（2026-11-14）：停当前 running → 投递本条消息 → 触发新一轮。
+    ///
+    /// 与 [`Self::dispatch_user_input`] 的唯一差异是**不排队等 run 边界**：先做
+    /// 引擎层停止（与停止按钮/队列强发共用 `suspend_pipeline_execution` 原语，
+    /// 只发停止信号、不退回待处理队列），再按普通派发投递消息——链忙则本条成
+    /// 为队首等待被链尾 drain 消费，链空闲则直接直跑。
+    ///
+    /// 调用面：任务管理「送消息给下级」（chat.send_message force=true）与前端
+    /// 待发送队列「强制发送」（force_pending_input）走同一停止原语，避免两套
+    /// 「强制」语义漂移。
+    ///
+    /// 默认实现 = 退化为普通派发（mock/降级面无需关心强制语义）。
+    async fn dispatch_force_input(&self, request: DispatchRequest) -> Result<(), String> {
+        self.dispatch_user_input(request).await
     }
 
     /// 激活消息段（多代切换，消息段模型 §2.5 后缀语义）。
@@ -267,11 +264,9 @@ impl InboundRouter {
         // pipeline_id：前端消息路由键，兼容顶层和 data.content 两种位置
         // （与 content 同理）。引擎回推流式事件时用它定位前端占位气泡。
         let pipeline_id = field_or_data(msg, "pipeline_id").unwrap_or("").to_string();
-        // thinking_strength：思考强度（off/low/medium/high），顶层优先、
-        // data 信封兜底（与 pipeline_id 同法）。缺失为空串 = 引擎不覆盖参数。
-        let thinking_strength = field_or_data(msg, "thinking_strength")
-            .unwrap_or("")
-            .to_string();
+        // thinking_strength 不再单独提取（ADR-2026-11-17）：它是 llm_core 声明的
+        // frame_field，走下方声明名单合成的 overlay 通道；空值 = 不写键 → 恢复
+        // 合并继承管道上次选择（重发/回退路径同法）。
         // client_message_id：前端幂等键（ADR 2026-08-21 消息幂等契约）。
         // 随 user 消息 metadata 落库并在 GET messages 回显，前端据此把乐观
         // 消息与权威记录对账去重。顶层优先、data 信封兜底（与 pipeline_id
@@ -290,20 +285,30 @@ impl InboundRouter {
             .filter(|v| v.is_object())
             .or_else(|| msg.get("execution_context").filter(|v| v.is_object()));
         // agent_id：消息级执行身份（用户拍板语义：新开扮演人设 id 就是
-        // agent_id）。顶层优先、data 信封兜底；形态非法（空/含空白/超 128
-        // 字符/含 ".."）一律按缺失处理（忽略不报错——可选提示性字段不得让
-        // 消息投递失败，与 execution_context 非对象按缺失同法）。缺失为空串
+        // agent_id）。顶层优先、data 信封兜底；值守卫与帧字段同款
+        // （[`valid_frame_field_value`]，ADR-2026-11-17：agent.id 随 overlay
+        // 直落持久 state 键，值形态归声明方，不走 config-id 形状），非法值
+        // 静默丢弃不写身份键并 WARN 一行（可选提示性字段不得让消息投递
+        // 失败，与 execution_context 非对象按缺失同法）。缺失为空串
         // = 未指定 → 不写身份键、不合成交道 overlay，管道沿用既有 agent.id
         // （与旧客户端行为逐字节一致）。
-        let agent_id = field_or_data(msg, "agent_id")
-            .filter(|s| valid_config_id(s))
-            .unwrap_or("")
-            .to_string();
+        let agent_id = match field_or_data(msg, "agent_id") {
+            Some(s) if valid_frame_field_value(s) => s.to_string(),
+            Some(s) => {
+                tracing::warn!(
+                    value_chars = s.chars().count(),
+                    "user_input agent_id 形态非法（空/超长/含控制字符），丢弃身份键不入 overlay"
+                );
+                String::new()
+            }
+            None => String::new(),
+        };
         // model_id 等插件声明帧字段：名单制传输（2026-10-23 用户裁定）——插件
         // manifest `frame_overlay_fields` 声明自己消费的帧字段，路由器对名单内
-        // 字段合成单键 overlay（字段名与值同过 config-id 形态守卫，非法按缺失
-        // 忽略不报错——可选提示性字段不得让消息投递失败）；名单外帧字段一律
-        // 不透传（防前端自由注 state）。overlay 随 pending 表落库可审计。
+        // 字段合成单键 overlay（字段名过 config-id 守卫；值过声明值守卫
+        // [`valid_frame_field_value`]——值类型归声明方，如 thinking_strength 是
+        // 参数组 JSON 串，不再被 config-id 形状误解）；名单外帧字段一律不透传
+        // （防前端自由注 state）。overlay 随 pending 表落库可审计。
         let mut declared_fields = self.dispatcher.frame_overlay_fields().await;
         declared_fields.sort();
         declared_fields.dedup();
@@ -318,7 +323,8 @@ impl InboundRouter {
         // （apply_state_overlay）＝消息级覆盖既有持久键，随 final_state 落
         // pipeline_state 表，后续轮次恢复沿用最后写入值；消费方 agent_config_load
         // 按 agent.id 加载 yaml（加载不到回落默认并告警，内核零 agent 知识）；
-        // 插件声明字段（如 llm_core 的 model_id）由各消费插件按自己的解析链消费。
+        // 插件声明字段（如 llm_core 的 model_id / thinking_strength）由各消费
+        // 插件按自己的解析链消费。
         let mut overlay = serde_json::Map::new();
         if !agent_id.is_empty() {
             overlay.insert("agent.id".to_string(), serde_json::json!(agent_id));
@@ -329,7 +335,7 @@ impl InboundRouter {
                 continue;
             }
             if let Some(v) = field_or_data(msg, &field) {
-                if valid_config_id(v) {
+                if valid_frame_field_value(v) {
                     overlay.insert(field, serde_json::json!(v));
                 }
             }
@@ -339,27 +345,19 @@ impl InboundRouter {
         } else {
             Some(serde_json::Value::Object(overlay))
         };
-        match self
-            .dispatcher
-            .dispatch_user_input(
-                &thread_id,
-                user_id,
-                &content,
-                &pipeline_id,
-                &thinking_strength,
-                execution_context,
-                state_overlay.as_ref(),
-                // 空串 = 未指定，agent 解析归 dispatcher 实现侧（线程绑定
-                // registry → 主管道 state agent.id 冷真值 → agentos）；显式值仅作
-                // 派发簿记，执行身份由上面合成的 agent.id overlay 承载。
-                &agent_id,
-                pipeline_config_id.as_deref(),
-                &client_message_id,
-                // WS 入口即前端发送（ADR-2026-08-26 来源标注）。
-                agentos_core::types::PendingInputSource::User,
-            )
-            .await
-        {
+        let request = agentos_core::types::DispatchRequest {
+            thread_id: thread_id.clone(),
+            user_id: user_id.to_string(),
+            pipeline_id: pipeline_id.clone(),
+            content,
+            client_message_id,
+            execution_context: execution_context.cloned(),
+            state_overlay,
+            pipeline_config_id,
+            // WS 入口即前端发送（ADR-2026-08-26 来源标注）。
+            source: agentos_core::types::PendingInputSource::User,
+        };
+        match self.dispatcher.dispatch_user_input(request).await {
             Ok(()) => RouteOutcome::Handled,
             Err(e) => RouteOutcome::Error(e),
         }
@@ -552,22 +550,9 @@ mod user_input_ec_tests {
 
     #[async_trait]
     impl PipelineDispatcher for RecordingDispatcher {
-        async fn dispatch_user_input(
-            &self,
-            _thread_id: &str,
-            _user_id: &str,
-            _content: &str,
-            _pipeline_id: &str,
-            _thinking_strength: &str,
-            execution_context: Option<&Value>,
-            _state_overlay: Option<&Value>,
-            _agent_id: &str,
-            pipeline_config_id: Option<&str>,
-            _client_message_id: &str,
-            _source: PendingInputSource,
-        ) -> Result<(), String> {
-            *self.last_execution_context.lock().unwrap() = execution_context.cloned();
-            *self.last_pipeline_config_id.lock().unwrap() = pipeline_config_id.map(str::to_string);
+        async fn dispatch_user_input(&self, request: DispatchRequest) -> Result<(), String> {
+            *self.last_execution_context.lock().unwrap() = request.execution_context.clone();
+            *self.last_pipeline_config_id.lock().unwrap() = request.pipeline_config_id.clone();
             Ok(())
         }
 

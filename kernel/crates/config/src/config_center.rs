@@ -1,3 +1,4 @@
+// @feature: FP-0.2.CFG 配置中心装载面 | @ci: rust-test
 //! 配置中心（热重载）
 //!
 //! 对应 0.1 的 `src/config/config_center.py ConfigCenter`。

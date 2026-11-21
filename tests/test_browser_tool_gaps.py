@@ -53,6 +53,7 @@ from tool import (  # noqa: E402
 )
 
 from agentos_plugin_sdk import bridge_client as bc  # noqa: E402
+from agentos_plugin_sdk import bridge_gateway as bgw  # noqa: E402
 from agentos_plugin_sdk.bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -94,15 +95,18 @@ class TestExecuteDispatch:
         assert r.success is False
         assert r.error_code == "UNKNOWN_BROWSER_TOOL"
 
-    async def test_missing_token_fails_cleanly(self, monkeypatch, tmp_path):
+    async def test_missing_token_self_generates_then_call_fails(self, monkeypatch, tmp_path):
         monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
         monkeypatch.delenv("AGENTOS_PROJECT_ROOT", raising=False)
-        monkeypatch.setattr(bc, "_find_project_root", lambda: str(tmp_path))  # 空目录无 .env
+        monkeypatch.setattr(bgw, "project_root", lambda: str(tmp_path))  # 可定位根：自生成可落盘
 
-        r = await BrowserTool({}).execute({"_tool_name": "browser_snapshot"})
+        config = {"bridge_base": "http://127.0.0.1:19998", "upstream": "browser", "timeout_secs": 2}
+        r = await BrowserTool(config).execute({"_tool_name": "browser_snapshot"})
 
+        # 新契约：凭据缺失进程内自生成令牌（不再有 BRIDGE_TOKEN_MISSING），
+        # 网关不可达由 BRIDGE_CALL_FAILED 承载
         assert r.success is False
-        assert r.error_code == "BRIDGE_TOKEN_MISSING"
+        assert r.error_code == "BRIDGE_CALL_FAILED"
 
     async def test_unreachable_bridge_maps_to_call_failed(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok"))
@@ -210,6 +214,9 @@ class TestTokenFromDotEnv:
         ],
     )
     def test_token_parsed_from_project_env(self, tmp_path, monkeypatch, raw_line, expected):
+        marker = tmp_path.joinpath(*bgw.GATEWAY_REL)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("# gateway\n", encoding="utf-8")  # project_root 的环境锚点
         (tmp_path / ".env").write_text(f"OTHER=1\n{raw_line}\n# tail comment\n", encoding="utf-8")
         monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
         monkeypatch.setenv("AGENTOS_PROJECT_ROOT", str(tmp_path))
@@ -365,7 +372,36 @@ class TestContainerTransport:
 
         r = c._send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
 
-        assert r == {"ok": False, "status": 0, "body": {"error": "容器内客户端无输出"}}
+        # 空输出契约：docker 内嵌脚本回传无 kind 字段 → _failure_kind 兜底 ambiguous
+        # → 保守不重试（重发可能让非幂等操作双发），报错带不可判语义
+        assert r == {
+            "ok": False,
+            "status": 0,
+            "body": {"error": "容器内客户端无输出（连接状态不可判，未自动重试以免重复执行）"},
+        }
+
+    def test_connect_failure_auto_starts_gateway_and_retries_once(self, monkeypatch):
+        c = self._client(monkeypatch)
+        calls = {"dispatch": 0, "gateway": 0}
+
+        def fake_dispatch(payload):
+            calls["dispatch"] += 1
+            if calls["dispatch"] == 1:
+                return {"ok": False, "status": 0, "body": {"error": "Bridge 不可达", "kind": "connect"}}
+            return {"ok": True, "status": 200, "body": {"result": {"content": []}}}
+
+        def fake_ensure_gateway(base_url, token="", wait_secs=0):
+            calls["gateway"] += 1
+            return base_url
+
+        monkeypatch.setattr(c, "_dispatch", fake_dispatch)
+        monkeypatch.setattr(bc.bridge_gateway, "ensure_gateway", fake_ensure_gateway)
+
+        r = c._send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+
+        # connect 类失败 = 网关生命周期缺位：自动拉起一次后重试（自愈主链）
+        assert r["ok"] is True
+        assert calls == {"dispatch": 2, "gateway": 1}
 
     def test_unparsable_output_reports_snippet(self, monkeypatch):
         c = self._client(monkeypatch)

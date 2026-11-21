@@ -1,6 +1,9 @@
 //! # spill_guard 原生插件（cdylib，大输出兜底）
 //!
-//! 对工具的大输出统一处理：**原文存文件 + UTF-8 安全提取 + 定位符返回**。
+//! 对工具的大输出统一处理：**原文存文件 + UTF-8 安全提取 + 存档路径引导**。
+//! 取回面 = 通用文件工具直读（file_read 分段 / enhanced_search 检索，
+//! ADR 2026-11-18-spill-file-face-direct-read；专用取回工具已退役）；
+//! on_pipeline_end 钩子清理本管道存档目录，全局 max_files 封顶兜底崩溃残留。
 //! 与 tool_core 同 step 组合（pipeline 配置保证排在其后）：
 //!
 //! ```text
@@ -23,7 +26,7 @@
 //! 替换后的小结果。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agentos_native_sdk::{plugin_into_raw, ExecContext, PipelinePlugin};
 use serde_json::{json, Value};
@@ -56,6 +59,35 @@ impl SpillGuard {
             out_buf: std::cell::UnsafeCell::new(String::with_capacity(256 * 1024)),
         }
     }
+
+    /// 生命周期钩子处理（best-effort）：on_pipeline_end 清理该管道的 spill
+    /// 存档目录，其余钩子 no-op。恒返回 "{}"（钩子无状态产出，内核忽略）。
+    fn handle_hook(&self, ectx: &ExecContext, hook: &Value) -> Result<&str, &str> {
+        let name = hook.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let pid = hook
+            .get("tags")
+            .and_then(|t| t.get("pipeline_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if name == "on_pipeline_end" && !pid.trim().is_empty() {
+            let config = ectx.ctx.config_value();
+            // cleanup_on_pipeline_end: false 显式关闭（与原 spill_retrieve 钩子
+            // 同开关语义，默认开）。
+            let opt_out = config
+                .get("spill")
+                .and_then(|s| s.get("cleanup_on_pipeline_end"))
+                .and_then(|v| v.as_bool())
+                == Some(false);
+            if !opt_out {
+                let store = SpillStore::new(base_from_config(&config), false, 6);
+                let _ = store.cleanup(pid);
+            }
+        }
+        let buf = unsafe { &mut *self.out_buf.get() };
+        buf.clear();
+        buf.push_str("{}");
+        Ok(buf.as_str())
+    }
 }
 
 // SAFETY: out_buf 仅在 execute（内核 blocking 线程串行调用，单实例不重入）
@@ -65,6 +97,12 @@ unsafe impl Sync for SpillGuard {}
 
 impl PipelinePlugin for SpillGuard {
     fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
+        // 生命周期钩子语义（hook_json 约定字段，ADR 2026-11-18-spill-file-face-
+        // direct-read）：on_pipeline_end → 清理该管道的 spill 存档目录（原
+        // spill_retrieve 插件的职责，工具移除后随存储所有权迁入本插件）。
+        if let Some(hook) = ectx.ctx.hook_value() {
+            return self.handle_hook(ectx, &hook);
+        }
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
         // run 内部全路径 best-effort：任何存档/解析失败都收敛为空更新（no-op），
@@ -105,7 +143,10 @@ struct SpillConfig {
     base_path: PathBuf,
     compression: bool,
     compression_level: u32,
-    /// 跳过兜底的工具名（默认含 spill_retrieve：防 read→spill→read 循环）。
+    /// 全局存档文件数上限（跨 pipeline；0 = 不限）。超限最老先删（2026-11-18
+    /// 用户裁定：存档要封顶，多了覆盖最老的）。
+    max_files: usize,
+    /// 跳过兜底的工具名（配置豁免面）。
     skip_tools: Vec<String>,
 }
 
@@ -138,20 +179,20 @@ impl SpillConfig {
             .get("semantic_max_line_chars")
             .and_then(|v| v.as_u64())
             .unwrap_or(200) as usize;
-        let base_path = spill
-            .get("base_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("./data/spill");
-        let base_path = resolve_base_path(base_path);
+        let base_path = base_from_config(config);
         let compression = spill
             .get("compression")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let compression_level = spill
             .get("compression_level")
             .and_then(|v| v.as_u64())
             .unwrap_or(6) as u32;
-        let mut skip_tools: Vec<String> = spill
+        let max_files = spill
+            .get("max_files")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as usize;
+        let skip_tools: Vec<String> = spill
             .get("skip_tools")
             .and_then(|v| v.as_array())
             .map(|a| {
@@ -160,9 +201,6 @@ impl SpillConfig {
                     .collect()
             })
             .unwrap_or_default();
-        if !skip_tools.iter().any(|s| s == "spill_retrieve") {
-            skip_tools.push("spill_retrieve".into()); // 防 spill_retrieve 自身大输出 → 取回死循环
-        }
         Some(SpillConfig {
             max_inline_bytes,
             head_fraction,
@@ -172,9 +210,21 @@ impl SpillConfig {
             base_path,
             compression,
             compression_level,
+            max_files,
             skip_tools,
         })
     }
+}
+
+/// base 路径解析（与 SpillConfig 同源默认）。钩子清理路径独立使用——enabled=false
+/// 或配置缺失时也要能按默认 base 清残留。
+fn base_from_config(config: &Value) -> PathBuf {
+    let configured = config
+        .get("spill")
+        .and_then(|s| s.get("base_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("./data/spill");
+    resolve_base_path(configured)
 }
 
 /// 相对 base_path 解析为绝对路径：优先 state 无关的稳定锚点——
@@ -284,6 +334,13 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
         if data.is_null() {
             continue;
         }
+        // 防取回死循环（ADR 2026-11-18）：file_read 直读 spill 存档原文件的
+        // 结果不再兜底——否则「读存档 → 超限再存档 → 引导再读」无限递归。
+        // 识别 = 结果 data 的 file/path 字段落在 spill base 下（best-effort
+        // 前缀比对，未命中时退化为普通 spill，引导语只建议分段读，循环可断）。
+        if tool_name == "file_read" && is_spill_archive_read(data, &cfg.base_path) {
+            continue;
+        }
 
         // 序列化（与 tool_core messages 内容同源：serde_yaml）后按字节判断。
         let Ok(text) = serde_yaml::to_string(data) else {
@@ -321,8 +378,7 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
         let replacement = build_replacement(
             &retained,
             &sem,
-            &spill_ref.locator,
-            &call_id,
+            &spill_ref.absolute_path.to_string_lossy(),
             text.len(),
             cfg.max_inline_bytes,
             cfg.semantic_max_line_chars,
@@ -384,6 +440,10 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
         }
     }
 
+    // 全局文件数封顶（写入发生才需要收敛；跨管道最老先删，兜住崩溃残留）。
+    if spilled_any || full_spilled {
+        store.enforce_max_files(cfg.max_files);
+    }
     if !spilled_any && !full_spilled {
         return HashMap::new();
     }
@@ -398,12 +458,13 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
     updates
 }
 
-/// 组装替换文本：预览（头/省略标记/尾）+ 语义提取块 + 定位符/取回引导。
+/// 组装替换文本：预览（头/省略标记/尾）+ 语义提取块 + 存档路径与直读引导
+/// （ADR 2026-11-18：spill_retrieve 工具退役，agent 经 file_read/enhanced_search
+/// 直接读存档文件，复用成熟文件工具的分段/检索能力）。
 fn build_replacement(
     retained: &RetainedText,
     sem: &semantic::SemanticSummary,
-    locator: &str,
-    call_id: &str,
+    archive_path: &str,
     original_bytes: usize,
     max_inline_bytes: usize,
     semantic_max_line_chars: usize,
@@ -428,11 +489,34 @@ fn build_replacement(
     out.push_str("\n\n── 语义提取 ──\n");
     out.push_str(&semantic::format_block(sem, semantic_max_line_chars));
     out.push_str(&format!(
-        "\n\n📌 完整原文已存档（{original_bytes} 字节，已省略 {} 字节）：\n\
-         调用工具 spill_retrieve(tool_call_id=\"{call_id}\") 取回；存档位置: {locator}。",
+        "\n\n📌 完整原文已存档（{original_bytes} 字节，已省略 {} 字节）：\n{archive_path}\n\
+         查看：file_read 的 offset/limit（或 tail）参数分段读取；检索：enhanced_search 检索该文件。",
         retained.omitted_bytes,
     ));
     out
+}
+
+/// file_read 结果是否读的是 spill 存档本体（防死循环豁免面）。
+///
+/// 路径形态归一（分隔符统一 `/`、去 Windows verbatim `//?/` 前缀、小写比对
+/// ——base 来自内核 cwd、file 字段来自 fs_tools resolve，两侧大小写/前缀形态
+/// 可能不一致）后做目录前缀比对。best-effort。
+fn is_spill_archive_read(data: &Value, base: &Path) -> bool {
+    let Some(path) = data
+        .get("file")
+        .and_then(|v| v.as_str())
+        .or_else(|| data.get("path").and_then(|v| v.as_str()))
+    else {
+        return false;
+    };
+    let norm = |s: &str| {
+        s.replace('\\', "/")
+            .trim_start_matches("//?/")
+            .to_lowercase()
+    };
+    let f = norm(path);
+    let b = norm(&base.to_string_lossy());
+    !b.is_empty() && f.starts_with(&format!("{b}/"))
 }
 
 /// 头尾文本拆分：retainer 返回的是拼接文本，这里按已知预算还原头/尾两段
@@ -596,9 +680,26 @@ mod tests {
             "替换后 {} 字节应 < 2048",
             replacement.len()
         );
-        assert!(replacement.contains("spill_retrieve"), "必须含取回引导");
-        assert!(replacement.contains("call_big1"), "必须含 tool_call_id");
-        assert!(replacement.contains("pipe-test"), "定位符含 pipeline 隔离");
+        // 直读引导（ADR 2026-11-18）：存档绝对路径 + file_read/enhanced_search
+        let archive_path = dir
+            .path()
+            .join("pipe-test")
+            .join("call_big1")
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            replacement.contains(&archive_path),
+            "必须含存档绝对路径: {archive_path}"
+        );
+        assert!(replacement.contains("file_read"), "必须含 file_read 引导");
+        assert!(
+            replacement.contains("enhanced_search"),
+            "必须含 enhanced_search 引导"
+        );
+        assert!(
+            !replacement.contains("spill_retrieve"),
+            "专用取回工具已退役，不得再引用"
+        );
 
         let spill = nr["metadata"]["spill"].as_object().expect("metadata.spill");
         assert_eq!(spill["tool_call_id"], "call_big1");
@@ -879,6 +980,157 @@ mod tests {
         let (r, m) = bash_result("call_skip", &big_output(8));
         let updates = run(&make_state(vec![r], vec![m]), &cfg);
         assert!(updates.is_empty(), "skip_tools 命中 → 透传");
+    }
+
+    /// file_read 结果构造（data.file = 读到的绝对路径；对齐 fs_tools 返回面）。
+    fn file_read_result(call_id: &str, file: &str, content: &str) -> (Value, Value) {
+        let data = json!({ "file": file, "content": content, "lines": 99, "size": content.len() });
+        let result = json!({
+            "tool_name": "file_read",
+            "success": true,
+            "error": null,
+            "data": data,
+            "metadata": null,
+            "duration_ms": 3.0,
+        });
+        let msg = json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": content,
+            "tool_result": {
+                "call_id": call_id,
+                "tool_name": "file_read",
+                "success": true,
+                "error": null,
+                "data": data,
+                "metadata": null,
+                "duration_ms": 3.0,
+            },
+            "seq": 9,
+        });
+        (result, msg)
+    }
+
+    #[test]
+    fn file_read_of_archive_not_respilled() {
+        // 防死循环（ADR 2026-11-18）：file_read 直读存档原文件 → 不再兜底。
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("pipe-test").join("call_arch");
+        let (r, m) = file_read_result("call_r", &archive.to_string_lossy(), &big_output(30));
+        let updates = run(&make_state(vec![r], vec![m]), &test_config(dir.path()));
+        assert!(updates.is_empty(), "读存档本体的结果豁免（防递归 spill）");
+    }
+
+    #[test]
+    fn file_read_of_other_big_file_still_spilled() {
+        // 对照组（防拟合）：file_read 读 base 外的大文件 → 照常兜底。
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap(); // 与 base 无关的目录树
+        let elsewhere = outside.path().join("big.log");
+        let (r, m) = file_read_result("call_r2", &elsewhere.to_string_lossy(), &big_output(30));
+        let updates = run(&make_state(vec![r], vec![m]), &test_config(dir.path()));
+        assert!(
+            updates.contains_key("tool_results"),
+            "base 外大文件读取照常兜底"
+        );
+    }
+
+    #[test]
+    fn archive_path_normalization_tolerates_windows_forms() {
+        // 归一化有区分度输入：verbatim 前缀 + 反斜杠 + 大小写混排仍识别为存档。
+        let base = Path::new("D:/Data/spill");
+        let data = json!({ "file": "\\\\?\\D:\\Data\\Spill\\pipe-1\\call_x" });
+        assert!(is_spill_archive_read(&data, base));
+        let outside = json!({ "file": "\\\\?\\D:\\Data\\spill-other\\call_x" });
+        assert!(!is_spill_archive_read(&outside, base), "兄弟目录不得误判");
+        let no_path = json!({ "content": "no file field" });
+        assert!(!is_spill_archive_read(&no_path, base));
+    }
+
+    #[test]
+    fn max_files_cap_evicts_oldest_on_write() {
+        // 全局封顶集成：预置 2 个老存档（显式老 mtime），再 spill 1 个新文件，
+        // max_files=2 → 最老的预置文件被淘汰。
+        let dir = tempfile::tempdir().unwrap();
+        let store = SpillStore::new(dir.path(), false, 6);
+        store.save("old-pipe", "old1", "ancient").unwrap();
+        store.save("old-pipe", "old2", "older").unwrap();
+        let old_t = std::time::SystemTime::UNIX_EPOCH;
+        for key in ["old1", "old2"] {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.path().join("old-pipe").join(key))
+                .unwrap();
+            f.set_modified(old_t).unwrap();
+        }
+        let mut cfg = test_config(dir.path());
+        cfg["spill"]["max_files"] = json!(2);
+        let (r, m) = bash_result("call_new", &big_output(8));
+        run(&make_state(vec![r], vec![m]), &cfg);
+        assert!(
+            !dir.path().join("old-pipe").join("old1").exists(),
+            "最老文件被淘汰（目录序确定性）"
+        );
+        assert!(
+            dir.path().join("old-pipe").join("old2").exists(),
+            "次新保留"
+        );
+        assert!(
+            dir.path().join("pipe-test").join("call_new").exists(),
+            "新存档在"
+        );
+    }
+
+    #[test]
+    fn hook_on_pipeline_end_cleans_archive_dir() {
+        // on_pipeline_end 钩子（经 execute 的 hook_json 约定字段）：清理该管道
+        // 存档目录，返回 "{}"；其它管道不受影响。
+        let dir = tempfile::tempdir().unwrap();
+        let store = SpillStore::new(dir.path(), false, 6);
+        store.save("pipe-a", "k1", "x").unwrap();
+        store.save("pipe-b", "k2", "y").unwrap();
+        let guard = SpillGuard::new();
+        let ectx_hook = ExecContext {
+            ctx: agentos_native_sdk::PluginCtx {
+                state_json: "{}".to_string(),
+                config_json: serde_json::to_string(&test_config(dir.path())).unwrap(),
+                hook_json: Some(
+                    r#"{"name":"on_pipeline_end","tags":{"pipeline_id":"pipe-a"}}"#.into(),
+                ),
+                ..Default::default()
+            },
+            host: None,
+        };
+        let out = guard.execute(&ectx_hook).expect("hook execute ok");
+        assert_eq!(out, "{}", "钩子无状态产出");
+        assert!(!dir.path().join("pipe-a").exists(), "目标管道目录已清理");
+        assert!(
+            dir.path().join("pipe-b").join("k2").exists(),
+            "他人管道不动"
+        );
+    }
+
+    #[test]
+    fn hook_unknown_name_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SpillStore::new(dir.path(), false, 6);
+        store.save("pipe-a", "k1", "x").unwrap();
+        let guard = SpillGuard::new();
+        let ectx = ExecContext {
+            ctx: agentos_native_sdk::PluginCtx {
+                state_json: "{}".to_string(),
+                config_json: "{}".to_string(),
+                hook_json: Some(r#"{"name":"on_load","tags":{}}"#.into()),
+                ..Default::default()
+            },
+            host: None,
+        };
+        let out = guard.execute(&ectx).expect("hook execute ok");
+        assert_eq!(out, "{}");
+        assert!(
+            dir.path().join("pipe-a").join("k1").exists(),
+            "非 end 钩子不清理"
+        );
     }
 
     #[test]

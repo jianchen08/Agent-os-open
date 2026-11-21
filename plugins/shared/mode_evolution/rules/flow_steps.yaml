@@ -1,0 +1,110 @@
+# 回顾工作流步骤枚举声明（B 部类物料：只允许用户修改，进化 agent 只读）
+#
+# 定位：T1–T8 是 rules/evolution_flow.md 里的顺序协议（给人/LLM 读的叙述文本）；
+# 本文件是它的**机器可读投影**——步骤名、前后继、门禁标记、驱动工具、回边、
+# 拒绝类别归属。规则正文改动时同步改这里（人工保持同源，不从 md 反向解析）。
+#
+# 消费面（真实消费，不是声明即止）：
+#   1. workflow_ledger.step_catalog()  → 步骤定义；step 名不在本表即拒写节点
+#   2. workflow_ledger.reject_step()   → reject category 落到哪个步骤节点
+#   3. aggregate.workflow_projection() → 步骤定义与回边直接进面板快照 workflow.defs/edges
+#   4. 面板 evolution_panel.html        → 只按快照里的 defs/edges 布点，不写死坐标
+#
+# drives 是「哪次真实工具调用产生该步骤节点」的权威说明；节点由工具 handler
+# 落账驱动，不靠 agent 提示词自觉上报（上报必漂移，且等于自证）。
+version: 1
+source: rules/evolution_flow.md
+
+steps:
+  - step: T1
+    title: 测量
+    upstream: []
+    downstream: [T2]
+    is_gate: false
+    drives: ["eval_query:suite", "eval_summarize"]
+  - step: T2
+    title: 归因
+    upstream: [T1]
+    downstream: [T3]
+    is_gate: false
+    drives: ["review_improvement", "traces:review_improvement"]
+  - step: T3
+    title: 提案
+    upstream: [T2]
+    downstream: [T4]
+    is_gate: true
+    drives: ["proposal:submit"]
+  - step: T4
+    title: 试跑
+    upstream: [T3]
+    downstream: [T5]
+    is_gate: false
+    drives: ["eval_summarize:treatment", "proposal:reject:prediction_miss"]
+  - step: T5
+    title: 裁决
+    upstream: [T4]
+    downstream: [T6]
+    is_gate: true
+    drives: ["eval_run_heldout", "proposal:reject:heldout_gap"]
+  - step: T6
+    title: 晋升/回滚
+    upstream: [T5]
+    downstream: [T6.5]
+    is_gate: true
+    drives: ["proposal:apply", "proposal:reject:user_veto"]
+  - step: T6.5
+    title: 保留率复验
+    upstream: [T6]
+    downstream: [T7]
+    is_gate: true
+    drives: ["eval_summarize:sentry"]
+  - step: T7
+    title: 记忆回填
+    upstream: [T6.5]
+    downstream: [T8]
+    is_gate: false
+    drives: ["memory", "traces:memory"]
+  - step: T8
+    title: 循环决策
+    upstream: [T7]
+    downstream: []        # 出口分支（回 T1 / 回 T3）是回边，见下方 edges
+    is_gate: false
+    drives: ["eval_query:health"]
+
+# 回边（面板按 kind=back 画虚线）：与 rules/evolution_flow.md T5/T6.5/T8 的出口一致
+edges:
+  - from: T5
+    to: T3
+    kind: back
+    label: 裁决拒 → 重提案
+  - from: T6.5
+    to: T1
+    kind: back
+    label: 保留率退化 → 循环挂起
+  - from: T8
+    to: T1
+    kind: back
+    label: 假设耗尽 → 重测
+  - from: T8
+    to: T3
+    kind: back
+    label: 预算内 → 再提案
+
+# proposal(action='reject') 的 category → 归属步骤（裁决发生在哪一步就落哪一步的节点）
+reject_steps:
+  prediction_miss: T4
+  heldout_gap: T5
+  sentry_regression: T6.5
+  user_veto: T6
+  external_cause: T2
+  harness_defect: T2
+  system_fault: T2
+  judgment_failure: T2
+  other: T2
+
+# 工作流出口（close_reason 枚举）；未判定出具体出口时显式 unknown，不编造
+close_reasons: [hypothesis_exhausted, budget_exhausted, vetoed, breaker,
+                p1_retention_fail, user_stop, unknown]
+
+# 节点状态枚举（无事件 = 不渲染节点；"未发生"与"未完成"是两种事实）
+node_statuses: [running, done, failed, skipped, unavailable]

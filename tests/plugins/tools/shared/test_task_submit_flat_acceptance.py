@@ -456,13 +456,17 @@ class TestFlatDispatchEndToEnd:
 
     @pytest.mark.asyncio
     async def test_schema_description_promotes_flat_form_only(self, mod: Any) -> None:
-        """工具 schema 的 acceptance_criteria description 只写白话形态+用户示例。"""
+        """工具 schema 的 acceptance_criteria description 只写白话形态+用户示例。
+
+        expect 不再广告（ADR 2026-11-11：LLM 工具面不喂语义评估路线，commit
+        859c574c12）——描述只保留 files/command 两白话字段与示例。
+        """
         definition = mod.TaskSubmitTool.get_tool_definition()
         prop = definition.input_schema["properties"]["acceptance_criteria"]
         assert "files" in prop["description"]
-        assert "expect" in prop["description"]
         assert "command" in prop["description"]
         assert "chapters/chapter_025.md" in prop["description"]
+        assert "- expect" not in prop["description"]
         assert "additionalProperties" not in prop
         # plugin.json 声明同口径（双面同步，防漂移）
         import json as _json

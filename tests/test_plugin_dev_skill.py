@@ -11,7 +11,11 @@
   tool_ids 未登记判 fail 并给修复指引；doctor verdict 汇总硬检查；
 - debug_tool：http.handle 型插件经 server.py 模块级 handle 直调；
   入参不匹配实现签名显式报错；
-- spawn_test_kernel.spawn：kernel_bin 直指时绕过仓内产物解析（装机自举车道）。
+- spawn_test_kernel.spawn：kernel_bin 直指时绕过仓内产物解析（装机自举车道）；
+- verify_plugin 三根验证实例（ADR 2026-11-07 跟刀）：Tier2 走干净视图、
+  Tier1 走全量 Tier1 视图、运行时副本断言防同 id 旧副本假绿；
+- verify_host 宿主编排：后端 keep_running 实例被前端探针复用、统一 stop、
+  合并证据（WSL interop 命令转发的宿主侧入口）。
 """
 
 from __future__ import annotations
@@ -23,8 +27,10 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skills" / "plugin-dev" / "scripts"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLKIT_SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "skill-dev-toolkit" / "scripts"
 
 
@@ -42,6 +48,7 @@ plugin_doctor = _load("plugin_doctor")
 debug_tool = _load("debug_tool")
 spawn_test_kernel = _load("spawn_test_kernel", TOOLKIT_SCRIPTS)
 verify_plugin = _load("verify_plugin")
+verify_host = _load("verify_host")
 
 pytestmark = pytest.mark.unit
 
@@ -324,10 +331,449 @@ def test_login_token_missing_password_raises(tmp_path: Path) -> None:
 
 
 def test_build_kernel_env_merges_env_extra(tmp_path: Path) -> None:
-    """env_extra 合并进内核环境（AGENTOS_USER_PLUGINS_DIR 承载面）。"""
+    """env_extra 合并进内核环境（显式调用方变量最后赢）。"""
     env = spawn_test_kernel.build_kernel_env(
         19999, tmp_path / "k.db", "pw", base={"AGENTOS_USER_PLUGINS_DIR": str(tmp_path)}
     )
     assert env["AGENTOS_USER_PLUGINS_DIR"] == str(tmp_path)
     assert env["AGENTOS_KERNEL_PORT"] == "19999"
     assert env["AGENTOS_ADMIN_PASSWORD"] == "pw"
+
+
+# ── 第三刀：分级单副本跟刀（三根验证实例 + 假绿防线，2026-11-11） ─────────
+
+def _fake_runtime(tmp_path: Path) -> tuple[Path, Path]:
+    """假仓库形态：config/kernel/plugin_tiers.yaml + plugins/shared（Tier1+共享件）。"""
+    workspace = tmp_path / "repo"
+    kernel_cfg = workspace / "config" / "kernel"
+    kernel_cfg.mkdir(parents=True)
+    (kernel_cfg / "plugin_tiers.yaml").write_text(
+        "tier1:\n"
+        "  safety_plugins:\n"
+        "    - approval_service\n"
+        "  shared_modules:\n"
+        "    - _libs\n",
+        encoding="utf-8",
+    )
+    base = workspace / "plugins" / "shared"
+    (base / "_libs").mkdir(parents=True)
+    approval = base / "approval"
+    approval.mkdir()
+    (approval / "plugin.json").write_text(
+        json.dumps({"id": "approval_service", "version": "1.0.0"}),
+        encoding="utf-8",
+    )
+    return workspace, base
+
+
+def _staging_plugin(parent: Path, plugin_id: str, version: str = "0.1.0") -> Path:
+    plugin_dir = parent / plugin_id
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({
+            "id": plugin_id, "version": version,
+            "capabilities": {"tools": []},
+        }),
+        encoding="utf-8",
+    )
+    return plugin_dir
+
+
+def test_resolve_config_root_kernel_bin_resources_layout(tmp_path: Path) -> None:
+    """装机形态：kernel_bin 在 <install>/resources/kernel/ 下 → 配置根取同级 config。"""
+    workspace, _ = _fake_runtime(tmp_path)
+    kernel_bin = tmp_path / "install" / "resources" / "kernel" / "agentos-kernel.exe"
+    kernel_bin.parent.mkdir(parents=True)
+    kernel_bin.write_text("", encoding="utf-8")
+    resources_config = tmp_path / "install" / "resources" / "config"
+    (resources_config / "kernel").mkdir(parents=True)
+    (resources_config / "kernel" / "plugin_tiers.yaml").write_text(
+        "tier1:\n  safety_plugins:\n    - approval_service\n", encoding="utf-8"
+    )
+    assert verify_plugin.resolve_config_root(workspace, kernel_bin=str(kernel_bin)) == resources_config.resolve()
+
+
+def test_resolve_config_root_missing_manifest_raises(tmp_path: Path) -> None:
+    with pytest.raises(verify_plugin.VerifyError, match="plugin_tiers.yaml"):
+        verify_plugin.resolve_config_root(tmp_path / "empty")
+
+
+def test_read_tier1_ids_reads_safety_plugins(tmp_path: Path) -> None:
+    workspace, _ = _fake_runtime(tmp_path)
+    assert verify_plugin.read_tier1_ids(workspace / "config") == {"approval_service"}
+
+
+def test_build_instance_config_tier2_routes_to_clean_view(tmp_path: Path) -> None:
+    """Tier2：tier1/shared 指内置根，tier2 指只含被测插件的干净视图。"""
+    workspace, base = _fake_runtime(tmp_path)
+    staged = _staging_plugin(tmp_path / "staging", "demo_tool")
+    work = tmp_path / "work"
+    work.mkdir()
+    cfg = verify_plugin.build_instance_config(
+        staged, "demo_tool", base, workspace / "config", work
+    )
+    assert cfg["tier"] == "tier2"
+    assert cfg["tier1_root"] == base
+    assert cfg["shared_root"] == base
+    assert cfg["tier2_root"] == work / ".verify_tier2_view"
+    assert (cfg["tier2_root"] / "demo_tool" / "plugin.json").is_file()
+    data = yaml.safe_load(cfg["path"].read_text(encoding="utf-8"))
+    assert data == {
+        "schema": 1,
+        "tier1_root": str(base),
+        "tier2_root": str(work / ".verify_tier2_view"),
+        "shared_root": str(base),
+    }
+
+
+def test_build_instance_config_tier1_view_carries_all_tier1(tmp_path: Path) -> None:
+    """Tier1：视图必须含清单内全部 Tier1（守卫拒启缺席），被测件替换为 staging。"""
+    workspace, base = _fake_runtime(tmp_path)
+    staged = _staging_plugin(tmp_path / "staging", "approval_service", version="1.0.1")
+    work = tmp_path / "work"
+    work.mkdir()
+    cfg = verify_plugin.build_instance_config(
+        staged, "approval_service", base, workspace / "config", work
+    )
+    assert cfg["tier"] == "tier1"
+    view = cfg["tier1_root"]
+    assert (view / "approval" / "plugin.json").is_file()
+    runtime_manifest = json.loads(
+        (view / "approval" / "plugin.json").read_text(encoding="utf-8")
+    )
+    assert runtime_manifest["version"] == "1.0.1"  # 指向 staging 而非内置旧版
+    assert cfg["tier2_root"].is_dir()
+    assert list(cfg["tier2_root"].iterdir()) == []
+
+
+def test_loaded_copy_rejects_foreign_copy_and_accepts_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """假绿防线：同 id 旧副本（内置根路径）必须 fail，视图内路径 + 版本一致才 pass。"""
+    view = tmp_path / "view"
+    (view / "demo_tool").mkdir(parents=True)
+    foreign = tmp_path / "repo" / "plugins" / "shared" / "demo_tool" / "plugin.json"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("{}", encoding="utf-8")
+
+    def _payload(path: Path, version: str) -> dict:
+        return {"manifest": {"plugins": [{
+            "plugin_id": "demo_tool", "version": version, "tier": "tier2",
+            "path": str(path), "source_root": "tier1",
+        }]}}
+
+    def _fake_get(payload: dict):
+        def _inner(*_args: object, **_kwargs: object) -> dict:
+            return payload
+        return _inner
+
+    monkeypatch.setattr(
+        verify_plugin, "http_get_json", _fake_get(_payload(foreign, "0.1.0"))
+    )
+    foreign_check = verify_plugin.check_loaded_copy(
+        "http://x", "demo_tool", "0.1.0", view
+    )
+    assert foreign_check["pass"] is False
+
+    staged_path = view / "demo_tool" / "plugin.json"
+    monkeypatch.setattr(
+        verify_plugin, "http_get_json", _fake_get(_payload(staged_path, "0.1.0"))
+    )
+    staged_check = verify_plugin.check_loaded_copy(
+        "http://x", "demo_tool", "0.1.0", view
+    )
+    assert staged_check["pass"] is True
+
+    # 路径对但版本不符（视图里不是本次 staging 的版本）同样 fail
+    monkeypatch.setattr(
+        verify_plugin, "http_get_json", _fake_get(_payload(staged_path, "0.0.9"))
+    )
+    stale_version = verify_plugin.check_loaded_copy(
+        "http://x", "demo_tool", "0.1.0", view
+    )
+    assert stale_version["pass"] is False
+
+
+def test_path_is_under_keeps_junction_view_path(tmp_path: Path) -> None:
+    """视图 junction 的运行时路径按视图归属判（resolve 会把链接还原成 staging 真身）。"""
+    real = tmp_path / "staging" / "demo_tool"
+    real.mkdir(parents=True)
+    view = tmp_path / "view"
+    view.mkdir()
+    verify_plugin._make_junction(view / "demo_tool", real)
+    assert verify_plugin._path_is_under(str(view / "demo_tool"), view) is True
+    assert verify_plugin._path_is_under(str(view / "demo_tool"), real) is False
+
+
+def test_check_tools_visible_empty_is_not_applicable() -> None:
+    """功能性插件（tools==[]）工具面断言不适用——不应因「0 个工具」判红。"""
+    check = verify_plugin.check_tools_visible("http://127.0.0.1:1", [])
+    assert check["pass"] is True
+    assert "不适用" in check["detail"]
+
+
+def test_login_tokens_returns_access_and_refresh() -> None:
+    """登录响应解析出 refresh_token（浏览器车道注入 localStorage 的凭据）。"""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Login(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.dumps({
+                "access_token": "acc-123",
+                "refresh_token": "ref-456",
+                "token_type": "bearer",
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Login)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    try:
+        tokens = verify_plugin.login_tokens(f"http://127.0.0.1:{port}", "pw")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert tokens == {"access_token": "acc-123", "refresh_token": "ref-456"}
+
+
+# ── 宿主验证编排（命令转发 + 前端浏览器车道，2026-11-11） ─────────────────
+
+def _fake_spawn_module(stop_calls: list[str]):
+    class _Spawn:
+        @staticmethod
+        def spawn(*_args: object, **_kwargs: object) -> dict:
+            return {
+                "port": 43123, "run_id": "run_x",
+                "admin_password": "pw", "scratch_root": "scratch",
+            }
+
+        @staticmethod
+        def stop(scratch_dir: Path, run_id: str | None = None) -> dict:
+            stop_calls.append(f"{scratch_dir}:{run_id}")
+            return {"stopped": True}
+
+    return _Spawn
+
+
+def test_verify_plugin_keep_running_skips_cleanup(tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """keep_running=True 保留实例交前端车道；默认路径必须 stop（防双停/泄漏）。"""
+    staging = _staging_plugin(tmp_path / "staging", "demo_tool")
+    stop_calls: list[str] = []
+    fake_spawn = _fake_spawn_module(stop_calls)
+    instance_cfg = {
+        "tier": "tier2",
+        "path": tmp_path / "instance.yaml",
+        "tier1_root": tmp_path / "base",
+        "tier2_root": tmp_path / "view",
+        "shared_root": tmp_path / "base",
+        "expected_runtime_root": tmp_path / "view",
+    }
+    work_dirs: list[Path] = []
+
+    def _fake_build(*args: object, **_kwargs: object) -> dict:
+        work_dirs.append(Path(str(args[4])))
+        return instance_cfg
+
+    monkeypatch.setattr(verify_plugin, "_load_spawn_test_kernel", lambda: fake_spawn)
+    monkeypatch.setattr(verify_plugin, "resolve_config_root", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(verify_plugin, "resolve_base_plugins_root", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(verify_plugin, "build_instance_config", _fake_build)
+    monkeypatch.setattr(
+        verify_plugin, "login_tokens",
+        lambda *_a, **_k: {"access_token": "t", "refresh_token": "r"},
+    )
+    monkeypatch.setattr(
+        verify_plugin, "check_tools_visible",
+        lambda *_a, **_k: {"name": "tools_visible", "pass": True, "detail": "stub"},
+    )
+    monkeypatch.setattr(
+        verify_plugin, "check_loaded_copy",
+        lambda *_a, **_k: {"name": "loaded_copy", "pass": True, "detail": "stub"},
+    )
+    monkeypatch.setattr(
+        verify_plugin, "check_schema_declared",
+        lambda *_a, **_k: {"name": "schema_declared", "pass": True, "detail": "stub"},
+    )
+
+    kept = verify_plugin.verify_plugin(staging, tmp_path, keep_running=True)
+    assert kept["instance"]["port"] == 43123
+    assert kept["instance"]["admin_password"] == "pw"  # 内存里保留给前端车道
+    disk = json.loads((staging / "verify_evidence.json").read_text(encoding="utf-8"))
+    assert disk["instance"]["admin_password"] == "***"  # 落盘必须脱敏
+    assert stop_calls == []
+    # WSL 转发形态：插件路径可能是相对值——instance.yaml 三根必须已钉绝对路径
+    # （相对值会被内核按配置文件目录二次拼接，启动守卫直接拒启，2026-11-11 实测）
+    monkeypatch.chdir(tmp_path)
+    verify_plugin.verify_plugin(Path("staging") / "demo_tool", tmp_path, keep_running=True)
+    assert work_dirs
+    assert all(path.is_absolute() for path in work_dirs)
+
+    stopped = verify_plugin.verify_plugin(staging, tmp_path)
+    assert stop_calls == [f"{staging.parent / '.verify_scratch'}:run_x"]
+    assert "instance" not in stopped
+
+
+def test_resolve_frontend_dist_prefers_kernel_bin_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """装机形态：kernel_bin 在 resources/kernel 下 → 前端 dist 取 resources/frontend/dist。"""
+    monkeypatch.setattr(verify_host, "_REPO_ROOT", tmp_path / "no_repo")
+    workspace = tmp_path / "repo"
+    (workspace / "frontend" / "dist").mkdir(parents=True)
+    (workspace / "frontend" / "dist" / "index.html").write_text("<html/>", encoding="utf-8")
+    kernel_bin = tmp_path / "install" / "resources" / "kernel" / "agentos-kernel.exe"
+    kernel_bin.parent.mkdir(parents=True)
+    kernel_bin.write_text("", encoding="utf-8")
+    installed_dist = tmp_path / "install" / "resources" / "frontend" / "dist"
+    installed_dist.mkdir(parents=True)
+    (installed_dist / "index.html").write_text("<html/>", encoding="utf-8")
+    resolved = verify_host.resolve_frontend_dist(workspace, str(kernel_bin))
+    assert resolved == installed_dist.resolve()
+    with pytest.raises(verify_host.HostVerifyError, match="index.html"):
+        verify_host.resolve_frontend_dist(tmp_path / "empty")
+
+
+def test_verify_host_single_instance_backend_then_frontend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """后端 keep_running 的实例被前端探针复用，最后统一 stop，证据合并落盘。"""
+    plugin_dir = _staging_plugin(tmp_path / "staging", "demo_page")
+    stop_calls: list[str] = []
+    probe_calls: list[dict] = []
+    probes: list[dict] = []
+
+    class _FakeVP:
+        VerifyError = verify_plugin.VerifyError
+
+        @staticmethod
+        def read_declared_tools(_plugin_dir: Path) -> dict:
+            return {"id": "demo_page", "version": "0.1.0", "tools": []}
+
+        @staticmethod
+        def _load_spawn_test_kernel():
+            return _fake_spawn_module(stop_calls)
+
+        @staticmethod
+        def redact_instance_secret(evidence: dict) -> dict:
+            return verify_plugin.redact_instance_secret(evidence)
+
+        @staticmethod
+        def verify_plugin(*_a: object, **_k: object) -> dict:
+            return {
+                "plugin_id": "demo_page", "all_pass": True,
+                "checks": [{"name": "tools_visible", "pass": True}],
+                "instance": {
+                    "port": 43123, "run_id": "run_x", "admin_password": "s3cret",
+                    "scratch_root": str(tmp_path / "scratch"),
+                },
+            }
+
+    def _fake_probe(plugin_dir: Path, workspace: Path, instance: dict,
+                    dist_dir: Path, **_kwargs: object) -> dict:
+        probe_calls.append({"plugin": plugin_dir, "instance": instance, "dist": dist_dir})
+        if probes:
+            return probes.pop(0)
+        return {
+            "checks": [{"name": "frontend_app_shell", "pass": True, "detail": "stub"}],
+            "screenshots": ["shot.png"], "error": None,
+        }
+
+    monkeypatch.setattr(verify_host, "_load_verify_plugin", lambda: _FakeVP)
+    monkeypatch.setattr(verify_host, "run_frontend_probe", _fake_probe)
+    monkeypatch.setattr(
+        verify_host, "resolve_frontend_dist", lambda *_a, **_k: tmp_path / "dist"
+    )
+
+    evidence = verify_host.verify_host(plugin_dir, tmp_path, frontend=True)
+    assert evidence["all_pass"] is True
+    assert probe_calls[0]["instance"]["port"] == 43123  # 复用后端实例
+    assert stop_calls == [f"{tmp_path / 'scratch'}:run_x"]
+    evidence_file = plugin_dir / "verify_host_evidence.json"
+    assert evidence_file.is_file()
+    assert "s3cret" not in json.dumps(evidence, ensure_ascii=False)
+    assert "s3cret" not in evidence_file.read_text(encoding="utf-8")
+    assert "***" in evidence_file.read_text(encoding="utf-8")
+    frontend_check = next(c for c in evidence["checks"] if c["name"] == "frontend_app_shell")
+    assert frontend_check["pass"] is True
+
+    # 前端探针自身报错 → 合并证据记红（不吞）
+    probes.append({"checks": [], "error": "probe boom", "screenshots": []})
+    failed = verify_host.verify_host(plugin_dir, tmp_path, frontend=True)
+    assert failed["all_pass"] is False
+    probe_check = next(c for c in failed["checks"] if c["name"] == "frontend_probe")
+    assert probe_check["pass"] is False
+
+
+def test_run_frontend_probe_writes_config_and_reads_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """探针配置交付内核地址/口令/dist，result.json 回读并带 exit_code。"""
+    plugin_dir = _staging_plugin(tmp_path / "staging", "demo_page")
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd: list[str], **_kwargs: object):
+        captured["cmd"] = cmd
+        out_dir = plugin_dir / "verify_frontend_evidence"
+        (out_dir / "result.json").write_text(
+            json.dumps({"checks": [{"name": "frontend_app_shell", "pass": True}],
+                        "screenshots": [], "error": None}),
+            encoding="utf-8",
+        )
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Proc()
+
+    monkeypatch.setattr(verify_host.subprocess, "run", _fake_run)
+    monkeypatch.setattr(verify_host, "resolve_node", lambda _explicit=None: "node")
+
+    result = verify_host.run_frontend_probe(
+        plugin_dir, tmp_path, {"port": 43123, "admin_password": "pw"},
+        tmp_path / "dist",
+    )
+    config = json.loads(
+        (plugin_dir / "verify_frontend_evidence" / "probe_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert config["kernel_base"] == "http://127.0.0.1:43123"
+    assert config["admin_password"] == "pw"
+    assert config["dist_dir"] == str(tmp_path / "dist")
+    assert result["exit_code"] == 0
+    assert result["checks"][0]["name"] == "frontend_app_shell"
+    assert captured["cmd"][0] == "node"
+
+
+def test_spawn_delivers_instance_config_channels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """spawn 具名参数落到内核环境（分级单副本三根载体）。"""
+    captured: dict[str, str] = {}
+
+    def _fake_popen(*_args: object, **kwargs: object) -> None:
+        captured.update(kwargs["env"])  # type: ignore[arg-type]
+        raise spawn_test_kernel.TestKernelError("stub stop")
+
+    monkeypatch.setattr(spawn_test_kernel.subprocess, "Popen", _fake_popen)
+    fake_bin = tmp_path / "agentos-kernel.exe"
+    fake_bin.write_text("", encoding="utf-8")
+    with pytest.raises(spawn_test_kernel.TestKernelError):
+        spawn_test_kernel.spawn(
+            tmp_path, kernel_bin=str(fake_bin), instance_config="i.yaml",
+            config_root="cfg", user_root="user",
+        )
+    assert captured["AGENTOS_INSTANCE_CONFIG"] == "i.yaml"
+    assert captured["AGENTOS_CONFIG_ROOT"] == "cfg"
+    assert captured["AGENTOS_USER_ROOT"] == "user"

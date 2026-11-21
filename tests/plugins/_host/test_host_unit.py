@@ -329,7 +329,9 @@ class TestMemberLoadIsolation:
         make_member("system", "healthy", "healthy_id")
         served: list[CohostServer] = []
 
-        async def _fake_serve(server: CohostServer, stall_secs: float) -> None:
+        async def _fake_serve(
+            server: CohostServer, stall_secs: float, *, host_name: str | None = None
+        ) -> None:
             served.append(server)
 
         monkeypatch.setattr(host, "_serve", _fake_serve)
@@ -439,3 +441,60 @@ class TestCohostServerAggregation:
         """成员 id 含点号导致聚合工具名冲突 → 构造期 fail-fast。"""
         with pytest.raises(ValueError, match="conflict"):
             CohostServer({"a": _make_member_plugin("a", tool_name="b.echo"), "a.b": _make_member_plugin("a.b")})
+
+
+# ── 共享 venv 身份自检 ───────────────────────────────────
+
+
+class TestSharedVenvActive:
+    """引导期共享 venv 自检：venv 未生效时补挂 site-packages，版本不符拒绝补挂。
+
+    动机（2026-11-10 装机实证）：venv 缺 pyvenv.cfg 时解释器静默退回外部
+    Python，成员依赖退化成残缺模块（aiohttp 命名空间包）→ sync_agent 上行
+    永久失败 → outbox 触顶 → 事件循环阻塞 → watchdog 自杀循环。
+    """
+
+    def test_no_venv_dir_is_noop(self, tmp_path: Path) -> None:
+        path: list[str] = []
+        assert host._ensure_shared_venv_active(tmp_path / "absent", path=path) is False
+        assert path == []
+
+    def test_site_packages_already_present_is_noop(self, tmp_path: Path) -> None:
+        """venv 已生效（site-packages 在 path 上）→ 不重复插入。"""
+        site = tmp_path / "Lib" / "site-packages"
+        site.mkdir(parents=True)
+        path = [str(site)]
+        assert host._ensure_shared_venv_active(tmp_path, path=path) is False
+        assert path == [str(site)]
+
+    def test_missing_pyvenv_cfg_self_heals(self, tmp_path: Path) -> None:
+        """venv 目录在但未生效（缺 pyvenv.cfg 的实证形态）→ 补挂到队首。"""
+        site = tmp_path / "Lib" / "site-packages"
+        site.mkdir(parents=True)
+        path = ["/elsewhere"]
+        assert host._ensure_shared_venv_active(tmp_path, path=path) is True
+        assert path[0] == str(site.resolve())
+
+    def test_posix_layout_detected(self, tmp_path: Path) -> None:
+        """POSIX 形态 lib/pythonX.Y/site-packages 同样识别。"""
+        site = tmp_path / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        path: list[str] = []
+        assert host._ensure_shared_venv_active(tmp_path, path=path) is True
+        assert path == [str(site.resolve())]
+
+    def test_version_mismatch_refuses_injection(self, tmp_path: Path) -> None:
+        """声明版本与解释器不一致 → 拒绝补挂（ABI 不匹配会变成更难查的导入崩溃）。"""
+        (tmp_path / "Lib" / "site-packages").mkdir(parents=True)
+        (tmp_path / "pyvenv.cfg").write_text(
+            "home = C:\python\nversion_info = 3.99.0\n", encoding="utf-8"
+        )
+        path: list[str] = []
+        assert host._ensure_shared_venv_active(tmp_path, path=path) is False
+        assert path == []
+
+    def test_declared_version_parsed(self, tmp_path: Path) -> None:
+        """pyvenv.cfg 版本解析：缺文件返回 None，合法行返回二元组。"""
+        assert host._declared_venv_version(tmp_path) is None
+        (tmp_path / "pyvenv.cfg").write_text("version_info = 3.12.12\n", encoding="utf-8")
+        assert host._declared_venv_version(tmp_path) == (3, 12)

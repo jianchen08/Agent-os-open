@@ -1,23 +1,36 @@
-"""MCP 授权协议原语（RFC 9728 / RFC 8414 / OIDC Discovery / RFC 7591 / OAuth 2.1 + PKCE / RFC 8707 / RFC 9207）。
+"""MCP 授权协商薄适配（RFC 9728 / RFC 8414 / OIDC Discovery / RFC 7591 / RFC 9207）。
+
+CA-P0 协议机退役自研（2026-11-19）：OAuth 通用机制（PKCE / state / 授权 URL /
+token 兑换 / 刷新 / 客户端注册请求体）已整体迁往 :mod:`oauth_engine`（Authlib
+唯一实现面），本模块按签名原样 re-export 保持调用面（``flow.py`` 与既有测试的
+import 面不变）；自身退化为 **MCP 特有协商的薄适配**——发现候选编排、元数据
+文档校验、WWW-Authenticate 指针、动态注册的 HTTP 编排与错误码翻译。token 兑换
+/刷新零手搓 HTTP（审计锚：``tests/test_oauth_engine_authlib.py``）。
 
 纯协议层：只做 HTTP 请求与数据校验/构造，不碰 .env、不持流程状态、不打开浏览器。
-所有端点 URL 先过 scheme 白名单（http/https 绝对 URL），其余一律拒（fail-closed）。
+所有端点 URL 先过 scheme 白名单（http/https 绝对 URL，:func:`oauth_engine.require_http_url`），
+其余一律拒（fail-closed）。
 
 受保护资源元数据候选顺序：显式 `resource_metadata_url` 入参 → 无凭据请求 401 的
 `WWW-Authenticate: ... resource_metadata="…"` 指针（RFC 9728 §5.1，best-effort：拿不到
 不算错）→ well-known 子路径插入形态 → well-known 根形态。某候选「不可用」（非 200 /
 非 JSON / 缺 authorization_servers / 传输失败）即继续下一候选，全部不可用才拒
 （实测三家真实服务形态不一：Linear 只有根形态可用、Sentry 与 GitHub Copilot MCP
-只有子路径形态可用）。
+只有子路径形态可用）。候选构造保留仓内实现：mcp SDK 的
+``build_protected_resource_metadata_discovery_urls`` 走 urljoin，丢失「子路径插入」
+形态（RFC 9728 正确形态、Sentry/GitHub Copilot MCP 真实可用形态，行为被测试钉死）。
 
-授权服务器元数据候选（同源，仅路径不同）：RFC 8414 路径插入 → OIDC 路径插入 → OIDC
-路径追加（规范正文顺序）。文档 `issuer` 与探测 issuer 不符 / 缺必需端点 / 明确不支持
+授权服务器元数据候选经 mcp SDK
+``build_oauth_authorization_server_metadata_discovery_urls``（auth_server_url=issuer：
+带路径三候选 RFC 8414 插入 → OIDC 插入 → OIDC 追加；根两候选——与仓内既有顺序逐项
+一致，实证见台账 R1）。文档 `issuer` 与探测 issuer 不符 / 缺必需端点 / 明确不支持
 S256 则**立即拒**（不换下一形态——那是绕过 issuer 校验的安全性质）。
 
-客户端身份：动态注册（RFC 7591）为主；operator 可传预注册 `client_id`（+ 可选
-`client_secret`，走 client_secret_post）覆盖；`client_id` 为 HTTPS URL 时即
-Client ID Metadata Documents 形态（2026-07-28 修订在编机制，需 operator 自托管该文档），
-本层只原样透传，不托管也不校验文档。
+客户端身份：动态注册（RFC 7591）为主，请求体经 mcp SDK ``OAuthClientMetadata``
+单源构造（:func:`oauth_engine.client_registration_payload`）；operator 可传预注册
+`client_id`（+ 可选 `client_secret`，走 client_secret_post）覆盖；`client_id` 为
+HTTPS URL 时即 Client ID Metadata Documents 形态（2026-07-28 修订在编机制，需
+operator 自托管该文档），本层只原样透传，不托管也不校验文档。
 
 [来源: modelcontextprotocol.io/specification/2026-07-28/basic/authorization
  与 .../authorization-server-discovery，2026-10-17 取]
@@ -25,116 +38,97 @@ Client ID Metadata Documents 形态（2026-07-28 修订在编机制，需 operat
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import hashlib
 import json
-import re
-import secrets
-import urllib.error
 import urllib.parse
-import urllib.request
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-DEFAULT_TIMEOUT_SECS = 20.0
+import oauth_engine as engine
+import requests
+from mcp.client.auth.utils import (
+    build_oauth_authorization_server_metadata_discovery_urls,
+    extract_field_from_www_auth,
+)
+from oauth_engine import (  # noqa: F401 —— re-export：调用面（flow.py / 既有测试）签名不变
+    build_authorization_url,
+    exchange_authorization_code,
+    make_pkce_pair,
+    make_state,
+    refresh_access_token,
+    require_http_url,
+)
+from oauth_errors import (  # noqa: F401 —— 同上，错误码与 OAuthError re-export
+    DEFAULT_TIMEOUT_SECS,
+    DISCOVERY_FAILED,
+    METADATA_INVALID,
+    PKCE_UNSUPPORTED,
+    REGISTRATION_FAILED,
+    REQUEST_FAILED,
+    TOKEN_REQUEST_FAILED,
+    TOKEN_RESPONSE_INVALID,
+    URL_INVALID,
+    OAuthError,
+)
+
 MAX_RESPONSE_BYTES = 1_048_576
 
-#: 错误码（机器可读；工具边界按 code 出失败信封）
-URL_INVALID = "URL_INVALID"
-REQUEST_FAILED = "REQUEST_FAILED"
-DISCOVERY_FAILED = "DISCOVERY_FAILED"
-METADATA_INVALID = "METADATA_INVALID"
-PKCE_UNSUPPORTED = "PKCE_UNSUPPORTED"
-REGISTRATION_FAILED = "REGISTRATION_FAILED"
-TOKEN_REQUEST_FAILED = "TOKEN_REQUEST_FAILED"
-TOKEN_RESPONSE_INVALID = "TOKEN_RESPONSE_INVALID"
+__all__ = [
+    "DEFAULT_TIMEOUT_SECS",
+    "DISCOVERY_FAILED",
+    "MAX_RESPONSE_BYTES",
+    "METADATA_INVALID",
+    "OAuthError",
+    "PKCE_UNSUPPORTED",
+    "REGISTRATION_FAILED",
+    "REQUEST_FAILED",
+    "TOKEN_REQUEST_FAILED",
+    "TOKEN_RESPONSE_INVALID",
+    "URL_INVALID",
+    "authorization_server_metadata_urls",
+    "build_authorization_url",
+    "discover_authorization_server",
+    "discover_protected_resource",
+    "exchange_authorization_code",
+    "make_pkce_pair",
+    "make_state",
+    "protected_resource_metadata_candidates",
+    "protected_resource_metadata_urls",
+    "refresh_access_token",
+    "register_client",
+    "require_http_url",
+    "resource_metadata_pointer",
+]
 
-
-class OAuthError(Exception):
-    """协议层失败（错误是值：``code`` 机器可读、文本给人看）。"""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
+# mcp SDK 指针提取器形参标注 httpx.Response，实现只消费 ``headers.get(...)``——
+# requests Response 鸭子同形。桥接为 Any 以过静态检查（仅此一处 SDK 签名面）。
+_www_auth_field_extractor: Any = extract_field_from_www_auth
 
 
 # ────────────────────────────────────────────────────────────
-# URL 校验与 HTTP
+# HTTP（元数据 GET 面；token/注册不在本模块）
 # ────────────────────────────────────────────────────────────
 
 
-def require_http_url(url: str, what: str) -> str:
-    """端点 URL 白名单：http/https 绝对 URL，无 fragment，否则 URL_INVALID。"""
-    if not isinstance(url, str) or not url.strip():
-        raise OAuthError(URL_INVALID, f"{what} 不能为空")
-    parts = urllib.parse.urlsplit(url.strip())
-    if parts.scheme not in ("http", "https") or not parts.netloc:
-        raise OAuthError(URL_INVALID, f"{what} 仅支持 http/https 绝对 URL：{url}")
-    if parts.fragment:
-        raise OAuthError(URL_INVALID, f"{what} 不得含 fragment：{url}")
-    return url.strip()
+def _http_json(url: str, *, what: str, timeout: float = DEFAULT_TIMEOUT_SECS) -> tuple[int, Any]:
+    """GET 一次 JSON 面，返回 ``(status, JSON 解析结果或 None)``；传输层失败 → REQUEST_FAILED。
 
-
-def _http_json(
-    url: str, *, what: str, method: str = "GET", data: bytes | None = None, timeout: float = DEFAULT_TIMEOUT_SECS
-) -> tuple[int, Any]:
-    """发一次请求，返回 ``(status, JSON 解析结果或 None)``；传输层失败 → REQUEST_FAILED。"""
+    响应体读取封顶 :data:`MAX_RESPONSE_BYTES`（超限按解析失败处理——文档面 DoS 卫生）。
+    """
     require_http_url(url, what)
-    headers = {"Accept": "application/json"}
-    if data is not None:
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-    request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 —— scheme 已白名单
-            status, body = response.status, response.read(MAX_RESPONSE_BYTES)
-    except urllib.error.HTTPError as exc:
-        status, body = exc.code, exc.read(MAX_RESPONSE_BYTES)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+        with requests.get(url, headers={"Accept": "application/json"}, timeout=timeout, stream=True) as response:
+            status = response.status_code
+            body = b""
+            for chunk in response.iter_content(chunk_size=65536):
+                body += chunk
+                if len(body) > MAX_RESPONSE_BYTES:
+                    return status, None
+    except requests.exceptions.RequestException as exc:
         raise OAuthError(REQUEST_FAILED, f"{what} 请求失败：{exc}") from exc
     try:
         return status, json.loads(body.decode("utf-8")) if body else None
     except (UnicodeDecodeError, json.JSONDecodeError):
         return status, None
-
-
-def _post_json(url: str, payload: dict[str, Any], *, what: str, timeout: float) -> tuple[int, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    return _http_json(url, what=what, method="POST", data=body, timeout=timeout)
-
-
-def _post_form(url: str, form: dict[str, str], *, what: str, timeout: float) -> tuple[int, Any]:
-    return _http_json(url, what=what, method="POST", data=urllib.parse.urlencode(form).encode(), timeout=timeout)
-
-
-def _unauthenticated_get(url: str, *, timeout: float) -> tuple[int, dict[str, str]]:
-    """无凭据 GET 一次，返回 ``(status, 小写键头表)``；传输层失败记 ``(0, {})``。
-
-    只服务 `WWW-Authenticate` 指针探测（best-effort 提示面）：失败不构成错误值，
-    由调用方按「无指针」继续走 well-known 候选。
-    """
-    try:
-        require_http_url(url, "MCP 服务器 URL")
-        request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 —— scheme 已白名单
-            return response.status, {k.lower(): v for k, v in response.headers.items()}
-    except urllib.error.HTTPError as exc:
-        return exc.code, {k.lower(): v for k, v in exc.headers.items()}
-    except (OAuthError, urllib.error.URLError, OSError, ValueError):
-        return 0, {}
-
-
-def resource_metadata_pointer(server_url: str, *, timeout: float = DEFAULT_TIMEOUT_SECS) -> str | None:
-    """RFC 9728 §5.1：无凭据请求的 401 响应里 `WWW-Authenticate` 的 `resource_metadata` 指针。
-
-    best-effort：拿不到（非 401 / 无该参数 / 请求失败）返回 None——那不是错误，
-    well-known 候选才是规范要求的兜底路径。
-    """
-    status, headers = _unauthenticated_get(server_url, timeout=timeout)
-    if status != 401:
-        return None
-    match = re.search(r'resource_metadata\s*=\s*"([^"]+)"', headers.get("www-authenticate", ""))
-    return match.group(1).strip() if match else None
 
 
 def _origin_and_path(url: str) -> tuple[str, str]:
@@ -147,8 +141,27 @@ def _origin_and_path(url: str) -> tuple[str, str]:
 # ────────────────────────────────────────────────────────────
 
 
+def resource_metadata_pointer(server_url: str, *, timeout: float = DEFAULT_TIMEOUT_SECS) -> str | None:
+    """RFC 9728 §5.1：无凭据请求的 401 响应里 `WWW-Authenticate` 的 `resource_metadata` 指针。
+
+    best-effort：拿不到（非 401 / 无该参数 / 请求失败）返回 None——那不是错误，
+    well-known 候选才是规范要求的兜底路径。指针值解析经 mcp SDK
+    ``extract_field_from_www_auth``。
+    """
+    try:
+        require_http_url(server_url, "MCP 服务器 URL")
+        with requests.get(server_url, headers={"Accept": "application/json"}, timeout=timeout, stream=True) as response:
+            status = response.status_code
+    except (OAuthError, requests.exceptions.RequestException):
+        return None
+    if status != 401:
+        return None
+    value = _www_auth_field_extractor(response, "resource_metadata")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def protected_resource_metadata_urls(server_url: str) -> list[str]:
-    """well-known 候选（规范顺序：子路径插入形态 → 根形态）。"""
+    """well-known 候选（规范顺序：子路径插入形态 → 根形态；仓内构造，理由见模块 docstring）。"""
     origin, path = _origin_and_path(server_url)
     urls = [f"{origin}/.well-known/oauth-protected-resource{path}"] if path else []
     urls.append(f"{origin}/.well-known/oauth-protected-resource")
@@ -176,18 +189,11 @@ def protected_resource_metadata_candidates(
 
 
 def authorization_server_metadata_urls(issuer: str) -> list[str]:
-    """授权服务器元数据候选（规范顺序：RFC 8414 路径插入 → OIDC 路径插入 → OIDC 路径追加）。"""
-    origin, path = _origin_and_path(issuer)
-    candidates = (
-        [
-            f"{origin}/.well-known/oauth-authorization-server{path}",
-            f"{origin}/.well-known/openid-configuration{path}",
-            f"{origin}{path}/.well-known/openid-configuration",
-        ]
-        if path
-        else [f"{origin}/.well-known/oauth-authorization-server", f"{origin}/.well-known/openid-configuration"]
-    )
-    return candidates
+    """授权服务器元数据候选（mcp SDK 工具承载；RFC 8414 路径插入 → OIDC 插入 → OIDC 追加）。
+
+    第二形参只服务 SDK 的 legacy 兜底分支（auth_server_url 恒非 None 时不可达），同传 issuer。
+    """
+    return build_oauth_authorization_server_metadata_discovery_urls(issuer, issuer)
 
 
 def _protected_resource_document(server_url: str, url: str, document: Any) -> dict[str, Any]:
@@ -243,7 +249,6 @@ def discover_protected_resource(
             continue
     if saw_invalid_document:
         raise OAuthError(METADATA_INVALID, f"受保护资源元数据均不可用（{server_url}）：{last}")
-    raise OAuthError(DISCOVERY_FAILED, f"未发现受保护资源元数据（{server_url}）：{last}")
     raise OAuthError(DISCOVERY_FAILED, f"未发现受保护资源元数据（{server_url}）：{last}")
 
 
@@ -309,7 +314,7 @@ def discover_authorization_server(issuer: str, *, timeout: float = DEFAULT_TIMEO
 
 
 # ────────────────────────────────────────────────────────────
-# 动态客户端注册（RFC 7591）与 PKCE
+# 动态客户端注册（RFC 7591）——HTTP 编排；请求体单源在 oauth_engine（mcp SDK 模型）
 # ────────────────────────────────────────────────────────────
 
 
@@ -327,149 +332,21 @@ def register_client(
         OAuthError: URL_INVALID / REGISTRATION_FAILED。
     """
     require_http_url(registration_endpoint, "动态客户端注册端点")
-    payload: dict[str, Any] = {
-        "client_name": client_name,
-        "redirect_uris": [redirect_uri],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-    }
-    if scope:
-        payload["scope"] = scope
+    payload = engine.client_registration_payload(client_name=client_name, redirect_uri=redirect_uri, scope=scope)
     try:
-        status, document = _post_json(registration_endpoint, payload, what="动态客户端注册", timeout=timeout)
-    except OAuthError as exc:
+        response = requests.post(
+            registration_endpoint, json=payload, headers={"Accept": "application/json"}, timeout=timeout
+        )
+    except requests.exceptions.RequestException as exc:
         raise OAuthError(REGISTRATION_FAILED, f"动态客户端注册失败：{exc}") from exc
-    if not 200 <= status < 300 or not isinstance(document, dict):
-        reason = document.get("error") if isinstance(document, dict) else f"HTTP {status}"
+    try:
+        document = response.json() if response.content else None
+    except ValueError:
+        document = None
+    if not 200 <= response.status_code < 300 or not isinstance(document, dict):
+        reason = document.get("error") if isinstance(document, dict) else f"HTTP {response.status_code}"
         raise OAuthError(REGISTRATION_FAILED, f"动态客户端注册被拒（{reason}）")
     client_id = document.get("client_id")
     if not isinstance(client_id, str) or not client_id:
         raise OAuthError(REGISTRATION_FAILED, "注册响应缺 client_id")
     return {"client_id": client_id}
-
-
-def make_pkce_pair() -> tuple[str, str]:
-    """生成 PKCE(S256) 对：``(code_verifier, code_challenge)``。"""
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
-    return verifier, challenge
-
-
-def make_state() -> str:
-    """CSRF 状态值（回调必须原样带回且命中挂起表）。"""
-    return secrets.token_urlsafe(32)
-
-
-# ────────────────────────────────────────────────────────────
-# 授权 URL 与令牌端点
-# ────────────────────────────────────────────────────────────
-
-
-def build_authorization_url(
-    authorization_endpoint: str,
-    *,
-    client_id: str,
-    redirect_uri: str,
-    state: str,
-    code_challenge: str,
-    scope: str | None = None,
-    resource: str | None = None,
-) -> str:
-    """构造授权请求 URL（PKCE(S256) + state + RFC 8707 resource）。"""
-    require_http_url(authorization_endpoint, "授权端点")
-    params = {
-        "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    if scope:
-        params["scope"] = scope
-    if resource:
-        params["resource"] = resource
-    separator = "&" if urllib.parse.urlsplit(authorization_endpoint).query else "?"
-    return f"{authorization_endpoint}{separator}{urllib.parse.urlencode(params)}"
-
-
-def _parse_token_response(document: dict[str, Any]) -> dict[str, Any]:
-    """令牌响应归一（只带已知字段；未知字段丢弃）。"""
-    access_token = document.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
-        raise OAuthError(TOKEN_RESPONSE_INVALID, "令牌响应缺 access_token")
-    expires_at = None
-    expires_in = document.get("expires_in")
-    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in >= 0:
-        expires_at = (datetime.now(UTC) + timedelta(seconds=expires_in)).isoformat()
-    refresh_token = document.get("refresh_token")
-    scope = document.get("scope")
-    token_type = document.get("token_type")
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token if isinstance(refresh_token, str) and refresh_token else None,
-        "token_type": token_type if isinstance(token_type, str) else None,
-        "scope": scope if isinstance(scope, str) else None,
-        "expires_at": expires_at,
-    }
-
-
-def _token_request(token_endpoint: str, form: dict[str, str], timeout: float) -> dict[str, Any]:
-    require_http_url(token_endpoint, "令牌端点")
-    try:
-        status, document = _post_form(token_endpoint, form, what="令牌请求", timeout=timeout)
-    except OAuthError as exc:
-        raise OAuthError(TOKEN_REQUEST_FAILED, f"令牌请求失败：{exc}") from exc
-    if not 200 <= status < 300 or not isinstance(document, dict):
-        reason = document.get("error") if isinstance(document, dict) else f"HTTP {status}"
-        raise OAuthError(TOKEN_REQUEST_FAILED, f"令牌请求被拒（{reason}）")
-    return _parse_token_response(document)
-
-
-def exchange_authorization_code(
-    token_endpoint: str,
-    *,
-    code: str,
-    redirect_uri: str,
-    client_id: str,
-    code_verifier: str,
-    client_secret: str | None = None,
-    resource: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT_SECS,
-) -> dict[str, Any]:
-    """授权码换令牌（PKCE verifier 随请求回带；RFC 8707 resource 同带）。
-
-    `client_secret` 给定时按 client_secret_post（RFC 6749 §2.3.1）随表单提交——
-    预注册机密客户端形态；缺省 = 公共客户端（DCR `token_endpoint_auth_method: none`）。
-    """
-    form = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": client_id,
-        "code_verifier": code_verifier,
-    }
-    if client_secret:
-        form["client_secret"] = client_secret
-    if resource:
-        form["resource"] = resource
-    return _token_request(token_endpoint, form, timeout)
-
-
-def refresh_access_token(
-    token_endpoint: str,
-    *,
-    refresh_token: str,
-    client_id: str,
-    client_secret: str | None = None,
-    resource: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT_SECS,
-) -> dict[str, Any]:
-    """refresh_token 授权（公共客户端轮换：响应里的新 refresh 由调用方落库）。"""
-    form = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id}
-    if client_secret:
-        form["client_secret"] = client_secret
-    if resource:
-        form["resource"] = resource
-    return _token_request(token_endpoint, form, timeout)

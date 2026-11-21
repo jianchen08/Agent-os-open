@@ -182,6 +182,145 @@ describe('槽位预留（reserveChromeStrips）', () => {
   })
 })
 
+describe('图形垂坠让位（skin-chat-inset）', () => {
+  /** 顶带：视口 0..height（几何基准，垂坠纠位钉到它的下沿） */
+  function mountBand(height: number): HTMLElement {
+    const el = document.createElement('div')
+    el.setAttribute('data-testid', 'chat-top-band')
+    el.setAttribute('data-test-band', '')
+    el.getBoundingClientRect = () =>
+      ({ height, width: 2000, top: 0, bottom: height, left: 0, right: 2000, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+    document.body.appendChild(el)
+    return el
+  }
+
+  /** 列让位目标：列顶=顶带下沿、列底=视口底 */
+  function mountTarget(top: number, height: number): HTMLElement {
+    const el = document.createElement('div')
+    el.setAttribute('data-skin-inset-target', 'chat')
+    el.setAttribute('data-test-target', '')
+    el.getBoundingClientRect = () =>
+      ({ height, width: 900, top, bottom: top + height, left: 360, right: 1260, x: 360, y: top, toJSON: () => ({}) }) as DOMRect
+    document.body.appendChild(el)
+    return el
+  }
+
+  /** 图形垂坠条带（无文字）：rect 跟随 inline top（纠位后能量到新位置） */
+  function mountGraphicStrip(opts: { edge: 'top' | 'bottom'; height: number; top: number }): HTMLElement {
+    const el = document.createElement('div')
+    el.setAttribute('data-test-strip', '')
+    el.style.position = 'fixed'
+    if (opts.edge === 'top') el.style.top = '0px'
+    else el.style.bottom = '0px'
+    el.innerText = '   '
+    el.getBoundingClientRect = () => {
+      const top = el.hasAttribute('data-skin-clamped-top') ? parseFloat(el.style.top) : opts.top
+      return { height: opts.height, width: 2000, top, bottom: top + opts.height, left: 0, right: 2000, x: 0, y: top, toJSON: () => ({}) } as DOMRect
+    }
+    document.body.appendChild(el)
+    return el
+  }
+
+  /** 带文字条栏（替代性标题栏/状态栏） */
+  function mountTextStrip(height: number, text: string): HTMLElement {
+    const el = document.createElement('div')
+    el.setAttribute('data-test-strip', '')
+    el.style.position = 'fixed'
+    el.style.top = '0px'
+    el.innerText = text
+    el.getBoundingClientRect = () =>
+      ({ height, width: 2000, top: 0, bottom: height, left: 0, right: 2000, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+    document.body.appendChild(el)
+    return el
+  }
+
+  afterEach(() => {
+    document.querySelectorAll('[data-test-strip], [data-test-band], [data-test-target]').forEach((el) => el.remove())
+  })
+
+  it('顶垂坠量测落 0：钉回顶带下沿 + 列写顶部让位', async () => {
+    const band = mountBand(40)
+    const target = mountTarget(40, 728)
+    const strip = mountGraphicStrip({ edge: 'top', height: 76, top: 0 })
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(strip.style.top).toBe('40px')
+    expect(strip.hasAttribute('data-skin-clamped-top')).toBe(true)
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('76px')
+    expect(document.documentElement.style.getPropertyValue('--skin-chrome-top')).toBe('')
+    band.remove()
+    target.remove()
+  })
+
+  it('顶垂坠已在顶带下沿：不纠位、让位高度=垂坠高', async () => {
+    mountBand(40)
+    const target = mountTarget(40, 728)
+    const strip = mountGraphicStrip({ edge: 'top', height: 76, top: 40 })
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(strip.style.top).toBe('0px')
+    expect(strip.hasAttribute('data-skin-clamped-top')).toBe(false)
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('76px')
+  })
+
+  it('底垂坠可见：列写底部让位（只算与列相交段）', async () => {
+    mountBand(40)
+    const target = mountTarget(40, 728)
+    mountGraphicStrip({ edge: 'bottom', height: 60, top: 708 })
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(target.style.getPropertyValue('--skin-chat-inset-bottom')).toBe('60px')
+  })
+
+  it('底垂坠退场（translateY 到视口外）：让位归零', async () => {
+    mountBand(40)
+    const target = mountTarget(40, 728)
+    mountGraphicStrip({ edge: 'bottom', height: 60, top: 768 })
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(target.style.getPropertyValue('--skin-chat-inset-bottom')).toBe('')
+  })
+
+  it('带文字条栏走整根让位，不写列级让位', async () => {
+    mountBand(40)
+    const target = mountTarget(40, 728)
+    mountTextStrip(40, '标题栏')
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(document.documentElement.style.getPropertyValue('--skin-chrome-top')).toBe('40px')
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('')
+  })
+
+  it('摘除：列让位变量与纠位一起收回', async () => {
+    mountBand(40)
+    const target = mountTarget(40, 728)
+    const strip = mountGraphicStrip({ edge: 'top', height: 76, top: 0 })
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('76px')
+    clearPluginSkin()
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('')
+    expect(strip.hasAttribute('data-skin-clamped-top')).toBe(false)
+    expect(strip.style.top).toBe('')
+  })
+
+  it('状态变化重同步：body 属性变化 → 防抖后重量几何', async () => {
+    mountBand(40)
+    const target = mountTarget(40, 728)
+    const strip = mountGraphicStrip({ edge: 'top', height: 76, top: 40 })
+    await applyPluginSkin(themeOf('ok'))
+    await Promise.resolve()
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('76px')
+    // 条带被皮肤挪出视口（退场态）→ 宿主状态属性变化触发重同步
+    strip.getBoundingClientRect = () =>
+      ({ height: 76, width: 2000, top: 768, bottom: 844, left: 0, right: 2000, x: 0, y: 768, toJSON: () => ({}) }) as DOMRect
+    document.body.setAttribute('data-test-state', '1')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    expect(target.style.getPropertyValue('--skin-chat-inset-top')).toBe('')
+    document.body.removeAttribute('data-test-state')
+  })
+})
+
 describe('applyPluginSkin - 文本响应透传', () => {
   it('transformResponse 原样透传（axios 文本响应不被 JSON 化）', async () => {
     mockApiGet.mockImplementation(

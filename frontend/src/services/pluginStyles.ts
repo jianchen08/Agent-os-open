@@ -20,8 +20,8 @@
 
 import { apiClient } from '@/services/api/client'
 import { extUrl } from '@/services/api/extRoute'
-import { loadSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { primaryModeTag } from '@/services/schema/modeOptions'
+import { loadSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { loggers } from '@/utils/logger'
 import type { ClientStyleDeclaration } from '@/services/schema/ContributionRegistry'
 

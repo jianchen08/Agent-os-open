@@ -138,10 +138,10 @@ class TestDangerousToolDualTrack:
 
     @pytest.mark.asyncio
     async def test_bash_command_in_container_is_dangerous(self) -> None:
-        """bash_execute 是 command_in_container → 危险工具。"""
+        """bash 是 command_in_container → 危险工具。"""
         plugin = _make_plugin(rules=[])
-        ctx = _make_ctx([{"name": "bash_execute", "args": {"command": "ls"}}])
-        assert plugin._is_dangerous_tool(ctx, "bash_execute") is True
+        ctx = _make_ctx([{"name": "bash", "args": {"command": "ls"}}])
+        assert plugin._is_dangerous_tool(ctx, "bash") is True
 
     @pytest.mark.asyncio
     async def test_read_only_tool_not_dangerous(self) -> None:
@@ -170,9 +170,9 @@ class TestDangerousToolDualTrack:
         """registry 不可用时回退到 policy.execution 判定（不崩溃）。"""
         plugin = _make_plugin(rules=[])
         # 无 services，registry 回退全局单例（可能抛异常被兜住）
-        ctx = _make_ctx([{"name": "bash_execute", "args": {}}], services={})
-        # bash_execute 走 command_in_container 轨道判为危险
-        assert plugin._is_dangerous_tool(ctx, "bash_execute") is True
+        ctx = _make_ctx([{"name": "bash", "args": {}}], services={})
+        # bash 走 command_in_container 轨道判为危险
+        assert plugin._is_dangerous_tool(ctx, "bash") is True
 
     @pytest.mark.asyncio
     async def test_unknown_tool_returns_empty_dangerous_ops(self) -> None:
@@ -283,12 +283,12 @@ class TestDangerousDecisionEndToEnd:
 
     @pytest.mark.asyncio
     async def test_command_in_container_tool_triggers_approval(self) -> None:
-        """bash_execute（command_in_container 轨）命中危险命令规则 → 弹审批。"""
+        """bash（command_in_container 轨）命中危险命令规则 → 弹审批。"""
         _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "approved_once"}])
 
         plugin = self._plugin(rules=[])
         ctx = _make_ctx(
-            [{"name": "bash_execute", "args": {"command": "rm -rf /tmp/x"}}], services={}
+            [{"name": "bash", "args": {"command": "rm -rf /tmp/x"}}], services={}
         )
 
         result = await plugin.execute(ctx)

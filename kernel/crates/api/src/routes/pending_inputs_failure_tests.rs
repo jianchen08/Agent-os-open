@@ -28,23 +28,21 @@ impl PendingProbeStore {
         StorageBackend::enqueue_pending_input(
             self.inner.as_ref(),
             "default",
-            pipeline_id,
             &PendingInputRecord {
                 id: id.to_string(),
-                pipeline_id: pipeline_id.to_string(),
                 tenant_id: "default".to_string(),
-                user_id: "u1".to_string(),
-                content: "排队输入".to_string(),
-                thread: "thread-probe".to_string(),
-                source: PendingInputSource::Trigger,
-                agent_id: "agentos".to_string(),
-                route_id: pipeline_id.to_string(),
-                thinking_strength: String::new(),
-                client_message_id: cmid.to_string(),
-                execution_context: None,
-                state_overlay: None,
-                pipeline_config_id: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                request: agentos_core::types::DispatchRequest {
+                    thread_id: "thread-probe".to_string(),
+                    user_id: "u1".to_string(),
+                    pipeline_id: pipeline_id.to_string(),
+                    content: "排队输入".to_string(),
+                    client_message_id: cmid.to_string(),
+                    source: PendingInputSource::Trigger,
+                    execution_context: None,
+                    state_overlay: None,
+                    pipeline_config_id: None,
+                },
             },
         )
         .await
@@ -245,23 +243,24 @@ fn probe_state(store: std::sync::Arc<PendingProbeStore>) -> AppState {
     state
 }
 
-fn probe_record(id: &str) -> PendingInputRecord {
+/// 探针条目：管道键 = `request.pipeline_id`（ADR-2026-11-17 起队列键单一真值，
+/// 不再有独立入队形参可覆盖——本参数因此必须与实际查询管道一致）。
+fn probe_record(pipeline_id: &str, id: &str) -> PendingInputRecord {
     PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: "pipe-fail-del".to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: "x".to_string(),
-        thread: "thread-probe".to_string(),
-        source: PendingInputSource::Trigger,
-        agent_id: "agentos".to_string(),
-        route_id: "pipe-fail-del".to_string(),
-        thinking_strength: String::new(),
-        client_message_id: String::new(),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "thread-probe".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: pipeline_id.to_string(),
+            content: "x".to_string(),
+            client_message_id: String::new(),
+            source: PendingInputSource::Trigger,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     }
 }
 
@@ -304,16 +303,14 @@ async fn clear_with_failing_list_returns_503_and_keeps_entries() {
     StorageBackend::enqueue_pending_input(
         probe.inner.as_ref(),
         "default",
-        "pipe-fail-clr",
-        &probe_record("pi_c_1"),
+        &probe_record("pipe-fail-clr", "pi_c_1"),
     )
     .await
     .unwrap();
     StorageBackend::enqueue_pending_input(
         probe.inner.as_ref(),
         "default",
-        "pipe-fail-clr",
-        &probe_record("pi_c_2"),
+        &probe_record("pipe-fail-clr", "pi_c_2"),
     )
     .await
     .unwrap();

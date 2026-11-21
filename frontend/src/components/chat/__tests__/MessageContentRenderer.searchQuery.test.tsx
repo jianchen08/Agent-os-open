@@ -51,3 +51,14 @@ describe('MessageContentRenderer — 搜索词为空白', () => {
     expect(screen.getByTestId('markdown-body')).toHaveTextContent('包含关键词的正文')
   })
 })
+
+describe('MessageContentRenderer — 无搜索词默认路径', () => {
+  it('searchQuery 未传：文本片段走默认渲染器（DefaultTextRenderer 分支，正文完整）', () => {
+    render(
+      <MessageContentRenderer
+        fragments={[{ type: 'text', key: 'f3', content: '无查询正文', isLast: true }]}
+      />,
+    )
+    expect(screen.getByTestId('markdown-body')).toHaveTextContent('无查询正文')
+  })
+})

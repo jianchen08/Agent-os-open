@@ -2,7 +2,8 @@
 """知识库（knowledge-base 域）测试——bank 唯一存储契约（终版拍板 2026-10-15）。
 
 机制：
-- 上传=切块→aretain 逐块写记忆 bank（kb bank=唯一存储，无目录/无副本/无对账）；
+- 上传=整文档单次 aretain 写记忆 bank（kb 主 bank verbatim 模式，降级落
+  kb_chunks bank chunks 模式；bank=唯一存储，无目录/无副本/无对账）；
   中途失败如实 500 并尽力清理已写 chunk；
 - 列表/详情/统计/标签从 bank documents 面派生（document_metadata.kb_* 聚合）；
 - 删除=按 type:knowledge+kb_item:{id} 标签删 bank（主路径，定位 0 文档=404，
@@ -132,10 +133,14 @@ def _make_client(bank: _FakeBank | None = None) -> tuple[MagicMock, _FakeBank]:
     bank = bank if bank is not None else _FakeBank()
     client = MagicMock()
     client.documents = bank
-    client.aretain = AsyncMock(side_effect=lambda **kw: MagicMock(
-        operation_id=f"c{kw['metadata']['kb_chunk_index']}", accepted=True))
+    client.aretain = AsyncMock(return_value=MagicMock(operation_id="c0", accepted=True))
     client.acreate_bank = AsyncMock(return_value=None)
     client.arecall = AsyncMock(return_value=SimpleNamespace(chunks=[], results=[]))
+    client.banks = SimpleNamespace(
+        list_banks=AsyncMock(return_value=SimpleNamespace(banks=[])),
+        update_bank_config=AsyncMock(return_value={"overrides": {}}),
+        get_bank_config=AsyncMock(return_value={"config": {"retain_extraction_mode": "verbatim"}}),
+    )
     return client, bank
 
 
@@ -144,6 +149,12 @@ def kb() -> Any:
     module = _load_module()
     module.set_client(None)
     return module
+
+
+@pytest.fixture
+def llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sidecar LLM provider 已注入（verbatim 主链路前置；运行时由 _apply_llm_env 写）。"""
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
 
 
 @pytest.fixture
@@ -172,59 +183,79 @@ class TestNoLocalTruth:
 
 
 class TestUpload:
-    def test_upload_retains_chunks_with_item_metadata(self, kb: Any, client: MagicMock) -> None:
-        """切块→aretain 逐块入 bank：tags 隔离（type:knowledge+kb_item+filetype）、
-        metadata 带聚合面（kb_id/kb_name/kb_size/kb_mime/kb_chunk_total）。"""
-        content = ("知识库内容。" * 800).encode("utf-8")  # > 2000 字符 → 多块
+    def test_upload_single_whole_document_aretain_with_item_metadata(
+        self, kb: Any, client: MagicMock, llm_env: None
+    ) -> None:
+        """整文档单次 aretain 入 bank（客户端零切块，切块归上游原生管线）：
+        tags 隔离（type:knowledge+kb_item+filetype）、metadata 聚合面
+        （kb_id/kb_name/kb_size/kb_mime）、标题双通道（内容前置 + context）。"""
+        content = ("知识库内容。" * 800).encode("utf-8")  # 远超旧客户端切块阈值
         result = _run(kb.upload_document("guide.md", content, "text/markdown", headers=_HEADERS))
 
-        assert result["chunks_imported"] > 1
+        assert result["chunks_imported"] == 1
+        assert result["ingestion_mode"] == "verbatim"
+        assert result["bank_id"] == "kb"
+        assert result["degraded"] is False
         assert result["message"] == "文件上传成功"
         assert result["size"] == len(content)
         assert client.acreate_bank.call_args.kwargs["bank_id"] == "kb"
-        assert client.aretain.call_count == result["chunks_imported"]
+        assert client.aretain.call_count == 1
 
         first = client.aretain.call_args_list[0].kwargs
         assert first["bank_id"] == "kb"
         assert first["tags"] == ["type:knowledge", f"kb_item:{result['item_id']}", "filetype:md"]
+        assert first["context"] == "guide"
+        assert first["content"].startswith("# guide\n\n")
         meta = first["metadata"]
         assert meta["kb_id"] == result["item_id"]
         assert meta["kb_name"] == "guide.md"
         assert meta["kb_size"] == str(len(content))
         assert meta["kb_mime"] == "text/markdown"
-        assert meta["kb_chunk_total"] == str(result["chunks_imported"])
         assert meta["source"] == "knowledge_base"
         assert meta["created_at"]
 
-    def test_upload_fail_midway_reports_and_cleans_written_chunks(self, kb: Any) -> None:
-        """中途失败：上传如实 500（唯一存储无兜底），已写 chunk 尽力清理不留半成品。"""
-        client, bank = _make_client()
-        real_aretain = client.aretain.side_effect
+    def test_upload_verbatim_failure_degrades_to_chunks_bank(self, kb: Any, llm_env: None) -> None:
+        """主 bank 落库失败 → 降级落 kb_chunks bank（chunks 模式），响应如实标注。"""
+        client, _bank = _make_client()
 
-        async def flaky(**kw: Any) -> Any:
-            if kw["metadata"]["kb_chunk_index"] == "2":
+        def retain_by_bank(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
                 raise RuntimeError("vector api down")
-            return await real_aretain(**kw)  # type: ignore[misc]
+            return MagicMock(operation_id="c-fb", accepted=True)
 
-        client.aretain = AsyncMock(side_effect=flaky)
+        client.aretain = AsyncMock(side_effect=retain_by_bank)
         kb.set_client(client)
 
-        with pytest.raises(kb.KBError) as ei:
-            _run(kb.upload_document("guide.md", ("字" * 5000).encode(), "text/markdown", headers=_HEADERS))
-        assert ei.value.status_code == 500
-        assert ei.value.error_code == "KNB_ING_8001"
-        # 已成功的 c0/c1 被清理（bank 回到无本条目状态）
-        assert bank.docs == {}, f"残留 chunk: {list(bank.docs)}"
+        result = _run(kb.upload_document("guide.md", "正文".encode(), "text/markdown", headers=_HEADERS))
 
-    def test_upload_fail_first_chunk_no_cleanup_calls(self, kb: Any) -> None:
-        """首块即失败：无已写 chunk，不触发清理面。"""
+        assert result["ingestion_mode"] == "chunks"
+        assert result["degraded"] is True
+        assert result["degradation_reason"]
+        banks_called = [c.kwargs["bank_id"] for c in client.aretain.call_args_list]
+        assert "kb" in banks_called and "kb_chunks" in banks_called
+
+    def test_upload_dual_bank_failure_reports_honestly(self, kb: Any, llm_env: None) -> None:
+        """主 + 降级 bank 双失败：上传如实 500（唯一存储无兜底）。"""
         client, bank = _make_client()
         client.aretain = AsyncMock(side_effect=RuntimeError("down"))
         kb.set_client(client)
         with pytest.raises(kb.KBError) as ei:
             _run(kb.upload_document("a.md", "正文".encode(), "text/markdown", headers=_HEADERS))
         assert ei.value.status_code == 500
-        assert not bank.docs
+        assert ei.value.error_code == "KNB_ING_8001"
+        assert bank.docs == {}
+
+    def test_upload_llm_unconfigured_lands_chunks_bank(self, kb: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """LLM provider 未配置 → verbatim 天然不可用，直落 kb_chunks（不触主 bank）。"""
+        monkeypatch.delenv("HINDSIGHT_API_LLM_PROVIDER", raising=False)
+        client, _bank = _make_client()
+        kb.set_client(client)
+
+        result = _run(kb.upload_document("a.md", "正文".encode(), headers=_HEADERS))
+
+        assert result["ingestion_mode"] == "chunks"
+        assert result["degraded"] is True
+        assert all(c.kwargs["bank_id"] == "kb_chunks" for c in client.aretain.call_args_list)
 
     def test_upload_without_client_fails_honestly(self, kb: Any) -> None:
         """sidecar 缺席：唯一存储不可达 = 上传如实失败（503，无兜底）。"""
@@ -386,22 +417,28 @@ class TestDelete:
 
 class TestSearch:
     def test_search_returns_chunks_with_item_context(self, kb: Any, client: MagicMock) -> None:
-        """原文 chunk 回显；chunk_id=document_id 解析归属（item/name/tags）。"""
+        """原文 chunk 回显；chunk_id=document_id 解析归属（item/name/tags）。
+        检索按调用方可见双 bank（主 kb + 降级 kb_chunks）扇出。"""
         _, bank = _make_client()
         client.documents = bank
         bank.add(_bank_doc("c1", "item-a", kb_name="a.md", extra_tags=["filetype:md"]))
-        resp = SimpleNamespace(
-            chunks=[SimpleNamespace(model_dump=lambda: {"id": "c1", "text": "分块一", "score": 0.9})],
-            results=[],
-        )
-        client.arecall = AsyncMock(return_value=resp)
+
+        def recall_by_bank(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
+                return SimpleNamespace(
+                    chunks=[SimpleNamespace(model_dump=lambda: {"id": "c1", "text": "分块一", "score": 0.9})],
+                    results=[],
+                )
+            return SimpleNamespace(chunks=[], results=[])
+
+        client.arecall = AsyncMock(side_effect=recall_by_bank)
 
         result = _run(kb.search("架构", headers=_HEADERS))
 
-        call_kwargs = client.arecall.call_args.kwargs
-        assert call_kwargs["bank_id"] == "kb"
-        assert call_kwargs["include_chunks"] is True
-        assert call_kwargs["tags"] == ["type:knowledge"]
+        recalled_banks = [c.kwargs["bank_id"] for c in client.arecall.call_args_list]
+        assert set(recalled_banks) == {"kb", "kb_chunks"}, "检索双 bank 扇出"
+        assert all(c.kwargs["include_chunks"] is True for c in client.arecall.call_args_list)
+        assert all(c.kwargs["tags"] == ["type:knowledge"] for c in client.arecall.call_args_list)
         assert result["total"] == 1
         first = result["results"][0]
         assert first["item_id"] == "item-a"
@@ -412,11 +449,16 @@ class TestSearch:
 
     def test_search_attribution_failure_degrades_context_only(self, kb: Any, client: MagicMock) -> None:
         """归属解析失败：内容照回显，上下文字段留空（不炸不吞内容）。"""
-        resp = SimpleNamespace(
-            chunks=[SimpleNamespace(model_dump=lambda: {"id": "ghost", "text": "孤儿", "score": 0.7})],
-            results=[],
-        )
-        client.arecall = AsyncMock(return_value=resp)
+
+        def recall_by_bank(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
+                return SimpleNamespace(
+                    chunks=[SimpleNamespace(model_dump=lambda: {"id": "ghost", "text": "孤儿", "score": 0.7})],
+                    results=[],
+                )
+            return SimpleNamespace(chunks=[], results=[])
+
+        client.arecall = AsyncMock(side_effect=recall_by_bank)
 
         result = _run(kb.search("q", headers=_HEADERS))
 

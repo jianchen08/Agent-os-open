@@ -1,6 +1,8 @@
-ingestion_url: http://162.14.69.153/ext/trace_ingestion/events
-origin_host: dev-windows
-origin_kind: dev
+# 出厂形态：导出目标留空=导出面不装载（server.py fail-closed 降级）；
+# 真值（ingestion_url/origin_host）在用户空间 config/plugins/trace_exporter/ 覆盖层。
+ingestion_url: ""
+origin_host: ""
+origin_kind: packaged
 event_types: "run.*"
 batch_max_events: 100
 flush_interval_secs: 30

@@ -4,7 +4,7 @@ import {
   taskPanelDisplayKey,
   type TaskPanelDisplayKey,
 } from '@/types/taskStatus'
-import type { PipelineStatus } from '@/types/pipeline'
+import type { PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
 import type { AgentTab } from '@/types/task'
 
 /** 管道运行视图态 → Agent 标签页状态（未知落 'unknown'，不猜 running） */
@@ -92,4 +92,64 @@ export function taskRowStatusVisual(
     }
   }
   return { color: TASK_PANEL_DISPLAY_COLORS[key], label: TASK_PANEL_DISPLAY_LABELS[key] }
+}
+/** 条目运行态视觉（文案/颜色）单点：项目登记行无运行态返回 null；任务行按
+ *  §4.5 一词一义折算（不直出 run 域词汇），会话行沿用 run 域词汇。行内标签
+ *  与详情标题、面板树聚合三处共用本函数——同一状态的多处呈现不得各写一套。
+ *  （自 PipelineManagerTreeParts 迁出：状态聚合需要同一判据，组件侧与数据面
+ *  不得各判一套） */
+export function entryStatusVisual(entry: PipelineViewEntry): { color: string; label: string } | null {
+  if (entry.kind === 'project') return null
+  if (entry.kind === 'task') {
+    return taskRowStatusVisual(entry.taskStatus, entry.hasPendingSubtasks === true, entry.status)
+  }
+  return statusVisual(entry.status ?? '')
+}
+
+/** 条目自身是否已显示「运行中」：下辖运行中徽标只在自身未显示运行中时补位
+ *  ——「我本人在跑」与「我的下级在跑」二义分离，不互相覆盖 */
+export function entryShowsRunning(entry: PipelineViewEntry): boolean {
+  return entryStatusVisual(entry)?.label === PIPELINE_STATUS_LABELS.running
+}
+
+/** 状态图标种类（行首「类型+状态合一」图标的取件键，单一真值）。
+ *
+ * 与 `entryStatusVisual` 出自**同一套分支判据**（taskRowStatusVisual 的统计口径），
+ * 但取结构化键而非显示文案——文案措辞可变（如任务面板「已暂停（可恢复）」），
+ * 以文案为键会让图标静默错位。项目登记行无运行态返回 null（渲染项目图标）。
+ */
+export type EntryStatusIconKind = 'running' | 'paused' | 'failed' | 'completed' | 'unknown'
+
+export function entryStatusIconKind(entry: PipelineViewEntry): EntryStatusIconKind | null {
+  if (entry.kind === 'project') return null
+  if (entry.kind === 'task') {
+    const key = taskPanelDisplayKey(entry.taskStatus, entry.hasPendingSubtasks === true)
+    if (key === 'running') {
+      // 终态防御（BUG-2b）：折算运行中而运行态已终 → 直出运行态口径
+      const runTerminal = entry.status != null && TERMINAL_PIPELINE_STATUSES.has(entry.status)
+      if (runTerminal) {
+        if (entry.status === 'cancelled') return 'paused'
+        return entry.status === 'failed' ? 'failed' : 'completed'
+      }
+      // 无证据防御（BUG-21）：运行态未知/缺席不猜 running
+      if (entry.status == null || entry.status === 'unknown') return 'unknown'
+      return 'running'
+    }
+    // 等待子任务 = 活跃等待，视觉归运行中
+    if (key === 'waiting_subtasks') return 'running'
+    return key
+  }
+  switch (entry.status) {
+    case 'running':
+      return 'running'
+    case 'suspended':
+    case 'cancelled':
+      return 'paused'
+    case 'failed':
+      return 'failed'
+    case 'completed':
+      return 'completed'
+    default:
+      return 'unknown'
+  }
 }

@@ -1,0 +1,36 @@
+ot game 块下发前端消费，删除前端重复表
+验收指标（新）：
+- ① 营造银走账两半同额（已达成，不需再动）
+- ② 消除「京畿」硬编码，改从场景资产取国库格，qing 场景建造与天命可用不再是死链
+- ③ 词条规格表收敛为后端单一真相源，前端不再保留 MANDATE_DEFS 重复表
+- cargo 测试不引入新失败
+From my last probe I learned:
+- web.rs step 处理器：qing 分支（582-586）走 qing::world::step_year 后，标准场景的 game 常驻块（624-625 init_game_layer_once + tick_standing）在哪？Looking at the output:
+- Line 602: `if matches!(st.scenario.as_str(), "standard-v1" | "world-v1") {` — org tick block
+- Line 624-625: game 常驻块 `crate::game::init_game_layer_once(w); for _ in crate::game::tick_standing(w, &sc) {}`
+The question is whether line 624-625 block is inside or outside the matches! block. From the earlier read of web.rs 596-656:
+```
+602: if matches!(st.scenario.as_str(), "standard-v1" | "world-v1") {
+608-615: org tick block (with remount etc)
+617-623: AI legislator block (if st.scenario == st.legis.scenario ...)
+625-631: v5 玩法扩展常驻块: {
+let sc = st.scenario.clone();
+let w = st.worlds.get_mut(&cur).unwrap();
+crate::game::init_game_layer_once(w);
+for _ in crate::game::tick_standing(w, &sc) {}
+}
+```
+From the earlier read (lines 596-656 output), the game block at relative lines 25-31:
+```
+// v5 玩法扩展常驻段：营建转化/天命积累/词条常驻/失地/整合
+{
+let sc = st.scenario.clone();
+let w = st.worlds.get_mut(&cur).unwrap();
+crate::game::init_game_layer_once(w);
+for _ in crate::game::tick_standing(w, &sc) {}
+}
+```
+This block is NOT inside the matches! standard/world block — it appears after the legislator block at the same indent level. So qing scenario DOES flow through tick_standing already? Wait, but the indent level: the matches! block at 602 has body indented, and the game block "v5 玩法扩展常驻段" — from the earlier output, the comment line starts with spaces at same level as `if matches!`. Let me check: in the output from web.rs 596-656 read:
+```
+16:                    if matches!(st.scenario.as_str(), "standard-v1" | "world-v1") {
+17-...org block...

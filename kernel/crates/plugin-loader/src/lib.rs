@@ -19,13 +19,14 @@
 pub mod capability_provider;
 pub mod enablement;
 pub mod error;
+pub mod instance_config;
 pub mod loader;
 pub mod native_loader;
 pub mod registry;
 
 /// 测试期用户空间环境钉桩（用户空间用例跨模块共用同一把进程级锁）。
 #[cfg(test)]
-pub(crate) mod test_env;
+pub mod test_env;
 
 pub use capability_provider::{
     register_provided_capabilities, CapabilityBridge, CapabilityRoute, McpBridge,
@@ -33,10 +34,16 @@ pub use capability_provider::{
 };
 pub use enablement::{PluginEnablement, PluginProfile, ProfileEntry};
 pub use error::LoaderError;
+pub use instance_config::{
+    boot_load_manifest_snapshot, build_load_manifest, load_instance_config, load_tier_manifest,
+    publish_boot_load_manifest, resolve_instance_config_path, validate_boot_roots, BootGuardError,
+    BootLoadManifest, InstanceConfig, InstanceConfigError, LoadedInstanceConfig, PluginLoadEntry,
+    PluginTier, PluginTiers, TierManifestError, INSTANCE_CONFIG_ENV, INSTANCE_CONFIG_FILENAME,
+    INSTANCE_CONFIG_SCHEMA, TIER_MANIFEST_FILENAME,
+};
 pub use loader::{
     collect_plugin_dirs, load_allowlist_file, AllowlistConfig, AllowlistEntry, AllowlistMode,
-    DualSourcePolicy, IneffectiveUserCopy, PluginLoaderImpl, CAP_HOST_CSS, CAP_HOST_JS,
-    DANGEROUS_FRONTEND_CAPS, PLUGIN_SOURCE_PRIORITY_ENV,
+    PluginLoaderImpl, CAP_HOST_CSS, CAP_HOST_JS, DANGEROUS_FRONTEND_CAPS,
 };
 pub use native_loader::NativePluginLoader;
 pub use registry::{

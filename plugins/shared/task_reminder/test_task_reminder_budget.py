@@ -87,6 +87,10 @@ def _merge(state: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
 
 
 def _execute(state: dict[str, Any], **cfg: Any) -> Any:
+    # evaluation_mode 是测试域便捷开关：真实路由键 = 管道字段 evaluation.metric_id
+    if cfg.pop("evaluation_mode", False):
+        state = dict(state)
+        state.setdefault("evaluation.metric_id", "semantic_check")
     return asyncio.run(TaskReminder(config=cfg).execute(_ctx(state)))
 
 
@@ -98,8 +102,14 @@ class TestFailureRoundExemption:
         state = _base_task_state(
             **{
                 _FP_KEY: TaskReminder._result_fingerprint("继续处理中"),
-                "_plugin_errors": [
-                    {"plugin_id": "pipeline_llm_core", "code": "MCP_CALL_FAILED", "message": "timeout"},
+                "_plugin_error_stats": [
+                    {
+                        "plugin_id": "pipeline_llm_core",
+                        "code": "MCP_CALL_FAILED",
+                        "message": "timeout",
+                        "count": 1,
+                        "seq": 1,
+                    },
                 ],
                 "evaluate_reminder_count": 4,
             }
@@ -117,15 +127,27 @@ class TestFailureRoundExemption:
         state = _base_task_state(
             **{
                 _FP_KEY: TaskReminder._result_fingerprint("继续处理中"),
-                "_plugin_errors": [
-                    {"plugin_id": "pipeline_llm_core", "code": "MCP_CALL_FAILED", "message": "t1"},
+                "_plugin_error_stats": [
+                    {
+                        "plugin_id": "pipeline_llm_core",
+                        "code": "MCP_CALL_FAILED",
+                        "message": "t1",
+                        "count": 1,
+                        "seq": 1,
+                    },
                 ],
             }
         )
         first = _execute(state)
         _merge(state, first.state_updates)
-        state["_plugin_errors"].append(
-            {"plugin_id": "pipeline_llm_core", "code": "MCP_CALL_FAILED", "message": "t2"},
+        state["_plugin_error_stats"].append(
+            {
+                "plugin_id": "pipeline_llm_core",
+                "code": "MCP_CALL_FAILED",
+                "message": "t2",
+                "count": 1,
+                "seq": 2,
+            },
         )
         second = _execute(state)
         assert second.state_updates == {"_has_new_llm_input": True}, (
@@ -136,7 +158,15 @@ class TestFailureRoundExemption:
         "errors",
         [
             [],
-            [{"plugin_id": "pipeline_tool_core", "code": "X", "message": "tool failed"}],
+            [
+                {
+                    "plugin_id": "pipeline_tool_core",
+                    "code": "X",
+                    "message": "tool failed",
+                    "count": 1,
+                    "seq": 1,
+                }
+            ],
         ],
         ids=["no-errors", "unrelated-plugin-error"],
     )
@@ -145,7 +175,7 @@ class TestFailureRoundExemption:
         state = _base_task_state(
             **{
                 _FP_KEY: TaskReminder._result_fingerprint("继续处理中"),
-                "_plugin_errors": errors,
+                "_plugin_error_stats": errors,
                 "evaluate_reminder_count": 2,
             }
         )
@@ -159,8 +189,14 @@ class TestFailureRoundExemption:
         state = _base_task_state(
             **{
                 _FP_KEY: TaskReminder._result_fingerprint("继续处理中"),
-                "_plugin_errors": [
-                    {"plugin_id": "pipeline_llm_core", "code": "MCP_CALL_FAILED", "message": "t1"},
+                "_plugin_error_stats": [
+                    {
+                        "plugin_id": "pipeline_llm_core",
+                        "code": "MCP_CALL_FAILED",
+                        "message": "t1",
+                        "count": 1,
+                        "seq": 1,
+                    },
                 ],
                 "evaluate_reminder_count": 2,
             }
@@ -181,8 +217,14 @@ class TestFailureRoundExemption:
                 "raw_result": "",
                 "raw_tool_calls": [{"function": {"name": "bash"}}],
                 _FP_KEY: TaskReminder._result_fingerprint(""),
-                "_plugin_errors": [
-                    {"plugin_id": "pipeline_llm_core", "code": "MCP_CALL_FAILED", "message": "timeout"},
+                "_plugin_error_stats": [
+                    {
+                        "plugin_id": "pipeline_llm_core",
+                        "code": "MCP_CALL_FAILED",
+                        "message": "timeout",
+                        "count": 1,
+                        "seq": 1,
+                    },
                 ],
                 "eval_tool_only_count": 4,
             }
@@ -305,13 +347,19 @@ class TestBudgetWithinSameRun:
         _merge(state, _execute(state).state_updates)
         assert state["evaluate_reminder_count"] == 1
         # ② 失败轮：raw_result 残留 + llm_core 错误 → 不计额
-        state["_plugin_errors"] = [
-            {"plugin_id": "pipeline_llm_core", "code": "MCP_CALL_FAILED", "message": "timeout"},
+        state["_plugin_error_stats"] = [
+            {
+                "plugin_id": "pipeline_llm_core",
+                "code": "MCP_CALL_FAILED",
+                "message": "timeout",
+                "count": 1,
+                "seq": 1,
+            },
         ]
         _merge(state, _execute(state).state_updates)
         assert state["evaluate_reminder_count"] == 1, "失败轮不得消耗额度"
         # ③ 恢复：新产出 → 正常计额
-        del state["_plugin_errors"]
+        del state["_plugin_error_stats"]
         state["raw_result"] = "恢复后的回复"
         _merge(state, _execute(state).state_updates)
         assert state["evaluate_reminder_count"] == 2

@@ -133,10 +133,60 @@ def classify_dsh_plugin(root: str | Path) -> dict[str, Any]:
         kinds["tool"] = {"channel": "runtime-bridge (extra-tools)"}
 
     # visual 视觉类：slots 前端表面（复用 client 扫描信号）
-    if _SLOT_NAME_RE.search(blob):
+    if slot_names_in(blob):
         kinds["visual"] = {"channel": "contributes renderers/slots 翻译"}
 
     return kinds
+
+
+# 宿主包说明符：社区插件常直接 import 官方核心包却不声明 peer（实测
+# @linxin666/dsh-tool-describe-image import @deepseek-ai/dsh-credentials）。
+_HOST_IMPORT_RE = re.compile(
+    r"""(?:from\s*|require\s*\(\s*|import\s*\(\s*)['"](@deepseek-ai/[A-Za-z0-9._-]+)['"]"""
+)
+# 包内 JS 扫描面（与 classify_dsh_plugin 的 glob 同构；node_modules 下的
+# 传递依赖不扫——那是安装面的事，不是本包的 import 声明）
+_HOST_SCAN_PATTERNS = (
+    "lib/**/*.js", "lib/**/*.mjs", "dist/**/*.js", "dist/**/*.mjs",
+    "src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "**/*.mjs",
+)
+
+
+def scan_host_imports(package_dir: str | Path) -> list[str]:
+    """扫包内代码与清单里引用的 ``@deepseek-ai/*`` 宿主包（去重排序）。
+
+    只做静态文本扫描，不执行任何插件代码；用于安装后补齐「插件直接 import
+    但未声明 peer」的宿主包。``package.json`` 的 dependencies/peerDependencies
+    一并计入（声明过的由 pnpm autoInstallPeers 兜，未声明的靠这里兜）。
+    """
+    root = Path(package_dir)
+    names: set[str] = set()
+    seen: set[Path] = set()
+    for pattern in _HOST_SCAN_PATTERNS:
+        for p in sorted(root.glob(pattern)):
+            # 只跳过包目录**内部**的 node_modules（包自身常装在
+            # <workspace>/node_modules/<name> 下，绝对路径含 node_modules 是常态）
+            if p in seen or "node_modules" in p.relative_to(root).parts:
+                continue
+            seen.add(p)
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            names.update(_HOST_IMPORT_RE.findall(text))
+    manifest = root / "package.json"
+    if manifest.is_file():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict):
+            for field in ("dependencies", "peerDependencies"):
+                deps = data.get(field)
+                if isinstance(deps, dict):
+                    names.update(str(k) for k in deps if str(k).startswith("@deepseek-ai/"))
+    return sorted(names)
+
 
 # ── DSH client 槽位 → 灵汐 UI 槽位映射表（界面语义翻译的单一事实源） ────────
 #
@@ -148,7 +198,7 @@ def classify_dsh_plugin(root: str | Path) -> dict[str, Any]:
 # 工具卡→聊天消息卡、详情→浮窗；灵汐无对应槽位的标记 direct（直接渲染，
 # 诚实边界，不强行归并）。
 DSH_SLOT_LINGXI_MAP: dict[str, dict[str, str]] = {
-    "tool.call.toolview": {"lingxi_slot": "chatMessages", "note": "工具结果卡 → 聊天消息卡样式（ActivityCard dsh:* 分支渲染）"},
+    "tool.call.toolview": {"lingxi_slot": "chatMessages", "note": "工具结果卡 → 聊天消息卡（render 意图/工具卡原生块）"},
     "conversation.chat.node": {"lingxi_slot": "chatMessages", "note": "聊天消息节点 → 聊天消息卡"},
     "conversation.details.tool": {"lingxi_slot": "floating", "note": "工具详情面板 → 浮窗/详情浮层"},
     "conversation.composer": {"lingxi_slot": "chatInteractions", "note": "聊天输入区 → 聊天交互模式"},
@@ -156,6 +206,12 @@ DSH_SLOT_LINGXI_MAP: dict[str, dict[str, str]] = {
     "conversation.input.dock": {"lingxi_slot": "dockItems", "note": "输入区 dock → 底部 dock 栏"},
     "settings.general.item": {"lingxi_slot": "settingsPanels", "note": "设置项 → 插件设置面板"},
     "settings.plugin.item": {"lingxi_slot": "settingsPanels", "note": "插件设置项 → 插件设置面板（modlens 等视觉包布局）"},
+    # 真实社区插件在用的槽位（2026-11-09 实测 dsh-pet/dsh-context/describe-image）
+    "settings.section": {"lingxi_slot": "settingsPanels", "note": "设置分节 → 插件设置面板"},
+    "sidebar.right.pane.tab": {"lingxi_slot": "workspaceTabs", "note": "右侧面板页签 → 工作区页签"},
+    "conversation.session.header": {"lingxi_slot": "chatMessages", "note": "会话头部 → 聊天会话头卡位"},
+    "conversation.session.header.actions": {"lingxi_slot": "chatActions", "note": "会话头部动作 → 聊天动作位"},
+    "sidebar.footer.action": {"lingxi_slot": "statusBarItems", "note": "侧栏页脚动作 → 状态栏条目"},
 }
 _DSH_SLOT_FALLBACK: dict[str, str] = {
     "lingxi_slot": "direct",
@@ -171,16 +227,31 @@ DSH_KNOWN_SLOT_NAMES: frozenset[str] = frozenset({
     *DSH_SLOT_LINGXI_MAP,
     # 位置侧已知（无灵汐 UI 槽位语义，锚点映射在 server 侧）
     "sidebar.settings",
-    "sidebar.footer.action",
     "settings.trigger",
-    "conversation.session.header",
-    "conversation.session.header.actions",
+    # 真实包在用、暂无渲染位的槽位（2026-11-10 bundle 实测扫描登记，防漂移）：
+    # shell.overlay=全局覆盖层（pet 立绘 / chat-settings 顶栏装饰；灵汐侧对应
+    # C4 SlotRegistry 的 modal 键，桥接另行处理）；conversation.input.right=
+    # 输入区右侧扩展位（prompt-snippets）；conversation.hero.options=空会话
+    # hero 区选项（chat-settings）。
+    "shell.overlay",
+    "conversation.input.right",
+    "conversation.hero.options",
 })
 
 
 def map_dsh_slot(slot_name: str) -> dict[str, str]:
     """DSH slot 名 → 灵汐槽位（未收录回退 direct = 直接渲染）。"""
     return DSH_SLOT_LINGXI_MAP.get(slot_name, dict(_DSH_SLOT_FALLBACK))
+
+
+def unmapped_slots(slots: dict[str, Any]) -> list[dict[str, str]]:
+    """未映射槽位清单（translate_package 的 slots → 管理页/预览可见的缺口）。"""
+    out: list[dict[str, str]] = []
+    for name, entry in slots.items():
+        if str((entry or {}).get("lingxi_slot") or "") != "direct":
+            continue
+        out.append({"slot": str(name), "reason": "灵汐无对应挂载位（direct 兜底，未强行归并）"})
+    return out
 
 
 # ── DSH hook 事件 → 灵汐 checks 触发位置映射表（钩子翻译的单一事实源） ──────
@@ -554,11 +625,42 @@ def translate_dialect_hooks(
     return result
 
 
-# slots.register/inject 的 name 声明（任意槽位名，不限于 toolview）
-_SLOT_NAME_RE = re.compile(
-    r"slots\.(?:register|inject)\([^)]*?name:\s*['\"]([\w.]+)['\"]",
-    re.DOTALL,
-)
+# slots.register/inject 的 name 声明（任意槽位名，不限于 toolview）。
+# 两种形态：字面量 `name: 'settings.plugin.item'` 与同文件常量
+# `name: OFFICIAL_PLUGIN_CARD_SEAT`（实测 describe-image 的 seat 注册形——
+# 字面量只出现在常量赋值里），标识符经 _SLOT_CONST_RE 解析。一次 register
+# 调用可能有多个 name（三元选座形），按调用实参平衡括号切片后全量提取。
+_SLOT_CALL_RE = re.compile(r"slots\.(?:register|inject)\(")
+_SLOT_NAME_IN_CALL_RE = re.compile(
+    r"name:\s*(?:['\"]([\w.-]+)['\"]|([A-Za-z_$][\w$]*))")
+_SLOT_CONST_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*=\s*['\"]([\w.-]+)['\"]")
+
+
+def _call_arguments(text: str, start: int) -> str:
+    """从实参起点切到配对右括号（平衡括号，忽略字符串内括号的边角形）。"""
+    depth = 1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+    return text[start:]
+
+
+def slot_names_in(text: str) -> set[str]:
+    """源文本里 slots 注册的槽位名（字面量 + 同文件常量标识符解析）。"""
+    consts = dict(_SLOT_CONST_RE.findall(text))
+    names: set[str] = set()
+    for call in _SLOT_CALL_RE.finditer(text):
+        for literal, ident in _SLOT_NAME_IN_CALL_RE.findall(
+                _call_arguments(text, call.end())):
+            name = literal or consts.get(ident, "")
+            if name:
+                names.add(name)
+    return names
 
 # ── DSH toolview 键 → 灵汐渲染组件映射表（前端组件翻译的单一事实源） ────────
 #
@@ -594,6 +696,37 @@ def map_toolview_to_component(toolview_key: str) -> dict[str, str]:
     return DSH_TOOLVIEW_COMPONENT_MAP.get(toolview_key, dict(_DSH_FALLBACK_MAPPING))
 
 
+# 卡型词汇白名单（映射表 card 面 + generic 兜底；前端生成物
+# DSH_RENDER_CARDS 与本集合同源，见 scripts/generate_render_card_vocabulary.py）
+DSH_RENDER_CARD_VALUES: frozenset[str] = frozenset(
+    {spec["card"] for spec in DSH_TOOLVIEW_COMPONENT_MAP.values()}
+    | {_DSH_FALLBACK_MAPPING["card"]}
+)
+
+
+def collect_installed_renderers(package_dirs: list[Path] | list[str | Path]) -> list[dict[str, str]]:
+    """聚合已装 DSH 包的 toolview 渲染声明 → ``[{tool, card}]``（去重 + 白名单）。
+
+    供 ``server.on_load`` 写回 ``contributes.renderers``——前端 dshAdapter
+    服务按此表给 DSH 工具名注册 render 意图兜底。单包翻译失败隔离。
+    """
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for directory in package_dirs:
+        try:
+            manifest = translate_package(directory)
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        for entry in manifest.get("client", {}).get("renderers") or []:
+            tool = str(entry.get("tool") or "")
+            card = str(entry.get("card") or "")
+            if not tool or tool in seen or card not in DSH_RENDER_CARD_VALUES:
+                continue
+            seen.add(tool)
+            out.append({"tool": tool, "card": card})
+    return sorted(out, key=lambda item: item["tool"])
+
+
 def dsh_params_to_json_schema(params: dict[str, Any] | None) -> dict[str, Any]:
     """DSH parameters DSL → JSON Schema（与 runtime 桥 mjs 侧同构）。
 
@@ -601,6 +734,9 @@ def dsh_params_to_json_schema(params: dict[str, Any] | None) -> dict[str, Any]:
     """
     if not params:
         return {"type": "object", "properties": {}}
+    # 已是 JSON Schema 形（社区插件直接写 schema）→ 原样透传（与桥 mjs 同构）
+    if params.get("type") == "object" and isinstance(params.get("properties"), dict):
+        return dict(params)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for key, spec in params.items():
@@ -683,7 +819,7 @@ def translate_package(package_dir: str | Path) -> dict[str, Any]:
             warnings.append(f"unreadable source {path.name}: {e}")
             continue
         # 槽位名（任意 DSH slot）→ 灵汐槽位映射（未收录回退 direct = 直接渲染）
-        for slot_name in _SLOT_NAME_RE.findall(text):
+        for slot_name in sorted(slot_names_in(text)):
             entry = slots.setdefault(slot_name, {**map_dsh_slot(slot_name), "sources": []})
             if rel not in entry["sources"]:
                 entry["sources"].append(rel)
@@ -1614,6 +1750,17 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
         for k, v in bubble_extracts.items():
             if not k.startswith("--bubble-"):
                 variables[k] = v
+
+        # ── DSH 设计令牌别名（皮肤设计系统直连）────────────────────────
+        # 皮肤以整套 --dsw-* 令牌声明表面（明暗两态各一套，运行期由
+        # body[data-skin-dark] 块覆盖）。静态抽取只取首匹配（=亮态分支）且
+        # 覆盖不全——暗态皮肤会拿到亮值、输入面根本拿不到值。对消费面明确
+        # 的令牌改发 var() 别名：浏览器按当前明暗态解析令牌，侧栏/输入面与
+        # DSH 原生渲染一致（2026-11-10 用户裁定：渲染槽位/表面要一致）。
+        if "--dsw-specific-sidebar-fill:" in css:
+            variables["--region-sidebar-bg"] = "var(--dsw-specific-sidebar-fill)"
+        if "--dsw-specific-input-major:" in css:
+            variables["--chat-input-bg"] = "var(--dsw-specific-input-major)"
 
         # 皮肤字体 → --font-ui（主题管线原生消费 main.tsx fontFamily）
         if css:

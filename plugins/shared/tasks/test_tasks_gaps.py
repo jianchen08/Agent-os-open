@@ -709,6 +709,21 @@ class TestFailedSideFollowWrite:
         assert isinstance(fields["task.failure_reason"], str)
         assert len(fields["task.failure_reason"]) > 0
 
+    async def test_crash_swept_is_deferred_not_projected_failed(self) -> None:
+        """崩溃清扫行不投影 task failed：任务保持 running，等自动恢复拉起。
+
+        ADR 2026-11-13：failed 是拉起失败的结果，不是拉起的前置条件。
+        """
+        reconcile, state, runs = self._env("running", "failed")
+        state._responses["list"][0]["run_stop_reason"] = "crash_swept"
+
+        divergences = await reconcile.reconcile_startup(state, runs)
+
+        assert [d["kind"] for d in divergences] == ["undecided_run_terminal"]
+        assert divergences[0].get("deferred") == "crash_swept_auto_resume"
+        update_calls = [c for c in state.calls if c[0] == "update"]
+        assert update_calls == [], "崩溃清扫行不得投影 task failed"
+
     async def test_follow_write_is_idempotent_across_rescans(self) -> None:
         """性质断言：补写后投影=failed，下一轮扫描不再进分歧集、零写（on_load 高频）。"""
         reconcile, state, runs = self._env("running", "failed")
@@ -1180,6 +1195,84 @@ class TestResumeTerminalStateGuard:
         resume_params = [p for name, p in calls if name == "pipeline-executor"]
         assert len(resume_params) == 1
         assert resume_params[0]["state_overlay"]["suspended_reason"] is None
+
+    async def test_resume_clears_stale_terminal_child_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """子 run 已终态但 task 投影未随写 → 恢复 overlay 同批清挂号键。
+
+        存量场景（2026-11-11 e475/885b）：评估子管道 run completed，但
+        task.status 停在 running，父的 ``task.subtasks_pending.<child>``
+        永不解除；恢复前不清键，父续跑轮会被 task_reminder 再次挂起。
+        """
+        import http_api
+
+        calls = self._patch(
+            monkeypatch,
+            {"status": "resumed", "run_id": "run-6", "dispatched": True},
+            state_rows=[
+                {
+                    "pipeline_id": "t-1",
+                    "task.id": "t-1",
+                    "task.status": "running",
+                    "task.subtasks_pending.c-1": "2026-11-11T08:30:28+00:00",
+                },
+                {
+                    "pipeline_id": "c-1",
+                    "task.id": "c-1",
+                    "task.status": "running",
+                    "run_status": "completed",
+                },
+            ],
+        )
+
+        resumed, submitted, error = await http_api._resume_task_pipeline("t-1")
+
+        assert (resumed, submitted, error) == (True, True, "")
+        resume_params = [p for name, p in calls if name == "pipeline-executor"]
+        assert len(resume_params) == 1
+        assert resume_params[0]["state_overlay"] == {
+            "task.status": "running",
+            "task_status": "running",
+            "suspended_reason": None,
+            "task.subtasks_pending.c-1": None,
+        }
+
+    async def test_resume_keeps_registration_for_active_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """子 run 仍在跑 → 挂号键保留（父恢复是为了等它，不是丢回执）。"""
+        import http_api
+
+        calls = self._patch(
+            monkeypatch,
+            {"status": "resumed", "run_id": "run-7", "dispatched": True},
+            state_rows=[
+                {
+                    "pipeline_id": "t-1",
+                    "task.id": "t-1",
+                    "task.status": "running",
+                    "task.subtasks_pending.c-1": "2026-11-11T10:00:00+00:00",
+                },
+                {
+                    "pipeline_id": "c-1",
+                    "task.id": "c-1",
+                    "task.status": "running",
+                    "run_status": "running",
+                },
+            ],
+        )
+
+        resumed, submitted, error = await http_api._resume_task_pipeline("t-1")
+
+        assert (resumed, submitted, error) == (True, True, "")
+        resume_params = [p for name, p in calls if name == "pipeline-executor"]
+        assert len(resume_params) == 1
+        assert resume_params[0]["state_overlay"] == {
+            "task.status": "running",
+            "task_status": "running",
+            "suspended_reason": None,
+        }
 
     @pytest.mark.parametrize("live_status", ["running", "suspended"])
     async def test_live_status_resume_keeps_current_behavior(

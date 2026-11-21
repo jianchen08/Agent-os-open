@@ -65,16 +65,17 @@ describe('ThinkingDisplay — 头部', () => {
     expect(queryByText(/步$/)).not.toBeInTheDocument()
   })
 
-  it('durationMs 显示为秒（一位小数）；缺省不显示耗时徽标', () => {
-    const { getByText, queryByText, rerender } = renderDisplay(makeThinking({ content: '', durationMs: 1523 }))
-    expect(getByText('1.5s')).toBeInTheDocument()
+  it('思考区一律不显示耗时数字（2026-11-19 用户纠正一）', () => {
+    const { queryByText, rerender } = renderDisplay(makeThinking({ content: '', durationMs: 1523 }))
+    // 时间只出现在消息底部活动行「执行中 · N.Ns」；思考区（标题/行尾/终态）均无耗时
+    expect(queryByText('1.5s')).not.toBeInTheDocument()
 
     rerender(<ThinkingDisplay thinking={makeThinking({ content: '' })} />)
     expect(queryByText('1.5s')).not.toBeInTheDocument()
   })
 
-  // 2026-11-06 用户裁定：思考中态头部统一图标后跟实时总耗时；结束后回到 durationMs 徽标
-  it('isThinking 且带耗时锚点：头部显示实时总耗时；结束后切回 durationMs 徽标', () => {
+  // 2026-11-19 规格二/三/四：思考中头部只显「执行中」badge；实时耗时统一收敛到底部活动行
+  it('isThinking：头部显示「执行中」badge 且无耗时；结束后 badge 消失且仍无耗时', () => {
     vi.useFakeTimers()
     try {
       vi.setSystemTime(new Date('2026-11-06T10:00:10Z'))
@@ -85,7 +86,10 @@ describe('ThinkingDisplay — 头部', () => {
           streamAnchorMs={anchor}
         />,
       )
-      expect(view.getByTestId('stream-elapsed')).toHaveTextContent('2.0s')
+      // 2026-11-19 用户纠正（单一状态指示点）：卡片头部不得再有「执行中」文字，
+      // 状态只由消息底部带转圈的活动行承担
+      expect(view.queryByTestId('thinking-running-badge')).not.toBeInTheDocument()
+      expect(view.queryByTestId('stream-elapsed')).not.toBeInTheDocument()
 
       view.rerender(
         <ThinkingDisplay
@@ -94,7 +98,7 @@ describe('ThinkingDisplay — 头部', () => {
         />,
       )
       expect(view.queryByTestId('stream-elapsed')).not.toBeInTheDocument()
-      expect(view.getByText('1.5s')).toBeInTheDocument()
+      expect(view.queryByText('1.5s')).not.toBeInTheDocument()
     } finally {
       vi.useRealTimers()
     }
@@ -217,13 +221,14 @@ describe('ThinkingDisplay — 流式思考内容', () => {
     expect(getByTestId('plain-md')).toHaveTextContent('# 结论 正文')
   })
 
-  it('思考中但暂无内容：显示「正在思考中...」占位', () => {
-    const { getByText, queryByTestId } = renderDisplay(
+  it('思考中但暂无内容：无预置占位文案（2026-11-19 单一状态指示点裁定——状态只由 spinner 与消息底部行承担）', () => {
+    const { container, queryByTestId } = renderDisplay(
       makeThinking({ content: '', isThinking: true }),
       { defaultExpanded: true },
     )
-    expect(getByText('正在思考中...')).toBeInTheDocument()
+    expect(container.querySelector('pre')).toBeNull()
     expect(queryByTestId('plain-md')).not.toBeInTheDocument()
+    expect(container.textContent).not.toContain('正在思考中')
   })
 
   it('非思考且无内容：既无 pre 也无 Markdown 也无占位', () => {

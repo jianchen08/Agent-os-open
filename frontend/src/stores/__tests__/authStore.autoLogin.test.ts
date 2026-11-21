@@ -10,6 +10,7 @@
  *   一并移除，内核「env 不符即重置」承担对齐）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useAuthStore } from '@/stores/authStore'
 
 const authApi = vi.hoisted(() => ({
   login: vi.fn(),
@@ -67,7 +68,6 @@ vi.mock('@/services/query/queryClient', () => ({
   queryClient: { removeQueries },
 }))
 
-import { useAuthStore } from '@/stores/authStore'
 
 const LOGIN_RESPONSE = {
   access_token: 'at-auto',
@@ -267,14 +267,14 @@ describe('initializeAuth 启动即借权（远端档免登）', () => {
   it('自定义后端 + 无存量令牌 → 借权换发并自动恢复认证（零登录面）', async () => {
     // 用户 2026-10-22 实测：应用启动即指向远端且无存量令牌时落登录闸——
     // 契约：先借权（本机代持令牌）再常规 refresh，全程不要求手输。
-    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    localStorage.setItem('server_base_url', 'http://203.0.113.153')
     borrow.mintLocalKernelToken.mockResolvedValue('local-at')
     borrow.borrowSession.mockResolvedValue({ ok: true, refreshToken: 'rt-borrow' })
 
     await useAuthStore.getState().initializeAuth()
 
-    expect(borrow.borrowSession).toHaveBeenCalledWith('http://162.14.69.153', 'local-at')
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-borrow')
+    expect(borrow.borrowSession).toHaveBeenCalledWith('http://203.0.113.153', 'local-at')
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBe('rt-borrow')
     const st = useAuthStore.getState()
     expect(st.isAuthenticated).toBe(true)
     expect(st.isInitializing).toBe(false)
@@ -284,14 +284,14 @@ describe('initializeAuth 启动即借权（远端档免登）', () => {
     // 用户 2026-10-26 实测：移动端连云端仍落登录页——远端档本机 proot 栈按
     // 设计不拉起，本机代持腿必然 mint 失败；契约：壳层 per-device token 直借
     // 云端 relay /borrow_auth 补位，全程零登录面。
-    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    localStorage.setItem('server_base_url', 'http://203.0.113.153')
     borrow.mintLocalKernelToken.mockResolvedValue(null)
     borrow.borrowViaShellDevice.mockResolvedValue({ ok: true, refreshToken: 'rt-shell' })
 
     await useAuthStore.getState().initializeAuth()
 
-    expect(borrow.borrowViaShellDevice).toHaveBeenCalledWith('http://162.14.69.153')
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-shell')
+    expect(borrow.borrowViaShellDevice).toHaveBeenCalledWith('http://203.0.113.153')
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBe('rt-shell')
     expect(borrow.borrowSession).not.toHaveBeenCalled()
     const st = useAuthStore.getState()
     expect(st.isAuthenticated).toBe(true)
@@ -299,7 +299,7 @@ describe('initializeAuth 启动即借权（远端档免登）', () => {
   })
 
   it('本机腿握手失败 → 壳层直借腿补位（先成先得）', async () => {
-    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    localStorage.setItem('server_base_url', 'http://203.0.113.153')
     borrow.mintLocalKernelToken.mockResolvedValue('local-at')
     borrow.borrowSession.mockResolvedValue({ ok: false, error: '借权不可用' })
     borrow.borrowViaShellDevice.mockResolvedValue({ ok: true, refreshToken: 'rt-shell' })
@@ -307,8 +307,8 @@ describe('initializeAuth 启动即借权（远端档免登）', () => {
     await useAuthStore.getState().initializeAuth()
 
     expect(borrow.borrowSession).toHaveBeenCalledTimes(1)
-    expect(borrow.borrowViaShellDevice).toHaveBeenCalledWith('http://162.14.69.153')
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-shell')
+    expect(borrow.borrowViaShellDevice).toHaveBeenCalledWith('http://203.0.113.153')
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBe('rt-shell')
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
   })
 })
@@ -317,7 +317,7 @@ describe('initializeAuth 存量令牌失效后的重借（远端档）', () => {
   it('存量 refresh 认证失败 → 重新借权并恢复认证（零登录面）', async () => {
     // 用户 2026-10-22 二次撞墙：目标内核重启致令牌作废，启动链只清凭据不重借
     // → 又落登录页。契约：失效即重借并重试 refresh。
-    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    localStorage.setItem('server_base_url', 'http://203.0.113.153')
     tl.getRefreshTokenValue.mockReturnValue('rt-stale')
     tl.refresh
       .mockRejectedValueOnce(new Error('401 令牌失效'))
@@ -327,8 +327,8 @@ describe('initializeAuth 存量令牌失效后的重借（远端档）', () => {
 
     await useAuthStore.getState().initializeAuth()
 
-    expect(borrow.borrowSession).toHaveBeenCalledWith('http://162.14.69.153', 'local-at')
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-fresh')
+    expect(borrow.borrowSession).toHaveBeenCalledWith('http://203.0.113.153', 'local-at')
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBe('rt-fresh')
     const st = useAuthStore.getState()
     expect(st.isAuthenticated).toBe(true)
     expect(st.isInitializing).toBe(false)

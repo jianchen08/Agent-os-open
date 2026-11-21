@@ -115,19 +115,41 @@ pub trait CapabilityRouter: Send + Sync {
 /// - `None`: method 含 `/`（MCP 标准方法）、namespace 不在白名单、或不含 `.`。
 pub fn parse_capability_method_with<'a, T: AsRef<str>>(
     method: &'a str,
-    known_namespaces: &[T],
+    known_namespaces: &'a [T],
 ) -> Option<(&'a str, &'a str)> {
     // 跳过 MCP 标准方法（initialize / tools/* / resources/* / notifications/*）
     // 这些是协议层方法，不是 capability 调用
-    if method.contains('/')
-        || known_namespaces
-            .iter()
-            .all(|cap| !method.starts_with(cap.as_ref()))
-    {
+    if method.contains('/') {
         return None;
     }
-
-    method.split_once('.')
+    // 在已知 namespace 里找「method 的点边界前缀」最长命中再切分——白名单
+    // 动态面（handler 注册表）允许任意 namespace 字符串，带点 namespace
+    // （provides 声明 grants.policy，wire 为 grants.policy.classify）按首点
+    // 切分会错切成 ("grants", "policy.classify") 而落 unhandled（装机
+    // 2026-11-19 实证：-32603 capability method not implemented）。无点
+    // namespace 行为不变（首个点即点边界）；多级命中取最长保证确定性。
+    let mut best: Option<(&str, &str)> = None;
+    for cap in known_namespaces {
+        let ns = cap.as_ref();
+        let Some(rest) = method.strip_prefix(ns).and_then(|r| r.strip_prefix('.')) else {
+            continue;
+        };
+        if best.is_none_or(|(hit_ns, _)| ns.len() > hit_ns.len()) {
+            best = Some((ns, rest));
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+    // 白名单通过但无点边界命中（namespace 是 method 前缀却不在点边界）：
+    // 保持既有首点切分语义——切分结果由 router 层判定，不在解析层改错误面。
+    if known_namespaces
+        .iter()
+        .any(|cap| method.starts_with(cap.as_ref()))
+    {
+        return method.split_once('.');
+    }
+    None
 }
 
 #[cfg(test)]
@@ -257,6 +279,41 @@ mod tests {
             parse_capability_method_with("human-interaction.create_choice", &known).unwrap();
         assert_eq!(cap, "human-interaction");
         assert_eq!(method, "create_choice");
+    }
+
+    #[test]
+    fn test_parse_with_dotted_namespace() {
+        // 带点 namespace（provides 声明形如 grants.policy）：wire method
+        // `<ns>.<method>` 必须按最长已知 namespace 前缀在点边界切分，
+        // 首点切分会把 grants.policy.classify 错切成 ("grants", "policy.classify")
+        // 而落 unhandled（装机 2026-11-19 实证：-32603 method not implemented）。
+        let known = vec!["grants.policy".to_string(), "grants.ledger".to_string()];
+        let (cap, method) = parse_capability_method_with("grants.policy.classify", &known).unwrap();
+        assert_eq!(cap, "grants.policy");
+        assert_eq!(method, "classify");
+        let (cap, method) = parse_capability_method_with("grants.ledger.request", &known).unwrap();
+        assert_eq!(cap, "grants.ledger");
+        assert_eq!(method, "request");
+    }
+
+    #[test]
+    fn test_parse_with_dotted_namespace_longest_prefix_wins() {
+        // 多级命中取最长（"grants" 与 "grants.policy" 同时在册时后者胜出，
+        // 切分结果确定性，不依赖注册顺序）。
+        let known = vec!["grants".to_string(), "grants.policy".to_string()];
+        let (cap, method) = parse_capability_method_with("grants.policy.classify", &known).unwrap();
+        assert_eq!(cap, "grants.policy");
+        assert_eq!(method, "classify");
+    }
+
+    #[test]
+    fn test_parse_with_prefix_not_at_dot_boundary_keeps_first_dot() {
+        // namespace 是 method 前缀但不在点边界（病态输入）：保持既有首点
+        // 切分语义（切分结果由 router 层判定，不在解析层改变错误面）。
+        let known = vec!["grants.policy".to_string()];
+        let (cap, method) = parse_capability_method_with("grants.policyfoo.bar", &known).unwrap();
+        assert_eq!(cap, "grants");
+        assert_eq!(method, "policyfoo.bar");
     }
 
     #[test]

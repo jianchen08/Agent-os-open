@@ -101,9 +101,57 @@ class TestMissingCarry:
         resources.mkdir()
         problems = mod.missing_carry(resources)
         joined = " ".join(problems)
-        for must in ("agentos-kernel.exe", "_host/.venv", "prereqs/uv.exe",
-                     "prereqs/wheels", "rclone.exe", "winfsp"):
+        for must in ("agentos-kernel.exe", "deploy-manifest.json", "_host/.venv",
+                     "prereqs/uv.exe", "prereqs/wheels", "rclone.exe", "winfsp"):
             assert must in joined, f"默认契约未覆盖 {must}"
+
+
+class TestVerifyDeployedManifest:
+    """部署清单回读（ADR 2026-11-10）：清单缺失判红 + 回读器严格档调用形态。"""
+
+    def test_missing_manifest_red(self, tmp_path: Path):
+        resources = tmp_path / "resources"
+        resources.mkdir()
+        ok, detail = mod.verify_deployed_manifest(resources)
+        assert ok is False
+        assert "缺部署清单" in detail
+
+    def test_invokes_verifier_in_strict_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import subprocess as real_subprocess
+
+        resources = tmp_path / "resources"
+        resources.mkdir()
+        (resources / "deploy-manifest.json").write_text("{}", encoding="utf-8")
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(argv, **_kwargs):
+            captured["argv"] = list(argv)
+            return real_subprocess.CompletedProcess(argv, 0, stdout="[deploy-verify] PASS 一致\n", stderr="")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        ok, detail = mod.verify_deployed_manifest(resources)
+
+        assert ok is True and "PASS" in detail
+        argv = captured["argv"]
+        assert argv[1].endswith("verify_deploy_manifest.py")
+        assert argv[2] == "verify"
+        assert "--strict" in argv
+        assert str(resources) in argv
+
+    def test_verifier_red_propagates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import subprocess as real_subprocess
+
+        resources = tmp_path / "resources"
+        resources.mkdir()
+        (resources / "deploy-manifest.json").write_text("{}", encoding="utf-8")
+
+        def fake_run(argv, **_kwargs):
+            return real_subprocess.CompletedProcess(argv, 1, stdout="[deploy-verify] FAIL 1 项\n", stderr="")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        ok, detail = mod.verify_deployed_manifest(resources)
+        assert ok is False
+        assert "FAIL" in detail
 
 
 class TestFindResources:
@@ -114,6 +162,67 @@ class TestFindResources:
     def test_present_resources_returned(self, tmp_path: Path):
         (tmp_path / "resources").mkdir()
         assert mod.find_resources(tmp_path) == tmp_path / "resources"
+
+
+class TestCleanupInstall:
+    """收尾清理（用户裁定 2026-11-12：测试完就清理掉）：先卸载器后删目录。"""
+
+    def test_runs_uninstaller_before_rmdir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import subprocess as real_subprocess
+
+        dest = tmp_path / "installed"
+        dest.mkdir()
+        uninstaller = dest / "Uninstall 灵汐助手.exe"
+        uninstaller.write_text("stub", encoding="utf-8")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return real_subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        mod.cleanup_install(dest, wait_s=0)
+
+        assert calls[0][0] == str(uninstaller)
+        assert calls[0][1] == "/S"
+        assert calls[-1][:3] == ["cmd", "/C", "rmdir"]
+        assert str(dest) in calls[-1]
+
+    def test_no_uninstaller_still_removes_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import subprocess as real_subprocess
+
+        dest = tmp_path / "installed"
+        dest.mkdir()
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return real_subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        mod.cleanup_install(dest, wait_s=0)
+
+        assert len(calls) == 1
+        assert calls[0][:3] == ["cmd", "/C", "rmdir"]
+
+    def test_uninstaller_failure_does_not_skip_rmdir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import subprocess as real_subprocess
+
+        dest = tmp_path / "installed"
+        dest.mkdir()
+        (dest / "Uninstall 灵汐助手.exe").write_text("stub", encoding="utf-8")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            if str(argv[0]).endswith("Uninstall 灵汐助手.exe"):
+                raise OSError("uninstaller blocked")
+            return real_subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        mod.cleanup_install(dest, wait_s=0)
+
+        assert calls[-1][:3] == ["cmd", "/C", "rmdir"]
 
 
 if __name__ == "__main__":

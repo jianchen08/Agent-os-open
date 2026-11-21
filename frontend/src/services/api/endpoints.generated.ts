@@ -9,7 +9,6 @@
  * 漂移/手写回潮检查：
  *     python scripts/check_frontend_endpoints_sync.py
  */
-/* eslint-disable */
 
 
   /** acp_quota_pool（ACP Quota Pool）：plugin.json 声明 3 端点 */
@@ -94,16 +93,12 @@
     'tables': '/ext/db_admin/tables',
   } as const
 
-  /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 16 端点 */
+  /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 12 端点 */
   export const DSH_ADAPTER_ENDPOINTS = {
+    'dsh_client_ui': '/ext/dsh_adapter/api/dsh/client-ui',
     'dsh_hooks_translate': '/ext/dsh_adapter/api/dsh/hooks/translate',
-    'dsh_plugins_list': '/ext/dsh_adapter/api/dsh/plugins',
-    'dsh_plugins_disable': '/ext/dsh_adapter/api/dsh/plugins/disable',
-    'dsh_plugins_enable': '/ext/dsh_adapter/api/dsh/plugins/enable',
-    'dsh_plugins_index': '/ext/dsh_adapter/api/dsh/plugins/index',
-    'dsh_plugins_install': '/ext/dsh_adapter/api/dsh/plugins/install',
-    'dsh_plugins_uninstall': '/ext/dsh_adapter/api/dsh/plugins/uninstall',
-    'dsh_manager_page': '/ext/dsh_adapter/page/manager',
+    'dsh_official_ui': '/ext/dsh_adapter/api/dsh/official-ui',
+    'dsh_client_bundle': '/ext/dsh_adapter/client-bundle/{path:path}',
     'dsh_skin_assets': '/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}',
     'dsh_skin_hooks': '/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs',
     'dsh_skin_merged_css': '/ext/dsh_adapter/styles/skin/{skin}/merged.css',
@@ -124,6 +119,14 @@
     'metrics_list': '/ext/evaluation_service/metrics',
     'metric_delete': '/ext/evaluation_service/metrics/{metric_id}',
     'metric_detail': '/ext/evaluation_service/metrics/{metric_id}',
+  } as const
+
+  /** grants（Grants Ledger）：plugin.json 声明 4 端点 */
+  export const GRANTS_ENDPOINTS = {
+    'grants_audit': '/ext/grants/audit',
+    'grants_list': '/ext/grants/list',
+    'grants_metrics': '/ext/grants/metrics',
+    'grants_revoke': '/ext/grants/{grant_id}',
   } as const
 
   /** hindsight_memory_service（Hindsight Memory Service）：plugin.json 声明 20 端点 */
@@ -148,6 +151,12 @@
     'memory_get': '/ext/hindsight_memory_service/memory/{memory_id}',
     'hindsight_recall': '/ext/hindsight_memory_service/recall',
     'hindsight_stats': '/ext/hindsight_memory_service/stats',
+  } as const
+
+  /** isolation_service（Isolation Service）：plugin.json 声明 2 端点 */
+  export const ISOLATION_SERVICE_ENDPOINTS = {
+    'isolation_external_bind': '/ext/isolation_service/external/bind',
+    'isolation_external_unbind': '/ext/isolation_service/external/unbind',
   } as const
 
   /** llm_service（LLM Service）：plugin.json 声明 10 端点 */
@@ -200,12 +209,13 @@
     'mode_godot_panel_page': '/ext/mode_godot/page/godot-panel',
   } as const
 
-  /** mode_personal（Mode Personal）：plugin.json 声明 20 端点 */
+  /** mode_personal（Mode Personal）：plugin.json 声明 22 端点 */
   export const MODE_PERSONAL_ENDPOINTS = {
     'personal_pim_capture': '/ext/mode_personal/capture',
     'personal_pim_events_create': '/ext/mode_personal/events',
     'personal_pim_events_list': '/ext/mode_personal/events',
     'personal_pim_event_patch': '/ext/mode_personal/events/{id}',
+    'personal_pim_event_ack_reminder': '/ext/mode_personal/events/{id}/ack_reminder',
     'personal_pim_focus_start': '/ext/mode_personal/focus/{id}/start',
     'personal_pim_focus_stop': '/ext/mode_personal/focus/{id}/stop',
     'personal_pim_habits_create': '/ext/mode_personal/habits',
@@ -218,6 +228,7 @@
     'personal_pim_todos_create': '/ext/mode_personal/todos',
     'personal_pim_todos_list': '/ext/mode_personal/todos',
     'personal_pim_todo_patch': '/ext/mode_personal/todos/{id}',
+    'personal_pim_todo_ack_reminder': '/ext/mode_personal/todos/{id}/ack_reminder',
     'personal_pim_todo_complete': '/ext/mode_personal/todos/{id}/complete',
     'personal_pim_todo_defer': '/ext/mode_personal/todos/{id}/defer',
     'personal_pim_todo_split': '/ext/mode_personal/todos/{id}/split',
@@ -360,10 +371,15 @@
     'selection_subscribe': '/ext/pipeline_host_context/subscribe',
   } as const
 
-  /** pipeline_security_check（Security Check）：plugin.json 声明 5 端点 */
+  /** pipeline_security_check（Security Check）：plugin.json 声明 10 端点 */
   export const PIPELINE_SECURITY_CHECK_ENDPOINTS = {
+    'audit_query': '/ext/pipeline_security_check/audit',
     'permission_mode_get': '/ext/pipeline_security_check/permission_mode',
     'permission_mode_switch': '/ext/pipeline_security_check/permission_mode',
+    'pipeline_permission_mode_get': '/ext/pipeline_security_check/permission_mode/pipeline',
+    'pipeline_permission_mode_revoke': '/ext/pipeline_security_check/permission_mode/pipeline',
+    'whitelist_get': '/ext/pipeline_security_check/whitelist',
+    'whitelist_remove': '/ext/pipeline_security_check/whitelist/remove',
     'zone_policy_get': '/ext/pipeline_security_check/zones',
     'zone_policy_add': '/ext/pipeline_security_check/zones/add',
     'zone_policy_remove': '/ext/pipeline_security_check/zones/remove',
@@ -378,6 +394,12 @@
   export const PIPELINE_TODO_TRACK_ENDPOINTS = {
     'todo_latest': '/ext/pipeline_todo_track/latest',
     'todo_plan_page': '/ext/pipeline_todo_track/page/todo-plan',
+  } as const
+
+  /** replay_link（ReplayLink）：plugin.json 声明 2 端点 */
+  export const REPLAY_LINK_ENDPOINTS = {
+    'replay_link_create': '/ext/replay_link/create',
+    'replay_link_get': '/ext/replay_link/get',
   } as const
 
   /** review_service（Review Service）：plugin.json 声明 9 端点 */
@@ -409,7 +431,7 @@
     'snippet_box_page': '/ext/snippet_box/page/snippet_box',
   } as const
 
-  /** sync_agent（Sync Agent）：plugin.json 声明 11 端点 */
+  /** sync_agent（Sync Agent）：plugin.json 声明 17 端点 */
   export const SYNC_AGENT_ENDPOINTS = {
     'backup_points': '/ext/sync_agent/backup/points',
     'backup_restore': '/ext/sync_agent/backup/restore',
@@ -418,6 +440,12 @@
     'borrow': '/ext/sync_agent/borrow',
     'borrow_auth': '/ext/sync_agent/borrow_auth',
     'enroll_device': '/ext/sync_agent/enroll',
+    'fs_list': '/ext/sync_agent/fs/list',
+    'fs_probe': '/ext/sync_agent/fs/probe',
+    'fs_read': '/ext/sync_agent/fs/read',
+    'fs_stat': '/ext/sync_agent/fs/stat',
+    'fs_targets': '/ext/sync_agent/fs/targets',
+    'fs_write': '/ext/sync_agent/fs/write',
     'mirror_records': '/ext/sync_agent/mirror/records',
     'sync_probe': '/ext/sync_agent/probe',
     'relay_devices': '/ext/sync_agent/relay/devices',
@@ -499,6 +527,13 @@
     'trigger_disable': '/ext/trigger_setup_tool/triggers/{trigger_id}/disable',
     'trigger_enable': '/ext/trigger_setup_tool/triggers/{trigger_id}/enable',
     'trigger_fire': '/ext/trigger_setup_tool/triggers/{trigger_id}/trigger',
+  } as const
+
+  /** ui_bridge（UI Bridge）：plugin.json 声明 3 端点 */
+  export const UI_BRIDGE_ENDPOINTS = {
+    'ui_command_result': '/ext/ui_bridge/command_result',
+    'ui_state_read': '/ext/ui_bridge/state',
+    'ui_state_report': '/ext/ui_bridge/state',
   } as const
 
   /** user_admin（User Admin HTTP Face）：plugin.json 声明 10 端点 */

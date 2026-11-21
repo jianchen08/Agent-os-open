@@ -533,6 +533,7 @@ mod tests {
             export_fields: vec![],
             aux_venvs: Vec::new(),
             provides: None,
+            visibility: Default::default(),
         }
     }
 
@@ -895,14 +896,13 @@ mod tests {
         assert_eq!(p, user.join(rel));
     }
 
-    /// 用户空间不可用（三个 env 全清但仍可能落 OS 标准目录——故直接验证
-    /// `user_config_dir()` 为 None 的形态不可构造时的等价面：Write 落 factory）。
-    /// 用 `AGENTOS_USER_ROOT` 钉到一个**不可写成目录**的路径来逼出回落。
+    /// 用户层不可用（`AGENTOS_USER_ROOT` 未设/空白 = `None`，零回落，ADR
+    /// 2026-11-07-plugin-tiered-single-copy-model §2.2）→ Read 落 factory。
     #[test]
     fn write_mode_falls_back_to_factory_when_user_root_unusable() {
-        // 钉用户根为"空串"→ env_path 过滤空串 → user_root() 回落 dirs::data_dir()；
-        // 无法真正构造 None（OS 标准目录恒存在），故本用例锁的是"分区变量为空串
-        // 时按未设置处理"这一解析契约，进而走 Read 的 factory 分支。
+        // 钉用户根为"空串"→ env_path 过滤空串 → user_root() = None（零回落）；
+        // 本用例锁的是"分区变量为空串时按未设置处理、用户层缺席读 factory"
+        // 这一解析契约。
         let tmp = tempfile::tempdir().unwrap();
         let factory = tmp.path().join("factory");
         std::fs::create_dir_all(factory.join("config/models")).unwrap();
@@ -911,7 +911,7 @@ mod tests {
             crate::test_env::pin_env(agentos_core::user_space::USER_CONFIG_DIR_ENV, Some(""));
         let _guard2 = crate::test_env::pin_env(agentos_core::user_space::USER_ROOT_ENV, Some(""));
 
-        // 空串 = 未设置 → 走 OS 标准目录（存在但无该文件）→ Read 落 factory
+        // 空串 = 未设置 → 用户层不可用 → Read 落 factory
         let p = resolve_kernel_config_target(&factory, "models/llm.yaml", ConfigTargetMode::Read)
             .unwrap();
         assert_eq!(

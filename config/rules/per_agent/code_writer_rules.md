@@ -1,3 +1,4 @@
+<!-- seed-version: 1 -->
 # Code Writer Agent 规则文件
 
 ## 第一部分：代码生成标准

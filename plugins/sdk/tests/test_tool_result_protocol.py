@@ -134,6 +134,22 @@ def test_serialize_for_content_properties() -> None:
     assert serialize_for_content({"b": 2, "a": 1}) == "a: 1\nb: 2\n"
 
 
+def test_serialize_text_payload_verbatim() -> None:
+    """文本载荷原文直通（ADR 2026-11-09-tool-result-content-verbatim）。
+
+    文本载荷 = data 本身是字符串，或对象含字符串 content 字段；逐字返回，
+    不缩进/不转义/不补换行——YAML 块标量给每行 +2 空格是任务 2393a90baea9
+    里 8 次 old_str not found 的根因。
+    """
+    text = '# 标题\n\n  2. **缩进行保留** —— "引号" \\反斜杠\n- 列表尾行'
+    assert serialize_for_content(text) == text
+    assert serialize_for_content("42") == "42"
+    assert serialize_for_content({"file": "D:\\w\\a.md", "lines": 5, "content": text}) == text
+    assert serialize_for_content({"content": ""}) == ""
+    # content 非字符串 → 仍 YAML（不误吞结构化载荷）。
+    assert serialize_for_content({"content": {"x": 1}}) == "content:\n  x: 1\n"
+
+
 def test_serialize_unserializable_falls_back_to_str() -> None:
     """YAML 无法表示的值（缓存可存任意 Python 对象）回落 str——读面不崩。"""
 

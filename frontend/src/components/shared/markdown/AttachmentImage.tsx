@@ -12,8 +12,8 @@
 import Image from '@lobehub/ui/es/Image/index'
 import { useState, type CSSProperties, type FC } from 'react'
 import { FileWarning } from '@/assets/icons'
-import { useAuthedAttachmentUrl } from '@/services/fileLoaderRegistry'
 import { cn } from '@/lib/utils'
+import { useAuthedAttachmentUrl } from '@/services/fileLoaderRegistry'
 
 export interface AttachmentImageProps {
   src?: string

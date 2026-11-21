@@ -179,6 +179,83 @@ pub fn collect_now() {
     unsafe { libmimalloc_sys::mi_collect(true) };
 }
 
+/// abandoned 回收探针尺寸类阶梯上界：512KiB（regular 页类量级上限；singleton
+/// 大页不走 abandoned 认领路径，探针不覆盖）。
+const ABANDONED_PROBE_MAX_BLOCK_BYTES: usize = 512 * 1024;
+/// 每尺寸类探针分配预算（字节）：足以溢出该类在用页的空闲容量、逼出**新页
+/// 分配**（v3 只在新页分配路径上认领 abandoned 页，见 [`reclaim_abandoned_now`]
+/// 文档）。
+const ABANDONED_PROBE_BUDGET_PER_CLASS: usize = 256 * 1024;
+/// 超预算大类的最少块数：保证至少一页量级的占用。
+const ABANDONED_PROBE_MIN_BLOCKS: usize = 4;
+
+/// 探针尺寸类阶梯（纯函数）：8B 起 1.25× 步进（与 mimalloc bin 增长同构）、
+/// 8 字节对齐、封顶 512KiB。返回 (块大小, 块数)——块数 = 每类预算折算
+/// （`max(预算/块大小, 4)`）：小类多块以溢出在用页，大类至少 4 块。
+/// 测试断性质不锚全表（tests::abandoned_probe_plan_properties）。
+fn abandoned_probe_plan() -> Vec<(usize, usize)> {
+    let mut plan = Vec::new();
+    let mut size = 8usize;
+    while size <= ABANDONED_PROBE_MAX_BLOCK_BYTES {
+        let blocks = (ABANDONED_PROBE_BUDGET_PER_CLASS / size).max(ABANDONED_PROBE_MIN_BLOCKS);
+        plan.push((size, blocks));
+        // 1.25× 步进 + 8 字节对齐；size ≥ 8 时步进 ≥ 2，严格递增保证终止。
+        size = (size + size / 4 + 7) & !7;
+    }
+    plan
+}
+
+/// abandoned 页回收探针（ADR 2026-11-16 retention 闸 purge 级动作；调用方
+/// 随后 [`collect_now()`] force purge 收尾完成返还）。
+///
+/// ## 为什么 mi_collect 不够（装机实证）
+///
+/// mimalloc v3 的 `mi_collect(force)` 只收**调用线程的 theap**（v3 theap.c：
+/// "cannot really collect process wide, just a theap"），死线程遗留的
+/// abandoned 页不被触碰——装机 2026-11-16 触发时刻快照 abandoned 11065 页，
+/// collect 后仅 11062（差 3 页 = 调用线程自身）。v3 的 abandoned 回收驱动
+/// 只有两条：**同尺寸类新页分配优先认领**（arena.c
+/// `mi_arenas_page_regular_alloc` 第 1 步）与 free 认领
+/// （page_reclaim_on_free=1，install 已开）。公开绑定无强制回收入口
+/// （`mi_heap_visit_abandoned_blocks` 仅遍历不释放；
+/// `_mi_arenas_page_unabandon` 等内部符号未导出，libmimalloc-sys 0.1.49
+/// 查证）。
+///
+/// 本探针用公开 API 驱动认领路径：按 [`abandoned_probe_plan`] 阶梯分配
+/// （溢出在用页 → 触发新页分配 → 认领 abandoned 页）后立即释放（页转全空
+/// 进 purge 候选），调用方 collect_now 完成返还。瞬时分配 ≈ 类数 × 256KiB
+/// ≈ 12MB 量级、释放即还；仅在 retention 闸命中时调用（每事件至多 2 次），
+/// 不在常规路径。
+///
+/// ## 边界（诚实声明）
+///
+/// 含**真活块**的 abandoned 页（属主已死、块不可达）任何分配器 API 都收不
+/// 回——该残余由 retention 闸连续命中升级判据兜底（purge 后仍超即排水）；
+/// 探针前后 abandoned_pages/commit 差值由调用方实录进 WARN，一次真实事件
+/// 即可定性「分配器滞留可回收 vs 真泄漏/碎片」。
+pub fn reclaim_abandoned_now() {
+    for (size, blocks) in abandoned_probe_plan() {
+        let mut ptrs: Vec<*mut core::ffi::c_void> = Vec::with_capacity(blocks);
+        for _ in 0..blocks {
+            // SAFETY: mi_malloc 线程安全；OOM 返回 NULL——此时内存已极端
+            // 吃紧，探针自身退场（释放已分配块后返回），不 panic 不硬撑。
+            let p = unsafe { libmimalloc_sys::mi_malloc(size) };
+            if p.is_null() {
+                for allocated in ptrs.drain(..) {
+                    // SAFETY: 指针来自上方 mi_malloc 且未释放过。
+                    unsafe { libmimalloc_sys::mi_free(allocated) };
+                }
+                return;
+            }
+            ptrs.push(p);
+        }
+        for p in ptrs {
+            // SAFETY: 指针来自上方 mi_malloc 且未释放过。
+            unsafe { libmimalloc_sys::mi_free(p) };
+        }
+    }
+}
+
 /// mimalloc 分配器统计快照（调用时刻的进程级瞬时值；mimalloc 无增量
 /// delta API，增量由消费方对两次快照相减得到——M1 测量面：先测量后治理）。
 ///
@@ -188,12 +265,16 @@ pub fn collect_now() {
 /// 换算与格式漂移风险。libmimalloc-sys 仅在未启用 `v2` feature 时暴露该
 /// 绑定（本仓未启用；若启用 v2 此处编译期即报错，需同步换解析面）。
 ///
-/// ## 字段可用性（release 构建现实，2026-09-10 对 v3.3.2 实测）
+/// ## 字段可用性（构建开关决定，2026-11-10 对 v3.3.2 实测）
 ///
 /// libmimalloc-sys 以 `MI_DEBUG=0` 编译 C 源，mimalloc 据此取 `MI_STAT=0`
-/// （v2/v3 同此默认）：**malloc 计量面（in_use/requested/allocs/freed）在
-/// 调用点被编译剔除，恒读 0**；arena/进程面（committed/reserved/purged/
-/// process）由子进程原子量无条件维护，是 release 构建下的可信信号。
+/// （v2/v3 同此默认）——此时 malloc 计量面在调用点被编译剔除，恒读 0。
+/// 本仓经 `kernel/.cargo/config.toml` 的 `[env] CFLAGS/CXXFLAGS` 注入
+/// `-DMI_STAT=1`（2026-11-10 装机内存诊断立项）：**`in_use_bytes`
+/// （malloc_normal/huge 的 current）可测**；`requested/allocs/freed` 属
+/// mimalloc v3 的 `MI_STAT>1` 分支（alloc.c 实测），MI_STAT=1 下仍恒 0——
+/// 要看分 bin 分布/分配次数需升到 MI_STAT=2。arena/进程面（committed/
+/// reserved/purged/process）由子进程原子量无条件维护，与 MI_STAT 无关。
 /// `abandoned_pages` 有维护但走线程堆本地计数，仅在线程 collect/退出时
 /// 合并——多线程进程内该值偏低（下界）。
 ///
@@ -201,18 +282,29 @@ pub fn collect_now() {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct MemStats {
     /// 活字节（in-use，含块头/对齐开销）：`malloc_normal.current + malloc_huge.current`。
-    /// 仅 `MI_STAT>0` 构建维护；release 构建恒 0（见上文），活增长请以
-    /// process 面 + committed 联看。
+    /// `MI_STAT>0` 构建维护——本仓已开 MI_STAT=1（见上文），故可用。
+    ///
+    /// ## 可信性闸（2026-11-12 装机实测）
+    ///
+    /// `current` 是跨线程堆合并量，长跑进程里合并会使其只增不减地漂移：装机
+    /// 内核运行 17h 后读到 6.4GiB，而同一刻 committed 仅 1.5GiB、RSS 0.46GiB
+    /// ——活字节在物理上不可能超过已提交量。故本字段只在 `in_use <= committed`
+    /// 时给出；越界即 None（不虚构活量），原始漂移量见
+    /// [`Self::in_use_drift_bytes`]。
     pub in_use_bytes: Option<u64>,
+    /// `in_use` 超出 `committed` 的漂移量（原样相减，仅越界时 Some）。
+    /// 诊断用：非零 = mimalloc 线程堆合并已失真，同时 `in_use_bytes` 与
+    /// `freed_bytes` 均为 None。
+    pub in_use_drift_bytes: Option<u64>,
     /// 用户请求字节（不含分配器开销）：`malloc_requested.current`。
-    /// 可用性与 [`MemStats::in_use_bytes`](Self::in_use_bytes) 相同（MI_STAT 门控）。
+    /// 属 `MI_STAT>1` 面（本仓 MI_STAT=1 → 恒 0），见上文。
     pub requested_bytes: Option<u64>,
     /// 累计分配次数：`malloc_normal_count + malloc_huge_count`。
-    /// 可用性与 [`MemStats::in_use_bytes`](Self::in_use_bytes) 相同（MI_STAT 门控）。
+    /// 属 `MI_STAT>1` 面（本仓 MI_STAT=1 → 恒 0），见上文。
     pub total_allocs: Option<u64>,
     /// 累计释放字节（v3 只统计字节数、无释放次数计数）：
     /// `(malloc_normal.total + malloc_huge.total) − in_use_bytes`。
-    /// 可用性与 [`MemStats::in_use_bytes`](Self::in_use_bytes) 相同（MI_STAT 门控）。
+    /// 组成项 total 属 `MI_STAT>0` 面，故本仓可用。
     pub freed_bytes: Option<u64>,
     /// 已向 OS 提交的字节：`committed.current`（子进程原子量，release 可信；
     /// 滞留治理主指标——purge_delay=0 下该值应随 collect 收缩）。
@@ -266,8 +358,17 @@ fn mem_stats_from_json(json: &[u8]) -> MemStats {
 }
 
 /// 读取 count 型字段（`{"total":…,"peak":…,"current":…}`）的指定分量。
+///
+/// `current` 是跨线程堆合并后的全局活量，合并顺序可使其瞬时为负（先合并
+/// free、后合并分配）：2026-11-11 装机实测 `live_mb`/`abandoned_pages`
+/// 在周期快照里偶发缺失，即 `as_u64` 对负值返回 None。负值按 0 钳制
+/// （下界语义），不让一个瞬时负量把整段归因读成 None。
 fn stat_component(v: &serde_json::Value, key: &str, field: &str) -> Option<u64> {
-    v.get(key)?.get(field).and_then(serde_json::Value::as_u64)
+    let raw = v.get(key)?.get(field)?;
+    if let Some(n) = raw.as_u64() {
+        return Some(n);
+    }
+    raw.as_i64().map(|n| n.max(0) as u64)
 }
 
 /// 读取 counter 型字段（裸数字）。
@@ -281,7 +382,7 @@ fn add_pair(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 }
 
 fn mem_stats_from_value(v: &serde_json::Value) -> MemStats {
-    let in_use = add_pair(
+    let raw_in_use = add_pair(
         stat_component(v, "malloc_normal", "current"),
         stat_component(v, "malloc_huge", "current"),
     );
@@ -289,10 +390,27 @@ fn mem_stats_from_value(v: &serde_json::Value) -> MemStats {
         stat_component(v, "malloc_normal", "total"),
         stat_component(v, "malloc_huge", "total"),
     );
+    let committed = stat_component(v, "committed", "current");
+    // 活字节不可能超过已提交量：越界 = 跨线程堆合并漂移（装机 17h 实测
+    // 6.4GiB vs committed 1.5GiB），此时原值不可当活字节用。置 None 并留
+    // 漂移量，调用方（周期快照/诊断增量）据此识别 metric 失真而非内存泄漏。
+    let (in_use, in_use_drift) = match (raw_in_use, committed) {
+        (Some(u), Some(c)) if u > c => {
+            tracing::warn!(
+                in_use_bytes = u,
+                committed_bytes = c,
+                drift_bytes = u - c,
+                "mimalloc in_use 超过 committed（线程堆合并漂移），活字节归因置空"
+            );
+            (None, Some(u - c))
+        }
+        (u, _) => (u, None),
+    };
     MemStats {
         in_use_bytes: in_use,
+        in_use_drift_bytes: in_use_drift,
         requested_bytes: stat_component(v, "malloc_requested", "current"),
-        committed_bytes: stat_component(v, "committed", "current"),
+        committed_bytes: committed,
         reserved_bytes: stat_component(v, "reserved", "current"),
         purged_bytes: counter_total(v, "purged"),
         total_allocs: add_pair(
@@ -413,6 +531,10 @@ mod tests {
             Some(700 + 300),
             "in_use = normal+huge current"
         );
+        assert_eq!(
+            s.in_use_drift_bytes, None,
+            "in_use < committed 时不产生漂移标记"
+        );
         assert_eq!(s.requested_bytes, Some(650));
         assert_eq!(s.committed_bytes, Some(786432));
         assert_eq!(s.reserved_bytes, Some(134217728));
@@ -422,6 +544,50 @@ mod tests {
         assert_eq!(s.abandoned_pages, Some(2));
         assert_eq!(s.process_commit_bytes, Some(6217728));
         assert_eq!(s.process_rss_bytes, Some(7184384));
+    }
+
+    /// 合并漂移闸（2026-11-12 装机实测形）：`malloc_normal/huge.current` 只增
+    /// 不减地漂移越过 committed 时，活字节归因置 None（物理不可能超过已提交
+    /// 量），漂移量原样留档；派生的 freed_bytes 同步置 None，不用失真活量相减。
+    #[test]
+    fn parser_nulls_in_use_when_drift_exceeds_committed() {
+        let sample = json!({
+            "committed": { "total": 0, "peak": 0, "current": 1_500_000_000u64 },
+            "malloc_normal": { "total": 0, "peak": 0, "current": 6_000_000_000i64 },
+            "malloc_huge": { "total": 0, "peak": 0, "current": 400_000_000i64 },
+        });
+        let s = mem_stats_from_value(&sample);
+        assert_eq!(
+            s.in_use_bytes, None,
+            "in_use 越过 committed 即失真，不得当活字节给出"
+        );
+        assert_eq!(
+            s.in_use_drift_bytes,
+            Some(4_900_000_000),
+            "漂移量 = 原值 − committed（原样留档，供诊断）"
+        );
+        assert_eq!(
+            s.committed_bytes,
+            Some(1_500_000_000),
+            "committed 本身不受影响"
+        );
+        assert_eq!(
+            s.freed_bytes, None,
+            "活量失真时 freed（total − in_use）一并置 None，不拿失真值相减"
+        );
+    }
+
+    /// 闸门只对「两值都可测且越界」生效：committed 缺失（版本差异）时保持
+    /// 既有透传语义——不因缺校验基准就把可测的 in_use 丢掉。
+    #[test]
+    fn parser_keeps_in_use_without_committed_baseline() {
+        let sample = json!({
+            "malloc_normal": { "total": 0, "peak": 0, "current": 700 },
+            "malloc_huge": { "total": 0, "peak": 0, "current": 300 },
+        });
+        let s = mem_stats_from_value(&sample);
+        assert_eq!(s.in_use_bytes, Some(1000));
+        assert_eq!(s.in_use_drift_bytes, None);
     }
 
     /// 版本差异防御：任一底层字段缺失 → 对应派生字段 None（不猜 0、不 panic）；
@@ -446,6 +612,20 @@ mod tests {
         assert_eq!(empty, MemStats::default());
         let garbage = mem_stats_from_value(&json!({ "committed": "not-a-number" }));
         assert_eq!(garbage.committed_bytes, None);
+    }
+
+    /// 瞬时负值钳制：`current` 是跨线程合并量，可为负（先合并 free、后合并
+    /// 分配）——负值读 0，不读 None，否则周期快照整字段偶发缺失。
+    #[test]
+    fn parser_clamps_transient_negative_current() {
+        let sample = json!({
+            "malloc_normal": { "total": 0, "peak": 0, "current": -128 },
+            "malloc_huge": { "total": 0, "peak": 0, "current": -64 },
+            "pages_abandoned": { "total": 0, "peak": 0, "current": -3 },
+        });
+        let s = mem_stats_from_value(&sample);
+        assert_eq!(s.in_use_bytes, Some(0), "负 current 钳 0 后仍合成");
+        assert_eq!(s.abandoned_pages, Some(0), "负计数钳 0");
     }
 
     /// 非 JSON 文本 → 全 None（fail-soft，不 panic）。
@@ -481,5 +661,102 @@ mod tests {
         // malloc 面键恒存在（值受 MI_STAT 构建开关影响，不断言数值）
         assert!(s.in_use_bytes.is_some(), "v3 JSON 恒含 malloc_normal/huge");
         assert!(s.total_allocs.is_some(), "v3 JSON 恒含 malloc 计数器");
+    }
+
+    /// MI_STAT 生效校验：活字节必须随真实分配前进。
+    ///
+    /// mimalloc release 默认 MI_STAT=0 → `malloc_normal.current` 在编译点被
+    /// 剔除，活集读不出，内存诊断只剩 committed/reserved 总量（无法回答
+    /// "涨在谁身上"）。构建旗标见 `kernel/.cargo/config.toml` 的
+    /// `[env] CFLAGS/CXXFLAGS`（本测试即该配置的机械门禁：删了旗标转红）。
+    ///
+    /// 分配次数计数器（`malloc_*_count`）不在断言内：mimalloc v3 把它放在
+    /// `MI_STAT>1` 分支（alloc.c 实测），MI_STAT=1 下恒 0 属构建事实。
+    #[test]
+    fn mi_stat_tracks_live_bytes() {
+        const COUNT: usize = 256;
+        const SIZE: usize = 4096;
+        let before = snapshot_stats();
+        // SAFETY: mi_malloc/mi_free 是 mimalloc C API 的常规分配/释放；
+        // 指针只在本作用域内成对使用。
+        let ptrs: Vec<*mut std::ffi::c_void> = (0..COUNT)
+            .map(|_| unsafe { libmimalloc_sys::mi_malloc(SIZE) })
+            .collect();
+        assert!(ptrs.iter().all(|p| !p.is_null()));
+        let after = snapshot_stats();
+        for p in ptrs {
+            unsafe { libmimalloc_sys::mi_free(p) };
+        }
+
+        let live_before = before.in_use_bytes.expect("malloc_normal/huge 键恒存在");
+        let live_after = after.in_use_bytes.expect("malloc_normal/huge 键恒存在");
+        // 并发测试可能同时在释放，取半量作下界（MI_STAT=0 时两侧恒 0，必红）。
+        assert!(
+            live_after >= live_before + (COUNT * SIZE / 2) as u64,
+            "MI_STAT 未生效：活字节未前进（{live_before} → {live_after}）"
+        );
+    }
+
+    // ── abandoned 回收探针（ADR 2026-11-16 retention 闸 purge 级动作）──
+
+    /// 探针阶梯性质断言（不锚全表）：首项 = (8B, 预算全量块)；尺寸严格递增
+    /// 且全部 ≤ 512KiB；块数 = max(256KiB/size, 4)（预算折算性质）、随尺寸
+    /// 单调不增、下限 4；中段抽样锚点验证折算公式本身。
+    #[test]
+    fn abandoned_probe_plan_properties() {
+        let plan = abandoned_probe_plan();
+        assert!(!plan.is_empty(), "阶梯非空");
+        assert_eq!(
+            plan[0],
+            (8, 256 * 1024 / 8),
+            "首项 = 最小类 8B × 预算全量块"
+        );
+        let (last_size, last_blocks) = plan[plan.len() - 1];
+        assert!(
+            last_size <= 512 * 1024,
+            "阶梯封顶 512KiB，实际尾项 {last_size}"
+        );
+        assert!(
+            last_size > 512 * 1024 * 3 / 4,
+            "尾项应落在上界带内（覆盖大类）"
+        );
+        assert_eq!(last_blocks, 4, "超预算大类取最少块数 4");
+        for w in plan.windows(2) {
+            let (s1, b1) = w[0];
+            let (s2, b2) = w[1];
+            assert!(s2 > s1, "尺寸严格递增: {s1} → {s2}");
+            assert!(b2 <= b1, "块数随尺寸单调不增: {s1}:{b1} → {s2}:{b2}");
+        }
+        assert!(plan.iter().all(|&(_, b)| b >= 4), "块数下限 4");
+        // 全表公式断言：每项块数 = max(预算/块大小, 4)（预算折算即规格本体）
+        assert!(
+            plan.iter().all(|&(s, b)| b == (256 * 1024 / s).max(4)),
+            "每项块数必须按预算折算"
+        );
+        // 次项锚点：8B 对齐粒度下首步落到 16B（翻倍），块数 = 256KiB/16
+        assert_eq!(plan[1], (16, 256 * 1024 / 16), "次项 = 16B 类");
+        // 1.25× 步进性质：次项起相邻尺寸比落在 (1.0, 1.6]（小尺寸段 8 字节对齐
+        // 粒度会把步进抬到 1.5 甚至翻倍——首步 8→16、16→24=1.5 均系对齐所致）
+        for w in plan.windows(2).skip(1) {
+            let ratio = w[1].0 as f64 / w[0].0 as f64;
+            assert!(
+                ratio > 1.0 && ratio <= 1.6,
+                "步进应贴近 1.25×（对齐允差 ≤1.6）：{} → {}",
+                w[0].0,
+                w[1].0
+            );
+        }
+    }
+
+    /// 探针冒烟：真实分配器上跑完整阶梯 + collect 收尾，不 panic、不崩。
+    ///
+    /// 回收效果不在进程内断言：测试进程无线程 churn、无 abandoned 页可收，
+    /// 且并行测试共享进程级统计（before/after 差值会被并发分配污染）——
+    /// 效果定性靠生产 WARN 的前后差值实录（reclaim_abandoned_now 文档）。
+    #[test]
+    fn reclaim_abandoned_now_smoke_runs_clean() {
+        install_global_allocator();
+        reclaim_abandoned_now();
+        collect_now();
     }
 }

@@ -76,6 +76,9 @@ def _capture(payload: dict[str, Any], store: PimStore) -> dict[str, Any]:
             return _err("capture", "低置信：无法从文本提取标题，请改用 title 字段直传")
         fields: dict[str, Any] = {k: v for k, v in parsed.items() if v is not None}
         fields.pop("done", None)  # 行 checkbox 非捕获语义，新建一律未完成
+        if payload.get("reminder_mode"):
+            # 行语法无此解析字段：显式参数透传落卡（建卡时判定，与结构化路径同轨）
+            fields["reminder_mode"] = payload["reminder_mode"]
     else:
         fields = {
             "title": payload.get("title"),
@@ -84,6 +87,7 @@ def _capture(payload: dict[str, Any], store: PimStore) -> dict[str, Any]:
             "repeat": payload.get("repeat"),
             "priority": payload.get("priority"),
             "direction": payload.get("direction", "none"),
+            "reminder_mode": payload.get("reminder_mode"),
         }
         fields = {k: v for k, v in fields.items() if v is not None}
     if payload.get("status"):
@@ -92,16 +96,19 @@ def _capture(payload: dict[str, Any], store: PimStore) -> dict[str, Any]:
     # 主管道 id——到点触发器挂载/钉住的坐标（不随活跃会话漂移）。
     if payload.get("pipeline_id"):
         fields["source_pipeline_id"] = str(payload["pipeline_id"])
-    if payload.get("kind") == "event":
-        at = payload.get("at") or fields.get("due")
-        if not isinstance(at, str) or not at.strip():
-            return _err("capture", "event 需要 at（时间）字段")
-        record, op_id = store.create("event", {**fields, "at": at})
-        return _ok("capture", {"event": record}, op_id)
-    if not str(fields.get("title", "")).strip():
-        return _err("capture", "title 不得为空")
-    record, op_id = store.create("todo", fields)
-    return _ok("capture", {"todo": record}, op_id)
+    try:
+        if payload.get("kind") == "event":
+            at = payload.get("at") or fields.get("due")
+            if not isinstance(at, str) or not at.strip():
+                return _err("capture", "event 需要 at（时间）字段")
+            record, op_id = store.create("event", {**fields, "at": at})
+            return _ok("capture", {"event": record}, op_id)
+        if not str(fields.get("title", "")).strip():
+            return _err("capture", "title 不得为空")
+        record, op_id = store.create("todo", fields)
+        return _ok("capture", {"todo": record}, op_id)
+    except ValueError as exc:
+        return _err("capture", str(exc))
 
 
 def _query(payload: dict[str, Any], store: PimStore) -> dict[str, Any]:

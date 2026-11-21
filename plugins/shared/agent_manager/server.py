@@ -52,6 +52,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -335,6 +336,10 @@ def _agent_list_item(
         "config_id": config_id,
         "name": str(parsed.get("name") or config_id),
         "description": str(parsed.get("description") or ""),
+        # 图标配置原样透出（emoji 优先，其次内置图标名）：
+        # 渲染语义在前端单一真值里定，后端不猜缺省图标；
+        # 未配置 = 空串交前端兜底。
+        "icon": str(parsed.get("icon") or ""),
         "agent_type": str(parsed.get("agent_type") or ""),
         "status": "active",
         "model": str(parsed.get("model") or parsed.get("model_tier") or ""),
@@ -452,7 +457,7 @@ _MODE_DECL_KNOWN = {
     "theme", "icon", "plan_spec", "planning_executors",
     "chain", "suite", "material_scope",
     "levers", "verifier_families", "weights", "budget",
-    "default", "inject_tools",
+    "default", "inject_tools", "inject_tool_ids",
     # 任务级门禁声明（L0 通用层，2026-10-28 方案 §3.2 / ADR 2026-10-27 步骤 2）：
     # 与 verifier_families 分工（后者服务自进化 suite 回归）。base 引用的指标 id
     # 单源在 evaluation 插件的指标清单（config_files 注入面），漂移由
@@ -576,6 +581,19 @@ def validate_mode_declaration(data: Any) -> tuple[dict[str, Any] | None, str]:
     # 未声明/false = 注册式工具包零贡献。
     if "inject_tools" in data and not isinstance(data["inject_tools"], bool):
         return None, "inject_tools 须为布尔（不声明 = 不参与工具并入）"
+    # inject_tool_ids（2026-11-11 模式标签注入）：可选非空列表，元素 = 工具 id
+    # 形态；工具由别的插件注册（本包只声明借用的工具 id），任务/会话管道都并入
+    # （消费点 agent_config_load._merge_mode_tools 经 mode_keys 聚合）。
+    if "inject_tool_ids" in data:
+        declared_tools = data["inject_tool_ids"]
+        if not isinstance(declared_tools, list) or not declared_tools:
+            return None, "inject_tool_ids 须为非空列表（不声明 = 零贡献）"
+        for name in declared_tools:
+            if not (
+                isinstance(name, str)
+                and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", name)
+            ):
+                return None, f"inject_tool_ids[] 工具 id 形态非法: {name!r}"
     # foreground_selectable（R10③ 补充裁定 2026-10-14）：可选布尔；false =
     # 不出现在前台模式选择面选项（默认兜底/后台型模式），缺省 = 可选。
     if "foreground_selectable" in data and not isinstance(data["foreground_selectable"], bool):
@@ -1143,7 +1161,7 @@ async def http_handle(
                 body = _decode_body(raw_body)
             except ValueError as exc:
                 return _ok(_json_response({"error": str(exc)}, 400))
-            status, payload = put_agent_config(m.group("id"), body)
+            status, payload = await asyncio.to_thread(put_agent_config, m.group("id"), body)
             return _ok(_json_response(payload, status))
 
         if mm and method == "PUT":
@@ -1155,7 +1173,9 @@ async def http_handle(
             except ValueError as exc:
                 return _ok(_json_response({"error": str(exc)}, 400))
             mode_agent_id = f"{mm.group('mode')}/{mm.group('stem')}"
-            status, payload = put_agent_config(mode_agent_id, body)
+            # 写回链含用户仓 git add/commit（同步子进程，timeout 8s ×2），
+            # 出事件循环执行（light 合宿宿主 watchdog 判停滞即整组退出）。
+            status, payload = await asyncio.to_thread(put_agent_config, mode_agent_id, body)
             return _ok(_json_response(payload, status))
 
         logger.warning("http.handle: no route for path=%s method=%s", path, method)

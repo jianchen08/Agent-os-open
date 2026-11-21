@@ -370,6 +370,9 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const nodeChildrenField = config.nodeChildrenField ?? 'children'
   /** 是否显示搜索框 */
   const showSearch = config.showSearch ?? false
+  /** 空/加载态渲染成一行（默认 false = 居中大态，供整页树场景；嵌在产物区
+   *  等辅助位时置 true——辅助区块没有内容就不该占版面） */
+  const compactStates = rawProps.compactStates === true
 
   /** 是否显示状态筛选器（默认跟随 showStatus） */
   const showStatusFilter = config.showStatusFilter ?? showStatus
@@ -894,25 +897,35 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     [effectiveData, nodeChildrenField, triggerRefresh],
   )
 
-  /** 远程加载失败态：显式错误 + 重试（失败不得伪装成"无数据"空树） */
+  /** 远程加载失败态：**一行低调提示 + 行内重试**。
+   *
+   * 错误不是主体内容：整块居中大图标 + 红字会把产物区变成报错页，压过真正要看的
+   * 东西。故降级为单行——弱化色小字 + 虚线框，失败原因单行截断（完整原因挂 title），
+   * 重试入口同行右端。失败仍不得伪装成"无数据"空树：文案与重试入口都在。
+   */
   if (rawProps.dataSource && remoteError && effectiveData.length === 0 && !isLoadingRemote) {
     const domain = loadErrorDomain(ds)
     return (
-      <div data-testid="file-tree-error" className="w-full rounded-lg border">
-        <div className="flex flex-col items-center justify-center p-8">
-          <FolderTree className="mb-3 h-12 w-12 text-status-error" />
-          <p className="text-sm text-status-error">{domain}加载失败</p>
-          <p className="mt-1 max-w-md break-all text-center text-xs text-muted-foreground">{remoteError}</p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-3"
-            onClick={triggerRefresh}
-            aria-label={`重试加载${domain}`}
-          >
-            重试
-          </Button>
-        </div>
+      <div
+        data-testid="file-tree-error"
+        className="border-border/70 text-muted-foreground flex w-full items-center gap-2 rounded border border-dashed px-2 py-1"
+      >
+        <FolderTree className="text-muted-foreground/60 h-icon-sm w-icon-sm flex-shrink-0" />
+        <span className="flex-shrink-0 text-[11px]">{domain}加载失败</span>
+        <span
+          className="text-muted-foreground/60 min-w-0 flex-1 truncate text-[11px]"
+          title={remoteError}
+        >
+          {remoteError}
+        </span>
+        <button
+          type="button"
+          onClick={triggerRefresh}
+          aria-label={`重试加载${domain}`}
+          className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] flex-shrink-0 rounded px-1 text-[11px] transition-colors"
+        >
+          重试
+        </button>
       </div>
     )
   }
@@ -921,6 +934,18 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
    *  该文案只对"有数据但被搜索/筛选滤空"成立，加载中伪装成无匹配会让用户
    *  误判工作空间为空（会话回退/请求竞态/刷新重取都会拉长加载窗口） */
   if (effectiveData.length === 0 && isLoadingRemote) {
+    // compact：辅助位里加载态只占一行，不用居中大转圈撑满版面
+    if (compactStates) {
+      return (
+        <div
+          data-testid="file-tree-loading"
+          className="border-border/70 text-muted-foreground flex w-full items-center gap-2 rounded border border-dashed px-2 py-1"
+        >
+          <Loader2 className="text-muted-foreground/60 h-icon-sm w-icon-sm flex-shrink-0 animate-spin" />
+          <span className="text-[11px]">加载中…</span>
+        </div>
+      )
+    }
     return (
       <div data-testid="file-tree-loading" className="w-full rounded-lg border">
         <div className="flex flex-col items-center justify-center p-8">
@@ -933,6 +958,18 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   /** 空状态渲染 */
   if (effectiveData.length === 0 && !isLoadingRemote) {
+    // compact：无内容就一行「无文件」，不占版面
+    if (compactStates) {
+      return (
+        <div
+          data-testid="file-tree-empty"
+          className="border-border/70 text-muted-foreground flex w-full items-center gap-2 rounded border border-dashed px-2 py-1"
+        >
+          <FolderTree className="text-muted-foreground/60 h-icon-sm w-icon-sm flex-shrink-0" />
+          <span className="text-[11px]">无文件</span>
+        </div>
+      )
+    }
     return (
       <div className="w-full rounded-lg border">
         <div className="flex flex-col items-center justify-center p-8">

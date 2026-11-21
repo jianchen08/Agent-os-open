@@ -96,6 +96,7 @@ async fn app_with_deps() -> (
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     };
 
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());

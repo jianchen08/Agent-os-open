@@ -54,7 +54,7 @@ class TestProjectTrace:
             "iteration": 3,
             "router": {"last_response_text": "r" * 300},
             "llm_usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
-            "_executed_tool_calls": [{"name": "file_read"}, {"name": "bash_execute"}],
+            "_executed_tool_calls": [{"name": "file_read"}, {"name": "bash"}],
             "raw_error": None,
         })
         row = pd.project_trace(entry)

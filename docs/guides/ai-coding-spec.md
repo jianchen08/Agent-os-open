@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-ai-coding-spec
+type: standard
+status: active
+---
+
 # AI 编码规则总纲
 
 > 规则物料（可注入遵守）：编码/审查 agent 的总纲。核心编码/审查/测试规则的**权威载体**在

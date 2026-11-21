@@ -71,10 +71,16 @@ describe('认证API', () => {
       expect(result.expires_in).toBe(3600)
 
       // 验证API调用（使用新的端点路径）
-      expect(apiClient.post).toHaveBeenCalledWith('/api/v1/auth/login', {
-        username: 'testuser',
-        password: 'password123',
-      })
+      // 第三参为登录专用配置：长超时（AUTH_LOGIN_TIMEOUT=120s）+ 关闭拦截器
+      // 自动重试（内核整体停顿重试无益，只需长等待）
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/api/v1/auth/login',
+        {
+          username: 'testuser',
+          password: 'password123',
+        },
+        { timeout: 120000, noAutoRetry: true },
+      )
       expect(apiClient.post).toHaveBeenCalledTimes(1)
     })
 

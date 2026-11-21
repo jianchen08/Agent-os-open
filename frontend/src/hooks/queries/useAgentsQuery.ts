@@ -30,6 +30,7 @@ function mapAndDedupeAgents(data: AgentListResponse): Agent[] {
       id: (agent.id as string) || (agent.config_id as string),
       configId: agent.config_id as string | undefined,
       name: agent.name as string,
+      icon: (agent.icon as string) || undefined,
       description: (agent.description as string) || '',
       type: (agent.agent_type as Agent['type']) || 'atomic',
       status: (agent.status as Agent['status']) || 'active',

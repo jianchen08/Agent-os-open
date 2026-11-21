@@ -60,6 +60,35 @@ describe('ASR API - transcribeAudio', () => {
     expect(result).toBeNull()
   })
 
+  it('拦截器重抛形态（details.code=asr_not_configured）→ 静默 null', async () => {
+    // apiClient 响应拦截器把 503 重抛为 Error + details=后端信封（无 response）
+    vi.mocked(apiClient.post).mockRejectedValueOnce(
+      Object.assign(new Error('语音转文字服务未配置'), {
+        code: 'asr_not_configured',
+        details: { code: 'asr_not_configured', message: '语音转文字服务未配置' },
+      }),
+    )
+
+    const result = await transcribeAudio(new Blob(['a']), 'audio/webm')
+
+    expect(result).toBeNull()
+  })
+
+  it('拦截器重抛形态（details 携带 asr_failed）→ TranscriptionError 保留后端原因', async () => {
+    vi.mocked(apiClient.post).mockRejectedValueOnce(
+      Object.assign(new Error('请求失败'), {
+        code: 'asr_failed',
+        details: { code: 'asr_failed', message: 'ASR API 调用失败 (status=400)' },
+      }),
+    )
+
+    const err = await transcribeAudio(new Blob(['a']), 'audio/webm').catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(TranscriptionError)
+    expect((err as TranscriptionError).message).toBe('ASR API 调用失败 (status=400)')
+    expect((err as TranscriptionError).code).toBe('asr_failed')
+  })
+
   it('502（转写失败）抛 TranscriptionError，携带后端结构化原因', async () => {
     vi.mocked(apiClient.post).mockRejectedValueOnce({
       response: { status: 502, data: { code: 'asr_failed', message: '上游密钥无效' } },

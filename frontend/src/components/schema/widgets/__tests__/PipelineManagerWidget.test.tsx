@@ -345,20 +345,35 @@ function seedOpenFolderFailure(
     .mockImplementation(() => {})
 }
 
-/** 打开文件夹失败族：渲染面板并点击首个「打开文件夹」按钮 */
-async function renderAndOpenFirstFolderButton() {
-  renderPmAllStatuses(<PipelineManagerWidget />)
-  fireEvent.click((await screen.findAllByLabelText('打开文件夹'))[0])
-}
-
-/** 行内「打开对话」按钮：整行点按现为切换详情展开/收起（需求③），
- *  打开对话走行内操作区按钮——行内定位走行容器，不受信息区分区影响 */
+/** 行内「发消息」按钮（方案 B：打开对话主入口=行内常驻按钮），
+ *  整行点按现为切换详情展开/收起——行内定位走行容器 */
 function rowOpenChatButton(entryName: string): HTMLElement {
   const el = screen.getAllByText(entryName)[0]
-  const row = (el.closest('tr') ?? el.closest('div')) as HTMLElement
-  const btn = row.querySelector('button[aria-label="打开对话"]') as HTMLElement | null
-  expect(btn, `row open-chat button for ${entryName}`).toBeTruthy()
+  const row = (el.closest('tr') ?? el.closest('div[data-entry-key]')) as HTMLElement
+  const btn = row.querySelector('button[aria-label="发消息"]') as HTMLElement | null
+  expect(btn, `row message button for ${entryName}`).toBeTruthy()
   return btn as HTMLElement
+}
+
+/** 打开条目「⋮」菜单并等待指定菜单项出现（方案 B：低频动作唯一常驻入口；
+ *  radix 菜单触发器走 pointerdown） */
+async function openEntryMenu(entryKey: string, waitForItem: string): Promise<void> {
+  fireEvent.pointerDown(screen.getByTestId(`pipeline-entry-more-${entryKey}`))
+  await screen.findByText(waitForItem)
+}
+
+/** 打开文件夹族：渲染面板并经项目行「⋮」菜单触发「打开项目文件夹」 */
+async function renderAndOpenFirstFolderButton() {
+  renderPmAllStatuses(<PipelineManagerWidget />)
+  const more = await waitFor(() => {
+    const el = document.querySelector<HTMLElement>(
+      '[data-testid^="pipeline-entry-more-project-"]',
+    )
+    expect(el, 'project row more trigger').toBeTruthy()
+    return el as HTMLElement
+  })
+  fireEvent.pointerDown(more)
+  fireEvent.click(await screen.findByText('打开项目文件夹'))
 }
 
 describe('PipelineManagerWidget', () => {
@@ -466,14 +481,16 @@ describe('PipelineManagerWidget', () => {
     renderPmAllStatuses(<PipelineManagerWidget />)
     // 树默认收起：子任务未展开时不可见（树=点击展开）
     expect(screen.queryByText('子任务')).toBeNull()
-    // 点父任务条目行首 chevron 展开（一对一：条目行即任务行）
-    const chevron = (await screen.findAllByText('主管道'))[0].closest('div')?.querySelector('button')
+    // 点父任务条目行首树 chevron 展开（一对一：条目行即任务行）
+    const chevron = (await screen.findAllByText('主管道'))[0]
+      .closest('div[data-entry-key]')
+      ?.querySelector('button[aria-label="展开或收起子管道"]')
     fireEvent.click(chevron!)
     // 单层：一对一绑定不出现"任务节点行+管道条目行"双层（各恰好一行）
     expect((await screen.findAllByText('主管道')).length).toBe(1)
     expect((await screen.findAllByText('子任务')).length).toBe(1)
-    // 子任务条目行带缩进（depth>0 的 paddingLeft），直挂父任务条目行下
-    const subtaskRow = (await screen.findAllByText('子任务'))[0].closest('div')
+    // 子任务条目行带缩进（depth>0 的 paddingLeft，在行容器上），直挂父任务条目行下
+    const subtaskRow = (await screen.findAllByText('子任务'))[0].closest('div[data-entry-key]')
     const padding = subtaskRow?.getAttribute('style') ?? ''
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
   })
@@ -482,18 +499,20 @@ describe('PipelineManagerWidget', () => {
     pmSeed.usePipelineRunsQuery.mockReturnValue({ data: SESSION_MAIN_RUNS })
     pmSeed.useAllTasksQuery.mockReturnValue({ data: SESSION_MAIN_TASKS })
     renderPmAllStatuses(<PipelineManagerWidget />)
-    // 树默认收起：点主管道条目行首 chevron（有子级才渲染）展开子树
-    const chevron = (await screen.findAllByText('主会话'))[0].closest('div')?.querySelector('button')
+    // 树默认收起：点主管道条目行首树 chevron（有子级才渲染）展开子树
+    const chevron = (await screen.findAllByText('主会话'))[0]
+      .closest('div[data-entry-key]')
+      ?.querySelector('button[aria-label="展开或收起子管道"]')
     expect(chevron).toBeDefined()
     fireEvent.click(chevron!)
     // 主管道条目（kind=session）+ 子任务条目行都渲染（子任务不得整体丢失）
     expect((await screen.findAllByText('子任务A')).length).toBeGreaterThanOrEqual(1)
     // 子任务条目行带缩进（depth>0，挂主管道条目下而非顶层平铺）
     const subtaskRow = (await screen.findAllByText('子任务A')).find((el) =>
-      el.closest('div')?.className.includes('hover:bg-muted'),
+      el.closest('div[data-entry-key]')?.className.includes('hover:bg-muted'),
     )
     expect(subtaskRow).toBeDefined()
-    const padding = subtaskRow?.closest('div')?.getAttribute('style') ?? ''
+    const padding = subtaskRow?.closest('div[data-entry-key]')?.getAttribute('style') ?? ''
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
   })
 
@@ -509,12 +528,14 @@ describe('PipelineManagerWidget', () => {
       expect(await screen.findByText(/执行中的管道/)).toBeInTheDocument()
       expect(screen.queryByText(/最近完成/)).toBeNull()
       // 主管道锚点行可见（行名 = 会话标题），顶层 depth 0 = 8px
-      const mainRow = (await screen.findAllByText('帮我多次调研'))[0].closest('div')
+      const mainRow = (await screen.findAllByText('帮我多次调研'))[0].closest('div[data-entry-key]')
       expect(mainRow?.getAttribute('style')).toMatch(/padding-left:\s*8px/)
-      fireEvent.click(mainRow?.querySelector('button') as HTMLElement)
+      fireEvent.click(
+        mainRow?.querySelector('button[aria-label="展开或收起子管道"]') as HTMLElement,
+      )
       // 两个兄弟子任务平级挂锚点行下（同为 depth 1 = 24px），不互挂
-      const rowA = (await screen.findAllByText('补充调研A'))[0].closest('div')
-      const rowB = (await screen.findAllByText('补充调研B'))[0].closest('div')
+      const rowA = (await screen.findAllByText('补充调研A'))[0].closest('div[data-entry-key]')
+      const rowB = (await screen.findAllByText('补充调研B'))[0].closest('div[data-entry-key]')
       expect(rowA?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
       expect(rowB?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
     } finally {
@@ -537,12 +558,12 @@ describe('PipelineManagerWidget', () => {
       ghostRow!.querySelector('[data-testid="pipeline-entry-title"]')!.textContent,
     ).toBe('未命名')
     // 兄弟不互挂：工具链自检不再嵌进最早兄弟陨石躲避行下（顶层平铺 depth 0 = 8px）
-    const toolRow = screen.getAllByText('工具链自检')[0].closest('div')
+    const toolRow = screen.getAllByText('工具链自检')[0].closest('div[data-entry-key]')
     expect(toolRow?.getAttribute('style')).toMatch(/padding-left:\s*8px/)
     // parent_task_id 锚定不受影响：评估子任务仍挂父任务行下（depth 1 = 24px）
-    const toolChevron = toolRow?.querySelector('button')
+    const toolChevron = toolRow?.querySelector('button[aria-label="展开或收起子管道"]')
     fireEvent.click(toolChevron!)
-    const evalRow = (await screen.findAllByText('评估子任务'))[0].closest('div')
+    const evalRow = (await screen.findAllByText('评估子任务'))[0].closest('div[data-entry-key]')
     expect(evalRow?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
   })
 
@@ -553,15 +574,21 @@ describe('PipelineManagerWidget', () => {
     try {
       renderPmAllStatuses(<PipelineManagerWidget />)
       // 树默认收起：先展开主管道条目
-      const chevron = (await screen.findAllByText('主会话'))[0].closest('div')?.querySelector('button')
+      const chevron = (await screen.findAllByText('主会话'))[0]
+        .closest('div[data-entry-key]')
+        ?.querySelector('button[aria-label="展开或收起子管道"]')
       fireEvent.click(chevron!)
       // 主管道锚点行 depth 0（8px）；直接子管道行 depth>0（挂主管道条目下）
-      const mainRow = (await screen.findAllByText('主会话'))[0].closest('div')
+      const mainRow = (await screen.findAllByText('主会话'))[0].closest('div[data-entry-key]')
       expect(mainRow?.getAttribute('style')).toMatch(/padding-left:\s*8px/)
       const childRows = await screen.findAllByText('子任务A')
       expect(childRows.length).toBeGreaterThanOrEqual(1)
       const indented = childRows.some(
-        (el) => el.closest('div')?.getAttribute('style')?.match(/padding-left:\s*2[48]px/),
+        (el) =>
+          el
+            .closest('div[data-entry-key]')
+            ?.getAttribute('style')
+            ?.match(/padding-left:\s*2[48]px/),
       )
       expect(indented).toBe(true)
     } finally {
@@ -569,16 +596,18 @@ describe('PipelineManagerWidget', () => {
     }
   })
 
-  it('任务条目行渲染打开工作空间按钮并开 workspace 文件树标签', async () => {
+  it('任务条目行经「⋮」菜单打开工作空间并开 workspace 文件树标签', async () => {
     pmSeed.useAllTasksQuery.mockReturnValue({ data: WS_TASKS })
     renderPmAllStatuses(<PipelineManagerWidget />)
-    // 树默认收起：先点父任务条目行首 chevron 展开，子任务条目行才渲染
-    const chevron = (await screen.findAllByText('主管道'))[0].closest('div')?.querySelector('button')
+    // 树默认收起：先点父任务条目行首树 chevron 展开，子任务条目行才渲染
+    const chevron = (await screen.findAllByText('主管道'))[0]
+      .closest('div[data-entry-key]')
+      ?.querySelector('button[aria-label="展开或收起子管道"]')
     fireEvent.click(chevron!)
-    // workspacePath 取自 metadata.ws_meta.path；按钮 title 带完整路径
-    const btns = await screen.findAllByTitle('打开工作空间: D:/ws/copy_1')
-    expect(btns.length).toBeGreaterThanOrEqual(1)
-    fireEvent.click(btns[0])
+    // workspacePath 取自 metadata.ws_meta.path → 「⋮」菜单出「打开工作空间」
+    // （方案 B 适配：行内平铺按钮与路径 title 退役，路径不再进行内 DOM）
+    await openEntryMenu('subPipe', '打开工作空间')
+    fireEvent.click(screen.getByText('打开工作空间'))
     const tabs = useLayoutModeStore.getState().workspaceTabs
     const tab = tabs.find((t) => t.dataSource === 'workspace://subPipe')
     expect(tab).toBeDefined()
@@ -586,7 +615,7 @@ describe('PipelineManagerWidget', () => {
     expect(tab?.title).toBe('子任务')
   })
 
-  it('会话管道 state 带工作区也渲染按钮（R3：state.workspace 驱动，非任务条目）', async () => {
+  it('会话管道 state 带工作区也出菜单项（R3：state.workspace 驱动，非任务条目）', async () => {
     // 会话管道：runs 快照有、任务列表无对应任务 → kind=session；工作区坐标
     // 只在 state 真值（ws_meta.path），任务 metadata 通道不适用
     pmSeed.usePipelineRunsQuery.mockReturnValue({
@@ -616,22 +645,21 @@ describe('PipelineManagerWidget', () => {
       },
     })
     renderPmAllStatuses(<PipelineManagerWidget />)
-    // 树默认收起：先展开会话分组节点（行名 = state.title）
-    const chevron = (await screen.findAllByText('会话工作区'))[0].closest('div')?.querySelector('button')
-    fireEvent.click(chevron!)
-    // state.ws_meta.path 驱动按钮（project_root 不用于关联）
-    const btns = await screen.findAllByTitle('打开工作空间: D:/ws/session-ws')
-    expect(btns.length).toBeGreaterThanOrEqual(1)
-    fireEvent.click(btns[0])
+    await screen.findAllByText('会话工作区')
+    // state.ws_meta.path 驱动菜单项（project_root 不用于关联）
+    await openEntryMenu('sessPipe', '打开工作空间')
+    fireEvent.click(screen.getByText('打开工作空间'))
     // 非任务条目无 taskId → dataSource 用 pipeline_id（state 行解析通道）
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs.some((t) => t.dataSource === 'workspace://sessPipe')).toBe(true)
   })
 
-  it('state 双键并存时任务域镜像 task.ws_meta 优先（裸 ws_meta 被会话投影污染场景）', async () => {
+  it('state 双键并存（task.ws_meta 镜像 + 裸 ws_meta）：工作区入口在场且开任务域数据源页签', async () => {
     // 运行中任务：state 出口同时带 task.ws_meta（任务域镜像，worktree 真值）
-    // 与被会话投影污染的裸 ws_meta（会话目录）——按钮路径必须取镜像，
-    // 不能落到会话默认文件夹
+    // 与被会话投影污染的裸 ws_meta（会话目录）。
+    // 方案 B 适配：路径不再进行内 DOM（行内按钮 title=路径 退役），镜像取值
+    // 优先级（services/api/pipelines.ts state 摘要层 task.ws_meta 优先）在 UI
+    // 面只余「有工作区坐标 → 菜单项在场 → 点击开任务域数据源页签」可观察链。
     pmSeed.useAllTasksQuery.mockReturnValue({
       data: [
         {
@@ -662,10 +690,13 @@ describe('PipelineManagerWidget', () => {
       },
     })
     renderPmAllStatuses(<PipelineManagerWidget />)
+    // 行名 = run.title（统一管道标题，ADR 2026-10-27）：subPipe 与 beforeEach
+    // 播种的 subRun（pipeline_id=subPipe）一对一合并，行名取 run.title「子任务」
     expect(await screen.findAllByText('子任务')).toHaveLength(1)
-    expect(
-      await screen.findAllByTitle('打开工作空间: D:/ws/proj__wt_9')
-    ).toHaveLength(1)
+    await openEntryMenu('subPipe', '打开工作空间')
+    fireEvent.click(screen.getByText('打开工作空间'))
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs.some((t) => t.dataSource === 'workspace://subPipe')).toBe(true)
   })
 
   it('无工作区坐标的条目不渲染打开工作空间按钮（主会话 R1 自然推论）', async () => {
@@ -808,8 +839,8 @@ describe('PipelineManagerWidget', () => {
     renderPmAllStatuses(<PipelineManagerWidget />)
     const projectRow = await screen.findByText('孤儿测试项目')
 
-    // 树视图只有会话行有「打开对话」按钮；项目行没有
-    expect(screen.getByLabelText('打开对话')).toBeInTheDocument()
+    // 树视图只有会话/任务行有「发消息」按钮；项目行没有（项目不进对话）
+    expect(screen.getByLabelText('发消息')).toBeInTheDocument()
 
     // 点击项目行（无按钮路径的兜底入口）：不开任何标签
     fireEvent.click(projectRow)
@@ -818,18 +849,20 @@ describe('PipelineManagerWidget', () => {
     })
   })
 
-  it('项目分组行渲染打开文件夹按钮：点击调 workspaces open 端点（项目登记通道）', async () => {
+  it('项目分组行「⋮」菜单出「打开项目文件夹」：点击调 workspaces open 端点（项目登记通道）', async () => {
     seedProjectQueries()
 
     renderPmAllStatuses(<PipelineManagerWidget />)
     await screen.findByText('可打开项目')
 
-    // 只有项目行有「打开文件夹」按钮（本树无会话/任务条目）
-    const folderButtons = screen.getAllByLabelText('打开文件夹')
-    expect(folderButtons).toHaveLength(1)
+    // 本树无会话/任务条目 → 「⋮」触发器只有项目行一个；旧平铺「打开文件夹」
+    // 按钮退役（方案 B：低频动作进菜单）
+    expect(screen.getAllByTestId(/^pipeline-entry-more-/)).toHaveLength(1)
+    expect(screen.queryByLabelText('打开文件夹')).toBeNull()
 
-    // 点击 → workspaces open 端点收到裸项目登记 id（后端登记通道解析文件夹）
-    fireEvent.click(folderButtons[0])
+    // 点击菜单项 → workspaces open 端点收到裸项目登记 id（后端登记通道解析文件夹）
+    await openEntryMenu('project-proj-open', '打开项目文件夹')
+    fireEvent.click(screen.getByText('打开项目文件夹'))
     await waitFor(() => {
       expect(pmSeed.workspaceOpen).toHaveBeenCalledWith(
         '/ext/workspace_service/workspaces/proj-open/open',
@@ -873,11 +906,14 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('项目行工作空间入口（第二组输入）：裸登记 id 契约对另一 id 同构成立', async () => {
-    // 第二组输入（不同项目 id）：裸 id 契约防拟合——proj-ws-a 用例外再验一组
+    // 第二组输入（不同项目 id）：裸 id 契约防拟合——proj-ws-b 用例外再验一组
+    // （方案 B：入口在「⋮」菜单，路径不进行内 DOM）
     seedProjectQueries({ id: 'proj-ws-b', goal: '工作区项目B', metadata: { path: 'D:/repos/b' } })
 
     renderPmAllStatuses(<PipelineManagerWidget />)
-    fireEvent.click((await screen.findAllByTitle('打开工作空间: D:/repos/b'))[0])
+    await screen.findByText('工作区项目B')
+    await openEntryMenu('project-proj-ws-b', '打开工作空间')
+    fireEvent.click(screen.getByText('打开工作空间'))
 
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs.some((t) => t.dataSource === 'workspace://proj-ws-b')).toBe(true)
@@ -891,8 +927,9 @@ describe('PipelineManagerWidget', () => {
     seedProjectQueries({ id: 'proj-ws-a', goal: '工作区项目A', metadata: { path: 'D:/repos/a' } })
 
     renderPmAllStatuses(<PipelineManagerWidget />)
-    const btns = await screen.findAllByTitle('打开工作空间: D:/repos/a')
-    fireEvent.click(btns[0])
+    await screen.findByText('工作区项目A')
+    await openEntryMenu('project-proj-ws-a', '打开工作空间')
+    fireEvent.click(screen.getByText('打开工作空间'))
 
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs.some((t) => t.dataSource === 'workspace://proj-ws-a')).toBe(true)
@@ -956,13 +993,17 @@ describe('PipelineManagerWidget', () => {
     renderPmAllStatuses(<PipelineManagerWidget />)
     await screen.findByText('去管道化项目')
 
-    // 无运行态：任何行都不渲染管道状态图标（筛选按钮的「运行中」文案常驻，
+    // 无运行态：任何行都不渲染管道状态提示（筛选按钮的「运行中」文案常驻，
     // 故以行内状态 title 为准）；无归属徽标不套在项目行上
     expect(screen.queryByTitle(/^运行状态：/)).not.toBeInTheDocument()
     expect(screen.queryByText('无归属')).not.toBeInTheDocument()
 
-    // 详情卡按项目字段展示（旧实现出管道 ID/运行 ID/归属/开始）
-    fireEvent.click(screen.getAllByLabelText('切换详细信息')[0])
+    // 详情卡按项目字段展示（旧实现出管道 ID/运行 ID/归属/开始）。
+    // 【疑似生产 bug，报告待裁】方案 B 唯一详情入口=点任务名称，但 TreeParts
+    // 对 project 行不给详情入口（标题按钮/行容器 onClick 双双排除 project，
+    // 旧「切换详细信息」按钮已退役）——详情卡不可达，本断言红 = bug 实证
+    // （与 detailHeader.test ④ 同源，待生产修复后自绿）。
+    fireEvent.click(screen.getByText('去管道化项目'))
     expect(await screen.findByText('项目 ID')).toBeInTheDocument()
     expect(screen.getByText('D:/repos/demo')).toBeInTheDocument()
     expect(screen.getByText('登记时间')).toBeInTheDocument()
@@ -976,14 +1017,20 @@ describe('PipelineManagerWidget', () => {
 
     renderPmAllStatuses(<PipelineManagerWidget />)
     expect(await screen.findByText('分组项目')).toBeInTheDocument()
-    // 项目组标题存在（单视图挂载：组头 1 + 树行「项目」徽标 1 = 2；项目行无
-    // agent 名——类型徽标只退役任务/会话两字样，用户裁定 2026-11-06）
-    expect(screen.getAllByText('项目')).toHaveLength(2)
+    // 项目组标题存在（方案 B：行内类型徽标退役，类型语义由状态图标承载——
+    // 项目行状态图标 = Folder，data-status-kind=project）
+    expect(screen.getAllByText('项目')).toHaveLength(1)
+    const projectRow = screen.getByText('分组项目').closest('div[data-entry-key]')!
+    expect(
+      projectRow
+        .querySelector('[data-testid="pipeline-entry-status-icon"]')!
+        .getAttribute('data-status-kind'),
+    ).toBe('project')
     expect(screen.getByText('执行中的管道')).toBeInTheDocument()
     expect(screen.queryByText('最近完成')).not.toBeInTheDocument()
   })
 
-  it('项目行渲染删除按钮：默认口径确认调删除端点（子任务挂起保留）', async () => {
+  it('项目行「⋮」菜单删除项目：默认口径确认调删除端点（子任务挂起保留）', async () => {
     seedProjectQueries({ id: 'proj-del', goal: '待删项目' })
     pmSeed.deleteProject.mockResolvedValueOnce({
       message: '项目已删除',
@@ -999,8 +1046,9 @@ describe('PipelineManagerWidget', () => {
     renderPmAllStatuses(<PipelineManagerWidget />)
     await screen.findByText('待删项目')
 
-    // 点击行上删除按钮 → 打开确认弹窗（不是直接删）
-    fireEvent.click(screen.getByLabelText('删除项目'))
+    // 点菜单「删除项目」→ 打开确认弹窗（不是直接删）
+    await openEntryMenu('project-proj-del', '删除项目')
+    fireEvent.click(screen.getByText('删除项目'))
     expect(await screen.findByText(/请选择名下子任务的处置方式/)).toBeTruthy()
     expect(pmSeed.deleteProject).not.toHaveBeenCalled()
 
@@ -1038,7 +1086,8 @@ describe('PipelineManagerWidget', () => {
 
     renderPmAllStatuses(<PipelineManagerWidget />)
     await screen.findByText('级联项目')
-    fireEvent.click(screen.getByLabelText('删除项目'))
+    await openEntryMenu('project-proj-cas', '删除项目')
+    fireEvent.click(screen.getByText('删除项目'))
     await screen.findByText(/请选择名下子任务的处置方式/)
 
     fireEvent.click(screen.getByLabelText('连同子任务一起删除（不可恢复）'))
@@ -1075,7 +1124,8 @@ describe('PipelineManagerWidget', () => {
 
     renderPmAllStatuses(<PipelineManagerWidget />)
     await screen.findByText('失败项目')
-    fireEvent.click(screen.getByLabelText('删除项目'))
+    await openEntryMenu('project-proj-fail', '删除项目')
+    fireEvent.click(screen.getByText('删除项目'))
     fireEvent.click(await screen.findByRole('button', { name: /确认删除/ }))
 
     await waitFor(() => {
@@ -1394,7 +1444,7 @@ describe('PipelineManagerWidget', () => {
     expect(await screen.findByText(/会话: 会话 abcdef12/)).toBeInTheDocument()
   })
 
-  it('平铺筛选标签：状态互斥自动反选 + 点击取消，类型可叠加', async () => {
+  it('平铺筛选标签：状态可叠加取并集 + 点击取消（类型维已退役）', async () => {
     renderPmAllStatuses(<PipelineManagerWidget />)
     await screen.findAllByText('评估中任务')
     // 状态组（空集起步 = 全量）：点「已完成」→ 仅终态条目可见
@@ -1414,7 +1464,7 @@ describe('PipelineManagerWidget', () => {
       'aria-pressed',
       'false',
     )
-    // 互斥：点「运行中」→ 独占视野；再点「已完成」→ 运行中自动反选取消
+    // 叠加：点「运行中」→ 仅运行态可见；再点「已完成」→ 两态并集都可见
     fireEvent.click(screen.getByRole('button', { name: '状态：运行中' }))
     expect(screen.getByRole('button', { name: '状态：运行中' })).toHaveAttribute(
       'aria-pressed',
@@ -1428,27 +1478,23 @@ describe('PipelineManagerWidget', () => {
     )
     expect(screen.getByRole('button', { name: '状态：运行中' })).toHaveAttribute(
       'aria-pressed',
+      'true',
+    )
+    expect(screen.getByText('评估中任务')).toBeInTheDocument()
+    // 再点「运行中」→ 仅取消自身，已完成视野保持
+    fireEvent.click(screen.getByRole('button', { name: '状态：运行中' }))
+    expect(screen.getByRole('button', { name: '状态：运行中' })).toHaveAttribute(
+      'aria-pressed',
       'false',
     )
-    expect(screen.getByText('评估中任务')).toBeInTheDocument()
-    // 类型组叠加：任务 + 会话同时选中 = 并集；再点取消单项
-    fireEvent.click(screen.getByRole('button', { name: '类型：任务' }))
-    expect(screen.getByRole('button', { name: '类型：任务' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: '状态：已完成' })).toHaveAttribute(
       'aria-pressed',
       'true',
     )
     expect(screen.getByText('评估中任务')).toBeInTheDocument()
-    expect(screen.queryByText('主管道')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '类型：会话' }))
-    expect(screen.getByRole('button', { name: '类型：会话' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
-    expect(screen.getByText('评估中任务')).toBeInTheDocument()
-    expect(screen.getAllByText('主管道').length).toBeGreaterThanOrEqual(1)
-    fireEvent.click(screen.getByRole('button', { name: '类型：任务' }))
-    expect(screen.queryByText('评估中任务')).not.toBeInTheDocument()
-    expect(screen.getAllByText('主管道').length).toBeGreaterThanOrEqual(1)
+    // 类型维已退役（用户裁定 2026-11-20）：工具栏无类型标签入口
+    expect(screen.queryByRole('button', { name: '类型：任务' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '类型：会话' })).toBeNull()
   })
 
   it('focusTaskId 定位流：清空关键词与会话筛选，终态任务行必可见', async () => {

@@ -17,6 +17,7 @@ from pim_store import PimStore
 _PREFIX = "/ext/mode_personal"
 
 _TODO_OP_PATH_RE = re.compile(rf"^{_PREFIX}/todos/(?P<id>[^/]+)/(?P<op>complete|defer|split)$")
+_ACK_PATH_RE = re.compile(rf"^{_PREFIX}/(?P<coll>todos|events)/(?P<id>[^/]+)/ack_reminder$")
 _FOCUS_PATH_RE = re.compile(rf"^{_PREFIX}/focus/(?P<id>[^/]+)/(?P<action>start|stop)$")
 _HABIT_CHECKIN_PATH_RE = re.compile(rf"^{_PREFIX}/habits/(?P<id>[^/]+)/checkin$")
 _COLLECTIONS = ("todos", "events", "habits")
@@ -99,6 +100,14 @@ def _route_inner(
         # 幂等：同日重复打卡 op_id 为 None（零变化不记账，回执照常 200）
         habit, checkin_op = store.checkin_habit(m.group("id"))
         return 200, {"habit": habit, "op_id": checkin_op}
+
+    m = _ACK_PATH_RE.match(path)
+    if m and method == "POST":
+        # direct 弹卡确认（P0④）：确认坐标 <=now 最近一次发生；未到点 noop；
+        # 同坐标重复确认幂等（ack_reminder 零变化不记账）
+        entity = _ENTITY_BY_COLLECTION[m.group("coll")]
+        acked = store.ack_reminder(entity, m.group("id"))
+        return 200, {entity: acked}
 
     m = _TODO_OP_PATH_RE.match(path)
     if m and method == "POST":

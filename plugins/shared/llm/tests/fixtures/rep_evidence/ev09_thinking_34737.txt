@@ -1,0 +1,34 @@
+(fine, harmless).
+So:
+```rust
+fn ensure_treasury(w: &mut World) {
+let cell = treasury_cell(w);
+if cell.is_empty() { return; }
+if w.material.amount_in(&cell, "库银") > 0.0 { return; }
+ensure_mandate_state(w);
+let seeded = w.entities.get("state#mandate")
+.and_then(|e| e.ctx.get("treasury_seeded")).map(|s| s == "1").unwrap_or(false);
+if seeded { return; }
+w.material.spawn_at("库银", 500.0, &cell, None, None, Some("朝廷"));
+w.material.ledger.push(format!("SEED 库银@{cell} n=500 owner=朝廷（玩法层国库初始化，Demo 额度）"));
+if let Some(e) = w.entities.get_mut("state#mandate") {
+e.ctx.insert("treasury_seeded".into(), "1".into());
+}
+}
+```
+Standard regression check: init standard → build → ensure_treasury: amount_in(京畿,库银)=800>0 → return, no seed. ✓ Silver 800→720 as before. ✓
+qing: init → build region=华北: amount_in(华北,库银)=0 → ensure_mandate_state (creates 天命账 acc=50) → not seeded → spawn 500@华北 + ledger + flag. paid=consume(华北,库银,80)=80 → 500-80=420 left. ✓ build ok.
+qing grain_gift: ensure (already seeded) → tc=华北 → spawn 300@华北 → 420+300=720. ✓
+mandate light: acc=50 ≥ 30 → 20. ✓
+KPI silver for qing reads field not cell — so 银库 KPI won't reflect game treasury. Acceptable (game layer accounting visible in ledger/build responses). The build response and events show the flows.
+4. web.rs patch (python byte-level):
+- Move game block from inside else to after else-close. Find exact CRLF text. From the sed dump (LF-stripped), the block is:
+```
+// v5 玩法扩展常驻段：营建转化/天命积累/词条常驻/失地/整合
+{
+let sc = st.scenario.clone();
+let w = st.worlds.get_mut(&cur).unwrap();
+crate::game::init_game_layer_once(w);
+for _ in crate::game::tick_standing(w, &sc) {}
+}
+}

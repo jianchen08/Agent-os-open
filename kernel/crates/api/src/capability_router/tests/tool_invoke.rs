@@ -515,14 +515,15 @@ async fn test_tool_executor_missing_invoker_returns_protocol_error() {
     }
 }
 
-// ── G2 注册门禁全能力面通用化：工具直调通道（tool-executor.invoke）同源拦截 ──
-// 契约：账本 verify_incomplete/verify_failed（遮挡名单现值）内插件的工具，
-// 直调通道一并拒绝（用户裁定 2026-10-26：校验没通过 = 整个插件不许上岗）；
-// 拒绝带明确原因；复验通过（账本 ok）自动放行，与 LLM 工具面转正语义一致。
+// ── G2 注册门禁：工具直调通道（tool-executor.invoke）显式失败（ADR 2026-11-12）──
+// 契约：工具面不遮挡（schema 保留），校验态在调用时拦截——插件级
+// verify_incomplete/verify_failed → TOOL_TEMPORARILY_UNAVAILABLE；工具级
+// sanitized/drift 被拒 → TOOL_DECLARATION_MISMATCH。两态都带原因与修复指引、
+// 不到达 sidecar，复验通过（账本 ok）自动放行。
 
 #[tokio::test]
 async fn tool_executor_invoke_blocks_verify_pending_plugin() {
-    // 注册表反查路径：遮挡名单内插件的工具直调被拒，调用不得到达 sidecar。
+    // 注册表反查路径：拦截名单内插件的工具直调被拒，调用不得到达 sidecar。
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let lookup: crate::capability_router::ShadowedPluginIdsLookupFn =
         Arc::new(|| vec!["plugin_bash".to_string()]);
@@ -536,11 +537,21 @@ async fn tool_executor_invoke_blocks_verify_pending_plugin() {
         )
         .await
         .unwrap();
-    assert_eq!(res["success"], false, "必败工具直调必须被拒: {res}");
+    assert_eq!(res["success"], false, "待复验工具直调必须被拒: {res}");
+    assert_eq!(
+        res["error_code"], "TOOL_TEMPORARILY_UNAVAILABLE",
+        "临时不可用须带结构化错误码: {res}"
+    );
     let err = res["error"].as_str().unwrap_or_default();
     assert!(
-        err.contains("校验未完成或校验失败") && err.contains("已拦截"),
-        "拒绝必须带明确原因（校验未完成/校验失败，已拦截）: {err}"
+        err.contains("TOOL_TEMPORARILY_UNAVAILABLE")
+            && err.contains("校验未完成")
+            && err.contains("复验"),
+        "拒绝必须带错误码、原因与恢复路径: {err}"
+    );
+    assert!(
+        err.contains("插件本身可能仍可用"),
+        "观测失败 ≠ 判定失败：须如实说明插件可能可用: {err}"
     );
     assert!(err.contains("plugin_bash"), "原因要点名插件: {err}");
     assert!(
@@ -566,10 +577,7 @@ async fn tool_executor_invoke_blocks_explicit_plugin_id_path() {
         .await
         .unwrap();
     assert_eq!(res["success"], false, "显式指定被拦插件也必须拒绝: {res}");
-    assert!(
-        res["error"].as_str().unwrap_or_default().contains("已拦截"),
-        "拒绝原因必须显式: {res}"
-    );
+    assert_eq!(res["error_code"], "TOOL_TEMPORARILY_UNAVAILABLE");
     assert!(
         captured.lock().unwrap().is_empty(),
         "显式路径被拦调用同样不得到达 sidecar"
@@ -578,7 +586,7 @@ async fn tool_executor_invoke_blocks_explicit_plugin_id_path() {
 
 #[tokio::test]
 async fn tool_executor_invoke_reopens_after_ledger_ok() {
-    // 转正：复验通过（账本 ok，遮挡名单清除）后同一调用自动放行，无需重启。
+    // 转正：复验通过（账本 ok，拦截名单清除）后同一调用自动放行，无需重启。
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let pending = std::sync::Arc::new(std::sync::Mutex::new(vec!["plugin_bash".to_string()]));
     let pending_for_lookup = pending.clone();
@@ -626,6 +634,99 @@ async fn tool_executor_invoke_unaffected_for_healthy_plugin() {
         .await
         .unwrap();
     assert_eq!(res["success"], true, "健康插件不受名单影响: {res}");
+    assert_eq!(captured.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tool_executor_invoke_blocks_declaration_mismatch_tool() {
+    // 工具级（sanitized/drift）：声明 schema 保留在面，调用显式失败且不进 sidecar。
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rejected: crate::capability_router::RejectedToolNamesLookupFn =
+        Arc::new(|| vec![("plugin_bash".to_string(), "bash_execute".to_string())]);
+    let router =
+        router_with_tool_invoke(captured.clone()).with_rejected_tool_names_lookup(rejected);
+
+    let res = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "bash_execute", "args": {}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["success"], false, "声明漂移工具直调必须被拒: {res}");
+    assert_eq!(
+        res["error_code"], "TOOL_DECLARATION_MISMATCH",
+        "声明漂移须带结构化错误码: {res}"
+    );
+    let err = res["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("TOOL_DECLARATION_MISMATCH")
+            && err.contains("plugin_bash")
+            && err.contains("bash_execute")
+            && err.contains("validate-all"),
+        "拒绝原因须含错误码/插件/工具/修复指引: {err}"
+    );
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "被拦调用不得到达 sidecar"
+    );
+}
+
+#[tokio::test]
+async fn tool_executor_invoke_declaration_mismatch_reopens_after_ok() {
+    // 修复后复验通过（账本 ok，拒调清单清空）→ 同一调用自动放行。
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rejected = std::sync::Arc::new(std::sync::Mutex::new(vec![(
+        "plugin_bash".to_string(),
+        "bash_execute".to_string(),
+    )]));
+    let rejected_for_lookup = rejected.clone();
+    let lookup: crate::capability_router::RejectedToolNamesLookupFn =
+        Arc::new(move || rejected_for_lookup.lock().unwrap().clone());
+    let router = router_with_tool_invoke(captured.clone()).with_rejected_tool_names_lookup(lookup);
+
+    let blocked = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "bash_execute", "args": {}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked["error_code"], "TOOL_DECLARATION_MISMATCH");
+
+    rejected.lock().unwrap().clear();
+    let ok = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "bash_execute", "args": {}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok["success"], true, "复验通过后自动放行: {ok}");
+    assert_eq!(captured.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tool_executor_invoke_declaration_mismatch_scoped_to_plugin_and_tool() {
+    // 区分度：只拦被拒的 (plugin,tool) 对——他插件同名工具、他工具均不受影响。
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rejected: crate::capability_router::RejectedToolNamesLookupFn =
+        Arc::new(|| vec![("some_other_plugin".to_string(), "bash_execute".to_string())]);
+    let router =
+        router_with_tool_invoke(captured.clone()).with_rejected_tool_names_lookup(rejected);
+
+    let res = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "bash_execute", "args": {}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["success"], true, "他插件的拒调不扩大打击面: {res}");
     assert_eq!(captured.lock().unwrap().len(), 1);
 }
 

@@ -125,6 +125,8 @@ def test_server_registers_tool_definition() -> None:
     assert schema["properties"]["action"]["enum"] == ["get", "continue", "stop", "delete", "change"]
     assert "task_id" in schema["properties"]
     assert "message" in schema["properties"]
+    # continue 的验收指标整组覆盖字段必须对 LLM 可见（同任务续作改目标时使用）
+    assert "acceptance_criteria" in schema["properties"]
 
 
 def test_on_load_hook_registered() -> None:

@@ -129,7 +129,7 @@ pub async fn validate_all_plugins_handler(
 ) -> axum::Json<serde_json::Value> {
     let Some(invoker) = state.invoker.clone() else {
         return axum::Json(json!({
-            "checked": 0, "clean": 0, "drifted": 0, "errors": 1,
+            "checked": 0, "clean": 0, "drifted": 0, "noted": 0, "errors": 1,
             "registry_disk_mismatches": 0,
             "message": "invoker 未接线（validate-all 不可用）",
             "reports": [],
@@ -142,6 +142,9 @@ pub async fn validate_all_plugins_handler(
     let mut consistency_reports: Vec<serde_json::Value> = Vec::new();
     let mut clean = 0usize;
     let mut drifted = 0usize;
+    // 软漂移专属计数（undeclared / descriptive_drift：记录不拒，不染红插件状态，
+    // ADR 2026-11-18-g2-tiered-drift-severity）
+    let mut noted = 0usize;
     let mut errors = 0usize;
     let mut registry_disk_mismatches = 0usize;
     for m in state.manifests.read().await.iter() {
@@ -221,12 +224,37 @@ pub async fn validate_all_plugins_handler(
                                 "actual_schema": actual,
                             })
                         }
+                        // 软漂移（2026-11-18 omnisearch 事故，只记录不拒绝）：随
+                        // invoker DescriptiveDrift 变体同步的健康度观测形态。
+                        agentos_invoker::verify::VerifyMismatch::DescriptiveDrift {
+                            name,
+                            declared,
+                            actual,
+                        } => {
+                            json!({
+                                "kind": "descriptive_drift",
+                                "tool": name,
+                                "declared_schema": declared,
+                                "actual_schema": actual,
+                            })
+                        }
                     })
                     .collect();
+                // 分档（ADR 2026-11-18-g2-tiered-drift-severity）：只有硬漂移
+                // （missing/schema_mismatch）计 drifted；软漂移-only 计 noted。
+                let has_hard = mismatches.iter().any(|mm| {
+                    matches!(
+                        mm,
+                        agentos_invoker::verify::VerifyMismatch::Missing { .. }
+                            | agentos_invoker::verify::VerifyMismatch::SchemaMismatch { .. }
+                    )
+                });
                 if mismatches.is_empty() {
                     clean += 1;
-                } else {
+                } else if has_hard {
                     drifted += 1;
+                } else {
+                    noted += 1;
                 }
                 // 写健康度：被拒工具 = missing/schema_mismatch（undeclared 仅记录不拒）
                 let rejected: Vec<String> = mismatches
@@ -238,15 +266,24 @@ pub async fn validate_all_plugins_handler(
                         agentos_invoker::verify::VerifyMismatch::SchemaMismatch {
                             name, ..
                         } => Some(name.clone()),
+                        // 软漂移与 Undeclared 同语义：只记录不拒（descriptive_drift
+                        // 不影响真实调用成败，拒收即错杀）。
+                        agentos_invoker::verify::VerifyMismatch::DescriptiveDrift { .. } => None,
                         agentos_invoker::verify::VerifyMismatch::Undeclared { .. } => None,
                     })
                     .collect();
                 let g2o = crate::plugin_watcher::G2VerifyOutcome {
                     manifest: m.clone(),
                     rejected_tools: rejected,
-                    drift: !mismatches.is_empty(),
+                    // 插件级 drift = 硬漂移 only：软漂移（undeclared /
+                    // descriptive_drift）不染红账本 g2_consistency。
+                    drift: has_hard,
+                    soft_drift: !has_hard && !mismatches.is_empty(),
                     spawn_failed: false,
                     smoke_failed: false,
+                    // 巡检只报告不处置：账本记 drift（不冒充 sanitized），
+                    // 但被拒工具同样武装调用显式失败闸（ADR 2026-11-12）。
+                    stub_armed: false,
                 };
                 ledger.upsert(crate::contract::PluginContractState::derived(
                     m,
@@ -255,7 +292,13 @@ pub async fn validate_all_plugins_handler(
                 ));
                 reports.push(json!({
                     "plugin_id": m.id,
-                    "status": if mismatches.is_empty() { "clean" } else { "drifted" },
+                    "status": if mismatches.is_empty() {
+                        "clean"
+                    } else if has_hard {
+                        "drifted"
+                    } else {
+                        "noted"
+                    },
                     "declared_tools": m.capabilities.tools.len(),
                     "actual_tools": actual.len(),
                     "malformed_items": malformed,
@@ -281,6 +324,7 @@ pub async fn validate_all_plugins_handler(
         "checked": reports.len(),
         "clean": clean,
         "drifted": drifted,
+        "noted": noted,
         "errors": errors,
         "registry_disk_mismatches": registry_disk_mismatches,
         "reports": reports,
@@ -305,35 +349,6 @@ pub async fn plugins_contract_status_handler(
         "plugins": items,
         "count": items.len(),
         "generated_at": crate::contract::now_ms(),
-    }))
-}
-
-/// GET /api/v1/plugins/source-arbitration — 多源仲裁「用户副本未生效」清单
-/// （D4/审查总册 P1-15：BuiltinFirst 装机盲区显式告警面）。
-///
-/// sync 工作流写坏版本号（如 `v` 前缀 strip 后仍非 semver / 不严格大于内置）
-/// 时用户副本输给内置，此前仅裁决日志逐 id 汇总行可查——本端点把该清单
-/// 结构化透出（`ineffective_user_copies`，语义见
-/// `agentos_plugin_loader::IneffectiveUserCopy`）。清单每轮 discover 全量
-/// 重建，用户副本修复版本后收敛为空。loader 未装配（裸测试构造）→ 空清单
-/// + 默认策略标签。
-pub async fn plugins_source_arbitration_handler(
-    axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<serde_json::Value> {
-    let (policy, ineffective) = match &state.plugin_loader {
-        Some(loader) => {
-            let label = match loader.dual_source_policy() {
-                agentos_plugin_loader::DualSourcePolicy::BuiltinFirst => "builtin",
-                agentos_plugin_loader::DualSourcePolicy::UserFirst => "user",
-            };
-            (label, loader.ineffective_user_copies())
-        }
-        None => ("user", Vec::new()),
-    };
-    axum::Json(json!({
-        "policy": policy,
-        "ineffective_user_copies": ineffective,
-        "count": ineffective.len(),
     }))
 }
 
@@ -399,6 +414,10 @@ pub async fn plugins_status_handler(
                 })).collect::<Vec<_>>(),
                 "has_contributes": m.contributes.is_some(),
                 "has_http_endpoints": !m.http_endpoints.is_empty(),
+                // 可见性（private 插件机制，ADR 2026-11-18 §决策 5）：前端插件
+                // 管理页据本字段过滤 private（用户安装/市场面不展示）；能力面
+                // （tools/http/contributes）不因 private 收窄——属性不是能力。
+                "visibility": m.visibility,
                 // 准入分级（2026-09-25）：被剥除的危险前端能力（host_js/host_css），
                 // 非空 = 设置页插件卡显示"受限"（禁静默降级）
                 "restricted_capabilities": m.restricted_capabilities,
@@ -754,7 +773,7 @@ async fn reenable_hot_path(
                             plugin = %plugin_id,
                             rejected = ?outcome.rejected_tools,
                             spawn_failed = outcome.spawn_failed,
-                            "注册闸 G2：启用复核判定声明与实现不一致，按净化后能力注册（需修改插件）"
+                            "注册闸 G2：启用复核判定声明与实现不一致，相关工具按声明注册为失败桩（schema 保留在工具面、调用显式失败；需修改插件）"
                         );
                         manifest_for_register = outcome.manifest;
                     } else if outcome.spawn_failed {

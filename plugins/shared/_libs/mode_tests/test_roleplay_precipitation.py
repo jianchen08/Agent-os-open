@@ -484,9 +484,9 @@ def test_promote_user_authored_entry_conflict_409(rp: Any, tmp_path: Any) -> Non
     assert data["behaviors"]["我的自定义行为"]["effect"] == {"player.灵力": "+1"}
 
 
-def test_promote_user_dir_unavailable_400(rp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_promote_user_dir_unavailable_400(rp: Any, patch_shared: Any) -> None:
     """用户空间不可得（user_config_dir()=None）= 400 如实报错，不静默假成功。"""
-    monkeypatch.setattr(rp, "_user_packs_dir", lambda: None)
+    patch_shared("_user_packs_dir", lambda: None)  # 消费点在 rp_* 自持绑定
     result = _post(rp, _PROMOTE, _promote_body())
     assert _status_of(result) == 400
     assert "user_config_dir" in _body_json(result)["error"]

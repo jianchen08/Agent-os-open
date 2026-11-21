@@ -9,7 +9,7 @@
  * UI 交互全部走真实 testing-library 事件。
  */
 import { act, fireEvent, screen, waitFor } from '@testing-library/react'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerReferenceProvider } from '@/services/references/referenceProviders'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { renderWithProviders as render } from '@/test/renderWithProviders'
@@ -47,6 +47,8 @@ const mocks = vi.hoisted(() => ({
     error: null as { type: string; message: string } | null,
     startRecording: vi.fn(),
     stopRecording: vi.fn(),
+    startServerASR: vi.fn(),
+    cancelRecording: vi.fn(),
     captured: {} as VoiceCallbacks,
   },
 }))
@@ -81,6 +83,8 @@ vi.mock('@/hooks/useVoiceInput', () => ({
       error: mocks.voice.error,
       startRecording: mocks.voice.startRecording,
       stopRecording: mocks.voice.stopRecording,
+      startServerASR: mocks.voice.startServerASR,
+      cancelRecording: mocks.voice.cancelRecording,
       isSupported: mocks.voice.isSupported,
     }
   },
@@ -90,17 +94,28 @@ vi.mock('../VoiceInputButton', () => ({
     disabled?: boolean
     state?: string
     onClick?: () => void
+    onPressStart?: () => void
+    onPressEnd?: () => void
     'aria-label'?: string
   }) => (
-    <button
-      type="button"
-      data-testid="mock-voice-button"
-      data-state={props.state ?? 'idle'}
-      disabled={props.disabled}
-      onClick={props.onClick}
-    >
-      {props['aria-label'] ?? '语音输入'}
-    </button>
+    <div>
+      <button
+        type="button"
+        data-testid="mock-voice-button"
+        data-state={props.state ?? 'idle'}
+        disabled={props.disabled}
+        onClick={props.onClick}
+      >
+        {props['aria-label'] ?? '语音输入'}
+      </button>
+      {/* 触屏按住说话回调触发面（pointerdown/pointerup 语义的按钮化投影） */}
+      <button type="button" data-testid="mock-voice-press-start" onClick={() => props.onPressStart?.()}>
+        press-start
+      </button>
+      <button type="button" data-testid="mock-voice-press-end" onClick={() => props.onPressEnd?.()}>
+        press-end
+      </button>
+    </div>
   ),
 }))
 vi.mock('../ChatInputActions', () => ({
@@ -190,6 +205,8 @@ beforeEach(() => {
   mocks.validateFile.mockReset()
   mocks.voice.startRecording.mockReset()
   mocks.voice.stopRecording.mockReset()
+  mocks.voice.startServerASR.mockReset()
+  mocks.voice.cancelRecording.mockReset()
   mocks.reportError.mockReset()
   mocks.validateFile.mockImplementation(() => ({ valid: true }))
   // 模型注册表/states 保持挂起，避免测试结束后异步 resolve 触发 act() 告警噪声
@@ -502,21 +519,27 @@ describe('ChatInput 语音输入（实时识别模式）', () => {
     expect(mocks.voice.startRecording).toHaveBeenCalledTimes(1)
   })
 
-  it.each<[string, number, string, string]>([
-    ['browser', 0, '正在聆听…', '00:00'],
-    ['browser', 65, '正在聆听…', '01:05'],
-    ['server-asr', 5, '服务器识别中…', '00:05'],
-  ])('录音状态条：mode=%s 时长=%s 显示 %s 与 %s', (mode, duration, label, durationText) => {
+  it.each<[number, string]>([
+    [0, '00:00'],
+    [65, '01:05'],
+  ])('录音状态条：时长=%s 秒 → 「正在聆听」+ %s', (duration, durationText) => {
     Object.assign(mocks.voice, {
       isSupported: true,
       isRecording: true,
       state: 'recording',
-      mode,
       recordingDuration: duration,
     })
     renderInput()
-    expect(screen.getByText(label)).toBeInTheDocument()
+    expect(screen.getByText('正在聆听')).toBeInTheDocument()
     expect(screen.getByText(durationText)).toBeInTheDocument()
+  })
+
+  it('转写状态条：录音停止后显示「识别中…」并常驻取消按钮', () => {
+    Object.assign(mocks.voice, { isSupported: true, isRecording: false, state: 'transcribing' })
+    renderInput()
+    expect(screen.getByText('识别中…')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '取消语音输入' }))
+    expect(mocks.voice.cancelRecording).toHaveBeenCalledTimes(1)
   })
 
   it('临时识别：空 interim 不改动输入', () => {
@@ -894,3 +917,167 @@ describe('ChatInput 外部插入文本（chatInputStore 桥）', () => {
     expect(useChatInputStore.getState().pendingInsert).toBeNull()
   })
 })
+
+describe('ChatInput 长按说话（触屏指针）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** 触屏指针事件（jsdom PointerEvent 支持 pointerType/clientY 初始化） */
+  const pointerDown = (clientY = 300) =>
+    fireEvent.pointerDown(textareaEl(), { pointerType: 'touch', clientY })
+  const pointerMove = (clientY = 300) =>
+    fireEvent.pointerMove(textareaEl(), { pointerType: 'touch', clientY })
+  const pointerUp = (clientY = 300) =>
+    fireEvent.pointerUp(textareaEl(), { pointerType: 'touch', clientY })
+
+  it('空白输入框长按 350ms → 起录语音通道（startRecording 统一入口）；松手停止后转写文字填入输入框', () => {
+    mocks.voice.isSupported = true
+    const { rerenderWith } = renderInput()
+
+    pointerDown()
+    act(() => vi.advanceTimersByTime(349))
+    expect(mocks.voice.startRecording).not.toHaveBeenCalled()
+    act(() => vi.advanceTimersByTime(1))
+    expect(mocks.voice.startRecording).toHaveBeenCalledTimes(1)
+
+    // 起录后横幅立即可见（hook 状态由 mock 回填后重渲染）
+    mocks.voice.isRecording = true
+    mocks.voice.state = 'recording'
+    rerenderWith({})
+    expect(screen.getByText('正在聆听')).toBeInTheDocument()
+
+    pointerUp()
+    expect(mocks.voice.stopRecording).toHaveBeenCalledTimes(1)
+
+    act(() => mocks.voice.captured.onTranscriptionComplete?.('语音转写文字'))
+    expect(textareaEl().value).toBe('语音转写文字')
+  })
+
+  it('长按上滑 60px → 「松开取消」，松手丢弃（不停止转写、不写入文字）', () => {
+    mocks.voice.isSupported = true
+    const { rerenderWith } = renderInput()
+    pointerDown(300)
+    act(() => vi.advanceTimersByTime(350))
+    mocks.voice.isRecording = true
+    mocks.voice.state = 'recording'
+    rerenderWith({})
+
+    pointerMove(240)
+    expect(screen.getByText('松开取消')).toBeInTheDocument()
+
+    pointerUp(240)
+    expect(mocks.voice.cancelRecording).toHaveBeenCalledTimes(1)
+    expect(mocks.voice.stopRecording).not.toHaveBeenCalled()
+    expect(textareaEl().value).toBe('')
+  })
+
+  it('上滑不足 60px：松手走正常停止', () => {
+    mocks.voice.isSupported = true
+    renderInput()
+    pointerDown(300)
+    act(() => vi.advanceTimersByTime(350))
+    pointerMove(241)
+    pointerUp(241)
+    expect(mocks.voice.stopRecording).toHaveBeenCalledTimes(1)
+    expect(mocks.voice.cancelRecording).not.toHaveBeenCalled()
+  })
+
+  it('鼠标按住不启用长按（桌面走麦克风按钮点击）', () => {
+    mocks.voice.isSupported = true
+    renderInput()
+    fireEvent.pointerDown(textareaEl(), { pointerType: 'mouse', clientY: 300 })
+    act(() => vi.advanceTimersByTime(1000))
+    expect(mocks.voice.startRecording).not.toHaveBeenCalled()
+  })
+
+  it('输入框有文字时长按不触发（保留文本选择与系统选择菜单）', () => {
+    mocks.voice.isSupported = true
+    renderInput()
+    fireEvent.change(textareaEl(), { target: { value: '已有正文' } })
+    pointerDown()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(mocks.voice.startRecording).not.toHaveBeenCalled()
+  })
+
+  it('短按（<350ms）松手按普通点击处理：不起录也不停止', () => {
+    mocks.voice.isSupported = true
+    renderInput()
+    pointerDown()
+    act(() => vi.advanceTimersByTime(200))
+    pointerUp()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(mocks.voice.startRecording).not.toHaveBeenCalled()
+    expect(mocks.voice.stopRecording).not.toHaveBeenCalled()
+  })
+
+  it('转写中按住不叠加起录（状态互斥）', () => {
+    mocks.voice.isSupported = true
+    mocks.voice.state = 'transcribing'
+    renderInput()
+    pointerDown()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(mocks.voice.startRecording).not.toHaveBeenCalled()
+  })
+
+  it('音频模型长按：走录音附件通道（startRecording），不做服务端转写', () => {
+    mocks.caps.supportsAudio = true
+    mocks.voice.isSupported = true
+    renderInput()
+    pointerDown()
+    act(() => vi.advanceTimersByTime(350))
+    expect(mocks.voice.startRecording).toHaveBeenCalledTimes(1)
+  })
+
+  it('长按生效期间抑制系统上下文菜单；空闲时放行', () => {
+    mocks.voice.isSupported = true
+    renderInput()
+    expect(fireEvent.contextMenu(textareaEl())).toBe(true)
+
+    pointerDown()
+    act(() => vi.advanceTimersByTime(350))
+    expect(fireEvent.contextMenu(textareaEl())).toBe(false)
+  })
+})
+
+describe('ChatInput 触屏按住说话（语音按钮按压回调）', () => {
+  it('按压起录（onPressStart）：复位数组标纪并起录；起录后的临时识别开启新段', () => {
+    mocks.voice.isSupported = true
+    renderInput()
+    // 先产生一段未确认临时文字（interim 区间已标记）
+    act(() => mocks.voice.captured.onInterimResult?.('临时词'))
+    expect(textareaEl().value).toBe('临时词')
+
+    fireEvent.click(screen.getByTestId('mock-voice-press-start'))
+    expect(mocks.voice.startRecording).toHaveBeenCalledTimes(1)
+
+    // 按压起录复位临时区间：新一段临时识别按「首次追加」处理（补空格），
+    // 而不是替换上一段（区间未复位时 base 会从 0 截断）
+    act(() => mocks.voice.captured.onInterimResult?.('新一段'))
+    expect(textareaEl().value).toBe('临时词 新一段')
+  })
+
+  it('松手收停（onPressEnd）：未确认临时文字提交为正文并保存草稿，随后停录', () => {
+    mocks.voice.isSupported = true
+    renderInput({ draftKey: 'hold-draft' })
+    act(() => mocks.voice.captured.onInterimResult?.('按住说的'))
+    expect(textareaEl().value).toBe('按住说的')
+
+    fireEvent.click(screen.getByTestId('mock-voice-press-end'))
+    expect(mocks.voice.stopRecording).toHaveBeenCalledTimes(1)
+    expect(textareaEl().value).toBe('按住说的')
+    expect(useChatInputStore.getState().drafts['hold-draft']).toBe('按住说的')
+  })
+
+  it('松手时无临时文字：只停录，不写草稿（与点击路径同守卫）', () => {
+    mocks.voice.isSupported = true
+    renderInput({ draftKey: 'hold-clean' })
+    fireEvent.click(screen.getByTestId('mock-voice-press-end'))
+    expect(mocks.voice.stopRecording).toHaveBeenCalledTimes(1)
+    expect(useChatInputStore.getState().drafts['hold-clean']).toBeUndefined()
+  })
+})
+

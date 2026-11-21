@@ -1,0 +1,15 @@
+# llm_provider_gateway 插件控制配置（config_files[id=gateway] 真值；用户空间为
+# 真值——内核启动期 copy-if-missing 播种，用户层存在即整体接管，升级不丢用户
+# 配置）。环境变量可覆盖：LLM_GATEWAY_BASE_URL / LLM_GATEWAY_CLIENT_API_KEY。
+# 网关进程本体配置（CLIProxyAPI server config）另见 gateway_server.yaml。
+base_url: http://127.0.0.1:8317
+# 探活未命中且端口空闲时自动拉起插件捆绑网关（bin/cli-proxy-api）；
+# false = 只复用已在运行的外部网关，不拉起。
+autostart: true
+# 调用网关的 client key（网关 server config 启用 access.api-keys 时必填；
+# 缺省空 = 匿名调用，仅本机回环可达）。也可经 LLM_GATEWAY_CLIENT_API_KEY 注入。
+client_api_key: ''
+# 拉起健康等待超时（秒）
+startup_timeout_secs: 15.0
+# 上游调用超时（秒，对齐 llm 网关 call_timeout 缺省）
+call_timeout_secs: 1800.0

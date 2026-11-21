@@ -58,6 +58,13 @@ LANGUAGE_EXTS: dict[str, str] = {
     "powershell": "*.ps1",
 }
 
+# languages 探测的目录剪枝集（依赖/构建产物重目录：技能包带 node_modules 或
+# .venv 时未剪枝的 rglob 会逐技能全树走 4 遍，list/get 侧线性放大——
+# video-shotcraft 1495 项实测单技能 33ms，只是当前还没人往里塞依赖树）。
+_PRUNE_DIR_NAMES = frozenset(
+    {"node_modules", ".venv", "venv", "__pycache__", ".git", ".pytest_cache", ".ruff_cache", "dist", "build"}
+)
+
 
 def _default_sources() -> list[tuple[Path, str]]:
     """四源并集（升优先序附来源标注；与 workspace_lifecycle 快照侧同源单点）。
@@ -96,8 +103,25 @@ def _skill_md_path(skill_dir: Path) -> Path | None:
 
 
 def detect_languages(skill_dir: Path) -> list[str]:
-    """目录内脚本语言覆盖面（任意深度存在性，原 rglob 检测同语义）。"""
-    return [lang for lang, pattern in LANGUAGE_EXTS.items() if any(skill_dir.rglob(pattern))]
+    """目录内脚本语言覆盖面（任意深度存在性，原 rglob 检测同语义）。
+
+    单遍 os.walk 同时探测四种扩展（原实现每语言一次 rglob = 全树 4 遍），
+    依赖/构建产物目录整枝剪掉（``_PRUNE_DIR_NAMES``）；返回序保持
+    LANGUAGE_EXTS 声明序。fnmatch 与 rglob 同一匹配语义（Windows 不区分
+    大小写，POSIX 区分）。"""
+    import fnmatch  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+
+    found: set[str] = set()
+    for _dirpath, dirnames, filenames in _os.walk(skill_dir):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIR_NAMES]
+        for filename in filenames:
+            for lang, pattern in LANGUAGE_EXTS.items():
+                if lang not in found and fnmatch.fnmatch(filename, pattern):
+                    found.add(lang)
+        if len(found) == len(LANGUAGE_EXTS):
+            break
+    return [lang for lang in LANGUAGE_EXTS if lang in found]
 
 
 def parse_skill_md(content: str, fallback_name: str) -> tuple[str, str, str]:

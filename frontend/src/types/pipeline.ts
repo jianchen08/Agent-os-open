@@ -70,6 +70,9 @@ export interface PipelineViewEntry {
   /** Agent 行内显示名（agents 注册表按 id/config_id 命中配置名——主管道
    *  「灵汐」；未命中回退 stem 短名。类型徽标位的替代渲染，可空） */
   agentLabel?: string
+  /** Agent 图标配置原值（config/agents/**\/*.yaml 的 `icon`：emoji 优先，
+   *  其次内置图标名；未配置/未命中留空，由前端缺省图标兜底） */
+  agentIcon?: string
   /** 关联任务 ID（kind=task 时有值） */
   taskId?: string
   /** 项目登记行 id（kind=project 时有值——文件夹打开面按登记 id 解析） */
@@ -116,4 +119,8 @@ export interface PipelineViewEntry {
   failureReason?: string
   /** 挂起归因（run 域 state.suspended_reason；非空才渲染挂起原因行） */
   suspendedReason?: string
+  /** 下辖运行中（聚合展示字段，派生自任务链——本条目自身状态值的**不改写**）：
+   *  子孙任务中有显示为运行中的 ⇔ 这条链是活的。行内以独立徽标呈现，
+   *  status/run 真值仍按原字段渲染（聚合展示与真实状态分离，不覆盖 run_status） */
+  hasRunningDescendant?: boolean
 }

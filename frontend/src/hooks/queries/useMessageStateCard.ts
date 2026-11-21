@@ -16,11 +16,12 @@
  * 后半正文不可丢）。
  */
 import { useEffect, useState } from 'react'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { apiClient } from '@/services/api/client'
 import { PIPELINE_STATE_MARKER_PARSE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { queryClient } from '@/services/query/queryClient'
-import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { matchStateCardStyleId as _matchStyleId } from '@/services/schema/messageStateCard'
 import { useSessionStore } from '@/stores/sessionStore'
 import { mainPipelineIdOf } from '@/utils/mappers'
 
@@ -40,7 +41,6 @@ export interface MessageStateCard {
 }
 
 export { stripBySpan, matchStateCardStyleId } from '@/services/schema/messageStateCard'
-import { matchStateCardStyleId as _matchStyleId } from '@/services/schema/messageStateCard'
 
 async function fetchLatestPayload(pipelineId: string): Promise<StateUpdatesPayload | null> {
   const res = await apiClient.get<{ state_updates: StateUpdatesPayload | null }>(

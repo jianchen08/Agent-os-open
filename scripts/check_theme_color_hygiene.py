@@ -5,6 +5,10 @@
 生产代码与插件声明模板中不得硬编码颜色字面量（hex / rgb() / rgba() /
 hsl() / hsla() 实参字面量），必须写 var(--token)/hsl(var(--token)) 主题变量。
 
+2026-11-07 用户裁定扩面：插件 web/webview HTML/CSS/JS 资产同受此约束
+（webview 可不接主题，但颜色字面量仍禁——可读性由 theme-contrast 门禁
+按实际渲染对比度执法，本闸只管字面量卫生面）。
+
 定义层豁免（这些文件的职责就是定义颜色本身）：
 - frontend/src/index.css            ：:root 主题变量定义
 - frontend/src/styles/**            ：design tokens 与皮肤定义层
@@ -30,12 +34,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 扫描面：前端源码 + 插件声明（声明式组件的模板颜色同受此约束）。
+# 扫描面：前端源码 + 插件声明 + 插件 web/webview 资产（2026-11-07 扩面，
+# 声明式组件的模板颜色与插件 HTML 资产同受此约束）。
 SCAN_GLOBS = (
     "frontend/src/**/*.ts",
     "frontend/src/**/*.tsx",
     "frontend/src/**/*.css",
     "plugins/shared/*/plugin.json",
+    "plugins/shared/*/web/**/*.html",
+    "plugins/shared/*/web/**/*.htm",
+    "plugins/shared/*/web/**/*.css",
+    "plugins/shared/*/web/**/*.js",
+    "plugins/shared/*/webview/**/*.html",
+    "plugins/shared/*/webview/**/*.htm",
+    "plugins/shared/*/webview/**/*.css",
+    "plugins/shared/*/webview/**/*.js",
 )
 
 # 定义层豁免（前缀形态；见模块 docstring 归因）。

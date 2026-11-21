@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.六 记忆检索 | @vision: V1 可进化 | @audit: T5#4 | @ci: none-local
 """hindsight spawn 守卫四件（方案 P0-3，2026-10-10 commit 爆涨同环修复）。
 
@@ -48,7 +47,7 @@ def _load_module() -> object:
     return module
 
 
-@pytest.fixture()
+@pytest.fixture
 def mod(monkeypatch: pytest.MonkeyPatch):
     """加载模块并隔离外部副作用（不真 spawn/不真杀进程）。"""
     m = _load_module()

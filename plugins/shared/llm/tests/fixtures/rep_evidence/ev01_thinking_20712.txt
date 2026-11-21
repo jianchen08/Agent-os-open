@@ -1,0 +1,43 @@
+m wait — does qing world's state persist entities? qing world build creates entities; state#mandate created by ensure_mandate_state on first init_game_layer_once during step. OK.
+3. build(): replace 京畿 literals with tc = treasury_cell(w):
+```rust
+let tc = treasury_cell(w);
+let paid = w.material.consume_from_cell(&tc, "库银", spec.cost);
+```
+refund spawn_at(&tc...), ledger format uses {tc}.
+4. MF-17 settle in tick_construction: after kind=建筑 conversion, settle 营造银:
+```rust
+// MF-17：建成即结清——营造银余额按「投入」核销为建筑本体（物化结清，死账闭合）
+let invest = w.entities.get(&id).and_then(|e| e.fields.get("投入").copied()).unwrap_or(0.0);
+if invest > 0.0 {
+let settled = w.material.consume_from_cell(&region, "营造银", invest);
+if settled > 1e-9 {
+w.material.ledger.push(format!(
+"SETTLE {building}@{region} 银={settled:.2}（营造银→建筑本体物化结清）"));
+}
+}
+```
+Note: current code re-reads entity after conversion — get 投入 before or after kind change doesn't matter.
+5. work pairing: replace the ("work", true) block:
+```rust
+("work", true) => {
+let earn = 0.15 * (0.5 + integrity);
+// MF-17（用户裁定口径）：得银与叶财富扣减成对——劳动从本区经济取值，
+// 人物随身银 +earn ↔ 源叶财富总量 -earn（μ -= earn/n）
+let leaf_id = w.leaves.iter()
+.find(|(_, l)| l.ctx.get("region").map(|r| r == region).unwrap_or(false))
+.map(|(id, _)| id.clone());
+let mut paired = false;
+if let Some(lid) = leaf_id {
+if let Some(l) = w.leaves.get_mut(&lid) {
+if l.n > 0.5 {
+l.shift_mu("财富", -earn / l.n);
+paired = true;
+}
+}
+}
+if !paired {
+note = "营生未成（本区无在册人群可承账，无账可记）".into();
+} else {
+if let Some(e) = w.entities.get_mut(eid) {
+e.fields.insert("随身银".into(),

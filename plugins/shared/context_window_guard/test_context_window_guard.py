@@ -1,7 +1,7 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
-"""context_window_guard plugin TDD 测试（Step 4 重建）。
+"""context_window_guard plugin TDD 测试（Step 4 重建 + 2026-11-16 裁剪修复）。
 
-验证内容（与任务规格 10 个用例对齐）：
+验证内容（与任务规格 10 个用例对齐，9 号随裁剪证据源修复重写）：
 1. test_init_does_not_crash —— ContextWindowGuardPlugin() 构造不导入 memory 模块
 2. test_resolve_trigger_ratio_falls_back —— _resolve_trigger_ratio(None) 不导入 memory.context_compressor
 3. test_compression_config_from_yaml —— 本地 CompressionConfig.from_yaml_config 返回有效预算
@@ -11,8 +11,10 @@
 7. test_format_messages_roles —— _format_messages 产出 【用户】【助手】【系统】【工具】 头
 8. test_save_uses_memory_backend —— 压缩后 backend.add 对 L1 用 memory_type="chunk"，
    对 memory_items 用 memory_type="semantic"
-9. test_trim_covered_messages_uses_backend —— mock backend 返回带 sequence_end 的 chunk，
-   断言 messages 被裁剪
+9. trim 契约（2026-11-16 修复）：裁剪证据源 = 历史已应用压缩块
+   （metadata.compression_ref.seq_range），不查记忆库——孤儿 chunk（落库后
+   回写前被打断的覆盖声明）不再驱动删除；被删原文与 set(seq, null) 同批
+   冻结（禁止裸删）；并行落库契约（refs 回填/单批失败隔离/批次不串行）
 10. test_get_memory_service_returns_none_without_deps —— 无 capability/backend → None，不崩
 
 测试不依赖真实 LLM/能力后端——通过 AsyncMock 注入 llm_call_fn / IMemoryBackend。
@@ -119,6 +121,30 @@ class FakeBackend:
 
     async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
         return list(self.search_returns)
+
+
+def _applied_block(
+    seq_range: list[int],
+    *,
+    with_seq: int | None = None,
+) -> dict[str, Any]:
+    """构造一条已应用压缩块消息（_build_batch_blocks 生产形态，seq_range 可注入）。"""
+    block: dict[str, Any] = {
+        "role": "system",
+        "name": "compressed",
+        "content": f'<compressed seq="{seq_range[0]}-{seq_range[1]}" level="L1">\n## 过程摘要\nx\n</compressed>',
+        "metadata": {
+            "compression_ref": {
+                "kind": "process",
+                "seq_range": list(seq_range),
+                "stored_at": "2026-11-16T00:00:00+00:00",
+                "memory_ids": [],
+            }
+        },
+    }
+    if with_seq is not None:
+        block["seq"] = with_seq
+    return block
 
 
 # ═══════════════════════════════════════════════════════════
@@ -319,50 +345,187 @@ class TestSaveUsesBackend:
 
 
 # ═══════════════════════════════════════════════════════════
-# 9. _trim_covered_messages 走 backend
+# 9. trim 契约（2026-11-16 修复）：证据源 = 历史已应用压缩块
 # ═══════════════════════════════════════════════════════════
 
 
-class TestTrimUsesBackend:
-    def test_trim_covered_messages_uses_backend(self) -> None:
-        """mock backend 返回带 sequence_end 的 L1 chunk，断言 messages 被裁剪。"""
+class TestTrimUsesAppliedBlocks:
+    """裁剪证据源 = 历史已应用压缩块（metadata.compression_ref.seq_range）。
+
+    裁剪与记忆库 chunk 完全解耦（孤儿 chunk 无害化）；被删原文与
+    set(seq, null) ops 同批冻结（禁止裸删，2026-11-16 装机事故回归）。
+    """
+
+    def test_trim_trims_to_applied_blocks_with_freeze(self) -> None:
+        """历史含已应用块（seq_range=[1,50]）+ 消息 1..60 → 裁掉 1..50。
+
+        execute 级断言 ops 批次：冻结 op 在批次中且 members 为被删原文全文
+        （逐条与输入深度相等）、null ops 覆盖被删 seq、块消息保留不被改写；
+        全程 backend=None（新证据源不需要记忆库）。
+        """
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.55})
+        block = _applied_block([1, 50])
+        # seq 1..50 已被块覆盖（裁），seq 51..60 是 recent（保留，>10% 防护不触发）
+        messages: list[dict[str, Any]] = [block] + [
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
+        ]
+        # 块消息无 seq 槽位（覆盖区间头部槽位语义），不与被裁槽位碰撞
+
+        mock_service = MagicMock()
+        mock_service.setup = MagicMock()
+        mock_service.compress_messages = AsyncMock(return_value=None)
+
+        ctx = mod._make_minimal_ctx(
+            state={"context_window": 128000, "messages": messages},
+            pipeline_id="pipe-1",
+        )
+        ctx._services["context_service"] = mock_service
+
+        result = _run(plugin.execute(ctx))
+        ops_list = result.state_updates["messages"]["_ops"]
+
+        # 冻结 op 在 ops 批次中，形态按契约
+        freezes = [op for op in ops_list if op.get("op") == "freeze_segment"]
+        assert len(freezes) == 1, "被删原文必须同批冻结（禁止裸删）"
+        freeze = freezes[0]
+        assert freeze["id"].startswith("seg_")
+        assert freeze["visible_to"] == "user"
+        assert freeze["base_seq"] == 1
+        assert freeze["base_len"] == 50
+        # members = 被删原文全文，逐条与输入深度相等（升序 = 输入顺序）
+        assert freeze["members"] == messages[1:51]
+
+        # null ops 覆盖被删 seq 1..50
+        null_ops = [
+            op for op in ops_list if op.get("op") == "set" and op.get("msg") is None
+        ]
+        assert {op["seq"] for op in null_ops} == set(range(1, 51))
+
+        # 块消息保留：无任何 set(seq, 块) 改写 op；批次总 ops = 1 冻结 + 50 null
+        assert not [
+            op for op in ops_list if op.get("op") == "set" and isinstance(op.get("msg"), dict)
+        ]
+        assert len(ops_list) == 51
+
+    def test_trim_preserves_applied_block_in_output(self) -> None:
+        """列表级：块消息（system）保留在裁剪输出中，仅非 system 被裁。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        plugin = mod.ContextWindowGuardPlugin()
+        block = _applied_block([1, 50], with_seq=1)
+        messages: list[dict[str, Any]] = [block] + [
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
+        ]
+        result = _run(plugin._trim_covered_messages(messages))
+        assert block in result
+        kept_non_sys_seqs = [
+            m["seq"] for m in result if m.get("role") != "system"
+        ]
+        assert kept_non_sys_seqs == list(range(51, 61))
+
+    def test_trim_ignores_memory_chunks_even_when_present(self) -> None:
+        """记忆库 chunk 与裁剪决策解耦：chunk 只声明覆盖到 20，块证据到 50
+        → 裁到 50（不是 20）。孤儿/滞后 chunk 抬高或压低 max_end 均无效。"""
         mod = _load_plugin_module()
         backend = FakeBackend()
-        # backend 返回一条 L1 chunk，sequence_end=5。
-        # 注意：sequence 信息放在 metadata.tags（"seq:1-5"）里——这正是
-        # save_compression_result 通过 backend.add(tags=[...]) 写入、
-        # 以及 HindsightBackend 原样存入 metadata.tags 的统一形态，
-        # 与 _parse_seq_from_tags 的解析契约一致。
         backend.search_returns = [
             {
                 "id": "c1",
-                "content": "已有摘要",
-                "score": 1.0,
+                "content": "滞后 chunk",
                 "memory_type": "chunk",
-                "metadata": {
-                    "tags": ["L1", "pipeline:pipe-1", "seq:1-5"],
-                },
+                "metadata": {"tags": ["L1", "pipeline:pipe-1", "seq:1-20"]},
             }
         ]
         mod.set_memory_backend(backend)
         plugin = mod.ContextWindowGuardPlugin()
-        ctx = mod._make_minimal_ctx(pipeline_id="pipe-1")
-        # seq 1-5 已被压缩（应裁），seq 6-8 是 recent（应保留，>10% 防护不触发）
-        messages: list[dict[str, Any]] = []
-        for i in range(1, 6):
-            messages.append({"role": "user", "content": f"msg{i}", "seq": i})
-        for i in range(6, 9):
-            messages.append({"role": "assistant", "content": f"recent{i}", "seq": i})
-
-        result = _run(plugin._trim_covered_messages(ctx, messages))
-        kept_seqs = [
-            m["seq"]
-            for m in result
-            if m.get("role") != "system" and isinstance(m.get("seq"), int)
+        history: list[dict[str, Any]] = [_applied_block([1, 50])] + [
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
         ]
-        # recent 段 6,7,8 保留，1-5 被裁
-        assert 6 in kept_seqs and 8 in kept_seqs
-        assert 1 not in kept_seqs and 5 not in kept_seqs
+        result = _run(plugin._trim_covered_messages(history))
+        kept_non_sys_seqs = [
+            m["seq"] for m in result if m.get("role") != "system"
+        ]
+        assert kept_non_sys_seqs == list(range(51, 61)), (
+            "裁剪必须按历史块证据裁到 50，而不是按记忆库 chunk 裁到 20"
+        )
+
+
+class TestTrimEvidenceBoundaries:
+    """证据解析边界（fail-closed）：坏 seq_range 不作证据，宁可不裁。"""
+
+    def _trim_result(self, mod: Any, blocks: list[dict[str, Any]]) -> Any:
+        plugin = mod.ContextWindowGuardPlugin()
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
+        ]
+        return _run(plugin._trim_covered_messages(blocks + messages))
+
+    def test_malformed_seq_range_is_not_evidence(self) -> None:
+        """seq_range 缺失/非 int/start>end 的块不作为证据 → 零裁剪。"""
+        mod = _load_plugin_module()
+        cases = [
+            # 缺 seq_range
+            {
+                "role": "system",
+                "name": "compressed",
+                "content": "x",
+                "metadata": {"compression_ref": {"kind": "process", "memory_ids": []}},
+            },
+            # seq_range 非 int
+            _applied_block([1, 50]) | {
+                "metadata": {
+                    "compression_ref": {
+                        "kind": "process",
+                        "seq_range": ["1", 50],
+                        "memory_ids": [],
+                    }
+                }
+            },
+            # start > end
+            _applied_block([50, 1]),
+            # metadata 无 compression_ref 键 / compression_ref 非 dict
+            _applied_block([1, 50]) | {"metadata": {}},
+            _applied_block([1, 50]) | {"metadata": {"compression_ref": "not-a-dict"}},
+        ]
+        for bad_block in cases:
+            plugin = mod.ContextWindowGuardPlugin()
+            messages: list[dict[str, Any]] = [
+                {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
+            ]
+            history = [bad_block] + messages
+            result = _run(plugin._trim_covered_messages(history))
+            assert result == history, (
+                f"坏证据必须放弃裁剪: seq_range={bad_block.get('metadata', {}).get('compression_ref', {}).get('seq_range')}"
+            )
+
+    def test_multiple_blocks_take_max_end(self) -> None:
+        """多块取 seq_range[1] 最大值：块 [1,20] + 块 [1,50] → 裁掉 1..50。"""
+        mod = _load_plugin_module()
+        result = self._trim_result(mod, [_applied_block([1, 20]), _applied_block([1, 50])])
+        kept = [m["seq"] for m in result if m.get("role") != "system"]
+        assert kept == list(range(51, 61))
+
+    def test_block_evidence_misaligned_protection_keeps_original(self) -> None:
+        """块 seq_range 与实际消息错位（声明覆盖 1..1000，消息只到 60）→
+        <10% 防护兜底放弃裁剪，返回原消息。"""
+        mod = _load_plugin_module()
+        plugin = mod.ContextWindowGuardPlugin()
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
+        ]
+        history = [_applied_block([1, 1000])] + messages
+        result = _run(plugin._trim_covered_messages(history))
+        assert result is history, "证据与序列错位必须由 <10% 防护兜底，放弃裁剪"
+
+    def test_trim_freeze_op_none_when_no_deleted_members(self) -> None:
+        """被删集合为空（异常形态）→ 不发空 members 冻结 op（防御分支）。"""
+        mod = _load_plugin_module()
+        msg = {"role": "user", "content": "x", "seq": 1}
+        assert mod.ContextWindowGuardPlugin._trim_freeze_op([msg], [dict(msg)]) is None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -471,21 +634,34 @@ class TestOpModeEmission:
         # 不应有多余 op
         assert set(ops.keys()) == {2, 3}
 
-    def test_trim_emits_set_null_for_dropped_seqs(self) -> None:
-        """裁剪场景（_trim_covered_messages）：dropped 的 seq 都是 set(seq, null)。
+    def test_trim_refuses_orphan_chunks_without_applied_block(self) -> None:
+        """本事故回归（2026-11-16 装机事故）：仅记忆库裸 chunk、历史无已应用
+        块 → 零删除。
 
-        backend 返回 L1 chunk（sequence_end=50），60 条消息中 seq 1-50 被覆盖裁掉，
-        seq 51-60 保留（>10% 防护不触发）。阈值之下不压缩。
+        事故形态：save_compression_result 落库后、压缩批次回写前被打断，
+        记忆库留下从未真正应用的覆盖声明（chunk tags seq:1-50）；旧裁剪盲信
+        该声明裸删 297 条头部消息且不冻结 → blob GC 物理清除不可恢复。
+        修复后裁剪证据源 = 历史已应用块，孤儿 chunk 不驱动任何删除 op。
         """
         mod = _load_plugin_module()
-        mod._memory_backend = None
         mod._capability_caller = None
 
-        backend = FakeBackend()
+        class _RecordingSearchBackend(FakeBackend):
+            """记录 search 调用的 FakeBackend（零检索断言用）。"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.search_calls = 0
+
+            async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+                self.search_calls += 1
+                return list(self.search_returns)
+
+        backend = _RecordingSearchBackend()
         backend.search_returns = [
             {
                 "id": "c1",
-                "content": "已有摘要",
+                "content": "孤儿覆盖声明",
                 "score": 1.0,
                 "memory_type": "chunk",
                 "metadata": {"tags": ["L1", "pipeline:pipe-1", "seq:1-50"]},
@@ -499,7 +675,6 @@ class TestOpModeEmission:
         for i in range(1, 61):
             messages.append({"role": "user", "content": f"m{i}", "seq": i})
 
-        # 注入一个 service 占位（让 _get_memory_service 不早退），但不会触发压缩
         mock_service = MagicMock()
         mock_service.setup = MagicMock()
         mock_service.compress_messages = AsyncMock(return_value=None)
@@ -511,18 +686,9 @@ class TestOpModeEmission:
         ctx._services["context_service"] = mock_service
 
         result = _run(plugin.execute(ctx))
-        ops = _ops_by_seq(result.state_updates)
 
-        # messages 是 _ops 形态
-        assert "_ops" in result.state_updates["messages"]
-        # dropped seq 1-50 都是 set(seq, null)
-        for s in (1, 25, 50):
-            assert ops[s] == {"op": "set", "seq": s, "msg": None}
-        # 保留的 seq 51-60 没有 op
-        for s in (51, 55, 60):
-            assert s not in ops
-        # op 总数 = 50
-        assert len(result.state_updates["messages"]["_ops"]) == 50
+        # 零删除：state_updates 不含 messages key（孤儿 chunk 不产生任何 op）
+        assert "messages" not in result.state_updates
 
     def test_clean_emits_set_null_for_old_summary(self) -> None:
         """窗口清理场景（clean_if_window_changed）：被删旧摘要消息 set(seq, null)。
@@ -629,8 +795,9 @@ class TestFallbackObservability:
     def _make_plugin(self, mod) -> Any:
         return mod.ContextWindowGuardPlugin(config={})
 
-    def test_memory_backend_search_failure_warns(self, caplog, monkeypatch) -> None:
-        """P13：记忆后端检索异常按无历史处理但必须 warning（三处之一回归）。"""
+    def test_memory_backend_search_failure_warns_in_estimate(self, caplog, monkeypatch) -> None:
+        """P13：记忆后端检索异常按无历史处理但必须 warning（trim 已与记忆库
+        解耦，回归点迁移到仍检索后端的 _estimate_assembled_tokens）。"""
         import logging
 
         mod = _load_plugin_module()
@@ -646,8 +813,8 @@ class TestFallbackObservability:
             config={},
         )
         with caplog.at_level(logging.WARNING):
-            messages = asyncio.run(plugin._trim_covered_messages(ctx, []))
-        assert messages == [], "检索失败按无历史处理（行为保持）"
+            estimated = asyncio.run(plugin._estimate_assembled_tokens(ctx, []))
+        assert estimated == -1, "检索失败按无 L1 预算处理（行为保持）"
         assert any("记忆后端检索失败" in r.getMessage() for r in caplog.records)
 
 
@@ -675,7 +842,7 @@ class _FlakyBackend:
         return []
 
 
-def _saved_seqs_from_backend(backend: _FlakyBackend) -> set[int]:
+def _saved_seqs_from_backend(backend: _FlakyBackend | _BatchScopedFlakyBackend) -> set[int]:
     """从成功落库的 chunk tags（"seq:a-b"）还原已获摘要覆盖的消息 seq 集合。"""
     seqs: set[int] = set()
     for call in backend.successful_adds:
@@ -698,6 +865,41 @@ def _round_messages() -> list[dict[str, Any]]:
     return [
         {"role": roles[i], "content": "A" * 400, "seq": i + 1} for i in range(4)
     ]
+
+
+def _process_blocks(compressed: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """从压缩结果中拣出过程块消息（按块所在 seq 索引）。"""
+    return {
+        m["seq"]: m
+        for m in compressed
+        if m.get("metadata", {}).get("compression_ref", {}).get("kind") == "process"
+    }
+
+
+class _BatchScopedFlakyBackend:
+    """按批次 seq 标签定点失败的伪记忆后端（并行落库下仍确定性的故障注入）。
+
+    并行落库后各批 save 的 add 调用交错，按调用序号定点失败不再确定；
+    改按 chunk 落库 tags 里的批次标记（每批唯一）定点失败：L1/L2 携带
+    ``seq:<start>-<end>``、快照携带 ``seq_end:<end>``，一批全量失败需同时
+    覆盖两类标记。
+    """
+
+    def __init__(self, doomed_tags: set[str]) -> None:
+        self.doomed_tags = doomed_tags
+        self.successful_adds: list[dict[str, Any]] = []
+        self.failed_adds: list[dict[str, Any]] = []
+
+    async def add(self, **kwargs: Any) -> str:
+        tags = kwargs.get("tags") or []
+        if self.doomed_tags & set(tags):
+            self.failed_adds.append(kwargs)
+            raise RuntimeError("backend write boom")
+        self.successful_adds.append(kwargs)
+        return f"mem-{len(self.successful_adds)}"
+
+    async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
 
 
 class TestSaveFailureFailOpen:
@@ -745,13 +947,16 @@ class TestSaveFailureFailOpen:
         assert deleted == []
         assert "落库失败" in caplog.text
 
-    def test_partial_save_failure_keeps_successful_refs(self) -> None:
-        """b0 全部工件（5 次调用）写库失败、b1 全部成功：
+    def test_partial_save_failure_keeps_successful_refs(self, caplog: Any) -> None:
+        """b0 全部 chunk 工件写库失败（按批次 seq 标签定点）、b1 全部成功：
 
         - b0 块消息引用留空、b1 块消息引用指向成功落库工件；
         - 两批的被压区间照常替换（成功批次的覆盖范围可从落库 tags 还原）。
+
+        并行落库后各批 add 调用交错，按调用序号定点失败不再确定，
+        改按每批唯一的 ``seq:<start>-<end>`` 标签定点（b0=seq:1-1）。
         """
-        backend = _FlakyBackend({1, 2, 3, 4, 5})
+        backend = _BatchScopedFlakyBackend({"seq:1-1", "seq_end:1"})
         mod = _load_plugin_module()
         result = _run(self._run_round(mod, backend))
         assert result is not None, "任一批次成功即应产出压缩结果"
@@ -760,17 +965,15 @@ class TestSaveFailureFailOpen:
         saved = _saved_seqs_from_backend(backend)
         assert saved == {2, 3}, f"成功批次的覆盖范围应可从落库 tags 还原: {saved}"
 
-        process_blocks = [
-            m
-            for m in compressed
-            if m.get("metadata", {}).get("compression_ref", {}).get("kind") == "process"
-        ]
+        process_blocks = _process_blocks(compressed)
         assert len(process_blocks) == 2
         refs_by_seq = {
-            m["seq"]: m["metadata"]["compression_ref"]["memory_ids"] for m in process_blocks
+            seq: m["metadata"]["compression_ref"]["memory_ids"]
+            for seq, m in process_blocks.items()
         }
         assert refs_by_seq[1] == [], "落库失败批次的块引用应留空"
         assert refs_by_seq[2], "落库成功批次的块应携带引用"
+        assert "落库失败" in caplog.text
 
     def test_all_saves_succeed_baseline(self) -> None:
         """对照基线：全部落库成功 → 所有块携带引用。"""
@@ -789,6 +992,164 @@ class TestSaveFailureFailOpen:
             assert block["metadata"]["compression_ref"]["memory_ids"], (
                 "全部落库成功时块必须携带引用"
             )
+
+
+class TestParallelBatchSaves:
+    """并行落库契约（2026-11-16 修复）：
+
+    每批压缩 LLM 产出后立即后台落库（不阻塞下一批 LLM 调用）；全部批次
+    LLM 循环结束后统一 gather 收割再建块；task 内自兜异常（fail-open），
+    execute 返回前不留悬挂 task。正确性不依赖落库成败（裁剪证据源 =
+    历史已应用块，孤儿 chunk 无害化），并行化是纯性能优化。
+    """
+
+    @staticmethod
+    def _two_batch_service(mod: Any, backend: Any) -> Any:
+        async def fake_llm(payload: list) -> str:
+            return _valid_compress_json()
+
+        svc = mod.CompressionService(backend=backend, llm_call_fn=fake_llm)
+        svc.setup(pipeline_id="pipe-par", session_id="sess-par")
+        return svc
+
+    @staticmethod
+    def _chunk_ref_id_by_tag(backend: FakeBackend) -> dict[str, str]:
+        """从 add 调用记录还原「层级@seq标签」→ 返回的 memory id 映射。
+
+        同批 L1/L2 共享同一 seq 标签，须按层级标签（L1/L2）二次区分；
+        快照块无 seq 区间标签（仅 seq_end），不在映射内。
+        """
+        out: dict[str, str] = {}
+        for i, call in enumerate(backend.add_calls):
+            if call.get("memory_type") != "chunk":
+                continue
+            tags = call.get("tags", [])
+            level = "L1" if "L1" in tags else ("L2" if "L2" in tags else None)
+            seq_tag = next(
+                (
+                    t
+                    for t in tags
+                    if isinstance(t, str) and t.startswith("seq:")
+                ),
+                None,
+            )
+            if level and seq_tag:
+                out[f"{level}@{seq_tag}"] = f"mem-{i + 1}"
+        return out
+
+    def test_refs_backfilled_to_own_batch(self) -> None:
+        """(a) refs 正常回填到对应批次块：每批过程块的 L1 引用 id 等于该批
+        自己那次 L1 落库调用返回的 id（按 tags 定位，不依赖批次间到达序）。"""
+        mod = _load_plugin_module()
+        backend = FakeBackend()
+        svc = self._two_batch_service(mod, backend)
+        result = _run(
+            mod.CompressionService._do_compress_round(
+                svc, _round_messages(), 800, {"recent": 300}
+            )
+        )
+        assert result is not None
+        compressed, _deleted = result
+        blocks = _process_blocks(compressed)
+        assert set(blocks.keys()) == {1, 2}, "两批各产出一块（b0=[m1], b1=[m2,m3]）"
+
+        mapping = self._chunk_ref_id_by_tag(backend)
+        assert set(mapping.keys()) == {"L1@seq:1-1", "L2@seq:1-1", "L1@seq:2-3", "L2@seq:2-3"}
+        assert len(set(mapping.values())) == 4, "各次落库调用各有其 id（有区分度）"
+        ref_0 = blocks[1]["metadata"]["compression_ref"]["memory_ids"]
+        ref_1 = blocks[2]["metadata"]["compression_ref"]["memory_ids"]
+        assert next(e for e in ref_0 if e["level"] == "L1")["id"] == mapping["L1@seq:1-1"]
+        assert next(e for e in ref_1 if e["level"] == "L1")["id"] == mapping["L1@seq:2-3"]
+        assert next(e for e in ref_0 if e["level"] == "L2")["id"] == mapping["L2@seq:1-1"]
+        assert next(e for e in ref_1 if e["level"] == "L2")["id"] == mapping["L2@seq:2-3"]
+
+    def test_batches_do_not_serialize_on_save(self) -> None:
+        """(c) 批次间不串行：第一批落库挂起期间第二批 LLM 调用已发出
+        （调用顺序记录断言，不测墙钟）；gather 收割后 refs 照常回填、
+        无悬挂 task（全部 add 完成）。"""
+        mod = _load_plugin_module()
+        events: list[str] = []
+
+        class _SuspendingBackend:
+            """add 进入后让出控制权三次再完成（挂起面，纯调度不测墙钟）。"""
+
+            async def add(self, **kwargs: Any) -> str:
+                events.append("add-enter")
+                for _ in range(3):
+                    await asyncio.sleep(0)
+                events.append("add-done")
+                return f"mem-{events.count('add-done')}"
+
+            async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+                return []
+
+        llm_count = {"n": 0}
+
+        async def fake_llm(payload: list) -> str:
+            await asyncio.sleep(0)  # 让出控制权：给后台落库 task 运行机会
+            llm_count["n"] += 1
+            events.append(f"llm-{llm_count['n']}")
+            return _valid_compress_json()
+
+        svc = mod.CompressionService(backend=_SuspendingBackend(), llm_call_fn=fake_llm)
+        svc.setup(pipeline_id="pipe-par2", session_id="sess-par2")
+        result = _run(
+            mod.CompressionService._do_compress_round(
+                svc, _round_messages(), 800, {"recent": 300}
+            )
+        )
+        assert result is not None
+
+        # 批次间不串行的可观察事实：第二批 LLM 调用发生在第一批落库完成之前
+        assert events.index("add-enter") < events.index("llm-2") < events.index("add-done")
+        # execute 返回前所有 save task 已收割：每批 5 次 add（L1/L2/快照/2 memory_items）
+        assert events.count("add-done") == 10
+        # refs 照常回填（两块引用非空）
+        blocks = _process_blocks(result[0])
+        assert all(
+            m["metadata"]["compression_ref"]["memory_ids"] for m in blocks.values()
+        )
+
+    def test_save_batch_refs_swallows_unexpected_error(self, caplog: Any) -> None:
+        """save_compression_result 之外的非预期异常（task 内兜底层）→ 引用
+        归空 + warning，不向批循环泄漏。"""
+        import logging
+
+        mod = _load_plugin_module()
+        backend = FakeBackend()
+        svc = mod.CompressionService(backend=backend)
+
+        comp_result = {
+            "l1": "x",
+            "l2": "",
+            "keywords": [],
+            # state_snapshot 含不可序列化对象 → save_compression_result 内
+            # json.dumps（工件 try 面之外）抛 TypeError
+            "state_snapshot": {"boom": object()},
+            "memory_items": {},
+        }
+        with caplog.at_level(logging.WARNING):
+            refs = _run(
+                svc._save_batch_refs(
+                    [{"role": "user", "content": "c", "seq": 1}], comp_result, 1000
+                )
+            )
+        assert refs == [], "兜底层必须把非预期异常归为空引用（fail-open）"
+        assert any("批次落库异常" in r.getMessage() for r in caplog.records)
+
+    def test_save_outcome_refs_normalizes_gather_outcomes(self, caplog: Any) -> None:
+        """gather(return_exceptions=True) 面上的残余异常形态归一为空引用
+        （防御层）；正常清单原样透传。"""
+        import logging
+
+        mod = _load_plugin_module()
+        refs = [{"level": "L1", "id": "mem-1"}]
+        assert mod.CompressionService._save_outcome_refs(refs) == refs
+        with caplog.at_level(logging.WARNING):
+            assert mod.CompressionService._save_outcome_refs(
+                RuntimeError("leaked")
+            ) == []
+        assert any("task 异常" in r.getMessage() for r in caplog.records)
 
 
 class TestCompressionDegradeNotBlocking:

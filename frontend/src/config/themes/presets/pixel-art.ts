@@ -17,7 +17,9 @@ export const pixelArtTheme: ThemeConfig = {
 
   colors: {
     // PICO-8: Blue 主操作 / Pink 副色 / Yellow 点缀
-    primary: '#29adff',
+    // primary 自 PICO-8 Blue #29adff 沿 hue203 加深一档：浅底（#fff1e8/#ffffff）
+    // 对比度达 WCAG ≥3（#29adff 仅 2.23，文字/图标作主色时不可读）
+    primary: '#0087db',
     secondary: '#ff77a8',
     accent: '#ffec27',
 
@@ -32,8 +34,9 @@ export const pixelArtTheme: ThemeConfig = {
 
     text: {
       // PICO-8 Dark Blue 当"黑"(像素游戏惯例,比纯黑柔和),次级降透明出层次
+      // （0.9 为对比度门禁下限：组件层 /60、/70 透明度修饰符叠加合成后仍需 ≥3）
       primary: '#1d2b53',
-      secondary: 'rgba(29, 43, 83, 0.72)',
+      secondary: 'rgba(29, 43, 83, 0.9)',
       muted: '#5f574f',
       disabled: '#7d7a82',
     },

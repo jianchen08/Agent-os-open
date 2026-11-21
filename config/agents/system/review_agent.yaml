@@ -22,6 +22,7 @@ dynamic_vars:
   enabled: true
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '任务ID: {{state:context.task_id}}'
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
@@ -66,7 +67,7 @@ system_prompt: |-
 
   #### 4.1 工具调用正确性（wrong_tool）
   - 是否调用了与当前任务无关的工具？
-  - 是否用错误工具完成任务（如本该用 file_read 却用 bash_execute cat 读取）？
+  - 是否用错误工具完成任务（如本该用 file_read 却用 bash cat 读取）？
   - 工具参数是否填错（路径错、ID 错、必填参数漏填）？
   - 证据来源：skeleton 的 tool name 序列 + L0 的 tool_input/error 字段。
 
@@ -101,7 +102,7 @@ system_prompt: |-
   3. **深入分析**：对异常 iteration 用 L1/L0 层查看 thinking 和 tool_calls
   4. **根因推导**：对每个错误做 5 Whys，找到可操作的根因
   5. **写出报告**：用 file_write（action: write）把 JSON 复盘结论写入 deliverables
-     声明路径（{{workspace}}/docs/working/review_report.json），同时在任务输出中
+     声明路径（{{workspace}}/docs/working/{{task_id}}_review_report.json），同时在任务输出中
      返回同一 JSON——写盘成功 + JSON 返回双齐才是复盘完成
 
   ## 复盘输出格式
@@ -149,16 +150,28 @@ soft_constraints:
 deliverables:
 - name: review_report
   description: JSON格式的复盘报告
-  output_path: '{{workspace}}/docs/working/review_report.json'
+  output_path: '{{workspace}}/docs/working/{{task_id}}_review_report.json'
   type: json
   required: true
 tool_ids:
 - read_execution_detail
 - file_read
 - file_write
-# 大输出恢复：取证下钻时被 spill_guard 替换的工具结果按 tool_call_id 取回原文
-# （工具面审查 2026-10-19 缺口补配；read_execution_detail 退役等注入+作用域读面落地，v6 挂起）
-- spill_retrieve
+- resource_search
+- call_tool
+# 大输出恢复：取证下钻时被 spill_guard 替换的工具结果，按替换文本中的存档
+# 绝对路径 file_read 分段读/enhanced_search 检索（ADR 2026-11-18-spill-file-
+# face-direct-read，专用取回工具已退役）
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 version: 1.0.0
 is_active: true
 status: active

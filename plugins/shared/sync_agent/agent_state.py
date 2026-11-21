@@ -98,7 +98,10 @@ class AgentStateStore:
     def __init__(self, db_path: str | Path) -> None:
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path))
+        # check_same_thread=False：落盘等慢 fsync 段经 asyncio.to_thread 下放
+        # （server.py 出站/备份面同刀口径）；sqlite3 serialized 线程模式下
+        # 跨线程用同一连接由库级串行化保护，不引入并发写竞争。
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 

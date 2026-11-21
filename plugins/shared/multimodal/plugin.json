@@ -4,8 +4,8 @@
     "packaging"
   ],
   "name": "Multimodal Service",
-  "description": "多模态内容适配与语音识别服务（模型能力查询/格式转换/ASR转写）",
-  "version": "1.0.1",
+  "description": "多模态内容适配与语音识别服务（模型能力查询/格式转换/ASR转写/图像切分）。1.2.0 增（R20 定稿）：multimodal.split_image 图像原生分辨率网格切分——长宽各自 ceil(轴长/规格) 等分、零缩放，供 file_read 图像模态按当前模型视觉输入上限做原图+分块一次注入（大图直喂会被模型 API 端视觉编码器缩放丢文字细节，分块 ≤ 上限即不触发）",
+  "version": "1.2.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
@@ -132,6 +132,108 @@
           ],
           "type": "object"
         }
+      },
+      {
+        "name": "multimodal.split_image",
+        "description": "图像原生分辨率网格切分（R20/R21 总像素口径）：长宽各自 ceil(轴长/sqrt(max_pixels)) 等分，零缩放，分块总像素 ≤ 上限不触发模型 API 端缩放；返回原图+分块元数据与拼合标注",
+        "input_schema": {
+          "properties": {
+            "base64_data": {
+              "type": "string",
+              "description": "Base64编码的图像内容"
+            },
+            "mime_type": {
+              "type": "string",
+              "description": "图像 MIME 类型（如 image/png）"
+            },
+            "max_pixels": {
+              "type": "integer",
+              "description": "当前模型视觉输入不缩放总像素上限（来自 llm.yaml multimodal.max_pixels）"
+            }
+          },
+          "required": [
+            "base64_data",
+            "mime_type",
+            "max_pixels"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "tiled": {
+              "type": "boolean",
+              "description": "是否发生切分（false=尺寸未超规格）"
+            },
+            "width": {
+              "type": "integer",
+              "description": "原图宽（像素）"
+            },
+            "height": {
+              "type": "integer",
+              "description": "原图高（像素）"
+            },
+            "grid": {
+              "type": "object",
+              "properties": {
+                "rows": {
+                  "type": "integer"
+                },
+                "cols": {
+                  "type": "integer"
+                }
+              },
+              "description": "切分网格（行×列）"
+            },
+            "tiles": {
+              "type": "array",
+              "description": "分块列表（行优先序；每块原生分辨率 PNG）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "base64_data": {
+                    "type": "string"
+                  },
+                  "mime_type": {
+                    "type": "string"
+                  },
+                  "width": {
+                    "type": "integer"
+                  },
+                  "height": {
+                    "type": "integer"
+                  },
+                  "row": {
+                    "type": "integer"
+                  },
+                  "col": {
+                    "type": "integer"
+                  },
+                  "x0": {
+                    "type": "integer"
+                  },
+                  "y0": {
+                    "type": "integer"
+                  },
+                  "x1": {
+                    "type": "integer"
+                  },
+                  "y1": {
+                    "type": "integer"
+                  }
+                }
+              }
+            },
+            "annotation": {
+              "type": "string",
+              "description": "拼合关系标注文本（调用方直通工具结果 content 键）"
+            },
+            "error": {
+              "type": "string",
+              "description": "切分失败原因（解码失败/参数非法；调用方按原样单图降级）"
+            }
+          }
+        }
       }
     ]
   },
@@ -157,9 +259,65 @@
         },
         {
           "name": "asr.default_provider",
-          "type": "string",
+          "type": "select",
           "label": "默认提供商 ID",
-          "description": "取 providers 下的键名（如 glm）；未命中时回退第一个 provider"
+          "description": "首选 provider（取 providers 下的键名）；不可用时按 fallback_chain 回退",
+          "options": [
+            {
+              "label": "本地 SenseVoice（sherpa-onnx，离线免费）",
+              "value": "local"
+            },
+            {
+              "label": "SiliconFlow（免费远端兜底）",
+              "value": "siliconflow"
+            },
+            {
+              "label": "智谱 GLM-ASR（付费兜底）",
+              "value": "glm"
+            }
+          ]
+        },
+        {
+          "name": "asr.providers.local.model_dir",
+          "type": "string",
+          "label": "本地模型目录（local）",
+          "description": "留空 = 用户空间默认 models/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+        },
+        {
+          "name": "asr.providers.local.num_threads",
+          "type": "number",
+          "label": "推理线程数（local）",
+          "description": "本地 SenseVoice 推理线程数，默认 2"
+        },
+        {
+          "name": "asr.providers.local.auto_download",
+          "type": "toggle",
+          "label": "自动下载模型（local）",
+          "description": "模型文件缺失时首次转写自动从 download_base 下载（约 239MB，走 hf-mirror）"
+        },
+        {
+          "name": "asr.providers.local.language",
+          "type": "string",
+          "label": "识别语言（local）",
+          "description": "固定语种如 zh；auto = 自动识别语种"
+        },
+        {
+          "name": "asr.providers.siliconflow.api_base",
+          "type": "string",
+          "label": "API Base（siliconflow）",
+          "description": "OpenAI 兼容端点基址，如 https://api.siliconflow.cn/v1"
+        },
+        {
+          "name": "asr.providers.siliconflow.api_key",
+          "type": "string",
+          "label": "API Key（siliconflow）",
+          "description": "支持 ${ENV_VAR} 占位（如 ${SILICONFLOW_API_KEY}）；未配置时该 provider 被跳过"
+        },
+        {
+          "name": "asr.providers.siliconflow.model",
+          "type": "string",
+          "label": "转写模型（siliconflow）",
+          "description": "如 FunAudioLLM/SenseVoiceSmall（免费 ASR）"
         },
         {
           "name": "asr.providers.glm.api_base",
@@ -177,7 +335,7 @@
           "name": "asr.providers.glm.model",
           "type": "string",
           "label": "转写模型（glm）",
-          "description": "如 glm-asr-v1"
+          "description": "如 glm-asr"
         },
         {
           "name": "asr.providers.glm.language",
@@ -195,9 +353,9 @@
       "path": "/ext/multimodal_service/audio/transcriptions",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 30000,
+      "timeout_ms": 900000,
       "max_concurrency": 2,
-      "description": "语音识别（ASR）：音频转文本（multipart file+language，config/models/asr.yaml 驱动；503 未配置/400 空文件/502 转写失败——原 POST /ext/channel_api/audio/transcriptions）"
+      "description": "语音识别（ASR）：音频转文本（multipart file+language，config/models/asr.yaml 驱动；本地优先/provider 链降级；503 未配置/400 空文件/502 转写失败。首次本地模型缺失时自动下载在请求内完成，故超时放宽到下载上限）"
     },
     {
       "route_id": "mm_files_capabilities",
@@ -220,5 +378,21 @@
       "description": "获取支持的文件类型（静态宽类型声明——原 GET /ext/channel_api/files/supported-types）"
     }
   ],
-  "host_group": "light"
+  "host_group": "light",
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "multimodal",
+        "methods": [
+          "convert",
+          "capability",
+          "supported",
+          "transcribe",
+          "split_image"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "multimodal"
+      }
+    ]
+  }
 }

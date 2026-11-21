@@ -1,0 +1,16 @@
+[project]
+name = "agentos-plugin-ui-bridge"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — ui_bridge（侧边栏 UI 对象桥：快照缓存 + ui_describe 感知工具）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    # 显式钉 MCP SDK 线，与 plugins/sdk 统一约定（mcp>=2.0,<3，v2 lowlevel API）
+    # 对齐；精确解析版本由 uv.lock 锁定。
+    "mcp>=2.0,<3",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

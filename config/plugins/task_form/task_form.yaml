@@ -19,7 +19,7 @@ form:
       placeholder: 任务详细描述...
     - name: project_id
       type: select
-      label: 挂靠项目（可选，任务在项目文件夹下执行，默认 worktree 分叉）
+      label: 挂靠项目（可选，任务在项目文件夹下执行，默认 plain 直接在项目目录工作）
       datasourceUri: /ext/task_form/options/projects
       description: 缺省为独立任务；与「新建项目」二选一
     - name: project_title
@@ -45,8 +45,8 @@ form:
       type: select
       label: 工作空间拓扑
       options:
-        - { label: 默认（worktree）, value: "" }
-        - { label: worktree（隔离副本，不影响原项目）, value: worktree }
+        - { label: 默认（plain，直接操作目标目录）, value: "" }
+        - { label: worktree（隔离副本，仅同文件域并行冲突时用）, value: worktree }
         - { label: plain（直接操作目标目录）, value: plain }
     - name: isolation_level
       type: select

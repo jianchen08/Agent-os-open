@@ -9,10 +9,19 @@
  * 由 MessageItem 元信息行单独挂载。
  */
 
-import { useState, type FC } from 'react'
+import { Share2 } from 'lucide-react'
+import { useRef, useState, type FC, type MouseEvent as ReactMouseEvent } from 'react'
 import { toast } from 'sonner'
-import { Copy, Pencil, RotateCcw, RefreshCw } from '@/assets/icons'
+import { Copy, MoreHorizontal, Pencil, RotateCcw, RefreshCw } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport'
+import { captureMessageCard, copyPngToClipboard, downloadDataUrl, findMessageCard } from '@/lib/shareCard'
 import { SegmentSwitcher } from './SegmentSwitcher'
 import type { Message } from '@/types/models'
 
@@ -75,6 +84,18 @@ export const MessageActions: FC<MessageActionsProps> = ({
   const [confirmingRollback, setConfirmingRollback] = useState(false)
   /** 是否为用户消息（决定回退/编辑入口归属） */
   const isUser = message.role === 'user'
+  // 移动端动作收纳（P1-5，MuMu 实测 shots/09 每条消息一份 4 图标行）：图标组
+  // 收进「⋯」菜单（触控条目 ≥44px），时间戳/分支切换器不动；桌面维持 hover
+  // 显隐平铺组
+  const isMobile = useIsMobileViewport()
+  /** 动作组锚点（菜单路径分享卡取卡用：菜单条目无事件 currentTarget，
+   *  经本 ref 所在元素向上找 [data-testid="message-item"] 卡片） */
+  const actionsRef = useRef<HTMLDivElement | null>(null)
+  const handleShareFromMenu = () => {
+    void handleShare({
+      currentTarget: actionsRef.current,
+    } as unknown as ReactMouseEvent<HTMLButtonElement>)
+  }
   /** 是否为最后一条 assistant 消息（重新生成入口：含失败/中断态） */
   const isAssistant = message.role === 'assistant'
   const showRegenerate =
@@ -89,6 +110,32 @@ export const MessageActions: FC<MessageActionsProps> = ({
     } else {
       navigator.clipboard.writeText(message.content)
       toast.success('已复制到剪贴板')
+    }
+  }
+
+  /** 确认回退：触发回调并收起确认条 */
+  const [sharing, setSharing] = useState(false)
+  /** 分享卡：消息气泡 DOM → PNG（优先剪贴板，失败降级下载，不静默） */
+  const handleShare = async (e: ReactMouseEvent<HTMLButtonElement>) => {
+    const card = findMessageCard(e.currentTarget)
+    if (!card) {
+      toast.error('未找到消息卡片')
+      return
+    }
+    setSharing(true)
+    try {
+      const dataUrl = await captureMessageCard(card)
+      try {
+        await copyPngToClipboard(dataUrl)
+        toast.success('分享卡已复制到剪贴板')
+      } catch {
+        downloadDataUrl(dataUrl, `share-card-${message.id}.png`)
+        toast.success('剪贴板不可用，已下载分享卡图片')
+      }
+    } catch (err) {
+      toast.error(`分享卡生成失败: ${String(err)}`)
+    } finally {
+      setSharing(false)
     }
   }
 
@@ -129,61 +176,139 @@ export const MessageActions: FC<MessageActionsProps> = ({
     )
   }
 
+  /** 菜单条目通用触控高度（移动端 ≥44px，优化原则 4） */
+  const menuItemClass = 'min-h-11'
+
   return (
     <>
-      {/* 次要动作组：hover 才显形（不打扰阅读） */}
-      <div className="flex items-center gap-0.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 w-6 p-0"
-          onClick={handleCopy}
-          disabled={disabled}
-          title="复制"
-        >
-          <Copy className="h-icon-xs w-icon-xs" />
-        </Button>
-      {/* 用户消息操作：编辑（打开内联编辑器）+ 回退（二次确认） */}
-      {isUser && onEdit && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 w-6 p-0"
-          onClick={onEdit}
-          disabled={disabled}
-          title="编辑并重新发送"
-        >
-          <Pencil className="h-icon-xs w-icon-xs" />
-        </Button>
+      {isMobile ? (
+        /* 移动端：单「⋯」入口（收纳后功能仍可达：复制/分享/编辑/回退/重新生成
+            全部在菜单内；回退仍走内联二次确认条，菜单关闭后出现在触发器旁） */
+        <div className="flex items-center gap-0.5" ref={actionsRef}>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-11 w-11 p-0"
+                disabled={disabled}
+                title="消息操作"
+                aria-label="消息操作"
+                data-testid="message-actions-more"
+              >
+                <MoreHorizontal className="h-icon-md w-icon-md" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align={isUser ? 'end' : 'start'} collisionPadding={12} className="w-48">
+              <DropdownMenuItem className={menuItemClass} onSelect={handleCopy} data-testid="message-menu-copy">
+                <Copy className="h-icon-sm w-icon-sm" />
+                复制
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={menuItemClass}
+                onSelect={handleShareFromMenu}
+                disabled={disabled || sharing}
+                data-testid="message-menu-share"
+              >
+                <Share2 className="h-icon-sm w-icon-sm" />
+                分享为图片
+              </DropdownMenuItem>
+              {isUser && onEdit && (
+                <DropdownMenuItem className={menuItemClass} onSelect={onEdit} disabled={disabled} data-testid="message-menu-edit">
+                  <Pencil className="h-icon-sm w-icon-sm" />
+                  编辑并重新发送
+                </DropdownMenuItem>
+              )}
+              {isUser && onRollbackTo && (
+                <DropdownMenuItem
+                  className={menuItemClass}
+                  onSelect={() => setConfirmingRollback(true)}
+                  disabled={disabled}
+                  data-testid="message-menu-rollback"
+                >
+                  <RotateCcw className="h-icon-sm w-icon-sm" />
+                  回退到这条消息
+                </DropdownMenuItem>
+              )}
+              {showRegenerate && (
+                <DropdownMenuItem className={menuItemClass} onSelect={() => onRegenerate?.()} disabled={disabled} data-testid="message-menu-regenerate">
+                  <RefreshCw className="h-icon-sm w-icon-sm" />
+                  重新生成
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {renderRollbackConfirm()}
+        </div>
+      ) : (
+        <>
+          {/* 次要动作组：hover 才显形（不打扰阅读） */}
+          <div className="flex items-center gap-0.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              onClick={handleCopy}
+              disabled={disabled}
+              title="复制"
+            >
+              <Copy className="h-icon-xs w-icon-xs" />
+            </Button>
+            {/* 分享卡：消息卡片 DOM → PNG 图片（调研报告 §四A 分享卡项；html-to-image MIT） */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              onClick={handleShare}
+              disabled={disabled || sharing}
+              title="分享为图片"
+              data-testid="share-card-button"
+            >
+              <Share2 className="h-icon-xs w-icon-xs" />
+            </Button>
+          {/* 用户消息操作：编辑（打开内联编辑器）+ 回退（二次确认） */}
+          {isUser && onEdit && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              onClick={onEdit}
+              disabled={disabled}
+              title="编辑并重新发送"
+            >
+              <Pencil className="h-icon-xs w-icon-xs" />
+            </Button>
+          )}
+          {isUser && onRollbackTo && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              onClick={() => setConfirmingRollback(true)}
+              disabled={disabled}
+              title="回退到这条消息"
+            >
+              <RotateCcw className="h-icon-xs w-icon-xs" />
+            </Button>
+          )}
+          {renderRollbackConfirm()}
+          {/* 重新生成：最后一条 assistant 消息（含失败/中断态） */}
+          {showRegenerate && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0"
+              onClick={onRegenerate}
+              disabled={disabled}
+              title="重新生成"
+              data-testid="regenerate-button"
+            >
+              <RefreshCw className="h-icon-xs w-icon-xs" />
+            </Button>
+          )}
+          </div>
+        </>
       )}
-      {isUser && onRollbackTo && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 w-6 p-0"
-          onClick={() => setConfirmingRollback(true)}
-          disabled={disabled}
-          title="回退到这条消息"
-        >
-          <RotateCcw className="h-icon-xs w-icon-xs" />
-        </Button>
-      )}
-      {renderRollbackConfirm()}
-      {/* 重新生成：最后一条 assistant 消息（含失败/中断态） */}
-      {showRegenerate && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 w-6 p-0"
-          onClick={onRegenerate}
-          disabled={disabled}
-          title="重新生成"
-          data-testid="regenerate-button"
-        >
-          <RefreshCw className="h-icon-xs w-icon-xs" />
-        </Button>
-      )}
-      </div>
       {/* ‹i/n› 分支切换器：常驻可见（不随操作组 hover 门控）——它是到达历史代
           版本的唯一入口，藏进 hover 组内等于「没有入口」（用户实证：重试多次
           仍找不到左右切换按钮） */}

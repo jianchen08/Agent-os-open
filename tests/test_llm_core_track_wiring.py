@@ -118,6 +118,30 @@ def _isolate_caller():
     plugin_mod.set_capability_caller(None)
 
 
+@pytest.fixture(autouse=True)
+def _llm_model_config(monkeypatch: Any) -> None:
+    """注入最小 llm.yaml 视图：模型空解析现在显式报错（本模块不测模型解析）。"""
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "gpt-4": {
+                        "provider": "openai",
+                        "model_name": "gpt-4",
+                        "api_base": "https://stub.example.com",
+                        "api_key": "stub-key",
+                    }
+                },
+                "defaults": {"chat": "gpt-4"},
+            }
+        },
+    )
+
+
 # ─────────────────── 成功轮写入三键 ───────────────────
 
 

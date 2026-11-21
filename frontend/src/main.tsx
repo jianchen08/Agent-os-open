@@ -18,6 +18,8 @@ import {
 import { openFile } from '@/services/fileOpener'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { startCommandExecutor } from '@/services/uiBridge/commandExecutor'
+import { mountUiBridgeReporter } from '@/services/uiBridge/reporterMount'
 import { openPluginPage } from '@/services/workspacePanelOpener'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import {
@@ -162,6 +164,16 @@ async function bootstrap() {
       })
     pushLocate()
     window.setTimeout(pushLocate, 1500)
+  })
+
+  // uiBridge 生产接线（AC-P1-7，ADR 2026-11-18-sidebar-ui-object-model）：
+  // 快照上报器 + 命令执行器随应用生命周期常驻（轻量 JSON、防抖+心跳、失败静默
+  // 重试）；dispose 挂 beforeunload——页面卸载即拆订阅与定时器，无泄漏。
+  const uiBridgeReporter = mountUiBridgeReporter()
+  const uiBridgeExecutor = startCommandExecutor()
+  window.addEventListener('beforeunload', () => {
+    uiBridgeReporter.dispose()
+    uiBridgeExecutor.stop()
   })
 
   // 异步初始化认证状态（不阻塞渲染）

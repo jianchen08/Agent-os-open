@@ -307,11 +307,14 @@ FULL_PREFIX_FILTERS: tuple[tuple[str, str], ...] = (
 )
 #: 恒跑面（ci.yml 无 if 的 job 承载的 filter 串）：traceability 恒跑 job +
 #: rust-deny。pre-commit 由本地钩子承载（staged 面），不在此列。
+#: plugin-tiers（ADR 2026-11-07-plugin-tiered-single-copy-model 刀 4）随
+#: ci.yml 恒跑 job 同步（本表与 ci.yml 车道接线同源，见 LANE_FILTERS 注）。
 ALWAYS_FILTERS = (
     "rust-deny,traceability-gate,doc-baseline-sync,doc-paths,doc-frontmatter,"
     "working-index-fresh,kernel-port-sync,openapi-drift,file-length-baseline,"
     "render-card-sync,shell-config-sync,frontend-plugin-pages-sync,"
-    "shared-root-imports,service-declaration,observability-config,gate-protected"
+    "shared-root-imports,service-declaration,observability-config,gate-protected,"
+    "plugin-tiers,graph-check"
 )
 #: 显式全量档（仅 --full-mode 传入；缺省任何路径都不跑全量）
 FULL_MODE = "--mode ci"

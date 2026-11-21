@@ -96,6 +96,7 @@ async fn memstats_with_admin_token_returns_snapshot() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     for field in [
         "in_use_bytes",
+        "in_use_drift_bytes",
         "requested_bytes",
         "committed_bytes",
         "reserved_bytes",

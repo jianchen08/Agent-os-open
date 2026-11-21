@@ -13,6 +13,67 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 
+
+# ── 凭据来源（与 agentos_plugin_sdk.bridge_gateway 同口径）──────────────
+# 网关原先只读 os.environ，而客户端按 env → .env → 自生成 解析，两侧来源不同源：
+# 只要网关不是由客户端 _spawn 拉起（旧进程/手工启动/另一进程拉起），它就无 token，
+# 客户端带着 .env 里的 token 打过来会被判"token 未配置"而 401；/health 不鉴权，
+# 恰好把这个问题掩盖成"网关是好的"。故网关必须读同一份凭据面。
+TOKEN_FILE_ENV = "AGENTOS_BRIDGE_TOKEN_FILE"
+_PROJECT_ROOT_ENV = "AGENTOS_PROJECT_ROOT"
+_GATEWAY_REL = ("mcp-servers", "mcp-bridge", "server.py")
+
+
+def _project_roots() -> list[str]:
+    """候选根：显式 env → cwd 向上逐级（同时认仓库与装机 resources 两种布局）。"""
+    out: list[str] = []
+    env_root = os.environ.get(_PROJECT_ROOT_ENV, "").strip()
+    if env_root:
+        out.append(env_root)
+    cur = os.getcwd()
+    for _ in range(8):
+        out.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return out
+
+
+def _token_files() -> list[str]:
+    """凭据文件候选：显式 AGENTOS_BRIDGE_TOKEN_FILE → <root>/user_root/.env → <root>/.env。"""
+    explicit = os.environ.get(TOKEN_FILE_ENV, "").strip()
+    if explicit:
+        return [explicit]
+    files: list[str] = []
+    for base in _project_roots():
+        for rel in (os.path.join("user_root", ".env"), ".env"):
+            candidate = os.path.join(base, rel)
+            if candidate not in files:
+                files.append(candidate)
+        # 装机布局：<install>/resources 下的 user_root
+        packaged = os.path.join(base, "resources", "user_root", ".env")
+        if packaged not in files:
+            files.append(packaged)
+    return files
+
+
+def read_token_file(token_env: str) -> str:
+    """从凭据文件读 token_env 对应值（首个命中即返回；读不到返回空串）。"""
+    for path in _token_files():
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(token_env + "="):
+                        value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if value:
+                            return value
+        except OSError:
+            continue
+    return ""
+
+
 class PolicyError(Exception):
     """治理层拒绝。http_status：401（认证）/403（策略）/404（未知上游）/413（超限）。"""
 
@@ -61,12 +122,28 @@ class BridgePolicy:
     # ── 认证 ─────────────────────────────────────────────────
 
     def bearer_token(self) -> str | None:
-        """读 token（env）。每 10s 重读一次（容忍改环境后不重启进程）。"""
+        """读 token：环境变量优先，缺失时读凭据文件（与客户端同源）。
+
+        每 10s 重读一次（容忍改环境/换凭据后不重启进程）。两处都没有仍返回
+        None → check_auth 拒绝一切调用（fail-closed 语义不变）。
+        文件兜底是必需的：网关可能由旧进程/手工/其它进程拉起，没有 env 注入，
+        此时客户端带着 .env 里的 token 来会被误判为"未配置"。
+        """
         now = time.monotonic()
         if self._token_cache is None or now - self._token_read_at > 10.0:
-            self._token_cache = os.environ.get(self.token_env) or None
+            self._token_cache = os.environ.get(self.token_env) or read_token_file(self.token_env) or None
             self._token_read_at = now
         return self._token_cache
+
+    def credential_configured(self) -> bool:
+        """是否已持有可用凭据（/health 上报用；不含凭据本身）。
+
+        为什么要在 /health 里上报：本网关 fail-closed，没凭据时**所有**带鉴权
+        调用都 401，但 /health 不鉴权仍返回 ok——客户端会把这种"活着但不可用"
+        的网关切当成就绪，于是每个工具调用都被 401，错误还指向"token 配置"，
+        排查方向被带偏。上报该布尔值让客户端能区分"就绪"与"活着但无凭据"。
+        """
+        return bool(self.bearer_token())
 
     def check_auth(self, auth_header: str | None) -> None:
         """校验 Authorization: Bearer <token>。token 未配置时拒绝一切调用。"""

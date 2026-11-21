@@ -37,6 +37,8 @@ async fn admin_token(app: &axum::Router) -> String {
 /// 无 store 场景（AppState::new()）的管理面 token：内置脚手架 admin
 /// （store=None 时 resolve 走内置表，pwv 与空口令哈希绑定一致）。
 fn scaffold_admin_token() -> String {
+    #[allow(unused_imports)] // 路径解析面：crate::server::X 经此供给（glob 非直接消费）
+    use crate::server::*;
     use agentos_http::auth::{encode_token, BuiltInUser, TokenType};
     encode_token(
         TokenType::Access,
@@ -525,6 +527,125 @@ async fn test_chat_uses_engine_not_echo() {
         "Chat should not be in echo mode, got: {content}"
     );
     assert_eq!(json["session_id"], "test_session");
+}
+
+/// P2 守卫（ADR-2026-11-17 后继）：chat_handler 顶层 agent_id 下压 agent.id
+/// overlay 前过 `valid_frame_field_value`（与 WS router 帧字段值守卫同款）——
+/// 合法值随 overlay 并入 state、经 run 收尾 checkpoint 持久化；非法值
+/// （控制字符）/空串静默丢弃该键 + WARN，请求本身照常成功（可选提示性字段
+/// 不得让投递失败）。观察面 = 收尾 checkpoint 的全量 state（checkpoint 写入
+/// 不保证先于 HTTP outcome 通知，按 `run_started_at` 轮询等本轮快照落库）。
+#[tokio::test]
+async fn test_chat_agent_id_guard_drops_malformed_and_keeps_valid() {
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
+    seed_session_with_pipeline(&sqlite, "s-ag-guard", "pipe-ag-guard", "default").await;
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+
+    let post_chat = |app: axum::Router, token: String, message: String, agent_id: String| async move {
+        let body = serde_json::to_string(&WsRequest {
+            message,
+            session_id: "s-ag-guard".to_string(),
+            agent_id,
+        })
+        .unwrap();
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chat")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+
+    // 非法（控制字符）与空 agent_id：请求成功，且收尾 checkpoint 不含 agent.id
+    for (label, agent_id) in [("控制字符", "bad\u{0001}id"), ("空串", "")] {
+        let prev = latest_run_started(&sqlite, "pipe-ag-guard").await;
+        let resp = post_chat(
+            app.clone(),
+            token.clone(),
+            format!("hi-{label}"),
+            agent_id.to_string(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{label}：agent_id 非法不得让请求失败（可选提示性字段）"
+        );
+        let ckpt = wait_next_run_checkpoint(&sqlite, "pipe-ag-guard", prev).await;
+        assert!(
+            ckpt.get("agent.id").is_none(),
+            "{label}：非法 agent_id 不得并入 state（收尾 checkpoint 无该键），实际: {:?}",
+            ckpt.get("agent.id")
+        );
+    }
+
+    // 合法 agent_id：随 overlay 并入 state，收尾 checkpoint 持久化（执行身份契约键）
+    let prev = latest_run_started(&sqlite, "pipe-ag-guard").await;
+    let resp = post_chat(
+        app.clone(),
+        token.clone(),
+        "hi-valid".to_string(),
+        "custom_agent".to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ckpt = wait_next_run_checkpoint(&sqlite, "pipe-ag-guard", prev).await;
+    assert_eq!(
+        ckpt.get("agent.id"),
+        Some(&serde_json::json!("custom_agent")),
+        "合法 agent_id 须随 overlay 并入 state 并经 checkpoint 持久化"
+    );
+}
+
+/// 上一个 run 的 checkpoint 起点时间戳（无 checkpoint → None）。
+async fn latest_run_started(
+    sqlite: &agentos_engine::SqliteStore,
+    pipeline_id: &str,
+) -> Option<String> {
+    sqlite
+        .load_latest_checkpoint(pipeline_id, "default")
+        .ok()
+        .flatten()
+        .and_then(|(_, ckpt)| {
+            ckpt.get("run_started_at")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+}
+
+/// 等本轮 run 的收尾 checkpoint 落库后返回快照。
+///
+/// HTTP outcome 通知与收尾 checkpoint 写入无先后契约（checkpoint 是尽力备份），
+/// 响应返回即读最新快照可能仍是上一轮——用 `run_started_at` 变化识别新一轮，
+/// 轮询到落库（3s 上限，超时即失败而非静默读旧值）。
+async fn wait_next_run_checkpoint(
+    sqlite: &agentos_engine::SqliteStore,
+    pipeline_id: &str,
+    prev_run_started_at: Option<String>,
+) -> serde_json::Value {
+    for _ in 0..300 {
+        if let Some((_, ckpt)) = sqlite
+            .load_latest_checkpoint(pipeline_id, "default")
+            .ok()
+            .flatten()
+        {
+            let started = ckpt
+                .get("run_started_at")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if started != prev_run_started_at {
+                return ckpt;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("等待本轮收尾 checkpoint 超时（3s）：latest 快照仍是上一轮或尚未落库");
 }
 
 #[tokio::test]
@@ -1283,17 +1404,19 @@ async fn test_multi_turn_second_round_sees_first_round_context() {
         tenant.clone(),
         process_via_engine(
             &state,
-            "第一轮：我叫小明",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("第一轮：我叫小明").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "m1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1304,17 +1427,19 @@ async fn test_multi_turn_second_round_sees_first_round_context() {
         tenant,
         process_via_engine(
             &state,
-            "第二轮：我叫什么？",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("第二轮：我叫什么？").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "m2",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1357,17 +1482,19 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
         tenant.clone(),
         process_via_engine(
             &state,
-            "HTTP 零轮",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("").to_string(),
+                content: ("HTTP 零轮").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            "",
-            thread,
             "h0",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1377,17 +1504,19 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
         tenant.clone(),
         process_via_engine(
             &state,
-            "HTTP 第一轮",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("HTTP 第一轮").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "h1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1397,17 +1526,19 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
         tenant,
         process_via_engine(
             &state,
-            "HTTP 第二轮",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("HTTP 第二轮").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "h2",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1468,17 +1599,19 @@ async fn test_multi_turn_cold_start_recovers_from_store() {
         tenant,
         process_via_engine(
             &state,
-            "冷启动第二轮",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("冷启动第二轮").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "c2",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1543,17 +1676,19 @@ async fn test_cold_recovery_ignores_stale_ended_flag() {
         tenant,
         process_via_engine(
             &state,
-            "冷启动第二轮",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("冷启动第二轮").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "e2",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1620,17 +1755,19 @@ async fn test_multi_user_isolation_end_to_end() {
         TenantContext::new("tenant_alice", thread_a),
         process_via_engine(
             &state,
-            "alice 的消息",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread_a).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe_a).to_string(),
+                content: ("alice 的消息").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe_a,
-            thread_a,
             "a1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1641,17 +1778,19 @@ async fn test_multi_user_isolation_end_to_end() {
         TenantContext::new("tenant_bob", thread_b),
         process_via_engine(
             &state,
-            "bob 的消息",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread_b).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe_b).to_string(),
+                content: ("bob 的消息").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe_b,
-            thread_b,
             "b1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -1802,17 +1941,19 @@ async fn test_registered_user_can_save_and_read_history() {
         TenantContext::new(&frank_id, thread),
         process_via_engine(
             &state,
-            "frank 的问题",
+            &agentos_core::types::DispatchRequest {
+                thread_id: (thread).to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipe).to_string(),
+                content: ("frank 的问题").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipe,
-            thread,
             "f1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -2008,17 +2149,19 @@ async fn test_process_via_engine_state_overlay_reaches_plugin_context() {
         tenant,
         process_via_engine(
             &state,
-            "开始执行任务",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_overlay").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_overlay").to_string(),
+                content: ("开始执行任务").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_overlay",
-            "thread_overlay",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2081,6 +2224,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
             enabled: Some(true),
             activation: Default::default(),
             provides: Default::default(),
+            visibility: Default::default(),
         });
     }
     state
@@ -2100,17 +2244,19 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
         tenant,
         process_via_engine(
             &state,
-            "执行任务",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_gap2_emit").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_gap2_emit").to_string(),
+                content: ("执行任务").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_gap2_emit",
-            "thread_gap2_emit",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2159,17 +2305,19 @@ async fn test_engine_run_failure_marks_run_failed() {
         tenant,
         process_via_engine(
             &state,
-            "触发失败",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_fail_evt").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_fail_evt").to_string(),
+                content: ("触发失败").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_fail_evt",
-            "thread_fail_evt",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2206,17 +2354,19 @@ async fn test_engine_user_stop_marks_run_cancelled() {
         tenant,
         process_via_engine(
             &state,
-            "正常输入但被用户停止",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_cancel").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_cancel_evt").to_string(),
+                content: ("正常输入但被用户停止").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_cancel_evt",
-            "thread_cancel",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2258,17 +2408,19 @@ async fn test_replay_after_interrupt_does_not_duplicate_user_message() {
         tenant,
         process_via_engine(
             &state,
-            "重启前的那条消息",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_gap3").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_gap3").to_string(),
+                content: ("重启前的那条消息").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_gap3",
-            "thread_gap3",
             "o1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -2308,17 +2460,19 @@ async fn test_user_message_slot_carries_run_id() {
         tenant,
         process_via_engine(
             &state,
-            "审计锚测试消息",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_runid").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_runid").to_string(),
+                content: ("审计锚测试消息").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_runid",
-            "thread_runid",
             "o1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -2364,17 +2518,19 @@ async fn test_repeated_user_message_after_reply_still_appends() {
             tenant.clone(),
             process_via_engine(
                 &state,
-                "再来一次",
+                &agentos_core::types::DispatchRequest {
+                    thread_id: ("thread_gap3b").to_string(),
+                    user_id: ("").to_string(),
+                    pipeline_id: ("pipe_gap3b").to_string(),
+                    content: ("再来一次").to_string(),
+                    client_message_id: ("").to_string(),
+                    source: agentos_core::types::PendingInputSource::System,
+                    execution_context: None,
+                    state_overlay: None,
+                    pipeline_config_id: None,
+                },
                 "agentos",
-                "pipe_gap3b",
-                "thread_gap3b",
                 "o1",
-                "",
-                "",
-                None,
-                None,
-                None,
-                "",
             ),
         )
         .await;
@@ -2415,17 +2571,19 @@ async fn test_concurrent_chats_with_interrupted_replay_consistent() {
                 TenantContext::new("tenant_gap3c", "thread_gap3c"),
                 process_via_engine(
                     &st,
-                    msg,
+                    &agentos_core::types::DispatchRequest {
+                        thread_id: ("thread_gap3c").to_string(),
+                        user_id: ("").to_string(),
+                        pipeline_id: (pipeline).to_string(),
+                        content: (msg).to_string(),
+                        client_message_id: ("").to_string(),
+                        source: agentos_core::types::PendingInputSource::System,
+                        execution_context: None,
+                        state_overlay: None,
+                        pipeline_config_id: None,
+                    },
                     "agentos",
-                    pipeline,
-                    "thread_gap3c",
                     "o1",
-                    "",
-                    "",
-                    None,
-                    None,
-                    None,
-                    "",
                 ),
             )
             .await
@@ -2495,17 +2653,19 @@ async fn test_run_terminal_does_not_write_task_status() {
         tenant,
         process_via_engine(
             &state,
-            "执行任务",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_unify").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_unify").to_string(),
+                content: ("执行任务").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_unify",
-            "thread_unify",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2537,17 +2697,19 @@ async fn test_run_terminal_does_not_write_task_status() {
         TenantContext::new("tenant_unify", "thread_unify"),
         process_via_engine(
             &state,
-            "普通消息",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_unify").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_plain").to_string(),
+                content: ("普通消息").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_plain",
-            "thread_unify",
             "o1",
-            "",
-            "",
-            None,
-            None,
-            None,
-            "",
         ),
     )
     .await;
@@ -2580,17 +2742,19 @@ async fn test_run_terminal_skips_writeback_for_owned_only_pipeline() {
         tenant,
         process_via_engine(
             &state,
-            "帮我开个子任务",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_owned_only").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: ("pipe_owned_only").to_string(),
+                content: ("帮我开个子任务").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            "pipe_owned_only",
-            "thread_owned_only",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2655,17 +2819,19 @@ async fn test_task_lifecycle_end_to_end_state_flow() {
         tenant,
         process_via_engine(
             &state,
-            "执行全流程验证任务",
+            &agentos_core::types::DispatchRequest {
+                thread_id: ("thread_lifecycle").to_string(),
+                user_id: ("").to_string(),
+                pipeline_id: (pipeline_id).to_string(),
+                content: ("执行全流程验证任务").to_string(),
+                client_message_id: ("").to_string(),
+                source: agentos_core::types::PendingInputSource::System,
+                execution_context: None,
+                state_overlay: Some(overlay.clone()),
+                pipeline_config_id: None,
+            },
             "agentos",
-            pipeline_id,
-            "thread_lifecycle",
             "o1",
-            "",
-            "",
-            None,
-            Some(&overlay),
-            None,
-            "",
         ),
     )
     .await;
@@ -2750,19 +2916,17 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
     // stream_start 在链任务激活时才发（ADR-2026-08-26 等待窗口不占位），轮询等待。
     use agentos_session::router::PipelineDispatcher;
     let _ = dispatcher
-        .dispatch_user_input(
-            "thread-1",
-            "u1",
-            "嗨",
-            "pid-12hex-inject",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "",
-            PendingInputSource::Trigger,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("pid-12hex-inject").to_string(),
+            content: ("嗨").to_string(),
+            client_message_id: ("").to_string(),
+            source: PendingInputSource::Trigger,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await;
     let delivered = sink.delivered.clone();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2808,19 +2972,17 @@ async fn test_pending_input_idle_consumed_immediately() {
     let dispatcher = crate::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-idle-1",
-            "u1",
-            "空闲直发",
-            "pipe-idle-1",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cmid-1",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-idle-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("pipe-idle-1").to_string(),
+            content: ("空闲直发").to_string(),
+            client_message_id: ("cmid-1").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     // 消费任务在链空闲时 pop → 立即执行；轮询等待队列清空（消费瞬态 = 删行）。
@@ -2871,19 +3033,17 @@ async fn test_pending_input_dispatch_leaves_no_residue() {
     let dispatcher = crate::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-del-1",
-            "u1",
-            "将被消费",
-            "pipe-del-1",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-del-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("pipe-del-1").to_string(),
+            content: ("将被消费").to_string(),
+            client_message_id: ("").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     // 空闲管道消息应被消费（异步链任务），轮询等待队列清空（消费瞬态 = 删行）。
@@ -3385,23 +3545,21 @@ async fn seed_pending(store: &Arc<dyn StorageBackend>, pid: &str, content: &str)
     store
         .enqueue_pending_input(
             "default",
-            pid,
             &PendingInputRecord {
                 id: id.clone(),
-                pipeline_id: pid.to_string(),
                 tenant_id: "default".to_string(),
-                user_id: "u1".to_string(),
-                content: content.to_string(),
-                thread: format!("thread-{pid}"),
-                source: agentos_core::types::PendingInputSource::User,
-                agent_id: "agentos".to_string(),
-                route_id: pid.to_string(),
-                thinking_strength: String::new(),
-                client_message_id: String::new(),
-                execution_context: None,
-                state_overlay: None,
-                pipeline_config_id: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                request: agentos_core::types::DispatchRequest {
+                    thread_id: format!("thread-{pid}"),
+                    user_id: "u1".to_string(),
+                    pipeline_id: pid.to_string(),
+                    content: content.to_string(),
+                    client_message_id: String::new(),
+                    source: agentos_core::types::PendingInputSource::User,
+                    execution_context: None,
+                    state_overlay: None,
+                    pipeline_config_id: None,
+                },
             },
         )
         .await
@@ -3461,7 +3619,7 @@ async fn test_pending_inputs_endpoints_crud() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let rows = store.list_pending_inputs("default", pid).await.unwrap();
-    assert_eq!(rows[0].content, "修改后", "PUT 覆盖 content");
+    assert_eq!(rows[0].request.content, "修改后", "PUT 覆盖 content");
 
     // PUT 不存在 → 404
     let resp = app
@@ -3686,19 +3844,17 @@ async fn test_pending_input_no_store_dispatch_direct() {
     use agentos_session::router::PipelineDispatcher;
     // 不报错（直接入链执行）
     dispatcher
-        .dispatch_user_input(
-            "thread-nostore-1",
-            "u1",
-            "无存储直发",
-            "pipe-nostore-1",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-nostore-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("pipe-nostore-1").to_string(),
+            content: ("无存储直发").to_string(),
+            client_message_id: ("").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     // 给链任务留出执行窗口（spawn 异步；无副作用可断言——不 panic 即验证路径）

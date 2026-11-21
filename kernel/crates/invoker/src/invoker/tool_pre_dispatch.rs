@@ -152,8 +152,9 @@ impl PreDispatchCall {
 
 /// state 中是否已有命中本调用的 guard 预填（命中即拦截优先，不执行工具）。
 ///
-/// 匹配口径与 tool_core `match_pre_decided` 一致：有 id 先按 call_id，id 未命中
-/// 再按"无 id entry + 工具名"兜底。
+/// 匹配口径与 tool_core `match_pre_decided` 一致（R15 逐 callId 精确配对）：
+/// 有 id 只按 call_id 精确匹配（禁消费无 id entry——并发同工具调用结果串线
+/// 通道）；无 id 调用按工具名匹配无 id entry（兼容面不变）。
 pub(super) fn state_pre_decided(state: &Value, call: &PreDispatchCall) -> bool {
     let entries = state.get(STATE_PRE_DECIDED_KEY).and_then(Value::as_array);
     match_entries(entries, call.call_id.as_deref(), &call.name).is_some()
@@ -166,11 +167,10 @@ fn match_entries<'a>(
 ) -> Option<&'a Value> {
     let entries = entries?;
     if let Some(id) = call_id.filter(|s| !s.is_empty()) {
-        for entry in entries {
-            if entry.get("call_id").and_then(Value::as_str) == Some(id) {
-                return Some(entry);
-            }
-        }
+        // R15：id 键调用只认同 id entry，不回落工具名（与 tool_core 同口径）。
+        return entries
+            .iter()
+            .find(|entry| entry.get("call_id").and_then(Value::as_str) == Some(id));
     }
     entries.iter().find(|entry| {
         let idless = entry
@@ -421,6 +421,12 @@ mod tests {
             &json!({"pre_decided_results": [{"call_id": "other", "success": false}]}),
             &by_id
         ));
+        // R15 逐 callId 精确配对：id 键调用禁消费无 id entry（并发同工具
+        // 调用串线通道——不拦截即回落预派发执行，语义正确）。
+        assert!(!state_pre_decided(
+            &json!({"pre_decided_results": [{"tool_name": "f", "success": false}]}),
+            &by_id
+        ));
 
         let idless_call = call(json!({"name": "file_write"}));
         assert!(state_pre_decided(
@@ -429,6 +435,11 @@ mod tests {
         ));
         assert!(!state_pre_decided(
             &json!({"pre_decided_results": [{"tool_name": "other", "success": false}]}),
+            &idless_call
+        ));
+        // 对照臂：无 id 调用不消费 id 键 entry。
+        assert!(!state_pre_decided(
+            &json!({"pre_decided_results": [{"call_id": "c1", "tool_name": "file_write", "success": false}]}),
             &idless_call
         ));
     }

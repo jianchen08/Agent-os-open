@@ -117,7 +117,7 @@ class _MultiBankDocs:
 
 class FakeKBClient:
     """多 bank hindsight 客户端：aretain 真实落 bank（upload→list 链路闭环）、
-    banks.list_banks 发现、arecall 按 bank 返回可区分结果。"""
+    banks.list_banks 发现 + bank config 读写、arecall 按 bank 返回可区分结果。"""
 
     def __init__(self) -> None:
         self.documents = _MultiBankDocs()
@@ -128,9 +128,13 @@ class FakeKBClient:
         self.acreate_bank = AsyncMock(side_effect=self._create_bank)
         self.aretain = AsyncMock(side_effect=self._aretain)
         self.arecall = AsyncMock(side_effect=self._arecall)
-        self.banks = SimpleNamespace(list_banks=self._list_banks)
+        self.banks = SimpleNamespace(
+            list_banks=self._list_banks,
+            update_bank_config=AsyncMock(return_value={"overrides": {}}),
+            get_bank_config=AsyncMock(return_value={"config": {}}),
+        )
 
-    async def _create_bank(self, bank_id: str = "") -> None:
+    async def _create_bank(self, bank_id: str = "", **_kw: Any) -> None:
         if bank_id and bank_id not in self._created_banks:
             self._created_banks.append(bank_id)
 
@@ -198,8 +202,13 @@ def kb() -> Any:
 
 
 @pytest.fixture
-def world(kb: Any) -> SimpleNamespace:
-    """kb 模块 + 注入多 bank 假客户端的世界（client 引用回填给断言用）。"""
+def world(kb: Any, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """kb 模块 + 注入多 bank 假客户端的世界（client 引用回填给断言用）。
+
+    LLM provider env 注入（sidecar 运行时由 _apply_llm_env 写入）——verbatim
+    主模式可用的前置，上传走主 bank 落点。
+    """
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
     client = FakeKBClient()
     kb.set_client(client)
     return SimpleNamespace(kb=kb, client=client)
@@ -281,7 +290,7 @@ class TestTenantScopedReads:
 
 class TestSearchScoped:
     def test_search_scoped_to_caller_tenant(self, world: SimpleNamespace) -> None:
-        """search 只召回调用方租户 bank；recall 调用面不触碰他租户 bank。"""
+        """search 只召回调用方租户双 bank（主+降级）；recall 调用面不触碰他租户 bank。"""
         _seed(world, _BANK_A, "c-a1", "item-a", kb_name="a.md")
         _seed(world, _BANK_B, "c-b1", "item-b", kb_name="b.md")
         world.client.recall_hits = {
@@ -292,12 +301,12 @@ class TestSearchScoped:
         result_a = _run(world.kb.search("正文", headers=_headers(_TENANT_A, "u-a")))
         assert result_a["total"] == 1
         assert result_a["results"][0]["item_id"] == "item-a"
-        assert world.client.recall_banks == [_BANK_A]
+        assert world.client.recall_banks == ["kb_chunks_tenant-a", _BANK_A]
 
         world.client.recall_banks.clear()
         result_b = _run(world.kb.search("正文", headers=_headers(_TENANT_B, "u-b")))
         assert result_b["results"][0]["item_id"] == "item-b"
-        assert world.client.recall_banks == [_BANK_B]
+        assert world.client.recall_banks == ["kb_chunks_tenant-b", _BANK_B]
 
     def test_search_missing_identity_fail_closed(self, world: SimpleNamespace) -> None:
         """缺身份头：检索空集 + error 降噪（不触任何 bank）。"""
@@ -477,10 +486,10 @@ class TestBankDiscovery:
         assert _run(kb._discover_kb_banks()) == []
 
     def test_admin_degrades_to_own_bank_when_discovery_broken(self, kb: Any) -> None:
-        """admin：bank 发现故障 → 只见自身 bank（只收窄不放大）。"""
+        """admin：bank 发现故障 → 只见自身双 bank（只收窄不放大）。"""
         kb.set_client(SimpleNamespace(documents=_MultiBankDocs()))  # 无 bank 发现能力
         banks = _run(kb._caller_banks(_headers(_TENANT_DEFAULT, "admin", "admin")))
-        assert banks == [_BANK_LEGACY]
+        assert banks == [_BANK_LEGACY, "kb_chunks"]
 
     def test_foreign_probe_failure_deletes_degrade_to_own_bank(
         self, kb: Any, monkeypatch: pytest.MonkeyPatch
@@ -546,9 +555,11 @@ def _multipart_body(filename: str, content: str) -> tuple[str, str]:
 
 
 @pytest.fixture
-def dispatch() -> Iterator[SimpleNamespace]:
+def dispatch(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
     """端到端测试台：canonical knowledge_base（server 分发解析名）+ fresh server。"""
     import knowledge_base as kb  # 裸名导入 = server 分发解析到的同一模块
+
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
 
     kb.set_client(None)
     spec = importlib.util.spec_from_file_location(

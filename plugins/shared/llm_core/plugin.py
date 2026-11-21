@@ -1,7 +1,14 @@
-"""LLM Core 插件 -- 基于 LLM Adapter 的大模型调用实现。
+"""LLM Core 插件 -- 管道服务面（双服务面角色一）：LLM 调用编排。
 
-通过 LLM Adapter 中间层调用大模型，支持多模型 fallback 和流式回调。
-重试/降级由 LLM Adapter（Router 层）负责；插件只上抛错误，错误处理语义见 ADR 2026-08-18。
+调用拓扑（主方案 §6.0 收敛图）：本管道面经**进程内**调用同插件同进程的适配
+服务面（``llm_adapter.execute(route="gateway")``），适配面再经网关出口跨进程
+调 ``llm.complete_stream``（唯一 llm 服务面，契约冻结，提供方=llm_service）。
+管道面只剩编排：state 读写 / 模型意图解析 / 循环守卫 / track 统计 / 半截落库；
+网关信封组装与等待上限归适配面（§6.2 三线边界：管道面→适配面=进程内调用，
+适配面→网关=跨进程契约调用）。
+
+重试/降级由 llm_service（Router/KeyPool 层）负责；插件只上抛错误，错误处理
+语义见 ADR 2026-08-18。
 
 职责：
 - 成功时输出 raw_result、raw_tool_calls，并将 assistant 回复 append 到 messages
@@ -30,7 +37,11 @@ _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
 
-# LLMResponse：聚合响应结构归属地（llm_core 不再直连 LLM API，调用走 llm_service）。
+# 适配服务面（双服务面角色二）：同进程第二入口。管道面经它发起网关调用
+# （route="gateway"），不再自己组装信封/直连能力句柄（批 5 生产改接）。
+import llm_adapter  # noqa: E402
+
+# LLMResponse：聚合响应结构归属地（llm_core 不直连 LLM API；调用经适配面→网关）。
 from _libs.pipeline_base.plugin import ICorePlugin, PluginContext  # noqa: E402
 from _libs.pipeline_base.types import StateKeys  # noqa: E402
 from _root_api import resolve_uploads_url  # noqa: E402
@@ -39,13 +50,14 @@ from track_stats import TrackStats  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# ── 能力调用器（LLM 面唯一事实源 = llm_service）────────────────────────
-# llm_core 的 LLM 调用经内核 tool-executor 能力跨进程调 llm.complete_stream
-# （与 approval/hindsight 经 capability 的既有用法同构）。server.py 在 on_load
-# 注入本函数；测试注入伪实现。未注入时调用抛明确错误（接线 bug 早暴露）。
-# LLM 调用耗时可达 llm.yaml call_timeout（默认 600s），第三参 timeout 必须显式
-# 传大值——SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 面向短调用，不传会先于 LLM
-# 完成被掐断（与 human-interaction 同款长等待语义）。
+# ── 能力调用器（网关出口句柄；llm 面唯一事实源 = llm_service）───────────
+# 本管道面把句柄交给适配服务面（llm_adapter.execute route="gateway"），由适配
+# 面组装 ``llm.complete_stream`` 信封跨进程调用 llm_service（与 approval/
+# hindsight 经 capability 的既有用法同构）。server.py 在 on_load 注入本句柄；
+# 测试注入伪实现。未注入时适配面网关路线 fail-closed（接线 bug 早暴露）。
+# LLM 调用耗时可达 llm.yaml call_timeout（默认 600s），等待上限由适配面按
+# call_timeout + 余量计算——SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 面向短调用，
+# 不传会先于 LLM 完成被掐断（与 human-interaction 同款长等待语义）。
 CapabilityCaller = Callable[[str, dict[str, Any], float | None], Any]
 
 _capability_caller: CapabilityCaller | None = None
@@ -81,10 +93,12 @@ class PartialStreamOutcome:
         self.result = result
 
 # ── 思考参数覆盖（思考全链路）────────────────────────────────────────
-# 前端 user_input 携带 thinking_strength = 参数组 JSON 串（选项即
-# thinking_strength_params 配置的参数组本身，llm_service thinking-levels
-# 端点下发、选中即透传；"" = 不覆盖），内核透传注入 state；llm_core 解析后
-# 按**思考参数白名单**过滤，与 default_params 合并后进 kwargs。
+# thinking_strength = 参数组 JSON 串（选项即 thinking_strength_params 配置的
+# 参数组本身，llm_service thinking-levels 端点下发、选中即透传），是**管道
+# 持久 state**（llm_core persistent_fields 声明，ADR 2026-11-09）：用户发送
+# 时非空值覆盖本轮，空串/重跑帧则按恢复合并读到管道上次选择——重发/回退
+# 不传参，状态回退后走正常管道流程自然生效。llm_core 解析后按**思考参数
+# 白名单**过滤，与 default_params 合并后进 kwargs。
 # reasoning_effort 的 extra_body 透传（DeepSeek 等 OpenAI 兼容中转）由
 # llm_service adapter 侧处理。
 #
@@ -139,13 +153,6 @@ _SYSTEM_NOTIFY_ID_RE = re.compile(r"\(ID:\s*([^)\s]+)\s*\)")
 _INJECTED_MSG_MARKERS = ("[触发器通知]", _SYSTEM_NOTIFY_MARKER, "【系统纪律】")
 _RECON_ANNOTATION_PREFIX = "[系统对账]"
 
-# 内核错误链逐跳累积的传输包装（tool_executor「tool execution failed:」→
-# invoker「MCP tool call failed:」→ mcp「tool call failed: <tool>:」「MCP
-# protocol error: [N] 」），同一根因被多层前缀包裹。内核折叠文案 280 字
-# 截断只保头部——不剥噪则用户只看到传输噪声、根因（含 LLM 供应商分类摘要）
-# 被截掉。最后一跳「MCP protocol error: [N] 」之后即插件异常原文。
-_MCP_PROTOCOL_MARKER = "MCP protocol error:"
-
 # ── 模型绑定快照（run 启动时的模型解析结果）────────────────────────
 # 裁定（2026-10-20 用户）：模型配置改动 = 下一管道生效——run 启动时快照
 # 模型解析结果，热重载只影响新 run；在飞 run 沿用启动时快照（不随
@@ -164,30 +171,50 @@ _LOOP_STREAK_KEY = "llm_loop_streak"
 _LOOP_HASH_KEY = "llm_loop_last_hash"
 _LOOP_STREAK_LIMIT = 3
 
+# 视觉输入不缩放总像素上限保守缺省（R21 总像素口径）：llm.yaml
+# multimodal.max_pixels 未声明时生效。1048576 = 1024²（业内视觉编码器常见
+# patch 处理预算；各家官方多只披露上传上限，缩放触发阈值不披露——低于阈值
+# 直喂才不被 API 端缩放；deepseek 实测口径 544²=295936 见 llm.yaml 声明与
+# docs/working/TB参赛适配_台账.md R20/R21）。tool_core 面无对应消费（切分
+# 决策在 fs_tools 经注入值拿规格），本常量是 state 写面的唯一缺省点。
+_DEFAULT_VISION_MAX_PIXELS = 1048576
+
 
 @dataclasses.dataclass(frozen=True)
-class ModelIdentity:
-    """单次调用的模型身份快照（execute 解析完绑定即原子捕获）。
+class ModelIntent:
+    """单次调用的模型意图视图（execute 解析完绑定即原子捕获）。
+
+    意图化口径（主方案 §6.1「模型意图（显式 id/tier/thinking_strength，解析
+    单源归网关）」）：``model_id`` = 意图（用哪个模型）；其余字段是**声明**
+    （展示名/窗口/视觉能力/冻结参数/预算），供 state 输出与守卫生效判断。
+    **连接事实（端点选择/凭据/方言/兜底链）不在本视图**——出站调用只携意图，
+    连接解析单源归网关（llm_service）；``api_base`` 仅作观测回显，从不进
+    出站信封。凭据材料（api_key）不进入管道面（批 5 收窄：无读者，已删除）。
 
     llm_core 单实例被多管道并发复用（主对话与派发子任务同进程交错执行）：
     模型身份不得落实例可变字段跨 await 读取——并发 execute 的
     ``_apply_binding`` 会覆写共享字段，把本管道的调用参数与结果归属踩成
     并发方的模型（装机 382ec1ee 实测：绑定 glm 的调用被贴/真发成子任务的
     MiniMax）。契约（2026-10-27 用户裁定）：模型身份随 state 走——每次
-    execute 解析完绑定即捕获本快照，调用参数与结果组装全部读快照，实例
-    字段仅保留作构造兜底（本轮无模型意图时复用 ``_boot_identity``）。
+    execute 解析完绑定即捕获本快照，调用参数与结果组装全部读快照。实例不
+    持有模型身份字段（方案 R4 死代码面已删除，批 3）：模型意图三级来源全空
+    即显式报错（2026-11-13 装机事故后收紧）。
     """
 
     model_id: str
     model: str
     provider: str
     api_base: str | None
-    api_key: str | None
     context_window: int | None
     supports_vision: bool
     default_params: dict[str, Any]
     # 流式超时配置（llm.yaml 键，随绑定快照；None=快照未携带，调用侧不透传）
     stream_idle_timeout: float | None = None
+    # 视觉输入不缩放总像素上限（llm.yaml multimodal.max_pixels，R21 总像素
+    # 口径）：None=不支持视觉或读取失败（不切分）；有值经
+    # state.llm_vision_max_pixels 供 tool_args_inject 注入 file_read 做
+    # 原图+分块一次注入。
+    vision_max_pixels: int | None = None
 _MIGRATION_KEY = "llm_model_migration"
 
 # 模型不可用错误标记（跨插件文本契约）：模型解析失败的错误文本含本标记，
@@ -198,26 +225,6 @@ MODEL_UNAVAILABLE_MARKER = "MODEL_UNAVAILABLE"
 
 # 显式改名映射的跟随上限（防映射环 a→b→a）
 _MIGRATION_MAX_HOPS = 5
-
-
-def _strip_transport_noise(err: Any) -> Any:
-    """剥离 MCP 错误链逐跳累积的传输前缀，保留根因尾部。
-
-    取字符串中最后一处「MCP protocol error: [N] 」之后的原文（插件异常的
-    str()，含 llm_service 分类摘要「LLM 供应商调用失败[认证失败]…」）；
-    标记缺失（非 MCP 通道/格式漂移）或剥离结果为空时原样返回，不做猜测。
-    """
-    if not isinstance(err, str):
-        return err
-    idx = err.rfind(_MCP_PROTOCOL_MARKER)
-    if idx < 0:
-        return err
-    tail = err[idx + len(_MCP_PROTOCOL_MARKER):].lstrip()
-    if tail.startswith("["):
-        end = tail.find("]")
-        if end >= 0:
-            tail = tail[end + 1:].lstrip()
-    return tail or err
 
 
 def _system_notify_task_id(msg: dict[str, Any]) -> str | None:
@@ -356,12 +363,8 @@ class LLMCore(ICorePlugin):
     llm.complete_stream，见 ``_call_llm``）。
 
     Attributes:
-        _config: 插件配置字典，包含 provider/model/api_base/api_key 等
-        _provider: 模型提供商（如 openai、minimax）
-        _model: 模型标识（如 gpt-4、MiniMax-M2.7）
-        _api_base: API 端点 URL
-        _api_key: API 密钥
-        _default_params: 默认调用参数（temperature、max_tokens 等）
+        _config: 插件配置字典（构造输入；含 max_empty_retries/track 等）
+        _track: 每轮用量统计器（sidecar 实例跨管道复用）
     """
 
     def __init__(
@@ -374,56 +377,25 @@ class LLMCore(ICorePlugin):
 
         Args:
             config: 插件配置字典，支持以下键：
-                - provider: 模型提供商（如 openai、minimax）
-                - model_name: 模型标识（如 gpt-4、MiniMax-M2.7）
-                - api_base: API 端点 URL
-                - api_key: API 密钥
-                - default_params: 默认调用参数（temperature、max_tokens 等）
+                - max_empty_retries: 空回复跨轮重试上限
+                - track: 用量统计初始化配置
+            模型意图（provider/model_name/api_base/default_params）不
+            从构造配置读取——每次 execute 由 state 模型意图 + llm.yaml 解析。
         """
         self._config = config or {}
-        self._provider: str = self._config.get("provider", "openai")
-        # model_id（yaml key，如 deepseek-v4-pro-apigo）：路由标识，
-        # 传给 llm_service 做 deployment 匹配，保证不同 provider 的同名模型隔离。
-        # model_name（yaml 的 model_name，如 deepseek-v4-pro）：发给上游的真实模型名。
-        # 两者必须分开：model_name 重名时（官方与 apigo 同底模），靠 model_id 区分路由。
-        self._model_id: str = self._config.get("model_id", "")
-        self._model: str = self._config.get("model_name", "gpt-4")
-        self._api_base: str | None = self._config.get("api_base")
-        self._api_key: str | None = self._config.get("api_key")
-        # 视觉能力缺省 False（fail-closed）：_apply_model_from_state 解析模型
-        # 时按 llm.yaml multimodal 声明覆盖。
-        self._supports_vision: bool = bool(self._config.get("supports_vision", False))
-        self._context_window: int | None = self._config.get("context_window")
-        if not self._context_window:
-            logger.warning(
-                "[%s] context_window 未配置！上下文守卫将无法工作。"
-                " 请在模型配置（llm.yaml）或 core_plugins 中设置 context_window。"
-                " model=%s, provider=%s",
-                self.name,
-                self._model,
-                self._provider,
-            )
-        # default_params 兜底：空 dict = 不设采样参数，全走上游默认（=不设限），
-        # 避免 reasoning model 被人为限 token。本字段是全链路唯一兜底点——
-        # 配置层(models.py)与 resolver 均不覆盖空 dict，漏配模型最终落此。
-        self._default_params: dict[str, Any] = self._config.get("default_params", {})
-        # 构造期身份快照：本轮 state 未表达模型意图（三级来源全空）时的调用
-        # 身份——不读实例字段，避免并发 execute 重绑踩踏（见 ModelIdentity）。
-        self._boot_identity = ModelIdentity(
-            model_id=self._model_id,
-            model=self._model,
-            provider=self._provider,
-            api_base=self._api_base,
-            api_key=self._api_key,
-            context_window=self._context_window,
-            supports_vision=self._supports_vision,
-            default_params=dict(self._default_params),
-        )
+        # 模型身份不落构造期字段（方案 R4 死代码面删除，批 3）：构造期配置
+        # （provider/model_name/api_base/context_window/default_params）
+        # 只作 config 视图保留，不再快照为调用身份——模型意图视图由
+        # _apply_model_from_state 每次 execute 返回 ModelIntent，调用面与
+        # 结果组装只读该快照；三级来源全空即显式报错（见
+        # _resolve_and_snapshot_model）。构造期身份快照曾以硬编码默认模型身份
+        # 发起调用（2026-11-13 装机事故），该回退面已退役。
 
         # 空回复重试上限（用户裁定 2026-08-30）：LLM 返回空文本且无工具调用
         # 时跨轮重试，超过上限标记耗尽交 output 步骤裁决任务失败。
-        # 每次 execute 由 _apply_runtime_config 按 plugin_configs 覆盖。
-        self._max_empty_retries: int = int(self._config.get("max_empty_retries", 2))
+        # 每次 execute 由 _resolve_max_empty_retries 解析成本轮局部值（构造默认
+        # = self._config 的 max_empty_retries）——不写实例字段：sidecar 实例跨
+        # 管道复用，await 期间会被其他管道覆盖（与 task_reminder 同范式）。
 
         # 每轮追踪统计（原 pipeline/output/track 插件职责，2026-09-15 并入：
         # 本插件产出的 llm_usage 即其输入，同步骤累加免跨插件边界重读 state）。
@@ -440,31 +412,34 @@ class LLMCore(ICorePlugin):
         """插件执行优先级。"""
         return 50
 
-    def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。
+    def _resolve_max_empty_retries(self, ctx: PluginContext) -> int:
+        """解析本管道的空回复重试上限（每 execute 局部值，不写实例字段）。
 
-        同 sidecar 实例被多个 agent 管道连续复用：先回构造默认值再应用本
-        管道 state.plugin_configs 注入的 max_empty_retries——前一 agent 的
-        配置不得残留到下一 agent（与 task_reminder 同范式）。
+        同 sidecar 实例被多个 agent 管道复用：构造默认（self._config）起底，
+        再应用本管道 state.plugin_configs 注入的 max_empty_retries——前一
+        agent 的配置不得残留到下一 agent，也不会在 await 处被并发管道覆盖
+        （与 task_reminder 同范式）。
         """
-        self._max_empty_retries = int(self._config.get("max_empty_retries", 2))
+        limit = int(self._config.get("max_empty_retries", 2))
         plugin_configs = ctx.state.get("plugin_configs", {})
         if isinstance(plugin_configs, dict):
             llm_core_cfg = plugin_configs.get("llm_core", {})
             if isinstance(llm_core_cfg, dict):
                 override = llm_core_cfg.get("max_empty_retries")
                 if isinstance(override, int) and override >= 0:
-                    self._max_empty_retries = override
+                    return override
+        return limit
 
     def _apply_model_from_state(
         self, state: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, ModelIdentity]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, ModelIntent]:
         """从管道 state 解析本次调用的模型并更新 self，返回调用身份快照。
 
         优先级：``state.model_id`` > ``state.model_tier``(→ defaults.tiers)
         > ``llm.yaml defaults.chat``。任一命中即按其 model_id 查
-        ``get_llm_core_config``；三级来源全部为空（本轮未表达模型意图）才
-        保持构造时的默认配置不变（不阻断）。
+        ``get_llm_core_config``；三级来源全部为空（llm.yaml defaults.chat
+        也为空，通常 = llm 配置注入为空）→ 显式报错，禁止回退构造期默认
+        身份——模型调用只认管道模型 ID / llm.yaml 配置。
 
         在飞保护（2026-10-20 裁定「模型配置改动 = 下一管道生效」；2026-10-23
         用户裁定升格为**管线级绑定**——绑定快照跨 run 复用，显式选择才换绑）：
@@ -499,9 +474,10 @@ class LLMCore(ICorePlugin):
             模型事实源（实例字段不读——并发 execute 会重绑共享字段）。
 
         Raises:
-            RuntimeError: 新 run 解析出的模型名不在 llm.yaml models 映射且
-                无显式映射（不在可用列表，点名报错），或模型配置缺 api_base
-                （换模型不得带病切换）。
+            RuntimeError: 三级来源全空（模型未解析，常见根因 = config 目录
+                内有文件读取失败导致 llm 配置注入为空），或新 run 解析出的
+                模型名不在 llm.yaml models 映射且无显式映射（不在可用列表，
+                点名报错），或模型配置缺 api_base（换模型不得带病切换）。
         """
         binding = self._read_model_binding(state)
         if binding is None:
@@ -514,7 +490,7 @@ class LLMCore(ICorePlugin):
         return self._apply_existing_binding(binding)
     def _resolve_and_snapshot_model(
         self, state: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, ModelIdentity]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, ModelIntent]:
         """本 run 首次解析模型 → 快照落 state（返回绑定、迁移留痕与调用身份）。"""
         # 解析链单源 `_config_models.resolve_model_id`（与 model.resolve 服务共用，
         # 落定键 2026-10-18）：显式 model_id > tier→defaults.tiers > defaults.chat。
@@ -524,9 +500,16 @@ class LLMCore(ICorePlugin):
             state.get("model_id", ""), state.get("model_tier", "")
         )
         if not resolved_id:
-            # 本轮未表达模型意图 → 保持构造期默认配置（不阻断）；身份用构造
-            # 快照，不读实例字段（并发 execute 可能已重绑）。
-            return None, None, self._boot_identity
+            # 本 run 无任何模型意图且 llm.yaml defaults.chat 为空 → 显式失败。
+            # 不得回退构造期身份：config 注入为空时那可能是空串或过期硬编码，
+            # 继续调用只会把错误面拖到 adapter（2026-11-13 装机事故：所有插件
+            # 注入空配置后以硬编码默认模型身份发起调用）。
+            raise RuntimeError(
+                f"[{self.name}] 模型未解析：state.model_id / model_tier 均未提供，"
+                f"且 llm.yaml defaults.chat 为空。请检查 llm 配置注入"
+                f"（config_files[].id=llm）与 llm.yaml defaults.chat——常见根因是 "
+                f"config 目录内有文件读取失败导致注入为空。"
+            )
 
         llm_conf: dict[str, Any] | None
         effective_id, llm_conf, source = self._resolve_model_entry(resolved_id)
@@ -547,13 +530,12 @@ class LLMCore(ICorePlugin):
             }
         resolved_id = effective_id
 
-        # 先整体验证再落字段：任何缺失配置都在触碰实例状态前显式失败，
-        # 不留半套改动（部分旧值 + 部分新值是更难排查的串味形态）。
+        # 端点校验在绑定落定前完成：缺 api_base 即显式失败，不留半套解析结果。
         api_base = llm_conf.get("api_base")
         if not api_base:
             raise RuntimeError(
                 f"[{self.name}] 模型 {resolved_id} 缺少 api_base 配置，"
-                f"拒绝以模型 {self._model_id} 的端点兜底（跨 provider 串味）；"
+                f"拒绝以其他模型端点兜底（跨 provider 串味）；"
                 f"请在 llm.yaml models.{resolved_id} 或其 provider 段补齐"
             )
 
@@ -564,7 +546,7 @@ class LLMCore(ICorePlugin):
             migrated_from=migration["from"] if migration else None,
             migration_source=migration["source"] if migration else None,
         )
-        identity = self._apply_binding(binding, llm_conf)
+        identity = self._apply_binding(binding)
         logger.info(
             "[%s] model bound: model_id=%s provider=%s model=%s",
             self.name,
@@ -576,7 +558,7 @@ class LLMCore(ICorePlugin):
 
     def _apply_existing_binding(
         self, binding: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, ModelIdentity]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, ModelIntent]:
         """沿用既有绑定快照（管线级粘性：跨 run、热重载只影响新管线）。
 
         快照模型仍在可用列表 → 沿用快照；快照模型已改名/移除 → 显式映射
@@ -587,7 +569,7 @@ class LLMCore(ICorePlugin):
         effective_id, live_conf, source = self._resolve_model_entry(model_id)
         if live_conf is not None and not source:
             # 快照模型仍可用且无后继声明 → 沿用启动时快照
-            return None, None, self._apply_binding(binding, live_conf)
+            return None, None, self._apply_binding(binding)
 
         if live_conf is None:
             logger.warning(
@@ -597,7 +579,7 @@ class LLMCore(ICorePlugin):
                 self.name,
                 model_id,
             )
-            return None, None, self._apply_binding(binding, None)
+            return None, None, self._apply_binding(binding)
 
         new_binding = self._build_model_binding(
             effective_id,
@@ -619,7 +601,7 @@ class LLMCore(ICorePlugin):
             model_id,
             effective_id,
         )
-        return new_binding, migration, self._apply_binding(new_binding, live_conf)
+        return new_binding, migration, self._apply_binding(new_binding)
 
     def _read_model_binding(self, state: dict[str, Any]) -> dict[str, Any] | None:
         """读管线模型绑定快照（跨 run 复用；run_id 仅为落定来源留痕）。"""
@@ -670,7 +652,11 @@ class LLMCore(ICorePlugin):
         migrated_from: str | None = None,
         migration_source: str | None = None,
     ) -> dict[str, Any]:
-        """构造模型绑定快照（解析结果全量；凭证不落快照——state 会进轨迹/投影面）。"""
+        """构造模型绑定快照（意图 + 声明；凭证不落快照——state 会进轨迹/投影面）。
+
+        连接事实（api_base）只作观测回显：别名/改名映射与窗口/参数冻结靠本快照，
+        端点选择与凭据解析归网关（出站信封从不携带它们）。
+        """
         binding: dict[str, Any] = {
             "run_id": str(state.get("run_id") or ""),
             "model_id": model_id,
@@ -679,9 +665,8 @@ class LLMCore(ICorePlugin):
             "api_base": str(conf.get("api_base") or ""),
             "default_params": conf.get("default_params") or {},
             "context_window": conf.get("context_window"),
-            "call_timeout": conf.get("call_timeout"),
             # 流式超时配置（llm.yaml defaults/models.<id> 键，配置桥已解析）：
-            # 随快照走才能在 _call_llm 透传给 llm_service——2026-11-04 装机事故
+            # 随快照走才能在 _call_llm 透传给网关——2026-11-04 装机事故
             # （e4bfd6538ed0）：此前 binding 丢弃两键，adapter 恒用 600s 兜底，
             # 流中途冻结 10min28s 才判错。
             "stream_idle_timeout": conf.get("stream_idle_timeout"),
@@ -692,43 +677,38 @@ class LLMCore(ICorePlugin):
             binding["migration_source"] = migration_source or ""
         return binding
 
-    def _apply_binding(
-        self, binding: dict[str, Any], live_conf: dict[str, Any] | None
-    ) -> ModelIdentity:
-        """把绑定快照落实例字段并返回本次调用身份快照（凭证取当前配置视图，不落快照）。
+    def _apply_binding(self, binding: dict[str, Any]) -> ModelIntent:
+        """把绑定快照解析为本次调用意图视图（无凭证读取——管道面不持凭据）。
 
-        实例字段仍同步写入（构造兜底语义保留），但调用面身份一律用返回的
-        ``ModelIdentity``——原子构造自本地值，不受并发 execute 后续重绑影响。
+        意图只以返回值承载（原子构造自本地值，不受并发 execute 后续重绑影响）；
+        构造期/实例级身份字段已删除（方案 R4，批 3）——模型意图随 state 走，
+        实例不再持有可被并发踩踏的模型字段。
         """
         model_id = str(binding.get("model_id") or "")
         provider = str(binding.get("provider") or "")
         model = str(binding.get("model_name") or "")
         api_base = str(binding.get("api_base") or "")
-        api_key = str((live_conf or {}).get("api_key") or "")
         context_window = binding.get("context_window")
         params = binding.get("default_params")
         default_params = dict(params) if isinstance(params, dict) else {}
-        self._model_id = model_id
-        self._provider = provider
-        self._model = model
-        self._api_base = api_base
-        self._api_key = api_key
-        self._context_window = context_window
-        self._default_params = default_params
         # 模型视觉能力（llm.yaml models.<id>.multimodal.supports_image）：写入
         # state 供 tool_core inject_multimodal 作注图闸门——模型不支持时不注图，
         # 工具截图走文本引导路径（消费键 state.llm_supports_vision）。
         supports_vision = self._read_supports_vision(model_id)
-        self._supports_vision = supports_vision
-        return ModelIdentity(
+        # 视觉输入不缩放总像素上限（R21 总像素口径）：仅支持视觉的模型解析
+        # （不支持=不注图，切分无意义）；经 state.llm_vision_max_pixels 供
+        # tool_args_inject 注入 file_read，做原图+分块一次注入（大图直喂会被
+        # 模型 API 端缩放）。
+        vision_max_pixels = self._read_vision_max_pixels(model_id) if supports_vision else None
+        return ModelIntent(
             model_id=model_id,
             model=model,
             provider=provider,
             api_base=api_base,
-            api_key=api_key,
             context_window=context_window,
             supports_vision=supports_vision,
             default_params=default_params,
+            vision_max_pixels=vision_max_pixels,
             # 旧绑定快照（字段缺省）→ None → 调用侧不携带，adapter 落自身默认
             stream_idle_timeout=binding.get("stream_idle_timeout"),
         )
@@ -815,33 +795,40 @@ class LLMCore(ICorePlugin):
         mm = entry.get("multimodal") or {}
         return bool(mm.get("supports_image", False))
 
-    def _get_llm_core_config(self, model_id: str) -> dict[str, Any] | None:
-        """通过 sidecar 注入的 config 桥取模型配置。
+    def _read_vision_max_pixels(self, model_id: str) -> int | None:
+        """读模型视觉输入不缩放总像素上限（models.<id>.multimodal.max_pixels，
+        R21 总像素口径；R20 的 max_side 键语义取错维度已退役，出现即 warn 忽略）。
 
-        从 ``_config_models.get_model_config_loader()`` 拿 loader，调
-        ``get_llm_core_config``。模型未配置时 loader 返回 None（合法降级）；
-        import/loader 自身故障是 sidecar 接线 bug，直接抛出可见。
+        取值口径：声明值优先；未声明取保守缺省 1024²（业内视觉编码器常见
+        patch 处理预算；各家编码器内部缩放阈值多未披露，低于阈值直喂才不被
+        API 端缩放——deepseek 实测口径 544²=295936 见 llm.yaml 声明，取数与
+        来源见 docs/working/TB参赛适配_台账.md R20/R21）。
+        配置查询失败 → None（与 _read_supports_vision 同款降级：不切分不阻断）。
         """
-        from _config_models import get_model_config_loader  # noqa: PLC0415
+        try:
+            from _config_models import get_model_config_loader  # noqa: PLC0415
 
-        return get_model_config_loader().get_llm_core_config(model_id)
-
-    def _capability_timeout(self, model: str) -> float:
-        """反向能力调用的等待上限：模型 call_timeout + 余量。
-
-        SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 会先于长 LLM 调用完成掐断请求
-        （llm.complete_stream 耗时可到 llm.yaml call_timeout）。+60s 余量让
-        llm_service 的结构化错误信封先于 SDK 超时返回（错误是值，不丢语义）。
-        模型不在 llm.yaml 时用 loader 内部默认 300s 口径（与 get_llm_core_config
-        的 defaults 兜底一致）。
-
-        入参是 **model id**（llm.yaml models 段的 key）——查表面以 id 为
-        基础，传 model_name 会查不到条目而静默回落 300s 口径（2026-10-28
-        装机实证：压缩/能力超时因 name 查表失配而错配）。
-        """
-        conf = self._get_llm_core_config(model)
-        call_timeout = float(conf["call_timeout"]) if conf else 300.0
-        return call_timeout + 60.0
+            entry = get_model_config_loader().get_model_config(model_id) or {}
+        except Exception:
+            logger.debug(
+                "[%s] vision max_pixels 查询失败，按不切分处理 (model_id=%s)",
+                self.name,
+                model_id,
+                exc_info=True,
+            )
+            return None
+        mm = entry.get("multimodal") or {}
+        if "max_side" in mm:
+            logger.warning(
+                "[%s] multimodal.max_side 键已退役（R21 总像素口径改 max_pixels），"
+                "忽略 (model_id=%s)",
+                self.name,
+                model_id,
+            )
+        declared = mm.get("max_pixels")
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared <= 0:
+            return _DEFAULT_VISION_MAX_PIXELS
+        return declared
 
     async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]
         """执行 LLM 调用，返回原始结果。
@@ -863,7 +850,8 @@ class LLMCore(ICorePlugin):
         # 动态模型解析：每次 execute 从 state 读模型绑定快照（run 启动时
         # 解析结果）/ model_id / model_tier，并整体切换实例配置（优先级与
         # 在飞保护语义见 _apply_model_from_state）。
-        self._apply_runtime_config(ctx)
+        # 空回复重试上限同属本管道配置：解析成局部值贯穿本轮，不写实例字段。
+        max_empty_retries = self._resolve_max_empty_retries(ctx)
         pending_binding, migration, identity = self._apply_model_from_state(ctx.state)
 
         messages = self._build_messages(ctx.state)
@@ -898,6 +886,22 @@ class LLMCore(ICorePlugin):
             result_text = response.text
             tool_calls = response.tool_calls
             thinking_text = response.thinking_text
+
+            # 退化循环处置：守卫判定原地重复并截断。
+            # - 正文与工具调用双空 = 本轮零有效产出 → 直接终止（2026-11-07
+            #   事故：思考通道刷同一 emoji 13 分钟，截断后若当正常轮继续，
+            #   下一轮只会再退化一次）。
+            # - 有正文但无工具调用 → 标记 llm_repetition_detected，交任务域
+            #   收束（task_reminder 裁决 failed，不自动重试；会话管道保留
+            #   半截内容、本轮结束）。有工具调用的轮不标记——调用可能是
+            #   有效进展，交工具执行面与 duplicate_check 兜底。
+            repetition_detected = bool(response.stream_repetition and not tool_calls)
+            if repetition_detected and not (result_text or "").strip():
+                raise RuntimeError(
+                    "LLM 输出退化循环：生成内容在原地重复，已自动截断本次输出"
+                    "（正文与工具调用均为空，本轮无有效进展）；"
+                    "如需继续请调整任务指令后重新提交"
+                )
 
             # 空转熔断（无进展自动掐停）：连续 _LOOP_STREAK_LIMIT 轮相同正文
             # 且无工具调用 → 上抛（任务失败面带明确原因）。校验须在组装/落库
@@ -952,7 +956,14 @@ class LLMCore(ICorePlugin):
                 "llm_provider": identity.provider,
                 "llm_api_base": identity.api_base,
                 "llm_supports_vision": identity.supports_vision,
+                # 视觉输入不缩放总像素上限（R21 总像素口径；None=不支持视觉/
+                # 读取失败，不切分）：消费链 tool_args_inject → file_read →
+                # multimodal.split_image。
+                "llm_vision_max_pixels": identity.vision_max_pixels,
                 "output_truncated": output_truncated,
+                # 退化循环本轮标记（每轮覆盖写，防上轮 True 残留）：任务域
+                # 收束判据（task_reminder → task.status=failed，不自动重试）。
+                "llm_repetition_detected": repetition_detected,
                 # 空转计度持久键：随 result 落 state，下一轮 execute 读回续计
                 _LOOP_STREAK_KEY: loop_streak,
                 _LOOP_HASH_KEY: loop_fp,
@@ -965,7 +976,9 @@ class LLMCore(ICorePlugin):
                 result[_MODEL_BINDING_KEY] = pending_binding
             if migration is not None:
                 result[_MIGRATION_KEY] = migration
-            self._apply_empty_retry_policy(ctx, result, result_text, tool_calls)
+            self._apply_empty_retry_policy(
+                ctx, result, result_text, tool_calls, max_empty_retries
+            )
             # 每轮 token / 耗时统计（原 pipeline/output/track 插件，2026-09-15
             # 并入——本插件产出的 llm_usage 就是该统计的输入，同一步骤内累加
             # 免去跨插件边界重读 state；见 ADR 2026-09-15-track-merged-into-llm-core）。
@@ -994,7 +1007,7 @@ class LLMCore(ICorePlugin):
             raise
 
     def _build_usage(
-        self, response: LLMResponse, identity: ModelIdentity
+        self, response: LLMResponse, identity: ModelIntent
     ) -> dict[str, Any] | None:
         """从响应构造用量轨迹字典（无用量时返回 None）。
 
@@ -1019,7 +1032,7 @@ class LLMCore(ICorePlugin):
         ctx: PluginContext,
         response: LLMResponse,
         streaming: bool,
-        identity: ModelIdentity,
+        identity: ModelIntent,
     ) -> None:
         """落成功调用日志（INFO 摘要 + DEBUG 全文与 tool_call 诊断）。"""
         result_text = response.text
@@ -1126,6 +1139,7 @@ class LLMCore(ICorePlugin):
         result: dict[str, Any],
         result_text: str | None,
         tool_calls: list[dict[str, Any]],
+        max_empty_retries: int,
     ) -> None:
         """按空回复重试策略回填计数与续跑标志（就地修改 result）。
 
@@ -1136,6 +1150,9 @@ class LLMCore(ICorePlugin):
         llm_empty_exhausted 交 output 步骤裁决任务终态（直接失败）。
         有产出即复位计数并清续跑标志（防残留标志把后续纯文本轮误路由回
         LLM 造成死循环，与 task_reminder 次级证据放行同键语义）。
+
+        Args:
+            max_empty_retries: 本轮管道的重试上限（execute 入口解析的局部值）
         """
         is_empty = not (result_text or "").strip() and not tool_calls
         if not is_empty:
@@ -1146,7 +1163,7 @@ class LLMCore(ICorePlugin):
         streak = int(ctx.state.get("llm_empty_streak", 0) or 0) + 1
         result["llm_empty_streak"] = streak
         pipeline_id = ctx.state.get("pipeline_id", "?")
-        if streak > self._max_empty_retries:
+        if streak > max_empty_retries:
             result["llm_empty_exhausted"] = True
             result["_has_new_llm_input"] = False
             logger.warning(
@@ -1161,7 +1178,7 @@ class LLMCore(ICorePlugin):
                 "[%s] 空回复（无文本无工具调用），第 %d/%d 次重试 pipeline=%s",
                 self.name,
                 streak,
-                self._max_empty_retries,
+                max_empty_retries,
                 pipeline_id,
             )
 
@@ -1198,7 +1215,7 @@ class LLMCore(ICorePlugin):
         *,
         status: str,
         error_info: dict[str, Any] | None = None,
-        identity: ModelIdentity,
+        identity: ModelIntent,
     ) -> dict[str, Any]:
         """流中断/取消 → 半截 assistant 消息落库（``status: error|interrupted``）。
 
@@ -1543,20 +1560,23 @@ class LLMCore(ICorePlugin):
         ctx: PluginContext,
         *,
         stream: bool = False,
-        identity: ModelIdentity,
+        identity: ModelIntent,
     ) -> LLMResponse | PartialStreamOutcome:
-        """经 llm_service（llm.complete_stream）调用 LLM。
+        """经适配服务面（进程内）→ 网关（llm.complete_stream）调用 LLM。
 
-        LLM 面唯一事实源 = llm_service：经内核 tool-executor 能力跨进程调用
-        （调用形态与 approval/hindsight 一致）。返回值是聚合响应 dict（与
-        adapter 的 LLMResponse 同构）；``partial`` 字段非 None（流中断/取消）
-        时组装半截结果（``PartialStreamOutcome``），由 execute 直接落库。
+        拓扑（批 5 生产改接，主方案 §6.0）：本管道面经同进程
+        ``llm_adapter.execute(route="gateway")`` 发起——网关信封组装与等待
+        上限在适配面（角色二），本处只给意图（model id）、冻结参数与上下文。
+        返回值与 ``llm.complete_stream`` 同构；``partial`` 字段非 None
+        （流中断/取消）时组装半截结果（``PartialStreamOutcome``），由 execute
+        直接落库。
 
         Args:
             messages: 对话消息列表
-            ctx: 插件执行上下文，用于读取 tool_schemas
+            ctx: 插件执行上下文，用于读取 tool_schemas / 思考参数 / 路由键
             stream: 是否使用流式模式（llm.complete_stream 恒流式，此参数
                 保留调用面不变，透传场景由 llm_service 统一处理）
+            identity: 本次调用的模型意图视图（模型身份随 state 走）
 
         Returns:
             成功：LLMResponse；流中断/取消：PartialStreamOutcome
@@ -1587,40 +1607,31 @@ class LLMCore(ICorePlugin):
                 preview = repr(str(content)[:80]) if content else ""
                 logger.debug("%s content_len=%d preview=%s", prefix, len(str(content)), preview)
 
-        # 服务调用参数：model 用 yaml key（model_id）做 deployment 匹配，
-        # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。
-        # _model_id 为空（旧 config）时回退到 _model，保持兼容。
+        # 网关调用参数 = 意图（model id，做 deployment 匹配——model_name 重名时
+        # 官方与 apigo 同底模也能路由到正确 provider）+ 冻结参数 + 预算键。
         # 消息标准化（结构/配对/MiniMax）在 llm_service 侧统一执行
-        # （llm.complete_stream 入口唯一关卡），本插件不再做调用方预处理。
+        # （llm.complete_stream 入口唯一关卡），本插件不做调用方预处理；
+        # 端点/凭据/方言不在本面（连接解析单源归网关）。
         # 身份一律读本次调用快照：实例字段会被并发 execute 的重绑在 await
         # 前后踩踏（线程交错窗口），读了就把请求发给并发方的模型。
-        kwargs: dict[str, Any] = {
-            "model": identity.model_id or identity.model,
-            "messages": messages,
-            **identity.default_params,
-        }
-
-        # agent 层级优先级透传：本进程（llm_core）的 contextvar 不跨进程共享，
-        # llm_service 的 KeyPool 优先级排队读的是它自己的 contextvar——经
-        # kwargs 显式接收落位（llm_service complete_stream 侧配套）。
-        kwargs["agent_level"] = ctx.state.get("agent_level", "L3")
+        params: dict[str, Any] = dict(identity.default_params)
 
         # 流式超时配置透传（llm.yaml defaults/models.<id> 键，键名与配置一致，
-        # llm_service 侧 _normalize_timeout_keys 归一为 adapter 内部键）。
+        # 网关侧 _normalize_timeout_keys 归一为 adapter 内部键）。
         # first_token_timeout 退役不上送（2026-11-04 用户裁定：吐字间隔超时
         # 含首 token，首块预算与吐字间隔同源，独立的更短首 token 预算失真）。
         # stream_idle_timeout：None（旧绑定快照/配置缺省）不携带——adapter 落
         # 自身默认。
         if identity.stream_idle_timeout is not None:
-            kwargs["stream_idle_timeout"] = identity.stream_idle_timeout
+            params["stream_idle_timeout"] = identity.stream_idle_timeout
 
-        # 思考参数覆盖：state.thinking_strength = 参数组 JSON 串（选项即配置
-        # 参数组，选中即透传）；解析+白名单过滤后与 default_params 合并，
-        # 空/非法不覆盖。
+        # 思考参数覆盖：state.thinking_strength = 管道持久选择（参数组 JSON 串，
+        # persistent_fields 声明）；解析+白名单过滤后与 default_params 合并，
+        # 空/非法不覆盖（重跑帧不带参，恢复合并已把上次选择带入 state）。
         thinking_strength = str(ctx.state.get("thinking_strength") or "")
         strength_params = resolve_thinking_params(thinking_strength)
         if strength_params:
-            kwargs.update(strength_params)
+            params.update(strength_params)
             logger.info(
                 "[%s] thinking_strength=%s → params=%s",
                 self.name,
@@ -1628,6 +1639,9 @@ class LLMCore(ICorePlugin):
                 strength_params,
             )
 
+        # tools 面（网关 tools 形参接收工具 schema；内核 inject_tool_schemas 已按
+        # agent tool_ids 注入 state.tool_schemas）。空面不携带该键——适配面
+        # 组装信封时按 None 省略，避免伪声明空工具面。
         tool_schemas = ctx.state.get("tool_schemas", [])
         if tool_schemas:
             logger.info(
@@ -1636,11 +1650,6 @@ class LLMCore(ICorePlugin):
                 len(tool_schemas),
                 ", ".join(t.get("function", {}).get("name", "?") for t in tool_schemas),
             )
-            # tools 透传：llm.complete_stream 的 tools 形参接收工具 schema，litellm
-            # 据此发 function calling 请求（内核 inject_tool_schemas 已按 agent
-            # tool_ids 注入 state.tool_schemas）。空面不携带该键——形参默认 None，
-            # 也不触发 capability input_schema 对 tools 的 array 校验。
-            kwargs["tools"] = tool_schemas
         else:
             # 空面出站观测（BUG-17）：工具面注入缺失（tool_schema 步骤断链/
             # 漂移清零）时本轮请求无 tools，模型会凭历史降级为正文输出原生
@@ -1668,55 +1677,30 @@ class LLMCore(ICorePlugin):
                 "（server.py on_load 应调用 set_capability_caller）"
             )
 
-        # run_id 取消感知锚：内核注入的 state.run_id 透传给 llm_service 启用
-        # 停止感知——契约全管道同一份（主会话/任务/子任务管道无域别，差别只在
-        # state 内容），用户停止（dispatch_stop → run Suspended）对所有管道
-        # 同等生效：流式协作中断 → partial 落库 → run 终态 Cancelled。
-        run_id = ctx.state.get("run_id", "") or ""
-        if run_id:
-            kwargs["run_id"] = run_id
-
-        # 调用 llm.complete_stream：流式事件经 llm_service 内部 event-bus
-        # 推送，返回 dict 携带完整聚合响应；partial 非 None 表示流中断/取消。
-        # plugin_id 显式点名 llm_service（capability 声明在 services 轴，不依赖
-        # LLM 工具注册表反查）。
-        # 流式事件路由键（_call_context）：llm_service 侧 _resolve_envelope 只读
-        # arguments["_call_context"]；内核 tool-executor 把 params 级 _call_context
-        # 合入 args（args 级同名字段按内建键剥离——防伪造），故必须放 params 顶层。
-        # 键与 tool_core 的读取面一致（state["session_id"]/["thread_id"]/
-        # ["pipeline_id"]/["message_id"]——引擎每轮注入本轮 a_ 消息 id）。
-        params = {
-            "tool_name": "llm.complete_stream",
-            "plugin_id": "llm_service",
-            "args": kwargs,
-            "_call_context": {
-                "thread_id": ctx.state.get("session_id")
-                or ctx.state.get("thread_id", "")
-                or "",
-                "pipeline_id": ctx.state.get("pipeline_id", "") or "",
-                "message_id": ctx.state.get("message_id", "") or "",
-            },
-        }
-        envelope = await caller(
-            "invoke", params, self._capability_timeout(identity.model_id or identity.model)
+        # 网关调用上下文（适配面组装 _call_context / agent_level / run_id）：
+        # - agent_level：本进程 contextvar 不跨进程共享，网关 KeyPool 优先级
+        #   排队读它自己的（显式接收落位）；
+        # - run_id：取消感知锚（dispatch_stop → run Suspended → partial 落库 →
+        #   run 终态 Cancelled），全管道同一份契约；
+        # - 流式事件路由键：与 tool_core 的读取面一致（state["session_id"]/
+        #   ["thread_id"]/["pipeline_id"]/["message_id"]——引擎每轮注入本轮
+        #   a_ 消息 id）。
+        gateway_context = llm_adapter.GatewayContext(
+            agent_level=ctx.state.get("agent_level", "L3"),
+            run_id=ctx.state.get("run_id", "") or "",
+            thread_id=ctx.state.get("session_id") or ctx.state.get("thread_id", "") or "",
+            pipeline_id=ctx.state.get("pipeline_id", "") or "",
+            message_id=ctx.state.get("message_id", "") or "",
         )
-        # tool-executor.invoke 返回 {success, data, error} 信封（内核 ToolResult
-        # 序列化）：success=false（工具未注册/执行失败）是错误不是空响应，
-        # fail-closed 抛出携带 error——否则盲取字段把失败伪装成"text 空的成功"。
-        if not isinstance(envelope, dict):
-            raise RuntimeError(
-                f"llm.complete_stream 信封形状异常: {type(envelope).__name__}"
-            )
-        if not envelope.get("success"):
-            raise RuntimeError(
-                f"llm.complete_stream 工具执行失败: "
-                f"{_strip_transport_noise(envelope.get('error') or envelope)}"
-            )
-        result = envelope.get("data")
-        if not isinstance(result, dict):
-            raise RuntimeError(
-                f"llm.complete_stream 返回形状异常: {type(result).__name__}"
-            )
+        result = await llm_adapter.execute(
+            identity.model_id,
+            messages,
+            tools=tool_schemas or None,
+            params=params,
+            route=llm_adapter.ROUTE_GATEWAY,
+            gateway=caller,
+            gateway_context=gateway_context,
+        )
 
         partial = result.get("partial")
         if partial is not None:
@@ -1735,4 +1719,7 @@ class LLMCore(ICorePlugin):
             thinking_text=result.get("thinking_text"),
             usage=result.get("usage") or None,
             finish_reason=result.get("finish_reason"),
+            # 退化循环截断标记（llm_service 共享翻译器判定）——execute 据此
+            # 判退化轮终态，不读此字段则截断对上层不可见（2026-11-07 事故）。
+            stream_repetition=bool(result.get("stream_repetition", False)),
         )

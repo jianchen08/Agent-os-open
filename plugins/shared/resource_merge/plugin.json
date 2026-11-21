@@ -5,7 +5,7 @@
   ],
   "name": "Resource Merge Tool",
   "description": "基于 git worktree 的资源合并与回滚 MCP 工具",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",

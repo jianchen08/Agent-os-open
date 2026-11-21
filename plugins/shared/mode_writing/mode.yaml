@@ -1,6 +1,6 @@
 # 写作模式声明面 mode.yaml（2026-09-28 升格自 profile.yaml；设计真值 docs/working/模式包工作模式设计_20260928.md D3。B 部类物料：由用户维护；出厂种子随 mode_writing 插件内打包，
 # 经 mode.get_profile 服务透出；suite 路径相对项目根）
-# 链路对标 NovelAI/Sudowrite 范式：续写/扩写/改写动作 + 章节验收（semantic_check）
+# 链路对标 NovelAI/Sudowrite 范式：续写/扩写/改写动作 + 章节验收（一致性/文风/终审三审代理）
 mode: writing
 name: 写作模式
 # description = 主 agent 唯一域路由知识（批 F3 接管口径：什么任务归我/直派谁/编排链要点；措辞定版 = 渲染缓存前缀稳定）

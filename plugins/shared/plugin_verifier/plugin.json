@@ -1,0 +1,123 @@
+{
+  "id": "plugin_verifier",
+  "name": "Plugin Verifier",
+  "description": "宿主侧插件验证工具（plugin_verify）：固定脚本 + SHA-256 pin + scratch 内核三隔离装载断言，可选真前端 Playwright 截图；只接受工作空间相对插件路径，超时杀整棵进程树，证据/口令脱敏。",
+  "version": "1.0.1",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "plugin_verify",
+        "isolation_capable": true,
+        "timeout_ms": 660000,
+        "description": "验证当前工作空间内的插件：起一个 scratch 内核实例（端口/DB/用户空间三隔离，不碰现役内核）装载插件，断言工具面与 schema，可选真前端 Playwright 截图。改动插件后调用；plugin_path 用工作空间相对路径。返回逐项 checks、证据 JSON 路径与截图路径；失败时 error 给出原因。",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "plugin_path": {
+              "type": "string",
+              "description": "插件目录（当前工作空间相对路径，如 plugins/shared/my_plugin）；不接受绝对路径或 .."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "backend",
+                "frontend"
+              ],
+              "default": "backend",
+              "description": "backend=scratch 内核装载 + 工具面/schema 断言；frontend=再跑真前端 Playwright 截图（慢，UI 改动时用）"
+            },
+            "timeout_s": {
+              "type": "integer",
+              "default": 240,
+              "minimum": 60,
+              "maximum": 600,
+              "description": "整体超时秒数（超时杀整棵验证进程树）；后端一般 60-120，前端建议 240+"
+            }
+          },
+          "required": [
+            "plugin_path"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "completed",
+                "failed",
+                "timeout",
+                "error"
+              ]
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "all_pass": {
+              "type": "boolean"
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "pass": {
+                    "type": "boolean"
+                  },
+                  "detail": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "screenshots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "evidence_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "success",
+            "status",
+            "plugin_id",
+            "scope",
+            "all_pass"
+          ]
+        },
+        "category": "system",
+        "render": {
+          "card": "generic"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  }
+}

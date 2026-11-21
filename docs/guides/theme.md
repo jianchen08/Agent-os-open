@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-theme
+type: standard
+status: active
+---
+
 # 主题规则（Theme）
 
 > 返回 [开发指南索引](README.md)。横切协议规则（供注入遵守）：主题与皮肤的权威契约。

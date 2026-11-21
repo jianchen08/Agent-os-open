@@ -61,6 +61,9 @@ _BINARY_SCAN_BYTES = 4 * 1024 * 1024
 # rg 同款默认 .git）：依赖与构建产物树单层精确剪枝（repo_walk_prune 只覆盖
 # 仓根一级）拦不住嵌套形态——.zctmp/.wt-* 内的 npm 依赖循环链可达数十万
 # 目录，实测本仓仓根无此剪枝 380s 走不到 docs/，有此剪枝 1.5s 命中。
+# 缓存/运行时垃圾族（.mypy_cache/.task_runtime 等，同 gitignore 口径）不剪
+# 的实测代价：text 搜索仓根起扫要先开读 ~23 万垃圾文件才到 plugins/
+# （2026-11-18 fa76afdbbe07 空结果归因），60s 墙钟预算耗尽 → 关键词恒不可达。
 _WALK_SKIP_DIR_NAMES = frozenset(
     {
         "node_modules",
@@ -71,8 +74,15 @@ _WALK_SKIP_DIR_NAMES = frozenset(
         ".zctmp",
         "__pycache__",
         "target",
+        "target-clippy-lint",
         "dist",
         "dist-electron",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".task_runtime",
+        ".test_kernel",
+        "user_root",
     }
 )
 _WALK_SKIP_DIR_NAMES_NORMED = frozenset(
@@ -126,9 +136,10 @@ async def enhanced_search(
 
     遍历按 basename 全深度跳过 node_modules/.git/target 等依赖与构建产物
     目录（rg 同款默认；直接以这些目录为 path 起搜仍可进入）。
-    """
-    import fnmatch
 
+    整树扫描体提取为同步函数 :func:`_scan_tree_sync` 整体下放线程池
+    （os.walk 深扫秒级起步——2026-11-16 方案文档 P0 配方），行为零变化。
+    """
     flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(query if use_regex else re.escape(query), flags)
 
@@ -142,9 +153,8 @@ async def enhanced_search(
     if not allowed or resolved is None:
         return ToolResult.failure_result(reason)
     search_path = Path(resolved)
-    if not search_path.exists():
+    if not await asyncio.to_thread(search_path.exists):
         return ToolResult.failure_result(f"Path not found: {path}")
-    truncated_reason = ""
     # 仓库根内遍历剪枝：搜索根本身是仓库根时会顺路走运行时/产物目录
     # （data/config/logs/.ai_workspaces/.git/.venv 等），walk 循环剔除；
     # 根在仓库外（普通工作区）时为空集零开销。延迟导入避免与 fs_tools
@@ -153,107 +163,18 @@ async def enhanced_search(
 
     prune = repo_anchor.repo_walk_prune(search_path)
 
-    results: list[dict[str, Any]] = []
-
-    def _search_sync() -> None:
-        nonlocal truncated_reason
-        # 支持单文件路径：os.walk 对「文件」路径产出空迭代（它只遍历目录条目），
-        # 导致指向具体文件时结果恒为空。这里显式把单文件构造成一次遍历，复用下方
-        # 既有匹配逻辑（file_path = Path(root) / fname 会还原成该文件路径）。
-        if search_path.is_file():
-            walk_iter: Any = [(search_path.parent, [], [search_path.name])]
-        else:
-            walk_iter = os_walk_depth(search_path, max_depth)
-        deadline = time.monotonic() + timeout_seconds
-        for root, dirs, files in walk_iter:
-            if time.monotonic() > deadline:
-                # 墙钟预算（D6 同源护栏）：daemon 高压/超大树下限时不无限走，
-                # 返回已达成的部分结果并如实标注截断。
-                nonlocal truncated_reason
-                truncated_reason = f"遍历超时（>{timeout_seconds:.0f}s），结果可能不完整"
-                return
-            dirs[:] = _walk_prune_dirs(root, dirs, prune)
-            if search_type == "filename":
-                for fname in files:
-                    if not fnmatch.fnmatch(fname, file_pattern):
-                        continue
-                    # 先匹配后敏感判定（纯换序，输出等价）：匹配是纯内存操作，
-                    # 敏感判定每文件一次 resolve 系统调用——十万级文件树下
-                    # 先判定会把整树遍历从秒级拖到近墙钟预算。
-                    if not pattern.search(fname):
-                        continue
-                    # 凭据类文件不进结果（遍历场景跳过而非整体失败：walk 会
-                    # 顺路碰到 .env，跳过才符合"搜索不回传凭据"）
-                    if _sensitive_file_reason((Path(root) / fname).resolve()) is not None:
-                        continue
-                    results.append(
-                        {
-                            "file_path": str(Path(root) / fname),
-                            "line_number": 0,
-                            "content": fname,
-                            "context_before": [],
-                            "context_after": [],
-                        }
-                    )
-                    if len(results) >= max_results:
-                        return
-            else:
-                for fname in files:
-                    if not fnmatch.fnmatch(fname, file_pattern):
-                        continue
-                    file_path = Path(root) / fname
-                    if _sensitive_file_reason(file_path.resolve()) is not None:
-                        continue
-                    # 二进制闸（git 同款 NUL 探测）：二进制不展开内容——此前
-                    # errors="replace" 把二进制吞成替换字符垃圾随命中行回传，
-                    # 单个文件即可撑出 MB 级结果。命中只报路径与体量，细节由
-                    # agent 决定是否 file_read（2026-09-14 用户裁定）。
-                    try:
-                        with file_path.open("rb") as fh:
-                            is_binary = b"\x00" in fh.read(_BINARY_SNIFF_BYTES)
-                    except OSError:
-                        continue
-                    if is_binary:
-                        if _binary_contains(file_path, pattern):
-                            results.append(
-                                {
-                                    "file_path": str(file_path),
-                                    "line_number": 0,
-                                    "content": (
-                                        f"[二进制文件命中，{file_path.stat().st_size} 字节，"
-                                        "内容不展开——需要细节请用 file_read 读取]"
-                                    ),
-                                    "context_before": [],
-                                    "context_after": [],
-                                }
-                            )
-                            if len(results) >= max_results:
-                                return
-                        continue
-                    try:
-                        content = file_path.read_text("utf-8", errors="replace")
-                    except OSError:
-                        continue
-                    lines = content.split("\n")
-                    for i, line in enumerate(lines):
-                        if pattern.search(line):
-                            ctx_start = max(0, i - context_lines)
-                            ctx_end = min(len(lines), i + context_lines + 1)
-                            results.append(
-                                {
-                                    "file_path": str(file_path),
-                                    "line_number": i + 1,
-                                    "content": line,
-                                    "context_before": lines[ctx_start:i],
-                                    "context_after": lines[i + 1 : ctx_end],
-                                }
-                            )
-                            if len(results) >= max_results:
-                                return
-                    if len(results) >= max_results:
-                        return
-
-    await asyncio.to_thread(_search_sync)
+    results, truncated_reason = await asyncio.to_thread(
+        _scan_tree_sync,
+        search_path,
+        max_depth,
+        prune,
+        pattern,
+        search_type,
+        file_pattern,
+        context_lines,
+        max_results,
+        timeout_seconds,
+    )
 
     return ToolResult.success_result(
         {"results": results},
@@ -261,6 +182,123 @@ async def enhanced_search(
         truncated=len(results) >= max_results or bool(truncated_reason),
         message=truncated_reason or None,
     )
+
+
+def _scan_tree_sync(
+    search_path: Path,
+    max_depth: int,
+    prune: set[str],
+    pattern: re.Pattern[str],
+    search_type: str,
+    file_pattern: str,
+    context_lines: int,
+    max_results: int,
+    timeout_seconds: float,
+) -> tuple[list[dict[str, Any]], str]:
+    """整树扫描体（同步，由线程池承载）：walk + 匹配 + 敏感判定 + 墙钟预算。
+
+    从 enhanced_search 内嵌闭包原样提取（行为零变化）；返回
+    ``(results, truncated_reason)``（原 nonlocal 两面）。
+    """
+    import fnmatch
+
+    results: list[dict[str, Any]] = []
+    truncated_reason = ""
+    # 支持单文件路径：os.walk 对「文件」路径产出空迭代（它只遍历目录条目），
+    # 导致指向具体文件时结果恒为空。这里显式把单文件构造成一次遍历，复用下方
+    # 既有匹配逻辑（file_path = Path(root) / fname 会还原成该文件路径）。
+    if search_path.is_file():
+        walk_iter: Any = [(search_path.parent, [], [search_path.name])]
+    else:
+        walk_iter = os_walk_depth(search_path, max_depth)
+    deadline = time.monotonic() + timeout_seconds
+    for root, dirs, files in walk_iter:
+        if time.monotonic() > deadline:
+            # 墙钟预算（D6 同源护栏）：daemon 高压/超大树下限时不无限走，
+            # 返回已达成的部分结果并如实标注截断。
+            truncated_reason = f"遍历超时（>{timeout_seconds:.0f}s），结果可能不完整"
+            return results, truncated_reason
+        dirs[:] = _walk_prune_dirs(root, dirs, prune)
+        if search_type == "filename":
+            for fname in files:
+                if not fnmatch.fnmatch(fname, file_pattern):
+                    continue
+                # 先匹配后敏感判定（纯换序，输出等价）：匹配是纯内存操作，
+                # 敏感判定每文件一次 resolve 系统调用——十万级文件树下
+                # 先判定会把整树遍历从秒级拖到近墙钟预算。
+                if not pattern.search(fname):
+                    continue
+                # 凭据类文件不进结果（遍历场景跳过而非整体失败：walk 会
+                # 顺路碰到 .env，跳过才符合"搜索不回传凭据"）
+                if _sensitive_file_reason((Path(root) / fname).resolve()) is not None:
+                    continue
+                results.append(
+                    {
+                        "file_path": str(Path(root) / fname),
+                        "line_number": 0,
+                        "content": fname,
+                        "context_before": [],
+                        "context_after": [],
+                    }
+                )
+                if len(results) >= max_results:
+                    return results, truncated_reason
+        else:
+            for fname in files:
+                if not fnmatch.fnmatch(fname, file_pattern):
+                    continue
+                file_path = Path(root) / fname
+                if _sensitive_file_reason(file_path.resolve()) is not None:
+                    continue
+                # 二进制闸（git 同款 NUL 探测）：二进制不展开内容——此前
+                # errors="replace" 把二进制吞成替换字符垃圾随命中行回传，
+                # 单个文件即可撑出 MB 级结果。命中只报路径与体量，细节由
+                # agent 决定是否 file_read（2026-09-14 用户裁定）。
+                try:
+                    with file_path.open("rb") as fh:
+                        is_binary = b"\x00" in fh.read(_BINARY_SNIFF_BYTES)
+                except OSError:
+                    continue
+                if is_binary:
+                    if _binary_contains(file_path, pattern):
+                        results.append(
+                            {
+                                "file_path": str(file_path),
+                                "line_number": 0,
+                                "content": (
+                                    f"[二进制文件命中，{file_path.stat().st_size} 字节，"
+                                    "内容不展开——需要细节请用 file_read 读取]"
+                                ),
+                                "context_before": [],
+                                "context_after": [],
+                            }
+                        )
+                        if len(results) >= max_results:
+                            return results, truncated_reason
+                    continue
+                try:
+                    content = file_path.read_text("utf-8", errors="replace")
+                except OSError:
+                    continue
+                lines = content.split("\n")
+                for i, line in enumerate(lines):
+                    if pattern.search(line):
+                        ctx_start = max(0, i - context_lines)
+                        ctx_end = min(len(lines), i + context_lines + 1)
+                        results.append(
+                            {
+                                "file_path": str(file_path),
+                                "line_number": i + 1,
+                                "content": line,
+                                "context_before": lines[ctx_start:i],
+                                "context_after": lines[i + 1 : ctx_end],
+                            }
+                        )
+                        if len(results) >= max_results:
+                            return results, truncated_reason
+                if len(results) >= max_results:
+                    return results, truncated_reason
+    return results, truncated_reason
 
 
 def os_walk_depth(root: Path, max_depth: int):

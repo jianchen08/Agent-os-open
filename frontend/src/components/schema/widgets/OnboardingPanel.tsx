@@ -18,15 +18,15 @@ import { useWorkspaceTabs } from '@/hooks/useWorkspaceTabs'
 import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
 import {
-  consumeLlmWizardFocus,
-  subscribeLlmWizardFocus,
-} from '@/services/onboarding/llmWizardFocus'
-import {
   fetchOnboardingContent,
   fetchOnboardingProgress,
   postProgressUpdate,
 } from '@/services/onboarding/content'
 import { evaluateCondition, collectApiChecks } from '@/services/onboarding/evaluator'
+import {
+  consumeLlmWizardFocus,
+  subscribeLlmWizardFocus,
+} from '@/services/onboarding/llmWizardFocus'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { openWorkspacePanelByPath, TOP_NAV_PANELS } from '@/services/workspacePanelOpener'
 import { LlmSetupWizard } from './onboarding/LlmSetupWizard'

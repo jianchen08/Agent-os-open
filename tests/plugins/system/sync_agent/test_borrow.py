@@ -325,13 +325,13 @@ def test_borrow_routes_hub_target_to_relay_endpoint(
                     path="/ext/sync_agent/borrow",
                     method="POST",
                     raw_body=json.dumps(
-                        {"target_base": "http://162.14.69.153", "target_is_hub": True}
+                        {"target_base": "http://203.0.113.153", "target_is_hub": True}
                     ),
                 )
             )
         )
         assert resp["status"] == 200
-        assert calls == ["http://162.14.69.153/ext/sync_relay/borrow_auth"]
+        assert calls == ["http://203.0.113.153/ext/sync_relay/borrow_auth"]
 
 
 def test_borrow_passthrough_upstream_rejection_and_network_failure(

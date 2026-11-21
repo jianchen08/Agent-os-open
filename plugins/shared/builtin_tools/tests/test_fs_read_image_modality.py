@@ -137,3 +137,180 @@ class TestHeadReadIoFailure:
         assert result.success is False
         assert "Read error" in result.error
         assert "device stuck" in result.error
+
+
+class TestImageSplitInjection:
+    """R20 定稿：原图+分块一次注入（规格经服务端注入，非 LLM 可见参数）。
+
+    无规格（max_pixels 缺省/非法）→ 原样单图契约且切分服务零调用（向后兼容，
+    行为与 R14 既往逐键一致）；有规格 → 调 multimodal.split_image，tiled 时
+    原图 base64_data 保持 + 分块 images[]（tool_core 注图随原图片）+ 切分标注
+    content；服务降级（异常/ error 键）→ 原样单图（warn 留痕）。
+    """
+
+    @staticmethod
+    def _stub_tiled_caller(
+        monkeypatch: pytest.MonkeyPatch, tiled: bool = True, error: str | None = None
+    ) -> list[tuple[str, str, int]]:
+        from agentos_builtin_tools import fs_tools
+
+        calls: list[tuple[str, str, int]] = []
+
+        async def _caller(base64_data: str, mime_type: str, max_pixels: int) -> dict[str, object]:
+            calls.append((base64_data, mime_type, max_pixels))
+            if error is not None:
+                return {"error": error, "tiled": False}
+            if not tiled:
+                return {"tiled": False, "tiles": []}
+            return {
+                "tiled": True,
+                "width": 2000,
+                "height": 1000,
+                "grid": {"rows": 1, "cols": 2},
+                "tiles": [
+                    {
+                        "base64_data": "dGl6MA==",
+                        "mime_type": "image/png",
+                        "width": 1000,
+                        "height": 1000,
+                        "row": 1,
+                        "col": 1,
+                        "x0": 0,
+                        "y0": 0,
+                        "x1": 1000,
+                        "y1": 1000,
+                    },
+                    {
+                        "base64_data": "dGl6MQ==",
+                        "mime_type": "image/png",
+                        "width": 1000,
+                        "height": 1000,
+                        "row": 1,
+                        "col": 2,
+                        "x0": 1000,
+                        "y0": 0,
+                        "x1": 2000,
+                        "y1": 1000,
+                    },
+                ],
+                "annotation": "[图像切分] 原图 2000×1000 … 块(行1,列1) 覆盖 x=0..1000",
+            }
+
+        fs_tools.set_split_image_caller(_caller)
+        monkeypatch.setattr(fs_tools, "set_split_image_caller", fs_tools.set_split_image_caller)
+        return calls
+
+    @pytest.fixture(autouse=True)
+    def _reset_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agentos_builtin_tools import fs_tools
+
+        monkeypatch.setattr(fs_tools, "_split_image_caller", None)
+
+    async def test_tiled_injects_original_plus_tiles_with_annotation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = _PNG_MAGIC + b"\x00\x01image-body"
+        f = tmp_path / "poster.png"
+        f.write_bytes(raw)
+        calls = self._stub_tiled_caller(monkeypatch)
+
+        result = await file_read(
+            path=str(f), workspace=str(tmp_path), llm_vision_max_pixels=1048576
+        )
+        assert result.success, result.error
+        out = result.output
+        # 原图契约键原样保持（前端卡片 + tool_core 注图首图数据源）
+        assert base64.b64decode(out["base64_data"]) == raw
+        assert out["mime_type"] == "image/png"
+        assert Path(out["path"]) == f.resolve()
+        assert out["size"] == len(raw)
+        # 分块面：tool_core images[].base64 契约键映射（tile base64_data → base64）
+        assert [img["base64"] for img in out["images"]] == ["dGl6MA==", "dGl6MQ=="]
+        assert all(img["mime_type"] == "image/png" for img in out["images"])
+        assert all(img["path"] == out["path"] for img in out["images"])
+        assert out["image_grid"] == {"rows": 1, "cols": 2}
+        assert out["tile_count"] == 2
+        # 切分标注走 content 文本直通通道（serialize_for_content verbatim）
+        assert "块(行1,列1)" in out["content"]
+        # 服务调用参数：原图 base64 + mime + 注入规格
+        assert calls == [(out["base64_data"], "image/png", 1048576)]
+
+    async def test_within_spec_returns_exact_original_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = _PNG_MAGIC + b"tiny"
+        f = tmp_path / "small.png"
+        f.write_bytes(raw)
+        calls = self._stub_tiled_caller(monkeypatch, tiled=False)
+
+        result = await file_read(
+            path=str(f), workspace=str(tmp_path), llm_vision_max_pixels=1048576
+        )
+        assert result.success
+        out = result.output
+        assert set(out) == {"path", "mime_type", "base64_data", "size"}, "未切分=原样契约"
+        assert base64.b64decode(out["base64_data"]) == raw
+        assert len(calls) == 1, "服务被调用但 tiled=false → 原样返回"
+
+    async def test_no_spec_skips_split_service(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """无规格（未注入/非视觉模型常态）→ 原样契约，切分服务零调用。"""
+        raw = _PNG_MAGIC + b"body"
+        f = tmp_path / "pic.png"
+        f.write_bytes(raw)
+        calls = self._stub_tiled_caller(monkeypatch)
+
+        result = await file_read(path=str(f), workspace=str(tmp_path))
+        assert result.success
+        assert set(result.output) == {"path", "mime_type", "base64_data", "size"}
+        assert calls == [], "无规格不得触达切分服务"
+
+    @pytest.mark.parametrize("bad", [0, -3, "1568", True])
+    async def test_invalid_spec_treated_as_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: object
+    ) -> None:
+        raw = _PNG_MAGIC + b"body"
+        f = tmp_path / "pic.png"
+        f.write_bytes(raw)
+        calls = self._stub_tiled_caller(monkeypatch)
+
+        result = await file_read(
+            path=str(f), workspace=str(tmp_path), llm_vision_max_pixels=bad  # type: ignore[arg-type]
+        )
+        assert result.success
+        assert set(result.output) == {"path", "mime_type", "base64_data", "size"}
+        assert calls == []
+
+    async def test_service_error_falls_back_to_original(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = _PNG_MAGIC + b"body"
+        f = tmp_path / "pic.png"
+        f.write_bytes(raw)
+        self._stub_tiled_caller(monkeypatch, error="图像解码失败（PIL）")
+
+        result = await file_read(
+            path=str(f), workspace=str(tmp_path), llm_vision_max_pixels=1048576
+        )
+        assert result.success, "切分失败不得拖垮读图主功能"
+        assert set(result.output) == {"path", "mime_type", "base64_data", "size"}
+
+    async def test_service_unavailable_falls_back_to_original(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = _PNG_MAGIC + b"body"
+        f = tmp_path / "pic.png"
+        f.write_bytes(raw)
+        from agentos_builtin_tools import fs_tools
+
+        async def _boom(b64: str, mime: str, max_pixels: int) -> dict[str, object]:
+            raise RuntimeError("capability not connected")
+
+        fs_tools.set_split_image_caller(_boom)
+
+        result = await file_read(
+            path=str(f), workspace=str(tmp_path), llm_vision_max_pixels=1048576
+        )
+        assert result.success, "服务不可用不得拖垮读图主功能"
+        assert set(result.output) == {"path", "mime_type", "base64_data", "size"}

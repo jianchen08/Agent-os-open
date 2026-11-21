@@ -10,7 +10,7 @@
  * mock 约定沿用 PipelineManagerWidget.test.tsx：runs/states/全量任务三个
  * query hook 播种数据。
  */
-import { screen } from '@testing-library/react'
+import { act, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -150,5 +150,24 @@ describe('PipelineManagerWidget focusTaskId 任务定位', () => {
     const marked = locatedRow('pipe-child')
     expect(marked).not.toBeNull()
     expect(marked!.getAttribute('data-located')).toBe('true')
+  })
+
+  it('定位行滚动跟随：rAF 下一帧对命中行 scrollIntoView（block=center）', async () => {
+    const scrollSpy = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(function scrollIntoView() {})
+    try {
+      renderWidget('task-x')
+      await screen.findByText('被定位任务')
+      // 定位效应的 requestAnimationFrame 下一帧执行行内滚动定位
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(scrollSpy).toHaveBeenCalledWith({ block: 'center' })
+      // 只滚动定位命中的那一行（遍历以 data-entry-key 命中即 break）
+      expect(scrollSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      scrollSpy.mockRestore()
+    }
   })
 })

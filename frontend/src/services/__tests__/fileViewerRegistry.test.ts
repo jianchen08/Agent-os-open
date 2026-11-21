@@ -101,7 +101,9 @@ describe('fileViewerRegistry 路由', () => {
     const resolved = resolveFileViewer('part.bin', 'Application/ACAD')
     expect(resolved.viewer.id).toBe('dwg_viewer')
     // 无 mime 时不参与匹配
-    expect(resolveFileViewer('part.bin').viewer.render.widget).toBe('code_editor')
+    // .bin 本轮声明为 binary_viewer 兜底（不再落文本编辑器吐乱码）；未声明扩展名仍走默认文本编辑器
+    expect(resolveFileViewer('part.bin').viewer.render.widget).toBe('binary_notice')
+    expect(resolveFileViewer('part.unknown').viewer.render.widget).toBe('code_editor')
     warnSpy.mockRestore()
   })
 
@@ -155,17 +157,63 @@ describe('内置声明表行为等价（退役 fileEditors.ts 的删值实验锚
   it('旧 fileTypeMap 显式映射的代表扩展名 → 同一渲染组件', () => {
     const cases: Array<[string, string]> = [
       ['a.txt', 'code_editor'],
-      ['a.md', 'code_editor'],
+      // 本轮有意变更：.md → markdown 预览（渲染态，源码可在查看器内切）
+      ['a.md', 'markdown_preview'],
       ['a.json', 'code_editor'],
       ['a.yaml', 'code_editor'],
-      ['a.svg', 'code_editor'],
+      // 本轮有意变更：.svg → 图片查看器（矢量浏览器原生可渲染）
+      ['a.svg', 'image_preview'],
       ['a.png', 'image_preview'],
       ['a.jpg', 'image_preview'],
       ['a.bmp', 'image_preview'],
       ['a.html', 'html_preview'],
+      ['a.mp4', 'media_preview'],
+      ['a.mp3', 'media_preview'],
+      ['a.zip', 'binary_notice'],
+      ['a.exe', 'binary_notice'],
     ]
     for (const [name, widget] of cases) {
       expect(resolveFileViewer(name).viewer.render.widget).toBe(widget)
     }
+  })
+})
+
+describe('内置声明表：Excel（excel_viewer，选型接入新增）', () => {
+  beforeEach(() => {
+    loadFileViewers([])
+  })
+
+  it('xlsx/xlsm/xls 命中 excel_preview（builtin 来源，大小写不敏感）', () => {
+    for (const name of ['a.xlsx', 'b.XLSX', 'c.xlsm', 'd.xls']) {
+      const resolved = resolveFileViewer(name)
+      expect(resolved.viewer.render.widget).toBe('excel_preview')
+      expect(resolved.source).toBe('builtin')
+    }
+  })
+
+  it('近似扩展名不误伤：.xlsb 未声明走默认文本编辑器，复合扩展名按尾段判定', () => {
+    expect(resolveFileViewer('a.xlsb').viewer.render.widget).toBe('code_editor')
+    expect(resolveFileViewer('a.xlsx.txt').viewer.render.widget).toBe('code_editor')
+  })
+})
+
+describe('内置声明表：既有类型路由命中补证（接入类型 × 路由全覆盖）', () => {
+  beforeEach(() => {
+    loadFileViewers([])
+  })
+
+  it('docx/pptx → document_viewer（可批注文档查看器）；pdf 仍优先命中 pdf_viewer', () => {
+    expect(resolveFileViewer('报告.docx').viewer.render.widget).toBe('document_viewer')
+    expect(resolveFileViewer('slides/演示.PPTX').viewer.render.widget).toBe('document_viewer')
+    // .pdf 在声明表中先被 pdf_viewer 命中（声明序语义，不得改动）
+    expect(resolveFileViewer('doc.pdf').viewer.render.widget).toBe('pdf_preview')
+  })
+
+  it('markdown 双扩展名与媒体全集合命中既有查看器', () => {
+    expect(resolveFileViewer('a.markdown').viewer.render.widget).toBe('markdown_preview')
+    for (const name of ['v.mp4', 'v.webm', 'a.mp3', 'a.flac']) {
+      expect(resolveFileViewer(name).viewer.render.widget).toBe('media_preview')
+    }
+    expect(resolveFileViewer('r.html').viewer.render.widget).toBe('html_preview')
   })
 })

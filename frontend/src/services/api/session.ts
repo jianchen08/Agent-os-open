@@ -7,7 +7,7 @@ import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
 import { checkIsSystemMessage } from '@/utils/messageType'
 import { requestWithRetry } from '@/utils/retry'
 import { truncateToolResultData } from '@/utils/toolResultTruncate'
-import type { MessagePart, ToolCallPart } from '@/types/messageParts'
+import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
 import type { Message, MessageToolCall, Session, ToolCallStatus } from '@/types/models'
 import type { RetryOptions } from '@/utils/retry'
 
@@ -223,8 +223,8 @@ function normalizeToolCallStatus(raw: unknown): ToolCallStatus {
 function normalizePersistedToolCalls(
   rawList: Array<Record<string, unknown>>,
 ): MessageToolCall[] {
-  return rawList.map((tc: any) => {
-    const fn = tc.function || {}
+  return rawList.map((tc) => {
+    const fn = (tc.function || {}) as { name?: unknown; arguments?: unknown }
     // OpenAI 规范的 arguments 是 JSON 字符串（持久化 rebuild 强制转字符串），
     // 解析回对象——与流式路径的 args（事件 payload 对象）结构一致。
     // 解析失败（截断/损坏数据）保留原值降级，不中断整批消息映射。
@@ -289,7 +289,10 @@ function assembleNonToolParts(params: {
       parts.push({
         type: 'system',
         content: backendMessage.content,
-        level: (metadata?.notification_level as any) || 'info',
+        level:
+          typeof metadata?.notification_level === 'string' && metadata.notification_level
+            ? (metadata.notification_level as SystemLevel)
+            : 'info',
         notificationType: (metadata?.notification_type as string) || 'task_notification',
         sequence: seq++,
       })
@@ -387,8 +390,8 @@ export function mapBackendMessageToMessage(
 /** 消除合并组内 part.sequence 的冲突，保持每条消息内 parts 的逻辑顺序
  * （渲染层 buildFragmentsFromParts 按 part.sequence 数值升序渲染）。
  */
-function dedupePartSequences(partsByMessage: any[][]): any[] {
-  const result: any[] = []
+function dedupePartSequences(partsByMessage: MessagePart[][]): MessagePart[] {
+  const result: MessagePart[] = []
   const seen = new Set<number>()
   // 组内最大 sequence：续接基准，随处理推进单调递增
   let maxSeq = 0

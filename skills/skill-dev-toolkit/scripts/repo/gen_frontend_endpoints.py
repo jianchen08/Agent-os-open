@@ -108,7 +108,6 @@ def render_ts(plugin_groups: list[tuple[str, str, list[dict]]]) -> str:
  * 漂移/手写回潮检查：
  *     python scripts/check_frontend_endpoints_sync.py
  */
-/* eslint-disable */
 """
     blocks = [header]
     for plugin_id, plugin_name, endpoints in plugin_groups:

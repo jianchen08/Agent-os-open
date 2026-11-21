@@ -8,11 +8,13 @@
  * - 401 刷新分支缺口：重放带新 Bearer / 无新 token 不改写头、refresh 自身 401
  *   的 body 解析容错（非法 JSON / 非字符串 token → 视为无法续链 → 登出）、
  *   非认证失败分类不登出、/login 路径不重定向
+ * - noAutoRetry 请求级关闭自动重试（对照：缺省标记的可重试网络错误仍自动重试）
  *
  * mock 边界：axios 实例（捕获拦截器 handler）、tokenLifecycle、错误上报、
  * GrowthLoop/authCallbacks；信封解析与分类逻辑全部真实链路。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { isRetryableError } from '@/utils/retry'
 
 const h = vi.hoisted(() => {
   const requestUse = vi.fn()
@@ -90,6 +92,7 @@ interface ErrorShape {
   retryCount?: number
   headers?: Record<string, string>
   body?: unknown
+  noAutoRetry?: boolean
 }
 
 function makeError(shape: ErrorShape): unknown {
@@ -100,6 +103,7 @@ function makeError(shape: ErrorShape): unknown {
       _retryCount: shape.retryCount ?? 2,
       ...(shape.headers ? { headers: shape.headers } : {}),
       ...(shape.body !== undefined ? { data: shape.body } : {}),
+      ...(shape.noAutoRetry !== undefined ? { noAutoRetry: shape.noAutoRetry } : {}),
     },
     ...(shape.status !== undefined ? { response: { status: shape.status, data: shape.data } } : {}),
     message: shape.message,
@@ -367,6 +371,48 @@ describe('client.ts 覆盖缺口（批九）', () => {
       expect(h.refresh).not.toHaveBeenCalled()
       expect(h.triggerAuthExpired).not.toHaveBeenCalled()
       expect(h.clearTokens).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('noAutoRetry：请求级关闭自动重试', () => {
+    // 本组用例需要 isRetryableError=true 才能触达重试判定；组内复位回文件默认 false
+    afterEach(() => {
+      vi.mocked(isRetryableError).mockReturnValue(false)
+      vi.useRealTimers()
+    })
+
+    it('noAutoRetry=true：可重试网络错误不自动重试，直接拒绝（登录等长等待端点语义）', async () => {
+      vi.mocked(isRetryableError).mockReturnValue(true)
+      const handler = responseErrorHandler
+      const rejected = await rejectedOf(
+        handler(
+          makeError({
+            code: 'ERR_NETWORK',
+            message: 'Network Error',
+            retryCount: 0,
+            noAutoRetry: true,
+          }),
+        ),
+      )
+      expect(h.instance).not.toHaveBeenCalled()
+      expect(rejected.code).toBe('ERR_NETWORK')
+    })
+
+    it('缺省（未标记）：同一可重试网络错误仍走既有自动重试（对照用例）', async () => {
+      vi.mocked(isRetryableError).mockReturnValue(true)
+      vi.useFakeTimers()
+      const handler = responseErrorHandler
+      const pending = handler(
+        makeError({ code: 'ERR_NETWORK', message: 'Network Error', retryCount: 0 }),
+      )
+      // 指数退避首跳 1000ms（fake timers 推进，不等真实秒）
+      await vi.advanceTimersByTimeAsync(1_000)
+      await pending
+
+      expect(h.instance).toHaveBeenCalledTimes(1)
+      const replayed = h.instance.mock.calls[0][0] as { _retryCount?: number; url?: string }
+      expect(replayed._retryCount).toBe(1)
+      expect(replayed.url).toBe('/api/v1/sessions')
     })
   })
 })

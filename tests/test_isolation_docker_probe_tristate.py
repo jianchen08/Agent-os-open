@@ -115,7 +115,7 @@ class TestDetectDockerTriState:
         assert str(exc) in detail
 
 
-def _make_ctx(tool: str = "bash_execute") -> PluginContext:
+def _make_ctx(tool: str = "bash") -> PluginContext:
     """L2 子任务 tool_execute 上下文（同 test_isolation_docker_recheck 基线）。"""
     return PluginContext(
         state={
@@ -153,7 +153,7 @@ class TestProbeErrorFailClosed:
     async def test_probe_error_rejects_container_tool_with_exception_text(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """探测异常 → bash_execute 被拒，原因含异常原文；error 日志留痕。"""
+        """探测异常 → bash 被拒，原因含异常原文；error 日志留痕。"""
         exc = subprocess.TimeoutExpired(cmd="docker version", timeout=3)
         guard = _guard_with_probe(
             monkeypatch,

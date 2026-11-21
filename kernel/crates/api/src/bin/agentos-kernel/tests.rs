@@ -8,8 +8,10 @@ use agentos_core::traits::PluginLoader as _;
 use super::boot_env::{
     budget_exceeded, collect_fast_triggered, effective_sample_threshold_mb,
     hard_limit_drain_threshold_mb, resolve_admin_password, resolve_collect_fast_secs,
-    resolve_host_est_commit_mb, resolve_mem_budget_mb, resolve_mem_hard_limit_mb,
-    worker_threads_for_tier, worker_threads_from, PressureAlertEdge,
+    resolve_commit_retention_ratio, resolve_host_est_commit_mb, resolve_mem_budget_mb,
+    resolve_mem_hard_limit_mb, resolve_retention_floor_mb, retention_breach,
+    worker_threads_for_tier, worker_threads_from, PressureAlertEdge, RetentionAction,
+    RetentionGuardState,
 };
 use super::plugin_boot::discover_plugin_roots;
 
@@ -119,38 +121,44 @@ fn reconcile_mode_seeds_at_boot_seeds_before_plugin_scan() {
     reconcile_mode_seeds_at_boot(&plugins_dir, None);
 }
 
-/// 启动扫描根（双根用户赢·启动侧）：内置根与用户根的插件父目录都必须进
-/// root_paths——模式包 `modes/<id>/plugin.json` 二级嵌套只有父目录根扫得到，
-/// 缺用户根会让启动装载 repo 份、热路径解析用户份（首个 sync 周期源码目录
-/// 翻转触发复验驱逐，/ext 路由空窗）。
+/// 启动扫描根（分级双根·启动侧）：Tier1 根与 Tier2 根的插件父目录都必须进
+/// root_paths——模式包 `modes/<id>/plugin.json` 二级嵌套只有父目录根扫得到。
 #[test]
 fn collect_boot_plugin_roots_includes_user_root_parents() {
     let tmp = tempfile::tempdir().unwrap();
-    let plugins_dir = tmp.path().join("plugins/shared");
-    let repo_mode = plugins_dir.join("modes/mode_coding");
+    let tier1 = tmp.path().join("plugins/shared");
+    let repo_mode = tier1.join("modes/mode_coding");
     std::fs::create_dir_all(&repo_mode).unwrap();
     std::fs::write(repo_mode.join("plugin.json"), r#"{"id":"mode_coding"}"#).unwrap();
-    let user_plugins = tmp.path().join("user-root/plugins");
-    let user_mode = user_plugins.join("modes/mode_coding");
+    let tier2 = tmp.path().join("user-root/plugins");
+    let user_mode = tier2.join("modes/mode_coding");
     std::fs::create_dir_all(&user_mode).unwrap();
     std::fs::write(user_mode.join("plugin.json"), r#"{"id":"mode_coding"}"#).unwrap();
 
-    let roots = collect_boot_plugin_roots(&plugins_dir, Some(&user_plugins));
-    let repo_parent = plugins_dir.join("modes").to_string_lossy().to_string();
-    let user_parent = user_plugins.join("modes").to_string_lossy().to_string();
+    let roots = collect_boot_plugin_roots(&tier1, Some(&tier2));
+    let repo_parent = tier1.join("modes").to_string_lossy().to_string();
+    let user_parent = tier2.join("modes").to_string_lossy().to_string();
     assert!(
         roots.contains(&repo_parent),
-        "内置根模式包父目录必须在扫描根: {roots:?}"
+        "Tier1 根模式包父目录必须在扫描根: {roots:?}"
     );
     assert!(
         roots.contains(&user_parent),
-        "用户根模式包父目录必须在扫描根（双根同 id 用户赢的启动前提）: {roots:?}"
+        "Tier2 根模式包父目录必须在扫描根: {roots:?}"
     );
 
-    // 用户根缺席（存量部署）= 仅内置根，不建目录不报错。
-    let only = collect_boot_plugin_roots(&plugins_dir, None);
+    // Tier2 根缺席 = 仅 Tier1 根，不建目录不报错。
+    let only = collect_boot_plugin_roots(&tier1, None);
     assert_eq!(only.len(), 1);
     assert_eq!(only[0], repo_parent);
+
+    // dev 退化配置（Tier2 根与 Tier1 根同指）= 单根，不重复产出同一扫描根。
+    let degenerate = collect_boot_plugin_roots(&tier1, Some(&tier1));
+    assert_eq!(
+        degenerate,
+        vec![repo_parent.clone()],
+        "同指根去重: {degenerate:?}"
+    );
 }
 
 /// git 化挂点（设计稿 §2.2）：对账后确保用户仓就绪 + 播种变更自动提交一笔；
@@ -873,10 +881,10 @@ fn discover_plugin_roots_parents_and_dedup() {
     );
 }
 
-/// 用户插件目录解析：环境变量优先（含空值忽略回落），回落落 OS 数据目录
-/// 下的 agentos/plugins。
+/// 用户数据面插件根解析（零回落，ADR 2026-11-07 §2.2）：env 显式生效；
+/// 未设/空白 = None（绝不推导 OS 标准目录）。
 #[test]
-fn user_plugins_dir_env_first_then_data_dir() {
+fn user_plugins_dir_env_first_no_fallback_without_env() {
     // 与 build_plugin_loader_wires_config_root 互斥：同读 AGENTOS_USER_* 进程全局态
     let _lock = user_space_env_lock();
     std::env::set_var("AGENTOS_USER_PLUGINS_DIR", "D:/custom/plugins");
@@ -885,16 +893,19 @@ fn user_plugins_dir_env_first_then_data_dir() {
         Some(PathBuf::from("D:/custom/plugins"))
     );
 
-    // 空白值视同未设置 → 回落 OS 数据目录
+    // 空白值视同未设置 → 分区缺席；用户根也未设 → None（零回落）
     std::env::set_var("AGENTOS_USER_PLUGINS_DIR", "   ");
-    let fallback = resolve_user_plugins_dir();
-    assert!(fallback.unwrap().to_string_lossy().contains("agentos"));
-
-    std::env::remove_var("AGENTOS_USER_PLUGINS_DIR");
-    assert!(
-        resolve_user_plugins_dir().is_some(),
-        "Windows 下 data_dir 恒可用"
+    let saved_user_root = std::env::var("AGENTOS_USER_ROOT").ok();
+    std::env::remove_var("AGENTOS_USER_ROOT");
+    assert_eq!(
+        resolve_user_plugins_dir(),
+        None,
+        "未显式交付 = None（不做 OS 目录推导）"
     );
+    if let Some(v) = saved_user_root {
+        std::env::set_var("AGENTOS_USER_ROOT", v);
+    }
+    std::env::remove_var("AGENTOS_USER_PLUGINS_DIR");
 }
 
 /// 私有内存采样（Windows 真实 API 冒烟）：进程自身采样必然成功且量级
@@ -904,4 +915,318 @@ fn user_plugins_dir_env_first_then_data_dir() {
 fn sample_private_bytes_returns_plausible_value() {
     let bytes = sample_private_bytes().expect("进程采样不应失败");
     assert!(bytes > 1024 * 1024, "采样值量级不合理: {bytes}");
+}
+
+/// 工作集采样（Windows 真实 API 冒烟）：量级合理，且不超过提交内存
+/// （工作集是提交的子集——同一次 K32GetProcessMemoryInfo 读回两口径）。
+#[cfg(windows)]
+#[test]
+fn sample_working_set_bytes_returns_plausible_value() {
+    let working_set = sample_working_set_bytes().expect("进程采样不应失败");
+    let commit = sample_private_bytes().expect("进程采样不应失败");
+    assert!(working_set > 1024 * 1024, "采样值量级不合理: {working_set}");
+    assert!(
+        working_set <= commit,
+        "工作集 {working_set} 不应大于提交 {commit}"
+    );
+}
+
+/// commit 相对保留闸判定（纯函数，ADR 2026-11-16）四组：正例（倍率超限）、
+/// 反例（倍率未超/恰等于 ratio×ws 严格不算）、floor 豁免（倍率超但绝对量
+/// 低于下限不判——小工作集倍率噪声防线）、极端与单调（ws=0 退化、ratio
+/// 收紧翻转结果）。
+#[test]
+fn retention_breach_ratio_floor_and_strictness() {
+    // 正例：commit 2000 / ws 1000 @ ratio 1.5 → 倍率 2.0 超限
+    assert!(retention_breach(2000, 1000, 1.5, 0));
+    // 反例：倍率未超
+    assert!(!retention_breach(1400, 1000, 1.5, 0));
+    // 临界：恰等于 ratio×ws（1500=1.5×1000）严格不算超
+    assert!(!retention_breach(1500, 1000, 1.5, 0));
+    // floor 豁免：倍率超（500/100=5.0）但绝对量低于 1024 下限 → 不判
+    assert!(!retention_breach(500, 100, 1.5, 1024));
+    // 同倍率量级、绝对量过 floor → 判
+    assert!(retention_breach(2000, 400, 1.5, 1024));
+    // commit 恰等于 floor：严格大于才过，恰等不算
+    assert!(!retention_breach(1024, 10, 1.5, 1024));
+    // ws=0 极端：过 floor 即纯倍率退化判定（无除法，不爆炸）
+    assert!(retention_breach(2048, 0, 1.5, 1024));
+    // ratio 单调性：同读数，倍率闸收紧（3.0）翻转结果
+    assert!(!retention_breach(2000, 1000, 3.0, 0));
+}
+
+/// commit 保留闸倍率解析：未设置=默认 1.5 启用；显式正值生效；0/负/非法
+/// =禁用该闸（None）。环境变量进程全局态，分支串单测试执行（同文件约定）。
+#[test]
+fn commit_retention_ratio_env_defaults_and_overrides() {
+    std::env::remove_var("AGENTOS_MEM_COMMIT_RATIO");
+    assert_eq!(
+        resolve_commit_retention_ratio(),
+        Some(1.5),
+        "未设置=默认 1.5 启用"
+    );
+
+    std::env::set_var("AGENTOS_MEM_COMMIT_RATIO", "2.0");
+    assert_eq!(
+        resolve_commit_retention_ratio(),
+        Some(2.0),
+        "显式正值覆盖默认"
+    );
+
+    std::env::set_var("AGENTOS_MEM_COMMIT_RATIO", "0");
+    assert_eq!(resolve_commit_retention_ratio(), None, "0=禁用该闸");
+
+    std::env::set_var("AGENTOS_MEM_COMMIT_RATIO", "-1.5");
+    assert_eq!(
+        resolve_commit_retention_ratio(),
+        None,
+        "负倍率恒真无意义=按非法禁用"
+    );
+
+    std::env::set_var("AGENTOS_MEM_COMMIT_RATIO", "bogus");
+    assert_eq!(resolve_commit_retention_ratio(), None, "非法值=禁用该闸");
+
+    std::env::remove_var("AGENTOS_MEM_COMMIT_RATIO");
+}
+
+/// 保留闸绝对下限解析：未设置=默认 1024；显式正值生效；0/非法回落默认
+/// （配置项非开关，与 AGENTOS_HOST_EST_COMMIT_MB 同构——闸的开关语义由
+/// ratio 承载，floor 只调防线高度）。
+#[test]
+fn retention_floor_env_defaults_and_overrides() {
+    std::env::remove_var("AGENTOS_MEM_RETENTION_FLOOR_MB");
+    assert_eq!(resolve_retention_floor_mb(), 1024, "未设置=默认 1024");
+
+    std::env::set_var("AGENTOS_MEM_RETENTION_FLOOR_MB", "2048");
+    assert_eq!(resolve_retention_floor_mb(), 2048, "显式正值生效");
+
+    std::env::set_var("AGENTOS_MEM_RETENTION_FLOOR_MB", "0");
+    assert_eq!(resolve_retention_floor_mb(), 1024, "0 非开关语义，回落默认");
+
+    std::env::set_var("AGENTOS_MEM_RETENTION_FLOOR_MB", "bogus");
+    assert_eq!(resolve_retention_floor_mb(), 1024, "非法值回落默认");
+
+    std::env::remove_var("AGENTOS_MEM_RETENTION_FLOOR_MB");
+}
+
+/// 保留闸计数状态机（ADR 2026-11-16）：连续 3 次命中才升级排空（前两次
+/// purge 清扫）；任一未命中清零重计（打断后重计 2 次仍只 purge，绝不凭
+/// 历史凑数升级）；缺数 reset 与未命中间构；命中期 commit 序列随命中累积、
+/// 清零连序列一起清（升级 WARN 定性判据的供给面）。
+#[test]
+fn retention_guard_counts_three_consecutive_then_drains() {
+    // 恰好连续 3 次 → Purge, Purge, Drain；序列随命中累积
+    let mut guard = RetentionGuardState::default();
+    assert_eq!(guard.observe(true, 2000), RetentionAction::Purge);
+    assert_eq!(guard.streak(), 1);
+    assert_eq!(guard.observe(true, 2500), RetentionAction::Purge);
+    assert_eq!(guard.streak(), 2);
+    assert_eq!(guard.hit_commits_mb(), &[2000, 2500]);
+    assert_eq!(guard.observe(true, 3000), RetentionAction::Drain);
+    assert_eq!(
+        guard.hit_commits_mb(),
+        &[2000, 2500, 3000],
+        "升级拍序列必须含全部三次命中读数"
+    );
+
+    // 未命中清零：2 次命中后打断，重计 2 次仍只 purge、绝不升级
+    let mut guard = RetentionGuardState::default();
+    assert_eq!(guard.observe(true, 2000), RetentionAction::Purge);
+    assert_eq!(guard.observe(true, 2500), RetentionAction::Purge);
+    assert_eq!(guard.observe(false, 100), RetentionAction::Idle);
+    assert_eq!(guard.streak(), 0);
+    assert!(guard.hit_commits_mb().is_empty(), "清零必须连序列一起清");
+    assert_eq!(guard.observe(true, 2000), RetentionAction::Purge);
+    assert_eq!(
+        guard.observe(true, 9999),
+        RetentionAction::Purge,
+        "打断后重计 2 次不得升级"
+    );
+    assert_eq!(guard.observe(true, 9999), RetentionAction::Drain);
+
+    // 采样缺数 reset 保守清零（不跨数据缺口升级）
+    let mut guard = RetentionGuardState::default();
+    assert_eq!(guard.observe(true, 2000), RetentionAction::Purge);
+    guard.reset();
+    assert_eq!(guard.streak(), 0);
+    assert!(guard.hit_commits_mb().is_empty());
+    assert_eq!(
+        guard.observe(true, 2000),
+        RetentionAction::Purge,
+        "reset 后重计"
+    );
+}
+
+// ===== 用户根 .env 引导装载（2026-11-17）=====
+
+use super::boot_env::{apply_env_file_entries, parse_env_file_content};
+
+/// 解析闭集：基础 KEY=VALUE / 注释 / 空行 / CRLF / 成对引号 / 非法行跳过。
+#[test]
+fn env_file_parse_subset() {
+    let content = "# 注释行\r\n\r\nAGENTOS_MEM_WATERMARK_MB=1536\r\n  KEY_A =  value_x  \r\nKEY_B=\"quoted val\"\r\nKEY_C='sq val'\r\nno_equals_line\r\nKEY_EMPTY=\r\n=NO_KEY\r\n#AGENTOS_HIDDEN=1\r\n";
+    let entries = parse_env_file_content(content);
+    assert_eq!(
+        entries,
+        vec![
+            ("AGENTOS_MEM_WATERMARK_MB".to_string(), "1536".to_string()),
+            ("KEY_A".to_string(), "value_x".to_string()),
+            ("KEY_B".to_string(), "quoted val".to_string()),
+            ("KEY_C".to_string(), "sq val".to_string()),
+        ],
+        "空值/无等号/空键/注释行全部跳过，键值 trim，成对引号剥除"
+    );
+}
+
+/// BOM 剥除：带 BOM 首行键正常解析。
+#[test]
+fn env_file_parse_strips_bom() {
+    let entries = parse_env_file_content("\u{feff}KEY_BOM=1\n");
+    assert_eq!(entries, vec![("KEY_BOM".to_string(), "1".to_string())]);
+}
+
+/// ambient 优先：进程环境已有键不被文件覆盖；未设键注入；契约键排除。
+#[test]
+fn env_file_apply_ambient_wins_and_excludes() {
+    const AMBIENT_KEY: &str = "AGENTOS_TEST_ENV_FILE_AMBIENT_KEY";
+    const FRESH_KEY: &str = "AGENTOS_TEST_ENV_FILE_FRESH_KEY";
+    std::env::remove_var(AMBIENT_KEY);
+    std::env::remove_var(FRESH_KEY);
+    std::env::set_var(AMBIENT_KEY, "from_ambient");
+
+    let entries = vec![
+        (AMBIENT_KEY.to_string(), "from_file".to_string()),
+        (FRESH_KEY.to_string(), "from_file".to_string()),
+        ("AGENTOS_ADMIN_PASSWORD".to_string(), "leaked".to_string()),
+        ("AGENTOS_USER_ROOT".to_string(), "C:/elsewhere".to_string()),
+        ("AGENTOS_KERNEL_PORT".to_string(), "1234".to_string()),
+        ("AGENTOS_BIND".to_string(), "0.0.0.0".to_string()),
+        ("AGENTOS_INSTANCE_CONFIG".to_string(), "x".to_string()),
+        ("AGENTOS_PLUGINS_DIR".to_string(), "x".to_string()),
+    ];
+    let (applied, skipped_ambient, skipped_excluded) = apply_env_file_entries(&entries);
+    assert_eq!(
+        (applied, skipped_ambient, skipped_excluded),
+        (1, 1, 6),
+        "只有未设的非契约键被注入"
+    );
+    assert_eq!(
+        std::env::var(AMBIENT_KEY).unwrap(),
+        "from_ambient",
+        "ambient 值绝不被文件覆盖"
+    );
+    assert_eq!(std::env::var(FRESH_KEY).unwrap(), "from_file");
+
+    std::env::remove_var(AMBIENT_KEY);
+    std::env::remove_var(FRESH_KEY);
+}
+
+/// fail-open：AGENTOS_USER_ROOT 未设 / 指向不存在目录时静默无操作不 panic。
+#[test]
+fn env_file_load_missing_root_and_file_are_noop() {
+    // 与 boot 种子 git 化测试互斥：同写 AGENTOS_USER_ROOT 进程全局态，
+    // 并行须串行——缺锁会把 boot 测试刚设的用户根撕掉，git 化降级假失败。
+    let _lock = user_space_env_lock();
+    std::env::remove_var("AGENTOS_USER_ROOT");
+    super::boot_env::load_user_root_env_file();
+
+    let dir = std::env::temp_dir().join(format!(
+        "agentos_env_file_test_{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::env::set_var("AGENTOS_USER_ROOT", &dir);
+    super::boot_env::load_user_root_env_file();
+    assert!(!dir.join(".env").exists());
+    std::env::remove_var("AGENTOS_USER_ROOT");
+    let _ = std::fs::remove_dir(&dir);
+}
+
+// ── boot 静默段阶段日志（2026-11-20 启动优化 A）──
+
+/// fmt 层写面捕获：事件字节收进共享缓冲供断言。
+#[derive(Clone)]
+struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for VecWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
+    type Writer = VecWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn stage_log_capture() -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    impl tracing::Subscriber,
+) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .with_ansi(false)
+        .with_writer(VecWriter(buf.clone()))
+        .finish();
+    (buf, subscriber)
+}
+
+/// 同步阶段包装落 start/done 两条 info!：stage 字段 start/done 各一条、
+/// done 带 elapsed_ms 耗时字段、返回值原样透传——装机慢 boot 日志直读可归因
+/// 的验收车道（2026-11-20 02:08Z boot 27s 零日志不可归因回归）。
+#[test]
+fn boot_stage_sync_logs_start_done_with_elapsed() {
+    let (buf, subscriber) = stage_log_capture();
+    tracing::subscriber::with_default(subscriber, || {
+        let out = super::boot_env::run_boot_stage("reap_orphan_runs", || 41 + 1);
+        assert_eq!(out, 42, "同步包装透传返回值");
+    });
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains("boot stage start") && text.contains("boot stage done"),
+        "start/done 两条阶段日志必须都在场: {text}"
+    );
+    assert_eq!(
+        text.matches("stage=\"reap_orphan_runs\"").count(),
+        2,
+        "stage 字段 start/done 各一条: {text}"
+    );
+    assert!(text.contains("elapsed_ms="), "done 必须带耗时字段: {text}");
+}
+
+/// 异步阶段包装同样落 start/done：await 前后各一条（trace/blob 清扫车道
+/// 同款包装，与同步包装共享受害断言）。
+#[test]
+fn boot_stage_async_logs_wrap_await() {
+    let (buf, subscriber) = stage_log_capture();
+    tracing::subscriber::with_default(subscriber, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let out = super::boot_env::run_boot_stage_async("trace_retention_purge", async {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                "purged"
+            })
+            .await;
+            assert_eq!(out, "purged", "异步包装透传 future 输出");
+        });
+    });
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        text.matches("stage=\"trace_retention_purge\"").count(),
+        2,
+        "start/done 各一条: {text}"
+    );
+    assert!(
+        text.contains("boot stage start") && text.contains("boot stage done"),
+        "start/done 两条阶段日志必须都在场: {text}"
+    );
+    assert!(text.contains("elapsed_ms="), "done 必须带耗时字段: {text}");
 }

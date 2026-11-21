@@ -1,3 +1,4 @@
+<!-- seed-version: 2 -->
 ## 隔离容器网络规则
 
 > 适用场景：在隔离容器内启动 server、跑浏览器测试（playwright/e2e）。
@@ -8,7 +9,7 @@
 
 **首选：都在容器内（同处一个网络命名空间，天然互通）**
 
-- agent 通过 `bash_execute` 在容器内启动 server，并在**同一个容器内**用 playwright/pytest 跑测试
+- agent 通过 `bash` 在容器内启动 server，并在**同一个容器内**用 playwright/pytest 跑测试
 - 二者都打 `127.0.0.1:<端口>`，因为它们在同一个网络命名空间，`127.0.0.1` 指向同一个 loopback
 - 容器镜像已预装 playwright + chromium + nodejs，可直接：
   - Python：`python -m pytest` / `python -c "from playwright.sync_api import ..."`
@@ -27,7 +28,6 @@
   - 例：`uvicorn main:app --host 0.0.0.0 --port 8000`
   - 例：`flask run --host 0.0.0.0 --port 5000`
 - **需被宿主/外部访问时**：server **必须绑 `0.0.0.0`**，绝不能只绑 `127.0.0.1`
-  - 原因：`127.0.0.1` 是容器自己的 loopback，宿主（含宿主上的浏览器工具）打不到
   - 即使配了端口映射，server 绑 `127.0.0.1` 时宿主依然 REFUSED
 
 ### 禁止的反模式

@@ -577,6 +577,7 @@ mod domain_event_tests {
             export_fields: vec![],
             aux_venvs: Vec::new(),
             provides: None,
+            visibility: Default::default(),
         }
     }
 
@@ -988,6 +989,7 @@ mod external_mcp_schema_gate_tests {
             export_fields: vec![],
             aux_venvs: Vec::new(),
             provides: None,
+            visibility: Default::default(),
         }
     }
 

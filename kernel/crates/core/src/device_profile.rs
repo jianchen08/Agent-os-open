@@ -1,3 +1,4 @@
+// @feature: FP-0.2.CFG 设备画像(内核 core 用户空间面) | @ci: rust-test
 //! 设备档案与合宿档位（原则 P2 运行时执法面）。
 //!
 //! Python 侧契约/计划面：`agentos_plugin_sdk.device_profile`（G-M1 契约

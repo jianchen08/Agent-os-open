@@ -151,8 +151,9 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
 - **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）；`route_signals` 仅是声明位，执行面零消费，新插件无需声明。
 - **插件间耦合唯一轴**：`requires_services`（能力角色名，boot 期闸校验）。
-- **LLM 可见工具三层过滤**：启用档案（`config/kernel/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
+- **LLM 可见工具三层过滤**：启用档案（`config/kernel/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。G2 校验态（sanitized/drift/verify_incomplete/verify_failed）**不参与工具面过滤**：声明 schema 恒在面（失败桩），调用时经契约账本显式失败并附错误码/原因/修复指引，工具数组不随校验态增减（ADR 2026-11-12）。
 - **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
+- **动态类可见性（第三种面，与常驻/不可见并列）**：`resource_search(mode=detailed)` 返回结构化 `tool_defs`（真实 `input_schema`/`output_schema`/`render`/`plugin_id`），`tool_schema` 插件在 prepare 步把它组装进**插件侧** `state["dynamic_tools"]`；模型经薄转发壳 `call_tool` 调用目标工具。动态类**不进** `tool_schemas`（不进 LLM 原生 `tools` 数组）→ 前缀缓存不因搜索抖动、`tool_ids` 白名单不被运行时扩大；权限判定**按目标工具名展开**（`security_check`/`level_guard`/`duplicate_check`），动态工具不绕过 4 档。动态定义**禁写注册表**；定义真值 = manifest 声明 / 活注册表（零声明 external MCP 由握手观测导入），不信模型回传；缺 `input_schema` 在**引入侧** fail-closed 拒收。MCP 工具纳入动态类后回收**沿用既有 idle GC**（引用计数只作观测/保活提示，不控制回收）。ADR 2026-11-15-dynamic-tool-surface。
 
 协议全字段见 [plugin-protocol.md](guides/plugin-protocol.md)。
 
@@ -168,14 +169,17 @@ level: L3                     # L1 沟通调度 → L2 编排 → L3 执行，�
 model_tier: medium            # 或 model_name 直接指定
 system_prompt: |              # 支持 {{path:...}} 文件注入与 {{project_root}} 占位
   ...
-tool_ids: [file_read, file_write, bash_execute, enhanced_search]   # LLM 可见工具白名单
+tool_ids: [file_read, file_write, bash, enhanced_search]   # LLM 可见工具白名单
 hard_constraints: [...]
 soft_constraints: [...]
 deliverables: [...]           # executor 特有：产出物声明
 plugins:
   enabled:
-    task_reminder: { max_reminders: 3, evaluation_mode: true }  # per-plugin inputs
+    task_reminder: { max_reminders: 3 }  # per-plugin inputs
 ```
+
+评估子管道模式由管道字段 `evaluation.mode="evaluator"` / `evaluation.metric_id`
+路由（task_evaluate 派发时写入），不是 agent 配置键。
 
 - **agent_id 的本质是执行上下文**：Agent 在内核中**没有运行时对象**——`agent_id` 只是执行上下文（pipeline state / `execution_context`）里的一个键，会话创建时写入 initial_state，随 `execution_context` 贯穿任务链全链传导。引擎对它只透传；agent 的全部语义由插件按这个键展开（见下条）。切换会话 Agent = 换一个上下文键，下一轮管道自然整体切换人设/工具/约束——不存在"注册/反注册 Agent"这类内核动作。
 - **消费分权（按 agent_id 展开的执行上下文）**：全量配置由管道 prepare 步的 `pipeline_agent_config_load` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等；工具面同属这份执行上下文（LLM 请求构建按已展开的 `tool_ids` 过滤工具 schema），内核不解析 Agent 配置、对 `agent_id` 只透传。
@@ -186,7 +190,7 @@ plugins:
 ### 工具系统
 
 - **统一契约**：每个工具声明 `input_schema` + `output_schema` + `render`（前端渲染意图）。工具执行后按 `output_schema` fail-closed 校验；前端按 `render` 路由渲染结果卡片；MCP 对外下发同一契约。
-- **执行**：工具调用由管道 core 步的 `pipeline_tool_core`（Rust 原生插件）执行，大输出经 `pipeline_spill_guard` 落盘兜底（`spill_retrieve` 为框架强制工具）。
+- **执行**：工具调用由管道 core 步的 `pipeline_tool_core`（Rust 原生插件）执行，大输出经 `pipeline_spill_guard` 落盘兜底（存档路径随替换文本下发，agent 经 `file_read`/`enhanced_search` 直读；管道结束钩子自动清理，全局 `max_files` 封顶）。
 - **分类来源**：内置工具插件（tools/ 自研 + 预置外部 MCP 接入清单，现仅 1 台）／任意外部 MCP 工具（零代码接入）／用户根自研插件。
 - **工具面控制**：Agent 的 `tool_ids` 白名单 + 层级守卫（level_guard 拦截越级任务类工具）+ 安全守卫（security_check 判定路径/危险工具审批/隔离放行）。
 

@@ -10,7 +10,9 @@ A3 安装位形态漂移）。对已拉起的装机内核做三步 API 冒烟，
      话这步即红——A3 结构漂移的业务面投影）；
   3. 纯聊天一轮：建会话 → WS user_input → 等 stream_end（--skip-chat 跳过；
      依赖 websockets 库与 LLM 密钥接线完整——「能登录但 LLM 全断」正是
-     B3 裸拉事故面，冒烟必须覆盖）。
+     B3 裸拉事故面，冒烟必须覆盖）。会话带 post-install-smoke 标记：**本轮
+     无论聊天成败都在收尾删除**，开跑先清扫历史轮次残留——装后冒烟不得在
+     应用会话列表留测试垃圾（用户裁定 2026-11-12）。
 
 用法（装机内核默认 9101；dev 侧冒烟 --base http://127.0.0.1:9100）：
   python scripts/post_install_smoke.py [--base http://127.0.0.1:9101]
@@ -31,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from io import TextIOWrapper
+from urllib.parse import quote
 
 DEFAULT_BASE = "http://127.0.0.1:9101"
 DEFAULT_CHAT_TIMEOUT = 300
@@ -38,6 +41,9 @@ DEFAULT_CHAT_TIMEOUT = 300
 MAIN_AGENT_HEADER = {"X-Main-Agent-Request": "true"}
 #: 冒烟消息：纯文本应答即收尾，禁调工具（工具循环会拉长等待且引入无关失败面）
 SMOKE_PROMPT = "这是装后冒烟测试：请直接回复「收到」两个字，不要调用任何工具。"
+#: 冒烟会话标记：title/intent/metadata 三处同值，清理按此识别（旧脚本只写
+#: title+intent，历史残留同口径扫除；首条消息派生标题不影响 intent/metadata）
+SMOKE_TAG = "post-install-smoke"
 
 
 def log(msg: str) -> None:
@@ -72,24 +78,62 @@ def _request(
         return resp.status, raw
 
 
-def smoke_chat(base: str, token: str, timeout_s: float) -> None:
-    """纯聊天一轮：建会话 → ws-ticket → user_input → 等 stream_end。"""
+def _session_is_smoke(session: dict) -> bool:
+    """冒烟会话识别：title/intent/metadata 任一命中标记（旧脚本只写前两处）。"""
+    if session.get("title") == SMOKE_TAG or session.get("intent") == SMOKE_TAG:
+        return True
+    metadata = session.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("smoke") == SMOKE_TAG
+
+
+def list_sessions(base: str, token: str) -> list[dict]:
+    """GET /api/v1/sessions → threads 列表（非对象项丢弃）。"""
+    status, body = _request(base, "/api/v1/sessions", token=token, timeout=30)
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get("threads"), list):
+        raise AssertionError(f"会话列表查询失败：HTTP {status} {str(body)[:200]}")
+    return [item for item in body["threads"] if isinstance(item, dict)]
+
+
+def delete_session(base: str, token: str, thread_id: str) -> tuple[bool, str]:
+    """DELETE /api/v1/sessions/{id}（级联清消息/管道/运行记录）→ (成功, 详情)。"""
+    status, body = _request(
+        base,
+        f"/api/v1/sessions/{quote(thread_id, safe='')}",
+        token=token,
+        method="DELETE",
+        timeout=30,
+    )
+    if status in (200, 204):
+        return True, f"HTTP {status}"
+    return False, f"HTTP {status} {str(body)[:200]}"
+
+
+def purge_stale_smoke_sessions(base: str, token: str) -> tuple[int, list[str]]:
+    """清扫历史轮次残留的冒烟会话 → (删除数, 失败详情)。"""
+    removed = 0
+    failures: list[str] = []
+    for session in list_sessions(base, token):
+        if not _session_is_smoke(session):
+            continue
+        thread_id = session.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            continue
+        ok, detail = delete_session(base, token, thread_id)
+        if ok:
+            removed += 1
+        else:
+            failures.append(f"{thread_id}: {detail}")
+    return removed, failures
+
+
+def _chat_round(ws_url: str, thread_id: str, timeout_s: float) -> None:
+    """WS 投递 user_input 并等到 stream_end；失败抛 AssertionError。
+
+    websockets 延迟导入：单测替换本函数即可覆盖清理契约（不引入可选依赖）。
+    """
     from websockets.exceptions import WebSocketException
     from websockets.sync.client import connect
 
-    status, body = _request(
-        base, "/api/v1/sessions", {"title": "post-install-smoke", "intent": "post-install-smoke"}, token, "POST"
-    )
-    if status != 200 or not isinstance(body, dict):
-        raise AssertionError(f"建会话失败：HTTP {status} {str(body)[:200]}")
-    thread_id = body.get("thread_id") or (body.get("data") or {}).get("thread_id")
-    if not thread_id:
-        raise AssertionError(f"建会话响应无 thread_id：{str(body)[:200]}")
-
-    status, body = _request(base, "/api/v1/ws-ticket", {}, token, "POST")
-    if status != 200 or not isinstance(body, dict) or not body.get("ticket"):
-        raise AssertionError(f"取 ws-ticket 失败：HTTP {status} {str(body)[:200]}")
-    ws_url = base.replace("http", "ws", 1) + f"/ws/chat?ticket={body['ticket']}"
     message = {
         "type": "user_input",
         "thread_id": thread_id,
@@ -127,6 +171,53 @@ def smoke_chat(base: str, token: str, timeout_s: float) -> None:
                     raise AssertionError(f"聊天流报错：{json.dumps(frame, ensure_ascii=False)[:400]}")
     except WebSocketException as exc:
         raise AssertionError(f"WS 链路异常（{ws_url}）：{exc}") from exc
+
+
+def smoke_chat(base: str, token: str, timeout_s: float) -> None:
+    """纯聊天一轮：建会话 → ws-ticket → user_input → 等 stream_end → 删会话。
+
+    清理契约（用户裁定 2026-11-12）：本轮会话无论聊天/ticket 成败都必须删除，
+    聊天失败时保留原异常优先返回；聊天成功而清理失败判红（应用会话列表被
+    污染即冒烟未收口）。
+    """
+    removed, purge_failures = purge_stale_smoke_sessions(base, token)
+    if removed:
+        log(f"PASS 已清理历史冒烟会话 {removed} 个")
+    for failure in purge_failures:
+        log(f"WARN 历史冒烟会话清理失败（不阻断本轮）：{failure}")
+
+    status, body = _request(
+        base,
+        "/api/v1/sessions",
+        {"title": SMOKE_TAG, "intent": SMOKE_TAG, "metadata": {"smoke": SMOKE_TAG}},
+        token,
+        "POST",
+    )
+    if status != 200 or not isinstance(body, dict):
+        raise AssertionError(f"建会话失败：HTTP {status} {str(body)[:200]}")
+    thread_id = body.get("thread_id") or (body.get("data") or {}).get("thread_id")
+    if not thread_id:
+        raise AssertionError(f"建会话响应无 thread_id：{str(body)[:200]}")
+
+    error: Exception | None = None
+    try:
+        status, body = _request(base, "/api/v1/ws-ticket", {}, token, "POST")
+        if status != 200 or not isinstance(body, dict) or not body.get("ticket"):
+            raise AssertionError(f"取 ws-ticket 失败：HTTP {status} {str(body)[:200]}")
+        ws_url = base.replace("http", "ws", 1) + f"/ws/chat?ticket={body['ticket']}"
+        _chat_round(ws_url, thread_id, timeout_s)
+    except Exception as exc:  # noqa: BLE001 - 先记账，清理后再原样抛出
+        error = exc
+
+    try:
+        cleaned, detail = delete_session(base, token, thread_id)
+    except (ConnectionError, OSError) as exc:
+        cleaned, detail = False, f"内核不可达：{exc}"
+    log(f"{'PASS' if cleaned else 'FAIL'} 清理本次冒烟会话 {thread_id}：{detail}")
+    if error is not None:
+        raise error
+    if not cleaned:
+        raise AssertionError(f"冒烟会话清理失败：{detail}（残留 {thread_id}，应用会话列表被污染）")
 
 
 def main() -> int:

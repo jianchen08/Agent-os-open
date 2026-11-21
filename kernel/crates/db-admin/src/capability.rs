@@ -657,9 +657,9 @@ mod tests {
 
     // ─── clear_execution_data（第 8 method）────────────────────────────
     // 涉及全局 pipeline_state_registry 的场景合并在单个串行测试里
-    // （全局单例 + cargo 并行测试 = 串扰源，见 clears_nine_tables 场景段）。
+    // （全局单例 + cargo 并行测试 = 串扰源，见 clear_execution_data_scenarios_matrix）。
 
-    /// 播种全量执行数据（7 表）+ users 1 行；运行状态与管道名可参数化。
+    /// 播种全量执行数据（9 表）+ users 1 行；运行状态与管道名可参数化。
     /// runs/branches 已退役（ADR 2026-09-18）：运行簿记 = pipeline_state 标量键。
     fn seed_execution_data(store: &agentos_engine::SqliteStore, runs_status: &str, pid: &str) {
         store
@@ -679,6 +679,8 @@ mod tests {
                         ('pipe_done','run_status','completed','str','default','2026-01-01T00:00:00Z');
                      INSERT INTO pipeline_checkpoints (checkpoint_id, pipeline_id, step_no, state_json, created_at) VALUES ('cp1','{pid}',1,'{{}}','2026-01-01T00:00:00Z');
                      INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, blob_id, run_id, created_at) VALUES ('default','{pid}',1,'m1','bl1','run1','2026-01-01T00:00:00Z');
+                     INSERT INTO message_segments (id, tenant_id, pipeline_id, base_seq, base_len, members_blob_id, created_at) VALUES ('seg1','default','{pid}',1,1,'bl1','2026-01-01T00:00:00Z');
+                     INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, client_message_id, created_at, request) VALUES ('pin1','{pid}','default','','2026-01-01T00:00:00Z','{{\"pipeline_id\":\"{pid}\",\"content\":\"hi\"}}');
                      INSERT INTO users (user_id, username, password, role, tenant_id, created_at) VALUES ('u_test','tester','x','user','default','2026-01-01T00:00:00Z');"
                 ))
                 .unwrap();
@@ -698,7 +700,7 @@ mod tests {
             .unwrap()
     }
 
-    const SEVEN_TABLES: [&str; 7] = [
+    const NINE_TABLES: [&str; 9] = [
         "traces",
         "blobs",
         "sessions",
@@ -706,6 +708,8 @@ mod tests {
         "pipeline_state",
         "pipeline_checkpoints",
         "message_slots",
+        "message_segments",
+        "pipeline_pending_inputs",
     ];
 
     #[tokio::test]
@@ -777,6 +781,8 @@ mod tests {
         assert_eq!(envelope["status"], 409, "运行中管道应拒绝: {envelope}");
         assert_eq!(count_table(&store, "pipeline_state"), 5, "拒绝时数据未动");
         assert_eq!(count_table(&store, "message_slots"), 1);
+        assert_eq!(count_table(&store, "message_segments"), 1);
+        assert_eq!(count_table(&store, "pipeline_pending_inputs"), 1);
         assert_eq!(count_table(&store, "users"), 1);
 
         // 场景 2：僵尸 running（DB 残留但内存无条目，重启后典型态）→ 放行；
@@ -788,10 +794,10 @@ mod tests {
             .unwrap();
         assert_eq!(envelope["status"], 200, "僵尸 running 应放行: {envelope}");
         let body = envelope["body"].clone();
-        // 播种行数：runs2+traces2+blobs1+branches1+sessions1+pipeline_sessions1
-        //           +pipeline_state1+checkpoints1+message_slots1 = 11
-        assert_eq!(body["cleared_count"], 11, "清除计数=播种总数: {body}");
-        for t in SEVEN_TABLES {
+        // 播种行数：traces1+blobs1+sessions1+pipeline_sessions1+pipeline_state5
+        //           +checkpoints1+message_slots1+segments1+pending1 = 13
+        assert_eq!(body["cleared_count"], 13, "清除计数=播种总数: {body}");
+        for t in NINE_TABLES {
             assert_eq!(count_table(&store, t), 0, "{t} 应清空");
         }
         assert_eq!(count_table(&store, "users"), 1, "users 必须保留");

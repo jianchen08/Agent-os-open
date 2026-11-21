@@ -24,6 +24,9 @@ const { mockStore, mockAddNotification } = vi.hoisted(() => ({
 }))
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: { getState: () => mockStore },
+  // lifecycleHandlers 在收口时直接调模块级 finalizePartsForInterrupt（F2 同刀收口）；
+  // 本测试面是宽限期时序，parts 映射语义由 store 侧测试覆盖，此处恒等透传
+  finalizePartsForInterrupt: (parts: unknown[]) => parts,
 }))
 vi.mock('@/stores/notificationStore', () => ({
   useNotificationStore: { getState: () => ({ addNotification: mockAddNotification }) },
@@ -166,7 +169,9 @@ describe('handleReconnected - interrupted 宽限重查（2026-08-23）', () => {
     expect(mockStore.updateMessage).toHaveBeenCalledWith(
       STREAMING_PIPELINE,
       'msg-001',
-      { status: 'interrupted' },
+      // F2 中断收口后载荷还带 parts（finalizePartsForInterrupt 的收口结果），
+      // 本测试断言时序契约，parts 语义由 store 侧测试覆盖
+      expect.objectContaining({ status: 'interrupted' }),
     )
     expect(mockStore.appendPart).toHaveBeenCalledWith(
       STREAMING_PIPELINE,

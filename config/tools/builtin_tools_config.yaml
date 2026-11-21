@@ -2,6 +2,8 @@
 # 内置工具配置
 # 此文件由 scripts/tools/collect_tool_info.py 自动生成
 # 请勿手动修改，运行脚本重新生成
+# 出厂播种版本（seedConfigTree 裁决：用户副本严格大于才保留；内容变更须抬版本）
+version: 2
 
 tool_cache:
   enabled: true
@@ -11,7 +13,7 @@ tool_cache:
       enabled: false
     file_write:
       enabled: false
-    bash_execute:
+    bash:
       enabled: false
     enhanced_search:
       enabled: true
@@ -51,7 +53,7 @@ tool_cache:
 tools:
 - name: file_read
   description: 读取文件内容、列出目录结构。适用场景：需要读取文件内容、浏览目录结构。不适用场景：需要写入文件（使用 file_write）、执行代码（使用
-    bash_execute）、搜索文件内容（使用 enhanced_search）、搜索文件名（使用 enhanced_search 的 filename 模式）。注意：路径访问受
+    bash）、搜索文件内容（使用 enhanced_search）、搜索文件名（使用 enhanced_search 的 filename 模式）。注意：路径访问受
     base_path 限制；大文件读取可能影响性能。fields 参数：读取 YAML/JSON 文件的特定字段，节省 token。例如：fields=['id',
     'name'] 只返回这两个字段。
   category: file
@@ -83,9 +85,8 @@ tools:
   - replace
   - insert
   - delete
-- name: bash_execute
-  description: 执行 Shell 命令，支持长时间运行进程（30秒超时+回调机制）、交互式输入（确认/密码）和隔离环境执行。适用场景：执行系统命令（ls/cat/grep/pip/npm等）、运行脚本、查看系统信息、安装依赖、编译构建项目。不适用场景：仅需读取文件（使用file_read）、仅需搜索文件（使用code_search）、危险操作（rm
-    -rf/format/dd等）、长期运行服务。注意事项：命令执行默认30秒超时，超时后触发回调机制；危险命令会被安全检查拦截；Windows和Linux/Mac命令语法可能不同；需要审批才能执行；长时间运行命令会保存日志到logs/bash/目录；敏感输入会被自动掩码处理。
+- name: bash
+  description: 执行 Shell 命令。前台阻塞到完成或等待上限（默认 30 秒，最大 600）；超时/后台返回 running+handle，进程不死，凭 handle 用 log 读输出、input 发交互输入、kill 终止。适用场景：执行系统命令（ls/cat/grep/pip/npm等）、运行脚本、查看系统信息、安装依赖、编译构建项目。不适用场景：仅需读取文件（使用file_read）、仅需搜索文件（使用enhanced_search）、危险操作（rm -rf/format/dd等）、长期运行服务。注意事项：超时不杀进程；危险命令会被安全检查拦截；Windows和Linux/Mac命令语法可能不同；需要审批才能执行；输出保存到持久日志（log 任何时候可读）；敏感输入会被自动掩码处理。
   category: system
   level: user
   requires_approval: true
@@ -183,7 +184,7 @@ tools:
   - system
 - name: resource_merge
   description: 基于 git 的资源合并与回滚工具。在 workspace 中通过 git 追踪文件变更，支持将修改后的资源合并到目标目录，以及回滚到之前的版本。适用场景：资源生成/修改时的
-    workspace 管理、文件变更追踪、合并到正式目录、版本回滚。不适用场景：仅读取文件（使用 file_read）、执行命令（使用 bash_execute）。注意事项：需要系统已安装
+    workspace 管理、文件变更追踪、合并到正式目录、版本回滚。不适用场景：仅读取文件（使用 file_read）、执行命令（使用 bash）。注意事项：需要系统已安装
     git；rollback 操作会将文件恢复到指定 commit 状态；cleanup 会删除 .git 目录且不可逆。
   category: task
   level: all
@@ -294,7 +295,7 @@ permission_policies:
     require_approval_tools:
     - file_read
     - file_write
-    - bash_execute
+    - bash
   readonly:
     can_approve: false
     auto_approve_tools:
@@ -305,7 +306,7 @@ permission_policies:
     require_approval_tools:
     - file_read
     - file_write
-    - bash_execute
+    - bash
     - schema_evaluator
     - resource_evaluator
     - compatibility_checker

@@ -81,13 +81,13 @@ class TestIsIsolated:
     """
 
     def _ctx(self) -> Any:
-        return make_tool_ctx("bash_execute", {"command": "ls"})
+        return make_tool_ctx("bash", {"command": "ls"})
 
     def test_isolated_batch_with_host_file_helper_passes(self) -> None:
         """隔离任务混合批：容器命令 + 宿主文件类辅助 → 判隔离（装机 M1 形状）。"""
         plugin = SecurityCheckPlugin()
         ctxs = [
-            {"tool_name": "bash_execute", "provider": "docker", "task_isolated": True},
+            {"tool_name": "bash", "provider": "docker", "task_isolated": True},
             {"tool_name": "delete_file", "provider": "host", "task_isolated": True},
         ]
         assert plugin._is_isolated(self._ctx(), ctxs) is True
@@ -96,21 +96,21 @@ class TestIsIsolated:
         """宿主裸跑命令执行类（bash）在批 → 回落所选档（fail-closed 方向）。"""
         plugin = SecurityCheckPlugin()
         ctxs = [
-            {"tool_name": "bash_execute", "provider": "docker", "task_isolated": True},
-            {"tool_name": "bash_execute", "provider": "host", "task_isolated": True},
+            {"tool_name": "bash", "provider": "docker", "task_isolated": True},
+            {"tool_name": "bash", "provider": "host", "task_isolated": True},
         ]
         assert plugin._is_isolated(self._ctx(), ctxs) is False
 
     def test_non_isolated_task_needs_approval(self) -> None:
         """非隔离任务（task_isolated=False）→ 未隔离，危险工具需审批。"""
         plugin = SecurityCheckPlugin()
-        ctxs = [{"tool_name": "bash_execute", "provider": "host", "task_isolated": False}]
+        ctxs = [{"tool_name": "bash", "provider": "host", "task_isolated": False}]
         assert plugin._is_isolated(self._ctx(), ctxs) is False
 
     def test_missing_task_isolated_treated_as_not_isolated(self) -> None:
         """context 无 task_isolated 字段 → 保守判为未隔离。"""
         plugin = SecurityCheckPlugin()
-        ctxs = [{"tool_name": "bash_execute", "provider": "docker"}]
+        ctxs = [{"tool_name": "bash", "provider": "docker"}]
         assert plugin._is_isolated(self._ctx(), ctxs) is False
 
     def test_empty_execution_contexts_not_isolated(self) -> None:
@@ -130,7 +130,7 @@ class TestExplicitModeResolution:
         """同会话、pipeline_id 不同（主/子管道轮换）→ 会话条目必须命中。"""
         plugin = SecurityCheckPlugin()
         ctx = make_tool_ctx(
-            "bash_execute", {"command": "ls"}, task_isolated=True,
+            "bash", {"command": "ls"}, task_isolated=True,
             pipeline_id="p-x", session_id="sess-x",
         )
         sc_mod._PERMISSION_MODES["sess-x"] = "bypass"
@@ -142,7 +142,7 @@ class TestExplicitModeResolution:
     def test_absent_key_is_not_explicit(self) -> None:
         plugin = SecurityCheckPlugin()
         ctx = make_tool_ctx(
-            "bash_execute", {"command": "ls"}, task_isolated=True,
+            "bash", {"command": "ls"}, task_isolated=True,
             pipeline_id="p-y", session_id="sess-y",
         )
         assert plugin._explicit_permission_mode(ctx) is None
@@ -150,7 +150,7 @@ class TestExplicitModeResolution:
     def test_missing_pipeline_id_still_resolves_by_session_id(self) -> None:
         """state 无 pipeline_id（部分内部链路）→ 按 session_id 命中。"""
         plugin = SecurityCheckPlugin()
-        ctx = make_tool_ctx("bash_execute", {"command": "ls"}, session_id="sess-1")
+        ctx = make_tool_ctx("bash", {"command": "ls"}, session_id="sess-1")
         sc_mod._PERMISSION_MODES["sess-1"] = "auto"
         try:
             assert plugin._explicit_permission_mode(ctx) == "auto"
@@ -193,7 +193,7 @@ class TestIsolatedDefaultFreePass:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
         ctx = make_tool_ctx(
-            "bash_execute", {"command": command}, provider="docker",
+            "bash", {"command": command}, provider="docker",
             task_isolated=True, pipeline_id="p-iso",
         )
 
@@ -228,7 +228,7 @@ class TestIsolatedDefaultFreePass:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
         ctx = make_tool_ctx(
-            "bash_execute",
+            "bash",
             {"command": "ls -la .packtest_probe_dir"},
             provider="docker",
             task_isolated=True,
@@ -276,7 +276,7 @@ class TestIsolatedExplicitOverride:
     @pytest.mark.parametrize(
         ("tool_name", "args", "hit"),
         [
-            ("bash_execute", {"command": "rm -rf .packtest_probe_dir"}, "rm -rf"),
+            ("bash", {"command": "rm -rf .packtest_probe_dir"}, "rm -rf"),
             ("github_ops", {"action": "create_comment", "body": "note"}, "comment"),
         ],
         ids=["command_tool", "publish_tool"],
@@ -305,7 +305,7 @@ class TestIsolatedExplicitOverride:
         _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "denied"}])
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
-        ctx = self._isolated_ctx("bash_execute", {"command": "rm -rf .packtest_probe_dir"})
+        ctx = self._isolated_ctx("bash", {"command": "rm -rf .packtest_probe_dir"})
 
         result = await plugin.execute(ctx)
         updates = result.state_updates
@@ -321,7 +321,7 @@ class TestIsolatedExplicitOverride:
         _cap, create = wire_approval_cap(sc_mod, [])
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
-        ctx = self._isolated_ctx("bash_execute", {"command": "rm -rf .packtest_probe_dir"})
+        ctx = self._isolated_ctx("bash", {"command": "rm -rf .packtest_probe_dir"})
 
         result = await plugin.execute(ctx)
         decision = _decision_view(result)
@@ -353,7 +353,7 @@ class TestBypassCarriesIsolatedDefault:
 
     def _isolated_ctx(self, command: str) -> Any:
         return make_tool_ctx(
-            "bash_execute", {"command": command},
+            "bash", {"command": command},
             provider="docker",
             task_isolated=True,
             pipeline_id=self._PIPELINE_ID,
@@ -436,7 +436,7 @@ class TestConservativeControls:
         _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "approved_once"}])
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
-        ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"}, task_isolated=False)
+        ctx = make_tool_ctx("bash", {"command": "rm -rf /tmp/a"}, task_isolated=False)
 
         result = await plugin.execute(ctx)
         assert _decision_view(result).get("allowed") is True
@@ -448,7 +448,7 @@ class TestConservativeControls:
         _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "approved_once"}])
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
-        ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"})
+        ctx = make_tool_ctx("bash", {"command": "rm -rf /tmp/a"})
 
         result = await plugin.execute(ctx)
         assert _decision_view(result).get("allowed") is True

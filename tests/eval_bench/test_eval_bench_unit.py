@@ -349,11 +349,11 @@ class TestCapabilityAssertions:
     def test_no_tool_called_detects_violation(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         ok, _ = run_eval._assert("", self.METRICS, {},
-                                 {"type": "no_tool_called", "value": "bash_execute"})
+                                 {"type": "no_tool_called", "value": "bash"})
         assert ok is True
-        violating = dict(self.METRICS, tool_names=["bash_execute", "file_read"])
+        violating = dict(self.METRICS, tool_names=["bash", "file_read"])
         ok2, detail = run_eval._assert("", violating, {},
-                                       {"type": "no_tool_called", "value": "bash_execute"})
+                                       {"type": "no_tool_called", "value": "bash"})
         assert ok2 is False and "违规" in detail
 
     def test_file_contains_with_fixture_and_empty_guard(self, tmp_path, monkeypatch):

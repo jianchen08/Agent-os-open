@@ -131,7 +131,7 @@ pub fn spawn_pipeline_sidecar_warmup(
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use agentos_core::traits::PluginType;
     use agentos_core::types::{LoopBody, PipelineConfig, PipelineStep, StepItem};
@@ -167,6 +167,7 @@ mod tests {
             enabled: None,
             activation: None,
             provides: None,
+            visibility: Default::default(),
             persistent_fields: vec![],
             export_fields: vec![],
             aux_venvs: Vec::new(),
@@ -402,7 +403,7 @@ mod tests {
     }
 
     /// 测试用最小 PluginLoader：只服务 warmup 的宿主构建（无 venv → Err）。
-    mod test_support {
+    pub mod test_support {
         use super::*;
         use agentos_core::traits::{PluginLoader, PluginStatus};
 
@@ -411,13 +412,13 @@ mod tests {
         }
 
         impl MockLoader {
-            pub fn new() -> Self {
+            pub(crate) fn new() -> Self {
                 Self {
                     manifests: parking_lot::RwLock::new(HashMap::new()),
                 }
             }
 
-            pub fn add_manifest(&self, manifest: PluginManifest) {
+            pub(crate) fn add_manifest(&self, manifest: PluginManifest) {
                 self.manifests.write().insert(manifest.id.clone(), manifest);
             }
         }

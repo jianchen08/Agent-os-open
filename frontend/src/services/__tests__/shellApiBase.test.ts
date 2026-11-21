@@ -27,9 +27,9 @@ describe('services/shellApiBase — getShellApiBase 分支', () => {
 
   it('注入合法 apiBase → 原样返回', () => {
     ;(window as unknown as Record<string, unknown>).LINGXI_SHELL_CONFIG = {
-      apiBase: 'http://162.14.69.153',
+      apiBase: 'http://203.0.113.153',
     }
-    expect(getShellApiBase()).toBe('http://162.14.69.153')
+    expect(getShellApiBase()).toBe('http://203.0.113.153')
   })
 
   it.each([

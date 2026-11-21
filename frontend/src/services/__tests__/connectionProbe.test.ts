@@ -60,7 +60,7 @@ describe('isPlaintextRemoteUrl — P6 明文过渡期判定', () => {
   it.each([
     ['http://192.168.1.10:9300', true],
     ['http://agent.example.com', true],
-    ['http://162.14.69.153', true],
+    ['http://203.0.113.153', true],
   ])('远程 http = true（%s）', (url, expected) => {
     expect(isPlaintextRemoteUrl(url)).toBe(expected)
   })

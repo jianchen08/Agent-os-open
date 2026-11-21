@@ -13,7 +13,9 @@ import {
   invalidatePipelineStates,
 } from '@/hooks/queries/usePipelineRunsQuery'
 import { invalidateSessions, readSessions  } from '@/hooks/queries/useSessionsQuery'
+import { notifyPipelineMessage } from '@/lib/systemNotifier'
 import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
+import { subscribeConnectionRebuilt } from '@/services/connectionSelfHeal'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { extractThreadId } from '@/services/websocket/streaming/handlers/utils'
 import { useChatInputStore } from '@/stores/chatInputStore'
@@ -55,6 +57,10 @@ export function useRealtimeEvents(): void {
 
     /** WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。 流式事件（stream_start 等）由 streaming/index.ts 统一处理，此处不重复订阅。 */
     const handleWsReconnect = () => {
+      // 连接已恢复：清除连接类存量通知（2026-11-18 批次 3）——断连/重连失败
+      // 条目与「服务请求失败」「连接通道已重建」常驻条目随恢复一并解除，
+      // 不留需要逐条手动关的死通知。
+      useNotificationStore.getState().clearConnectionErrorNotifications()
       // 重连后补拉管道运行快照（断线期间的 stream_* 增量丢失，以快照对账）。
       // query 化：invalidate runs/states——活跃订阅自动重拉，替代原 store.fetch()。
       // 事件路径「先 invalidate 再取」强制新鲜：staleTime 窗口内直接 fetchQuery
@@ -277,6 +283,38 @@ export function useRealtimeEvents(): void {
     // WebSocket lifecycle（仅重连时补漏，首次连接由 setActiveSession 负责加载）
     globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, handleWsReconnect)
 
+    // 通知出队冲刷（批次 5）：notify_judge 判定 worthy 打标晚于 new_message 帧
+    // （post 时序错位，管道空闲即补发 notify_flush）。立即弹；dedupeKey=message_id
+    // 与帧链路共用幂等记账（押单后的重放/补发不双弹）。body 空（无摘要）由
+    // notifyPipelineMessage 静默降级。
+    const handleNotifyFlush = (eventData: Record<string, unknown>) => {
+      const info = (eventData?.data as Record<string, unknown>) || eventData || {}
+      void notifyPipelineMessage({
+        notifyWorthy: true,
+        title: '灵汐',
+        body: typeof info.title === 'string' ? info.title : '',
+        threadId: typeof info.thread_id === 'string' ? info.thread_id : undefined,
+        dedupeKey: typeof info.message_id === 'string' ? info.message_id : undefined,
+      })
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.NOTIFY_FLUSH, handleNotifyFlush)
+
+    // 连接池毒化自愈广播（2026-11-18 装机事故批次 2/3）：主进程探活内核健康后
+    // 重建 Electron 网络连接池并推送（net:self-heal:rebuilt），常驻通知告知
+    // 用户通道已重建、正在重连；重连成功（WS_RECONNECTED）时随连接类存量一并
+    // 清除。无 electronAPI（浏览器/移动壳）→ no-op。
+    const unsubConnectionRebuilt = subscribeConnectionRebuilt(() => {
+      useNotificationStore.getState().addNotification({
+        title: '连接通道已重建，正在重连',
+        message: '检测到连接通道异常，桌面壳已重建网络连接池，正在重新连接内核。',
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        mergeKey: 'conn-self-heal',
+        sourceLabel: '系统',
+      })
+    })
+
     // Task lifecycle events
     // （task_status_update / task_status_changed 当前后端推送路径静默跳过、
     //   待 SDK frontend.emit capability 落地后恢复——见 tasks/service.py，故保留订阅）
@@ -290,8 +328,10 @@ export function useRealtimeEvents(): void {
 
     /**
      * 发送失败透传（任何错误都必须让用户看见）：
-     * user_input 断线排队超 TTL（连接迟迟未恢复）→ 乐观 user 消息标 failed、
-     * 停止流式态、在原位置插入 system 错误消息 + 通知中心高优告警。
+     * user_input 断线排队超 TTL（连接迟迟未恢复）/ 内核 user_input_ack(ok:false)
+     * 拒收 → 乐观 user 消息标 failed、停止流式态。错误呈现走操作点（输入框报错）
+     * 与通知中心高优告警，不向消息流插 system 气泡——消息流只承载对话与生成
+     * 结果，发送失败不是一轮生成，落进气泡只会显示误导性的「生成失败」。
      */
     const handleUserInputSendTimeout = (eventData: {
       data?: {
@@ -320,20 +360,6 @@ export function useRealtimeEvents(): void {
         ps.stopStreaming(pipelineId)
       }
 
-      // 原位置插入可见错误（system 消息有独立渲染分支），用户刷新后由后端权威内容对账
-      if (pipelineId && cmid) {
-        ps.addMessage(pipelineId, {
-          id: `send_failed_${cmid}`,
-          sessionId: info.thread_id || '',
-          role: 'system',
-          content: serverAware
-            ? `⚠ ${reason}（消息已到达服务器但被拒绝派发），请重试或检查会话状态。`
-            : `⚠ ${reason}。这条消息没有发到服务器（后端无记录），请检查连接状态后重新发送。`,
-          timestamp: new Date().toISOString(),
-          status: 'error',
-        } as never)
-      }
-
       useNotificationStore.getState().addNotification({
         title: '消息发送失败',
         message: serverAware
@@ -342,7 +368,12 @@ export function useRealtimeEvents(): void {
         priority: 'high',
         category: 'error',
         isBlocking: false,
-        autoDismissMs: 10000,
+        // 发送失败常驻（2026-11-18 装机事故批次 3）：断连期逐条撤回通知
+        // 10s 即逝，用户只看到气泡消失不知根因。同 mergeKey 合并高频失败
+        // （毒化期 77 次重连只更新一条）；各消息的 failed 态与会话内气泡
+        // 重试按钮承载逐条恢复，通知恒需用户手动关闭（不随重连自动清，
+        // 避免用户尚未重发就丢提醒）。
+        mergeKey: 'msg-send-failed',
         sourceLabel: '系统',
       })
     }
@@ -708,6 +739,7 @@ export function useRealtimeEvents(): void {
     return () => {
       // WebSocket lifecycle
       globalWS.unsubscribe(WS_LOCAL_EVENTS.RECONNECTED, handleWsReconnect)
+      unsubConnectionRebuilt()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
 
       // Task lifecycle events
@@ -719,6 +751,7 @@ export function useRealtimeEvents(): void {
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_FAILED, handleTaskTerminalNotice)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TRIGGER_FIRED, handleTriggerFired)
       globalWS.unsubscribe(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, handleUserInputSendTimeout)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.NOTIFY_FLUSH, handleNotifyFlush)
       globalWS.unsubscribe(WS_SERVER_EVENTS.ROUTE_ERROR, handleRouteError)
       globalWS.unsubscribe(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, handlePendingInputsChanged)
       globalWS.unsubscribe(

@@ -51,7 +51,7 @@ cases:
   category: coding
   target: mode_coding/programming_orchestrator_agent_v2
   messages:
-  - 请读取仓库根的 config/isolation/isolation_policy.yaml，回答：bash_execute 工具的隔离策略是什么（isolation
+  - 请读取仓库根的 config/isolation/isolation_policy.yaml，回答：bash 工具的隔离策略是什么（isolation
     与 execution 字段的值）？把答案以 YAML 形式写入当前工作空间的 policy_answer.yaml，键为 isolation 和 execution。
   acceptance_criteria:
     file_check:

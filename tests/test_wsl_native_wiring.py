@@ -111,21 +111,41 @@ class TestProviderSlotting:
         assert isinstance(providers[IsolationLevel.HOST], HostProvider)
 
     def test_wsl_native_disabled_slot_falls_through(self) -> None:
-        """wsl 关闭不占槽：nt/mac 落 Docker；Linux 落 linux_native（默认启用）。"""
+        """wsl 显式关闭不占槽：nt/mac 落 Docker；Linux 落 linux_native（默认启用）。"""
         providers = _MOD._create_providers_from_config(
-            {"host": {"enabled": True}, "cua": {"enabled": True}}
+            {"host": {"enabled": True}, "cua": {"enabled": True}, "wsl_native": {"enabled": False}}
         )
         if os.name == "nt" or sys.platform != "linux":
             assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
         else:
             assert isinstance(providers[IsolationLevel.CONTAINER], LinuxNativeProvider)
 
-    def test_wsl_native_disabled_by_default(self) -> None:
+    def test_wsl_native_enabled_by_default_on_windows(self) -> None:
+        """Windows 缺省启用（2026-11-13 用户裁定：隔离技术栈 Codex 式原生
+        优先——配置段缺席/注入链断裂不再静默降 Docker，同日装机实测形态）；
+        Linux 默认落 linux_native，macOS 落 Docker。"""
         providers = _MOD._create_providers_from_config({})
-        if os.name == "nt" or sys.platform != "linux":
-            assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
-        else:
+        if os.name == "nt":
+            assert isinstance(providers[IsolationLevel.CONTAINER], WslNativeProvider)
+        elif sys.platform == "linux":
             assert isinstance(providers[IsolationLevel.CONTAINER], LinuxNativeProvider)
+        else:
+            assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
+
+    def test_wsl_native_default_enabled_with_docker_only_config(self) -> None:
+        """providers 段在而 wsl_native 缺席（配置快照丢段形态）：nt 仍缺省
+        启用 wsl_native 占槽——2026-11-13 装机 21:46~22:09 四次创建全落
+        Docker 的注入断裂面，本缺省语义下结构性封死；显式 enabled: false
+        才回 Docker（见 test_wsl_native_disabled_slot_falls_through）。"""
+        providers = _MOD._create_providers_from_config(
+            {"host": {"enabled": True}, "cua": {"enabled": True}}
+        )
+        if os.name == "nt":
+            assert isinstance(providers[IsolationLevel.CONTAINER], WslNativeProvider)
+        elif sys.platform == "linux":
+            assert isinstance(providers[IsolationLevel.CONTAINER], LinuxNativeProvider)
+        else:
+            assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
 
 
 # ── manager：按名查找/销毁委托 ───────────────────────────────

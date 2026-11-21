@@ -9,8 +9,9 @@
 - 失败轮的 ``raw_result`` 是上一轮残留（同一文本）——若计入重复输出会被
   误诊 ``duplicate_loop``（2026-10-20 事故：15 条同文 LLM 错误终态被写成
   duplicate_loop，与真实死因不符）。
-- 失败计数来自引擎 ``_plugin_errors``（run 开头清空、run 内累积）：本轮
-  新增错误条数 = 失败轮；成功轮无新增 → 连击计数清零（自愈不误伤）。
+- 失败计数来自引擎 ``_plugin_error_stats``（run 开头清空、run 内按
+  `(plugin_id, message)` 聚合成 count）：本轮新增计数 = 失败轮；成功轮无
+  新增 → 连击计数清零（自愈不误伤）。
 """
 
 from __future__ import annotations
@@ -82,12 +83,43 @@ def _exec_updates(plugin: Any, state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _llm_error(message: str) -> dict[str, Any]:
-    """引擎 _plugin_errors 条目形态（plugin_id/code/message）。"""
+    """单次失败记录（按插件执行序交给 ``_state`` 聚合）。"""
     return {
         "plugin_id": "pipeline_llm_core",
         "code": "MCP_CALL_FAILED",
         "message": message,
     }
+
+
+def _error_stats(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把失败记录聚合成引擎账本形态（同 (plugin_id, message) 累加 count，
+    seq 按执行序单调递增）——与 finalize::record_plugin_error 同口径。"""
+    stats: list[dict[str, Any]] = []
+    seq = 0
+    for err in errors:
+        seq += 1
+        entry = next(
+            (
+                e
+                for e in stats
+                if e["plugin_id"] == err["plugin_id"] and e["message"] == err["message"]
+            ),
+            None,
+        )
+        if entry is None:
+            stats.append(
+                {
+                    "plugin_id": err["plugin_id"],
+                    "code": err.get("code") or "PLUGIN_EXEC_FAILED",
+                    "message": err["message"],
+                    "count": 1,
+                    "seq": seq,
+                }
+            )
+        else:
+            entry["count"] += 1
+            entry["seq"] = seq
+    return stats
 
 
 def _fingerprint(message: str) -> str:
@@ -104,7 +136,7 @@ def _state(errors: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
         "raw_tool_calls": [],
         "tool_results": [],
         "run_id": "run-1",
-        "_plugin_errors": errors,
+        "_plugin_error_stats": _error_stats(errors),
     }
     state.update(extra)
     return state
@@ -253,7 +285,8 @@ class TestVolatileFieldBlindness:
         assert first.get("should_stop") is not True
         assert first["router.llm_fail_streak"]["count"] == 2
 
-        # 引擎 _plugin_errors run 内累积：第二轮列表 = 前 2 条旧错误 + 3 条新错误
+        # 引擎 _plugin_error_stats run 内聚合：第二轮 = 前 2 次旧失败（同文
+        # 聚成 count=2）+ 3 次新失败（各自独立 request_id → 3 条 count=1）
         state = _state(
             [_llm_error(_quota_429_msg("072a" + "a" * 20)) for _ in range(2)]
             + [_llm_error(_quota_429_msg(f"072b{id_:024x}")) for id_ in range(3)],
@@ -370,3 +403,85 @@ class TestRepetitiveOutputUnchanged:
         updates = _exec_updates(plugin, state)
 
         assert updates["router.repetitive_count"] == 0
+
+
+class TestCamelCaseRequestIdStripping:
+    """camelCase ``requestId`` 易变字段剥除（2026-11-18 装机 634adfc6a364 实证）。
+
+    事故形态：CPA gateway 额度 429 错误正文用 camelCase ``requestId``（无
+    下划线），旧正则只匹配 ``request_id``——同型失败逐调用异文，连击永不
+    达阈，169 连败未触发熔断，任务全家僵死 80+ 分钟。
+    """
+
+    @staticmethod
+    def _gateway_429_msg(request_id: str) -> str:
+        """2026-11-18 装机实证形态：gateway service_down 包裹的额度 429，
+        camelCase requestId 每调用不同（文本其余部分相同）。引号形态与引擎
+        PARSE_ERROR 嵌入面一致 = JSON 字符串单反斜杠转义。"""
+        inner = (
+            '{"error":{"message":"upstream 429: '
+            "额度已用尽，请访问以下链接，购买加油包以获取更多额度："
+            'https://example.com/profile",'
+            f'"requestId":"{request_id}",'
+            '"type":"server_error","code":"internal_server_error"}}'
+        )
+        return (
+            "RuntimeError: llm.complete_stream 工具执行失败: "
+            '{"success": false, "error": "原错误: _PluginProviderFailure: '
+            "[llm_failure code=service_down] [wire http 500] "
+            + inner.replace('"', '\\"')
+            + '"}}'
+        )
+
+    def test_stable_text_strips_camel_case_request_id(self) -> None:
+        """camelCase requestId 剥除后无原文残留（两种引号形态都收）。"""
+        plain = '"requestId":"fc21488c-70d1-450d-99d5-4c1ab19e77f2"'
+        escaped = '\\"requestId\\":\\"fc21488c-70d1-450d-99d5-4c1ab19e77f2\\"'
+        for text in (plain, escaped):
+            stable = _MOD._stable_error_text(text)
+            assert "<volatile>" in stable, text
+            assert "fc21488c" not in stable, text
+
+    def test_camel_case_variance_accumulates_and_trips(self) -> None:
+        """仅 camelCase requestId 不同的同类失败 → 同文连击，达瞬态阈值 5 终止。"""
+        plugin = DuplicateCheckPlugin()
+        errors = [
+            _llm_error(self._gateway_429_msg(f"fc21488c-{i:04d}-450d"))
+            for i in range(5)
+        ]
+        state = _state(errors, agent_level="L2")
+
+        updates = _exec_updates(plugin, state)
+
+        assert updates["should_stop"] is True
+        assert updates["router.stop_reason"] == "llm_fail_loop"
+
+    def test_camel_case_variance_real_pace_across_rounds(self) -> None:
+        """真实节奏（每轮一条失败）：camelCase 异文跨轮延续计数，第 5 轮终止。"""
+        plugin = DuplicateCheckPlugin()
+
+        first = _exec_updates(
+            plugin,
+            _state(
+                [_llm_error(self._gateway_429_msg("fc21488c-aaaa-450d")) for _ in range(2)],
+                agent_level="L2",
+            ),
+        )
+        assert first.get("should_stop") is not True
+        assert first["router.llm_fail_streak"]["count"] == 2
+
+        state = _state(
+            [_llm_error(self._gateway_429_msg("fc21488c-aaaa-450d")) for _ in range(2)]
+            + [
+                _llm_error(self._gateway_429_msg(f"fc21488c-{i:04d}-450d"))
+                for i in range(3)
+            ],
+            agent_level="L2",
+        )
+        state["router.llm_fail_streak"] = first["router.llm_fail_streak"]
+        state["router.llm_error_cursor"] = first["router.llm_error_cursor"]
+
+        second = _exec_updates(plugin, state)
+
+        assert second["should_stop"] is True
+        assert second["router.stop_reason"] == "llm_fail_loop"

@@ -9,8 +9,8 @@
  * viewOrdinal 0 = 正看启用序列（标签「当前」），k = 正看第 k 段（乐观换装态）。
  */
 
-import { useShallow } from 'zustand/react/shallow'
 import { toast } from 'sonner'
+import { useShallow } from 'zustand/react/shallow'
 import { getMessageSegmentDetail } from '@/services/api/messageSegments'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'

@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { presetThemes } from '@/config/themes'
 import { apiClient } from '@/services/api/client'
 import { findDownMessage, postUp as bridgePostUp } from './webviewTestBridge'
+import { WebviewWidget } from '../WebviewWidget'
 import type { Mock } from 'vitest'
 
 const openModeSession = vi.hoisted(() => vi.fn())
@@ -39,7 +40,6 @@ vi.mock('@/stores/sessionStore', async () => {
   }
 })
 
-import { WebviewWidget } from '../WebviewWidget'
 
 beforeEach(() => {
   vi.clearAllMocks()

@@ -59,12 +59,15 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _make_project(tmp_path: Path, form_yaml: str | None, agents: dict[str, str] | None = None) -> Path:
-    """搭最小项目根：config/task_form.yaml（可选）+ config/agents/**.yaml。"""
+    """搭最小项目根：config/plugins/task_form/task_form.yaml（可选，manifest
+    声明路径）+ config/agents/**.yaml。"""
     root = tmp_path / "proj"
     config = root / "config"
+    form_dir = config / "plugins" / "task_form"
     (config / "agents").mkdir(parents=True, exist_ok=True)
     if form_yaml is not None:
-        (config / "task_form.yaml").write_text(form_yaml, encoding="utf-8")
+        form_dir.mkdir(parents=True, exist_ok=True)
+        (form_dir / "task_form.yaml").write_text(form_yaml, encoding="utf-8")
     for rel, content in (agents or {}).items():
         path = config / "agents" / rel
         path.parent.mkdir(parents=True, exist_ok=True)

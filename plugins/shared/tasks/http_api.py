@@ -23,6 +23,7 @@ dispatcher 调度的标准插件 HTTP 面模式，与 agent_manager/task_form �
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -58,6 +59,13 @@ logger = logging.getLogger(__name__)
 # ——DISPATCH_FAILED 管道未创建；WORKSPACE_PREPARE_FAILED 工作空间建不出来，
 # 任务记录已保留并标 failed（ADR 2026-10-17）。
 _CORE_FAILURE_ERROR_CODES = frozenset({"DISPATCH_FAILED", "WORKSPACE_PREPARE_FAILED"})
+
+# 子任务挂号键前缀（task_submit 写入提交者管道，值非空 = 终态回执未写）。
+_PENDING_SUBTASK_PREFIX = "task.subtasks_pending."
+# 子任务 run 已到终态（task 投影可能因修复前残留未随写）。
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed"})
+# 子任务仍在执行/等待：父挂起是在等它，不能对其重复派发父续跑轮。
+_ACTIVE_RUN_STATUSES = frozenset({"running", "pending", "suspended"})
 
 
 # ════════════════════════════════════════════════════════════
@@ -476,6 +484,71 @@ async def _read_task_row(task_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _pending_child_ids(row: dict[str, Any] | None) -> list[str]:
+    """父行上仍持有非空值的子任务挂号 id（空值 = 已回执墓碑）。"""
+    if not isinstance(row, dict):
+        return []
+    child_ids: list[str] = []
+    for key, value in row.items():
+        k = str(key)
+        if not k.startswith(_PENDING_SUBTASK_PREFIX) or value in (None, ""):
+            continue
+        child_id = k[len(_PENDING_SUBTASK_PREFIX) :]
+        if child_id:
+            child_ids.append(child_id)
+    return child_ids
+
+
+async def _stale_pending_clear_fields(row: dict[str, Any] | None) -> dict[str, Any]:
+    """已终态子任务的挂号键 → 恢复 overlay 清除字段（null = 已回执）。
+
+    父任务挂起等子任务时，子 run 已 completed/failed 但 task.status 因
+    「评估结论未投影终态」等修复前残留停在 running，父的
+    ``task.subtasks_pending.<child>`` 就永远不会被终态回执清除（装机
+    2026-11-11 e475/885b 实证：子 run 08:36 已 completed，父 09:47 恢复后
+    再挂起，双停滞 >90min）。恢复前把这些已终态子任务的挂号键加入 overlay
+    ——overlay 在 state 恢复合并之后应用，父续跑轮不再被陈旧挂号键二次挂起。
+
+    判据取子行 ``task.status`` 终态 **或** ``run_status`` 终态：后者覆盖
+    子任务投影未随写的存量残留；子行缺失/读面故障时不动（保守，不猜）。
+    """
+    child_ids = _pending_child_ids(row)
+    if not child_ids:
+        return {}
+    try:
+        handle = _capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[tasks http] 陈旧挂号键读面故障（本轮不清理） | err=%s", exc)
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    by_pipeline = {
+        str(r.get("pipeline_id") or ""): r for r in rows if isinstance(r, dict)
+    }
+    fields: dict[str, Any] = {}
+    for child_id in child_ids:
+        child = by_pipeline.get(child_id)
+        if not isinstance(child, dict):
+            continue
+        task_status = str(child.get("task.status") or "")
+        run_status = str(child.get("run_status") or "")
+        if task_status in _TERMINAL_RUN_STATUSES or run_status in _TERMINAL_RUN_STATUSES:
+            fields[f"{_PENDING_SUBTASK_PREFIX}{child_id}"] = None
+    return fields
+
+
+def _has_active_pending_child(
+    row: dict[str, Any], by_pipeline: dict[str, dict[str, Any]]
+) -> bool:
+    """父行是否仍在等一个未终态子任务（活跃子任务不重复拉起父续跑轮）。"""
+    for child_id in _pending_child_ids(row):
+        child = by_pipeline.get(child_id)
+        if isinstance(child, dict) and str(child.get("run_status") or "") in _ACTIVE_RUN_STATUSES:
+            return True
+    return False
+
+
 async def follow_write_cancel_terminal(task_id: str) -> None:
     """停止终态随写（事件路径入口）：自身投影。
 
@@ -522,6 +595,31 @@ async def follow_write_cancel_terminal(task_id: str) -> None:
             )
 
 
+# run 簿记在飞时允许纠偏的投影词面：这些值都表示"上一轮已结束"，与
+# ``run_status=running`` 直接矛盾（2026-11-10 装机实证：resume 后 run 在飞，
+# task.status 停在 stopped，面板显示已停止且 submit 口被 400 拒）。
+_STALE_PROJECTION_STATUSES = frozenset({"stopped", "failed", "timeout", "pending", ""})
+
+
+def derive_task_status(row: dict[str, Any]) -> str:
+    """任务状态投影纠偏：run 簿记在飞时以 ``run_status`` 为真值。
+
+    任务状态是域投影，但投影会与实际脱节——典型路径：resume 续跑轮从快照
+    恢复出的 ``task.status`` 仍是上一轮的终态（stopped），复位写被后续状态
+    持久化顶掉；结果是 run 在飞而面板/守卫读到 stopped（submit 直接 400）。
+
+    判据只碰"明确矛盾"的组合：``run_status == "running"`` 且投影是上一轮
+    终态词面 → 返回 ``running``。其余（无 run 簿记 / suspended / 投影已是
+    running / 用户侧 completed）原样返回，不猜不改语义。
+    """
+    projected = str(row.get("task.status") or "")
+    if str(row.get("run_status") or "") == "running" and (
+        projected in _STALE_PROJECTION_STATUSES
+    ):
+        return "running"
+    return projected or "pending"
+
+
 async def _read_task_status(task_id: str) -> str | None:
     """读任务管道的 task.status 投影（恢复链仲裁依据）。
 
@@ -543,13 +641,18 @@ async def _read_task_status(task_id: str) -> str | None:
         )
         if row is None:
             return None
-        return str(row.get("task.status") or "") or None
+        # 与列表/详情同源纠偏：run 在飞而投影停在上一轮终态时以 running 裁决
+        # ——恢复守卫据实读数（stopped 被当"可恢复"放行、submit 被当"不可提交"
+        # 拒绝，两边都错在读了僵尸投影）。
+        return derive_task_status(row) or None
     except Exception as exc:  # noqa: BLE001
         logger.warning("[tasks http] 投影读面故障，恢复仲裁降级放行 | task_id=%s | err=%s", task_id, exc)
         return None
 
 
-async def _resume_task_pipeline(task_id: str, user_id: str = "") -> tuple[bool, bool, str]:
+async def _resume_task_pipeline(
+    task_id: str, user_id: str = "", allow_crash_swept: bool = False
+) -> tuple[bool, bool, str]:
     """恢复任务 = resume_pipeline（内核按 run 状态簿记或拉起续跑轮）。
 
     携带终态键复位 overlay（B13①，defd5b555"恢复重置"同族）：恢复投影
@@ -568,6 +671,11 @@ async def _resume_task_pipeline(task_id: str, user_id: str = "") -> tuple[bool, 
     原因展示）；其余状态与投影读面故障（_read_task_status 降级 None）一律
     现行为放行。内核 resume_pipeline 能力不加任何任务语义守卫（内核零任务
     知识，架构公理）。
+
+    failed 窄放行（ADR 2026-11-12-crash-swept-running-tasks-auto-relaunch）：
+    ``allow_crash_swept=True`` 且投影行 ``run_stop_reason`` 恰为内核崩溃清扫
+    署名 ``crash_swept``（重启前 running 被打断）时放行 failed——仅启动自动
+    恢复通道使用；缺任一条件照旧拒绝，幽灵续跑防线对其余全部路径原样。
 
     Returns:
         (resumed, submitted, error)：resumed = 内核确认恢复语义生效（run 在飞/
@@ -598,7 +706,13 @@ async def _resume_task_pipeline(task_id: str, user_id: str = "") -> tuple[bool, 
         message = f"任务已完成，无可恢复对象；如需返工请由上级带指令继续: {task_id}"
         logger.warning("[tasks http] 拒绝裸恢复已完成任务（幽灵续跑防线） | task_id=%s", task_id)
         return False, False, message
-    if task_status == "failed":
+    # 崩溃清扫窄放行：flag + 署名双条件（行内再验一次，防调用方误用）。
+    crash_swept_bypass = (
+        allow_crash_swept
+        and task_status == "failed"
+        and str((row or {}).get("run_stop_reason") or "") == _CRASH_SWEEP_REASON
+    )
+    if task_status == "failed" and not crash_swept_bypass:
         message = (
             f"任务已失败，不可恢复执行；请通过重新提交（submit）或"
             f" task_manage continue 重试: {task_id}"
@@ -613,6 +727,26 @@ async def _resume_task_pipeline(task_id: str, user_id: str = "") -> tuple[bool, 
         "task_status": "running",
         "suspended_reason": None,
     }
+    # 旧停泊归因随新 run 清除（与派发通道/失败窄放行分支无关）：crash_swept
+    # （内核崩溃清扫署名）与排空/水位自愈类归因是「run 被打断暂泊」的署名，
+    # 新 run 一起即陈旧；真实失败归因（llm_fail_loop / duplicate_loop /
+    # user_requested 等）不在停泊词表，原样保留（恢复链不得抹掉失败史）。
+    # 2026-11-12 第 4 次实证：task.status=running 的 crash_swept 行不走 failed
+    # 窄放行分支，旧 overlay 只在窄放行内清键 → 恢复后署名残留，面板误读为
+    # 当前 run 归因。
+    if _is_parking_stop_reason(str((row or {}).get("run_stop_reason") or "")):
+        overlay["run_stop_reason"] = None
+    if crash_swept_bypass:
+        # 崩溃清扫派的终态残键同批清：派发到收尾窗口内面板会把陈旧署名误读
+        # 为当前 run 的失败归因；ended_at/failure_* 清理让重试轮不顶上一轮失败
+        # 原因展示（timeout 路径同款）。run_stop_reason 由上方停泊归因判别清键。
+        overlay.update(
+            {
+                "task.ended_at": None,
+                "task.failure_class": None,
+                "task.failure_reason": None,
+            }
+        )
     if task_status == "timeout":
         overlay.update(
             {
@@ -621,6 +755,9 @@ async def _resume_task_pipeline(task_id: str, user_id: str = "") -> tuple[bool, 
                 "task.failure_reason": None,
             }
         )
+    # 陈旧子任务挂号键：子 run 已终态而 task 投影未随写的存量残留 → 恢复
+    # overlay 同批清键，否则父续跑轮被 task_reminder 按挂号真值再次挂起。
+    overlay.update(await _stale_pending_clear_fields(row))
     try:
         handle = _capability("pipeline-executor")
         # params.user_id 已退役（内核刀3）：反调面身份由内核执行上下文注入
@@ -646,6 +783,218 @@ async def _resume_task_pipeline(task_id: str, user_id: str = "") -> tuple[bool, 
     run_id = str(resp.get("run_id") or "")
     dispatched = resp.get("dispatched") is True
     return (run_id != "" or dispatched), dispatched, ""
+
+
+# ──────────────────────────────────────────────
+# 排空自动恢复（2026-11-11 用户裁定）
+# ──────────────────────────────────────────────
+
+# 内核 drain_and_exit75 的归因字串前缀（三个触发源：水位自愈 / 手动 G8 /
+# watcher cdylib 集变更）。suspended_reason 在位 ⇔ 本次挂起因排空——用户停止/
+# 审批挂起/llm_fail_loop 等非排空停靠不写该键，故不会被自动拉起。
+_DRAIN_SUSPEND_MARKERS = (
+    "memory watermark self-heal",
+    "system/restart",
+    "plugin set changed",
+)
+# 内核崩溃清扫署名（reap_orphan_runs 对受害行的 run_stop_reason 署名值，
+# ADR 2026-11-12-crash-swept-running-tasks-auto-relaunch）：在位 ⇔ 该 run
+# 是内核重启时在飞被打断的——重启前就真失败的任务带真实归因、永无此署名。
+_CRASH_SWEEP_REASON = "crash_swept"
+# 单次启动的恢复上限与逐个间隔：避免几十个任务同时抢 LLM 配额/工作空间锁；
+# 超出上限的留待下一轮人工或下次重启（不静默丢弃——逐个 WARNING 留痕）。
+_AUTO_RESUME_LIMIT = 20
+_AUTO_RESUME_STAGGER_SECS = 1.5
+
+
+def _is_drain_suspend_reason(reason: str) -> bool:
+    """归因字串是否来自内核排空（大小写不敏感前缀包含，纯函数可单测）。"""
+    lowered = reason.strip().lower()
+    return any(marker in lowered for marker in _DRAIN_SUSPEND_MARKERS)
+
+
+def _is_parking_stop_reason(reason: str) -> bool:
+    """``run_stop_reason`` 是否停泊归因（新 run 起始即陈旧的暂泊署名）。
+
+    停泊面 = 内核崩溃清扫署名 ``crash_swept`` + 排空/水位自愈挂起归因
+    （三源同 :data:`_DRAIN_SUSPEND_MARKERS`）。真实失败归因（``llm_fail_loop``
+    / ``duplicate_loop`` / ``user_requested`` 等）不在词表——恢复链只清停泊
+    署名，不覆盖真实失败史（2026-11-12 用户要求）。
+    """
+    value = reason.strip().lower()
+    if not value:
+        return False
+    return value == _CRASH_SWEEP_REASON or _is_drain_suspend_reason(value)
+
+
+async def _clear_crash_sweep_signature(state_cap: Any, pipeline_id: str) -> None:
+    """拉起成功后显式清 ``run_stop_reason=crash_swept``（旧 run 署名）。
+
+    内核 resume overlay 的 null 清键在装机实证未落库（2026-11-13 08:20
+    `1af174` running 仍带 crash_swept），插件侧补一刀确定性清除；写失败仅
+    告警，下一次 run 收尾的 terminal_run_fields 会覆写。
+    """
+    try:
+        await state_cap.call(
+            "update",
+            {"pipeline_id": pipeline_id, "fields": {"run_stop_reason": None}},
+        )
+    except Exception as exc:  # noqa: BLE001 — 恢复成功优先，清署名失败只留痕
+        logger.warning(
+            "[tasks http] 崩溃清扫署名清除失败 | task_id=%s | err=%s",
+            pipeline_id,
+            exc,
+        )
+
+
+async def _mark_relaunch_failed(
+    state_cap: Any, pipeline_id: str, error: str
+) -> None:
+    """崩溃清扫自动拉起失败 → 才把任务投影为 failed（ADR 2026-11-13）。
+
+    成功拉起时任务保持 running（不写 failed/suspended）；只有这里失败才写
+    ``task.status=failed`` + ``failure_class=relaunch_failed``。``run_stop_reason``
+    保留 crash_swept，下次启动仍可凭署名重试。
+    """
+    fields = {
+        "task.status": "failed",
+        "task.ended_at": _now_iso(),
+        "task.failure_class": "relaunch_failed",
+        "task.failure_reason": f"重启自动拉起失败：{error or '无可恢复对象'}",
+    }
+    try:
+        await state_cap.call(
+            "update", {"pipeline_id": pipeline_id, "fields": fields}
+        )
+    except Exception as exc:  # noqa: BLE001 — 失败投影写不进只留痕，不阻断其余任务
+        logger.warning(
+            "[tasks http] 自动拉起失败投影写入失败 | task_id=%s | err=%s",
+            pipeline_id,
+            exc,
+        )
+
+
+async def auto_resume_drained_tasks() -> list[dict[str, Any]]:
+    """启动对账后自动恢复被打断的任务（排空 + 内核重启两类）。
+
+    背景①排空：``drain_and_exit75`` 排空在途 run（``run_status=suspended`` +
+    ``suspended_reason``），重启后 reconcile 把任务投影复位 ``stopped``——
+    此前只能人工 ``task_manage continue`` 续跑，每次自愈都留一批停摆任务。
+
+    背景②崩溃清扫（ADR 2026-11-12-crash-swept-running-tasks-auto-relaunch，
+    用户裁定「重启前 running 的，重启后自动重新拉起」）：内核 ``reap_orphan_runs``
+    把重启时在飞的 run 清扫为 ``run_status=failed`` 并署名
+    ``run_stop_reason=crash_swept``——本函数凭署名识别此类任务并自动派发
+    续跑轮（经 ``allow_crash_swept`` 窄放行 failed 守卫）。重启前就真失败的
+    任务带真实归因、无署名，不会被拉起。
+
+    本函数按 state 行筛选后逐个走 :func:`_resume_task_pipeline`
+    （= 内核 ``pipeline-executor.resume_pipeline``：run 簿记在飞则接管、
+    否则派发续跑轮），恢复即经 overlay 清 ``suspended_reason``；``run_stop_reason``
+    仅在旧值是停泊归因（``crash_swept`` / 排空/水位自愈）时清除，真实失败
+    归因（``llm_fail_loop`` 等）保留。
+
+    守卫（两类共用）：
+    - 排空类 ``run_status == "suspended"``：已被恢复/重跑的管道不重复拉起；
+    - 排空类 ``suspended_reason`` 命中排空标记：非排空停靠不自动恢复；
+    - 崩溃类 ``run_status == "failed"`` ∧ 署名恰为 ``crash_swept``；
+    - 任务管道身份门（:func:`events.is_task_pipeline_row`）：会话主管道不是
+      任务，恢复它等于凭空发一轮消息；
+    - ``task.status`` 真终态 completed 跳过（返工属上级带指令职责）；排空类
+      另拒 failed（未署名的 failed 不是本通道的恢复对象）；
+    - 有活跃子任务（run running/pending/suspended）跳过：父在等子，重复派发
+      只会制造并行轮。
+
+    Returns:
+        成功恢复的记录列表（``pipeline_id``/``dispatched``）；读面或单个恢复
+        失败只告警，不影响其余任务（自愈兜底不反向阻断装载）。
+    """
+    try:
+        handle = _capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception as exc:  # noqa: BLE001 — 读面故障降级：本轮不恢复，留痕迹
+        logger.warning("[tasks http] 排空自动恢复读面故障（本轮跳过） | err=%s", exc)
+        return []
+    if not isinstance(rows, list):
+        return []
+    by_pipeline = {
+        str(r.get("pipeline_id") or ""): r for r in rows if isinstance(r, dict)
+    }
+    candidates: list[tuple[str, bool]] = []  # (pipeline_id, crash_swept)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if not _task_events.is_task_pipeline_row(row):
+            continue
+        run_status = str(row.get("run_status") or "")
+        if run_status == "suspended":
+            if not _is_drain_suspend_reason(str(row.get("suspended_reason") or "")):
+                continue
+            # 排空类：failed 同为真终态（未署名，非本类对象）
+            if str(row.get("task.status") or "") in ("completed", "failed"):
+                continue
+            crash_swept = False
+        elif run_status == "failed" and str(
+            row.get("run_stop_reason") or ""
+        ) == _CRASH_SWEEP_REASON:
+            # 崩溃清扫类：completed 是真完成（即使带陈旧署名也不拉）
+            if str(row.get("task.status") or "") == "completed":
+                continue
+            crash_swept = True
+        else:
+            continue
+        pipeline_id = str(row.get("pipeline_id") or "")
+        if not pipeline_id:
+            continue
+        # 活跃子任务门（两类同受）：父停靠是在等它，子任务的终态通知会唤醒父
+        # ——重新派发父续跑轮只会制造并行重复轮（2026-11-11 e475/885b 同批）。
+        if _has_active_pending_child(row, by_pipeline):
+            continue
+        candidates.append((pipeline_id, crash_swept))
+    resumed: list[dict[str, Any]] = []
+    for idx, (pipeline_id, crash_swept) in enumerate(candidates[:_AUTO_RESUME_LIMIT]):
+        if idx:
+            await asyncio.sleep(_AUTO_RESUME_STAGGER_SECS)
+        ok, dispatched, error = await _resume_task_pipeline(
+            pipeline_id,
+            user_id="task_service:auto_resume",
+            allow_crash_swept=crash_swept,
+        )
+        if ok:
+            resumed.append({"pipeline_id": pipeline_id, "dispatched": dispatched})
+            logger.info(
+                "[tasks http] %s自动恢复 | task_id=%s | dispatched=%s",
+                "崩溃清扫" if crash_swept else "排空",
+                pipeline_id,
+                dispatched,
+            )
+            if crash_swept:
+                # 任务保持 running；旧 run 署名确定性清除（不依赖 kernel overlay）
+                await _clear_crash_sweep_signature(handle, pipeline_id)
+        elif crash_swept:
+            # 拉起失败才把任务置 failed（ADR 2026-11-13）；署名保留供下次启动重试
+            await _mark_relaunch_failed(handle, pipeline_id, error)
+            logger.warning(
+                "[tasks http] 崩溃清扫任务自动恢复失败，已投影 failed | task_id=%s | err=%s",
+                pipeline_id,
+                error or "无可恢复对象",
+            )
+        elif error:
+            logger.warning(
+                "[tasks http] %s任务自动恢复被拒 | task_id=%s | err=%s",
+                "崩溃清扫" if crash_swept else "排空",
+                pipeline_id,
+                error,
+            )
+    overflow = len(candidates) - _AUTO_RESUME_LIMIT
+    if overflow > 0:
+        logger.warning(
+            "[tasks http] 待恢复任务超单次上限，剩余 %d 个未拉起"
+            "（ids=%s）",
+            overflow,
+            ",".join(pid for pid, _ in candidates[_AUTO_RESUME_LIMIT:]),
+        )
+    return resumed
 
 
 async def _cascade_suspend_children(parent_task_id: str) -> int:
@@ -838,7 +1187,7 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
             {
                 "id": pid,
                 "title": str(row.get("task.goal") or pid),
-                "status": str(row.get("task.status") or "pending"),
+                "status": derive_task_status(row),
                 "thread_id": _session_anchor(row),
                 "pipeline_run_id": pid,
                 "parent_task_id": str(row.get("lineage.parent_pipeline_id") or "") or None,
@@ -1231,7 +1580,7 @@ async def update_task(
     return _task_to_response({
         "id": task_id,
         "title": str(row.get("task.goal") or task_id),
-        "status": str(row.get("task.status") or "pending"),
+        "status": derive_task_status(row),
     })
 
 
@@ -1811,7 +2160,7 @@ async def get_project(
                     {
                         "id": str(row.get("pipeline_id") or ""),
                         "title": str(row.get("task.goal") or row.get("pipeline_id") or ""),
-                        "status": str(row.get("task.status") or "pending"),
+                        "status": derive_task_status(row),
                     }
                 )
     except Exception as exc:  # noqa: BLE001 — 子任务摘要读取降级为空

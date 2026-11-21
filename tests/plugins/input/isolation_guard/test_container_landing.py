@@ -52,7 +52,7 @@ def _reset_env_caller() -> Any:
 def _make_guard(docker_available: bool = True) -> Any:
     """构造 IsolationGuard，decider 按真实 policy 语义返回隔离级别。
 
-    bash_execute → CONTAINER（策略真值）；browser_* → CONTAINER（Bridge 模式
+    bash → CONTAINER（策略真值）；browser_* → CONTAINER（Bridge 模式
     沙箱内发起）；其余工具（file_read/file_write 等）→ HOST（容器内没有工具
     代码，isolation_policy.yaml 真值即 non_isolated）。
     默认注入落地成功的 caller 假身（落地细节由各用例按需覆盖）。
@@ -61,7 +61,7 @@ def _make_guard(docker_available: bool = True) -> Any:
 
     def _resolve(tool_name: str, category: Any = None) -> Any:
         mock = MagicMock()
-        if tool_name in ("bash_execute", "browser_navigate", "browser_snapshot", "browser_click",
+        if tool_name in ("bash", "browser_navigate", "browser_snapshot", "browser_click",
                          "browser_type", "browser_take_screenshot", "browser_console_messages"):
             mock.isolation = IsolationLevel.CONTAINER
         else:
@@ -111,7 +111,7 @@ def _base_state(**overrides: Any) -> dict[str, Any]:
 
     workspace 用真实存在目录：挂载源悬空防护（d1c3b4213）下不存在路径会被
     拒绝建容器，夹具路径必须可挂载。
-    tool_output_contracts 对齐生产：tool_schema 插件每轮写入契约表，bash_execute
+    tool_output_contracts 对齐生产：tool_schema 插件每轮写入契约表，bash
     已声明 isolation_capable（plugin.json 声明位）。"""
     if not Path(_LANDING_WS).exists():
         Path(_LANDING_WS).mkdir(parents=True, exist_ok=True)
@@ -120,9 +120,9 @@ def _base_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.TASK_ID: "",
         "workspace": _LANDING_WS,
         "execution_context": {"isolation": {"level": "isolated"}},
-        StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "ls"}}],
+        StateKeys.RAW_TOOL_CALLS: [{"name": "bash", "args": {"command": "ls"}}],
         "tool_output_contracts": {
-            "bash_execute": {"schema": {}, "render": None, "isolation_capable": True},
+            "bash": {"schema": {}, "render": None, "isolation_capable": True},
         },
     }
     base.update(overrides)
@@ -162,7 +162,7 @@ class TestSessionIsolatedLanding:
                 _base_state(
                     **{
                         StateKeys.RAW_TOOL_CALLS: [
-                            {"name": "bash_execute", "args": {"command": "ls", "working_dir": "/host/custom"}}
+                            {"name": "bash", "args": {"command": "ls", "working_dir": "/host/custom"}}
                         ]
                     }
                 )
@@ -173,7 +173,7 @@ class TestSessionIsolatedLanding:
         assert calls[0]["args"]["_container_id"] == "container-abc"
 
     @pytest.mark.asyncio
-    async def test_混合工具只改bash_execute(self) -> None:
+    async def test_混合工具只改bash(self) -> None:
         guard = _make_guard()
         result = await guard.execute(
             _ctx(
@@ -181,7 +181,7 @@ class TestSessionIsolatedLanding:
                     **{
                         StateKeys.RAW_TOOL_CALLS: [
                             {"name": "file_read", "args": {"path": "/x"}},
-                            {"name": "bash_execute", "args": {"command": "pwd"}},
+                            {"name": "bash", "args": {"command": "pwd"}},
                             {"name": "file_write", "args": {"path": "/y"}},
                         ]
                     }
@@ -201,7 +201,7 @@ class TestSessionIsolatedLanding:
                 _base_state(
                     **{
                         StateKeys.RAW_TOOL_CALLS: [
-                            {"name": "bash_execute", "args": '{"command": "ls"}'}
+                            {"name": "bash", "args": '{"command": "ls"}'}
                         ]
                     }
                 )
@@ -215,7 +215,7 @@ class TestSessionIsolatedLanding:
     async def test_args非法JSON降级空dict再注入(self) -> None:
         guard = _make_guard()
         result = await guard.execute(
-            _ctx(_base_state(**{StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": "not-json{"}]}))
+            _ctx(_base_state(**{StateKeys.RAW_TOOL_CALLS: [{"name": "bash", "args": "not-json{"}]}))
         )
         calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
         assert calls[0]["args"]["_container_id"] == "container-abc"
@@ -408,7 +408,7 @@ class TestLandingWorkspaceFallback:
 
     装机实测（2026-10-17）：shared 模式任务管道不落 state.workspace，且
     task_service 未接线（metadata 恒空）——单一来源缺失使容器落地全程失败，
-    整条任务生命期 bash_execute 全被拦（container_create_failed）。
+    整条任务生命期 bash 全被拦（container_create_failed）。
     """
 
     @pytest.mark.asyncio

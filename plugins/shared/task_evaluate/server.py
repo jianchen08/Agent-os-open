@@ -37,9 +37,10 @@ async def _on_load(_params: dict[str, Any]) -> None:
     写：评估终态（task.status/task.ended_at）经 pipeline-state.update 落
     state 单一真值——任务状态由任务域插件裁决，内核只管管道运行域
     （run 终态只广播事件，不再回写 task.status）。
-    执行器：PipelineEvaluationExecutor（0.2 生产版——tool 型本地跑，agent 型
-    派评估子管道继承任务工作区）。能力句柄懒解析（协程内 get_capability），
-    on_load 早于 capability 注入完成也能在真正派发时拿到。
+    执行器：PipelineEvaluationExecutor（0.2 生产版——tool 型执行，agent 型
+    派评估子管道继承任务工作区）。bash_check 经内核 tool-executor 调 bash
+    工具异步执行，不在本宿主事件循环跑 subprocess。能力句柄懒解析（协程内
+    get_capability），on_load 早于 capability 注入完成也能在真正派发时拿到。
     """
     from _executor import PipelineEvaluationExecutor  # noqa: PLC0415
 
@@ -56,11 +57,17 @@ async def _on_load(_params: dict[str, Any]) -> None:
         handle = plugin.get_capability("chat")
         return await handle.call("send_message", params)
 
+    async def _tool_call(tool_name: str, args: dict[str, Any]) -> Any:
+        """经内核 tool-executor 执行工具（bash_check 用，异步不占本宿主事件循环）。"""
+        handle = plugin.get_capability("tool-executor")
+        return await handle.call("invoke", {"tool_name": tool_name, "args": args})
+
     tool_mod.set_state_reader(_read_state_rows)
     tool_mod.set_state_writer(_write_task_state)
     _executor_singleton = PipelineEvaluationExecutor(
         chat_send=_chat_send,
         state_rows=_read_state_rows,
+        tool_call=_tool_call,
     )
     tool_mod.set_default_executor(_executor_singleton)
 

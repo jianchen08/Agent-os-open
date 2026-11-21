@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Mode Godot",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",

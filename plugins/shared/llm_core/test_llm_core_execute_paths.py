@@ -6,7 +6,7 @@
 否则组装 LLMResponse。本文件覆盖既有测试未触及的 execute 分支：
 
 - ``_apply_model_from_state``：state.model_tier → defaults.tiers 解析、llm.yaml
-  配置更新 self、model_id 未配置保持现状；
+  配置更新 self；三级来源全空（defaults.chat 也为空）→ 显式报错；
 - ``_build_messages``：compression_messages 剥离 ``_context_form``、history 剥离
   ``seq``/``tool_result``、multimodal 合并进 list 型 content、dynamic_vars 三种形态；
 - 成功路径：tool_call arguments >100 字符诊断、tool_calls+thinking 的
@@ -42,6 +42,8 @@ for _d in (_SYSTEM_LLM_DIR, _SHARED_DIR, _LLM_CORE_DIR):
     if str(_d) in sys.path:
         sys.path.remove(str(_d))
     sys.path.insert(0, str(_d))
+
+import llm_adapter  # noqa: E402  适配服务面（剥噪助手批 5 迁至此处）
 
 _MOD_NAME = "llm_core_execute_paths_under_test"
 
@@ -122,7 +124,72 @@ def _base_state() -> dict[str, Any]:
     }
 
 
+def _test_identity(**overrides: Any) -> Any:
+    """构造调用意图视图（R4 后实例不持身份字段；单测显式传入快照）。
+
+    批 5 收窄：视图无 api_key（凭据不进入管道面）；api_base 仅观测回显。
+    """
+    values: dict[str, Any] = {
+        "model_id": "deepseek-v3",
+        "model": "deepseek-v3",
+        "provider": "openai",
+        "api_base": "https://baseline.example.com",
+        "context_window": 64000,
+        "supports_vision": False,
+        "default_params": {},
+    }
+    values.update(overrides)
+    return _mod.ModelIntent(**values)
+
+
+def test_constructor_holds_no_model_identity_fields() -> None:
+    """R4 死代码面删除：构造期/实例级模型身份字段一律不存在（身份随快照走）。"""
+    plugin = _make_plugin(_FakeCaller({"success": True, "data": _ok_response()}))
+    for attr in (
+        "_model_id",
+        "_model",
+        "_provider",
+        "_api_base",
+        "_api_key",
+        "_context_window",
+        "_default_params",
+        "_supports_vision",
+        "_vision_max_side",
+        "_boot_identity",
+    ):
+        assert not hasattr(plugin, attr), f"死代码身份字段仍在场: {attr}"
+
+
 # ─────────────────── 模型动态解析（_apply_model_from_state） ───────────────────
+
+
+@pytest.fixture(autouse=True)
+def _baseline_llm_config(monkeypatch: Any) -> None:
+    """每个用例注入一条可绑定的最小 llm.yaml 视图。
+
+    模型未解析现在显式报错（不再回退构造期身份），未测解析的用例需要一条
+    默认模型配置；测特定配置的用例在用例体内 monkeypatch 覆盖本基线。
+    """
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "deepseek-v3": {
+                        "provider": "openai",
+                        "model_name": "deepseek-v3",
+                        "api_base": "https://baseline.example.com",
+                        "api_key": "baseline-key",
+                        "context_window": 64000,
+                    }
+                },
+                "defaults": {"chat": "deepseek-v3"},
+            }
+        },
+    )
 
 
 def _inject_llm_config(monkeypatch: Any) -> None:
@@ -150,24 +217,49 @@ def _inject_llm_config(monkeypatch: Any) -> None:
     )
 
 
-async def test_model_tier_resolves_and_updates_self(monkeypatch: Any) -> None:
-    """state.model_tier → defaults.tiers 解析 → llm.yaml 配置更新 self。"""
+async def test_empty_llm_config_and_empty_state_raises_defaults_chat(
+    monkeypatch: Any,
+) -> None:
+    """llm 配置注入为空 + state 无模型意图 → 显式报错（2026-11-13 装机事故）。
+
+    旧行为：回退构造期身份（gpt-4/openai），错误面被拖到 adapter 缺 api_base。
+    新契约：模型调用只认管道模型 ID / llm.yaml 配置，解析为空即失败（可诊断、
+    可行动），且失败发生在任何 LLM 调用之前。
+    """
+    import _config_models
+
+    monkeypatch.setattr(_config_models, "_config", {})
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+
+    with pytest.raises(RuntimeError, match=r"defaults\.chat"):
+        await plugin.execute(_make_ctx(_base_state()))
+
+    assert caller.calls == [], "模型未解析不得发起下游 LLM 调用"
+
+
+async def test_model_tier_resolves_identity_snapshot(monkeypatch: Any) -> None:
+    """state.model_tier → defaults.tiers 解析 → 本次调用身份快照（结果面回读）。
+
+    R4 后身份不落实例字段：解析结果经 execute 返回的 state_updates 与本次
+    调用参数（caller args）观测——语义期望不变，读面改指活契约。
+    """
     _inject_llm_config(monkeypatch)
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller)
-    assert plugin._model_id == ""  # noqa: SLF001
+    assert not hasattr(plugin, "_model_id"), "构造期身份字段已退役（R4）"
 
-    await plugin.execute(_make_ctx({**_base_state(), "model_tier": "large"}))
+    result = await plugin.execute(_make_ctx({**_base_state(), "model_tier": "large"}))
 
-    assert plugin._model_id == "deepseek-v4-pro"  # noqa: SLF001
-    assert plugin._provider == "deepseek"  # noqa: SLF001
-    assert plugin._model == "deepseek-v4-pro"  # noqa: SLF001
-    assert plugin._api_base == "https://api.example.com"  # noqa: SLF001
-    assert plugin._api_key == "k1"  # noqa: SLF001
-    assert plugin._context_window == 64000  # noqa: SLF001
-    assert plugin._default_params == {"temperature": 0.3}  # noqa: SLF001
+    assert result["llm_model_id"] == "deepseek-v4-pro"
+    assert result["llm_provider"] == "deepseek"
+    assert result["llm_model"] == "deepseek-v4-pro"
+    assert result["llm_api_base"] == "https://api.example.com"
+    assert result["track.model_context_window"] == 64000
     # 调用通道：model 用 yaml key（model_id）做 deployment 匹配
     assert caller.calls[0][1]["args"]["model"] == "deepseek-v4-pro"
+    # default_params 随身份快照进入调用参数（temperature=0.3）
+    assert caller.calls[0][1]["args"]["temperature"] == 0.3
 
 
 async def test_model_id_unknown_fails_round_visibly(monkeypatch: Any) -> None:
@@ -256,16 +348,16 @@ async def test_tier_resolved_model_missing_fails_visibly(monkeypatch: Any) -> No
 
 
 async def test_model_id_same_unchanged_conf_idempotent(monkeypatch: Any) -> None:
-    """同一 model_id 且配置内容未变 → 解析幂等（字段与当前配置视图一致）。"""
+    """同一 model_id 且配置内容未变 → 解析幂等（结果面身份与配置视图一致）。"""
     _inject_llm_config(monkeypatch)
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller, {"model_id": "deepseek-v4-pro"})
-    await plugin.execute(_make_ctx(_base_state()))
-    await plugin.execute(_make_ctx(_base_state()))
-    assert plugin._model_id == "deepseek-v4-pro"  # noqa: SLF001
-    # 字段对齐当前配置视图（首执行即对齐基线，二执行幂等不变）
-    assert plugin._model == "deepseek-v4-pro"  # noqa: SLF001
-    assert plugin._context_window == 64000  # noqa: SLF001
+    first = await plugin.execute(_make_ctx(_base_state()))
+    second = await plugin.execute(_make_ctx(_base_state()))
+    assert first["llm_model_id"] == second["llm_model_id"] == "deepseek-v4-pro"
+    # 身份对齐当前配置视图（首执行即对齐基线，二执行幂等不变）
+    assert first["llm_model"] == second["llm_model"] == "deepseek-v4-pro"
+    assert first["track.model_context_window"] == second["track.model_context_window"] == 64000
 
 
 async def test_same_model_param_change_reapplies(monkeypatch: Any) -> None:
@@ -276,14 +368,14 @@ async def test_same_model_param_change_reapplies(monkeypatch: Any) -> None:
     已有绑定快照的在飞 run 以启动时快照为准（参数改动留给下一管道，见
     test_llm_core_model_binding.py::test_inflight_run_keeps_startup_params）。
     凭证（api_key）两种口径都取当前配置视图（key 归 llm_service 解析，
-    llm_core 不向其传 key）。
+    llm_core 不向其传 key）——本测经调用参数（default_params）观测改参生效。
     """
     _inject_llm_config(monkeypatch)
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller, {"model_id": "deepseek-v4-pro"})
-    await plugin.execute(_make_ctx(_base_state()))
-    assert plugin._context_window == 64000  # noqa: SLF001
-    assert plugin._default_params == {"temperature": 0.3}  # noqa: SLF001
+    first = await plugin.execute(_make_ctx(_base_state()))
+    assert first["track.model_context_window"] == 64000
+    assert caller.calls[0][1]["args"]["temperature"] == 0.3
 
     import _config_models
 
@@ -306,13 +398,12 @@ async def test_same_model_param_change_reapplies(monkeypatch: Any) -> None:
             }
         },
     )
-    await plugin.execute(_make_ctx(_base_state()))
+    second = await plugin.execute(_make_ctx(_base_state()))
 
-    assert plugin._model_id == "deepseek-v4-pro"  # noqa: SLF001
-    assert plugin._context_window == 128000  # noqa: SLF001
-    assert plugin._default_params == {"temperature": 0.7}  # noqa: SLF001
-    assert plugin._api_key == "k2"  # noqa: SLF001
-    assert plugin._api_base == "https://api.example.com/v2"  # noqa: SLF001
+    assert second["llm_model_id"] == "deepseek-v4-pro"
+    assert second["track.model_context_window"] == 128000
+    assert second["llm_api_base"] == "https://api.example.com/v2"
+    assert caller.calls[1][1]["args"]["temperature"] == 0.7
 
 
 # ─────────────────── _build_messages 装配分支 ───────────────────
@@ -431,7 +522,7 @@ def test_strip_transport_noise_keeps_cause_tail() -> None:
         "LLM 供应商调用失败[认证失败]（model=deepseek-v4）: "
         "AuthenticationError: Error code: 401 - Invalid API key"
     )
-    assert _mod._strip_transport_noise(noised) == (  # noqa: SLF001
+    assert llm_adapter._strip_transport_noise(noised) == (  # noqa: SLF001
         "LLM 供应商调用失败[认证失败]（model=deepseek-v4）: "
         "AuthenticationError: Error code: 401 - Invalid API key"
     )
@@ -440,10 +531,10 @@ def test_strip_transport_noise_keeps_cause_tail() -> None:
 def test_strip_transport_noise_fallbacks() -> None:
     """剥噪回退：无标记原样返回 / 空尾原样返回 / 非字符串原样返回。"""
     plain = "tool not found"
-    assert _mod._strip_transport_noise(plain) == plain  # noqa: SLF001
+    assert llm_adapter._strip_transport_noise(plain) == plain  # noqa: SLF001
     dangling = "MCP protocol error: [0] "
-    assert _mod._strip_transport_noise(dangling) == dangling  # noqa: SLF001
-    assert _mod._strip_transport_noise({"error": "dict 形态"}) == {  # noqa: SLF001
+    assert llm_adapter._strip_transport_noise(dangling) == dangling  # noqa: SLF001
+    assert llm_adapter._strip_transport_noise({"error": "dict 形态"}) == {  # noqa: SLF001
         "error": "dict 形态"
     }
 
@@ -1070,7 +1161,7 @@ async def test_call_llm_message_logging_branches() -> None:
         ],
         _make_ctx(_base_state()),
         stream=False,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert caller.calls[0][1]["tool_name"] == "llm.complete_stream"
 
@@ -1092,7 +1183,7 @@ async def test_call_llm_tool_schemas_passed_to_service() -> None:
             }
         ),
         stream=False,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert caller.calls[0][1]["args"]["model"] == "deepseek-v3"
     assert caller.calls[0][1]["args"]["tools"] == schemas
@@ -1115,7 +1206,7 @@ async def test_call_llm_call_context_carries_round_routing_keys() -> None:
             }
         ),
         stream=False,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     ctx = caller.calls[0][1]["_call_context"]
     assert ctx == {
@@ -1130,7 +1221,7 @@ async def test_call_llm_call_context_carries_round_routing_keys() -> None:
         [{"role": "user", "content": "hi"}],
         _make_ctx(_base_state()),
         stream=False,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     ctx2 = caller2.calls[0][1]["_call_context"]
     assert ctx2["thread_id"] == ""
@@ -1146,7 +1237,7 @@ async def test_call_llm_tool_schemas_empty_not_carried() -> None:
         [{"role": "user", "content": "hi"}],
         _make_ctx(_base_state()),
         stream=False,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert "tools" not in caller.calls[0][1]["args"]
     assert caller.calls[0][1]["args"]["model"] == "deepseek-v3"
@@ -1162,13 +1253,13 @@ async def test_interrupted_persists_user_requested_stop_signal() -> None:
     partial: dict[str, Any] = {"text": "半截", "thinking_text": None, "tool_calls": [], "usage": {}}
 
     cancelled = plugin._build_partial_failure_result(
-        partial, status="interrupted", error_info=None, identity=plugin._boot_identity
+        partial, status="interrupted", error_info=None, identity=_test_identity()
     )
     assert cancelled["ended"] is True
     assert cancelled["router.stop_reason"] == "user_requested"
 
     errored = plugin._build_partial_failure_result(
-        partial, status="error", error_info=None, identity=plugin._boot_identity
+        partial, status="error", error_info=None, identity=_test_identity()
     )
     assert "ended" not in errored
     assert "router.stop_reason" not in errored
@@ -1197,7 +1288,7 @@ async def test_interrupted_thinking_only_persists_message() -> None:
     }
 
     result = plugin._build_partial_failure_result(
-        partial, status="interrupted", error_info=None, identity=plugin._boot_identity
+        partial, status="interrupted", error_info=None, identity=_test_identity()
     )
     ops = result["messages"]["_ops"]
     assert [op["op"] for op in ops] == ["set"], "仅一条 assistant 落库 op，无配对 tool 结果"
@@ -1215,7 +1306,7 @@ async def test_interrupted_thinking_only_persists_message() -> None:
         {**partial, "text": "   "},
         status="interrupted",
         error_info=None,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert ws["messages"]["_ops"][0]["msg"]["reasoning_content"] == (
         "先查上下文里的路由表再回答"
@@ -1238,7 +1329,7 @@ async def test_stream_error_thinking_only_persists_message() -> None:
         },
         status="error",
         error_info=error_info,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     ops = result["messages"]["_ops"]
     assert [op["op"] for op in ops] == ["set"], "仅一条 assistant 落库 op，无配对 tool 结果"
@@ -1263,7 +1354,7 @@ async def test_interrupted_true_zero_output_no_thinking_persists_no_message() ->
         {"text": "", "thinking_text": None, "tool_calls": [], "usage": {}},
         status="interrupted",
         error_info=None,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert "messages" not in result, "真零产出中断不得落空 assistant 消息"
     assert result["ended"] is True, "中断停止信号照常置位"
@@ -1277,7 +1368,7 @@ async def test_stream_error_true_zero_output_no_thinking_persists_no_message() -
     partial: dict[str, Any] = {"text": None, "thinking_text": None, "tool_calls": [], "usage": {}}
 
     result = plugin._build_partial_failure_result(
-        partial, status="error", error_info=None, identity=plugin._boot_identity
+        partial, status="error", error_info=None, identity=_test_identity()
     )
     assert "messages" not in result
     assert "ended" not in result
@@ -1289,7 +1380,7 @@ async def test_interrupted_with_partial_text_still_persists_message() -> None:
     plugin = _make_plugin(_FakeCaller())
     partial: dict[str, Any] = {"text": "半截", "thinking_text": None, "tool_calls": [], "usage": {}}
     result = plugin._build_partial_failure_result(
-        partial, status="interrupted", error_info=None, identity=plugin._boot_identity
+        partial, status="interrupted", error_info=None, identity=_test_identity()
     )
     assert "messages" in result and result["messages"]["_ops"], "半截文本保留落库"
 
@@ -1297,7 +1388,7 @@ async def test_interrupted_with_partial_text_still_persists_message() -> None:
         {**partial, "text": "   "},
         status="interrupted",
         error_info=None,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert "messages" not in whitespace, "纯空白文本且无思考视同真零产出，不落空消息"
 
@@ -1440,7 +1531,7 @@ async def test_result_stamps_supports_vision_true(monkeypatch: Any) -> None:
     result = await plugin.execute(_make_ctx(state))
 
     assert result["llm_supports_vision"] is True
-    assert plugin._supports_vision is True  # noqa: SLF001
+    assert not hasattr(plugin, "_supports_vision"), "视觉能力随身份快照，不落实例字段"
 
 
 async def test_result_stamps_supports_vision_false_when_undeclared(monkeypatch: Any) -> None:
@@ -1501,7 +1592,7 @@ async def test_partial_error_info_persists_into_message() -> None:
         partial,
         status="error",
         error_info=error_info,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     ops = result["messages"]["_ops"]
     persisted = ops[0]["msg"]
@@ -1516,6 +1607,90 @@ async def test_thinking_strength_params_merged_into_call() -> None:
         [{"role": "user", "content": "hi"}],
         _make_ctx({**_base_state(), "thinking_strength": '{"reasoning_effort": "high"}'}),
         stream=False,
-        identity=plugin._boot_identity,
+        identity=_test_identity(),
     )
     assert caller.calls[0][1]["args"]["reasoning_effort"] == "high"
+
+
+# ─────────────────── 流式退化循环截断的终态处置（2026-11-07） ───────────────────
+
+
+async def test_execute_terminates_on_repetition_with_no_output() -> None:
+    """退化循环截断且正文/工具双空 → 终止并写明死因。
+
+    事故形态：思考通道原地刷同一 emoji，正文为空、无工具调用。截断后若当正常
+    轮继续，下一轮只会再退化一次（本用例锁死"零产出退化轮必须终止"）。
+    """
+    caller = _FakeCaller(
+        {
+            "success": True,
+            "data": _ok_response(
+                text="",
+                thinking_text="🍦" * 600,
+                finish_reason="length",
+                stream_repetition=True,
+            ),
+        }
+    )
+    plugin = _make_plugin(caller)
+
+    with pytest.raises(RuntimeError, match="退化循环"):
+        await plugin.execute(_make_ctx(_base_state()))
+
+
+async def test_execute_keeps_truncated_output_when_content_present() -> None:
+    """有正文的截断轮保留半截内容，但打 llm_repetition_detected 交任务域
+    收束（任务管道 failed，不自动重试；会话管道保留内容结束本轮）。"""
+    caller = _FakeCaller(
+        {
+            "success": True,
+            "data": _ok_response(
+                text="已完成部分排查，剩余项如下",
+                finish_reason="length",
+                stream_repetition=True,
+            ),
+        }
+    )
+    plugin = _make_plugin(caller)
+
+    result = await plugin.execute(_make_ctx(_base_state()))
+
+    assert result["raw_result"] == "已完成部分排查，剩余项如下"
+    assert result["llm_repetition_detected"] is True
+
+
+async def test_execute_no_repetition_flag_streams_normally() -> None:
+    """无退化标记（正常流）路径零变化——守卫不误伤正常轮。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response(text="", thinking_text="想了一下")})
+    plugin = _make_plugin(caller)
+
+    result = await plugin.execute(_make_ctx(_base_state()))
+
+    assert result["raw_result"] == ""
+    assert result["llm_repetition_detected"] is False
+
+
+async def test_execute_repetition_with_tool_calls_does_not_flag_round() -> None:
+    """带工具调用的截断轮不标记退化：调用可能是有效进展，交工具执行面。"""
+    caller = _FakeCaller(
+        {
+            "success": True,
+            "data": _ok_response(
+                text="",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "file_read", "arguments": "{}"},
+                    }
+                ],
+                finish_reason="tool_calls",
+                stream_repetition=True,
+            ),
+        }
+    )
+    plugin = _make_plugin(caller)
+
+    result = await plugin.execute(_make_ctx(_base_state()))
+
+    assert result["llm_repetition_detected"] is False

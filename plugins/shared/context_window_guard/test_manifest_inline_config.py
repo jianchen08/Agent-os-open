@@ -153,11 +153,15 @@ class TestPluginTriggerRatio:
 
 
 class TestPerCallRuntimeConfig:
-    """每调用注入重解析（2026-09-02 单一真值 + sidecar 每调用注入）。"""
+    """每调用注入重解析（2026-09-02 单一真值 + sidecar 每调用注入）。
+
+    解析结果是 execute 局部值，不写实例字段（同 sidecar 多管道并发复用同一
+    实例，实例字段会在 await 处被其他管道覆盖）。
+    """
 
     def test_per_call_injected_namespace_reresolves_ratio(self) -> None:
         """构造期空配置（合宿扇出可能给空 dict），execute 时 ctx.config 带注入
-        → _trigger_ratio/_window_cfg 按注入值重解析。"""
+        → 返回的 window_cfg/trigger_ratio 按注入值重解析；实例字段保持构造默认。"""
         mod = _load_plugin_module()
         plugin = mod.ContextWindowGuardPlugin({})
         assert plugin._trigger_ratio == 0.55
@@ -167,9 +171,10 @@ class TestPerCallRuntimeConfig:
             config={"context_window": {"compress_trigger_ratio": 0.06}},
             pipeline_id="pipe-1",
         )
-        plugin._apply_runtime_config(ctx)
-        assert plugin._trigger_ratio == 0.06
-        assert plugin._window_cfg.get("compress_trigger_ratio") == 0.06
+        window_cfg, trigger_ratio = plugin._resolve_runtime_config(ctx)
+        assert trigger_ratio == 0.06
+        assert window_cfg.get("compress_trigger_ratio") == 0.06
+        assert plugin._trigger_ratio == 0.55, "运行时解析不得写实例字段（跨管道串台源）"
 
     def test_explicit_pipeline_ratio_wins_over_per_call_injection(self) -> None:
         """pipeline 显式 trigger_ratio 在每调用注入下仍最高。"""
@@ -180,8 +185,8 @@ class TestPerCallRuntimeConfig:
             config={"context_window": {"compress_trigger_ratio": 0.06}},
             pipeline_id="pipe-1",
         )
-        plugin._apply_runtime_config(ctx)
-        assert plugin._trigger_ratio == 0.9
+        _, trigger_ratio = plugin._resolve_runtime_config(ctx)
+        assert trigger_ratio == 0.9
 
     def test_state_override_still_highest(self) -> None:
         """ctx.state context_guard.trigger_ratio（agent 运行时覆盖）仍最高。"""
@@ -192,8 +197,8 @@ class TestPerCallRuntimeConfig:
             config={"context_window": {"compress_trigger_ratio": 0.06}},
             pipeline_id="pipe-1",
         )
-        plugin._apply_runtime_config(ctx)
-        assert plugin._trigger_ratio == 0.1
+        _, trigger_ratio = plugin._resolve_runtime_config(ctx)
+        assert trigger_ratio == 0.1
 
     def test_execute_uses_per_call_threshold(self) -> None:
         """行为级：构造期无注入（默认 0.55 → 触发线 70400），60000 tokens 不压；

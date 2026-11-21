@@ -102,22 +102,46 @@ def test_missing_any_baseline_fails_loud(tree: Path, tmp_path: Path) -> None:
         any_base.check_any_baseline(tree, tmp_path / "nope.txt")
 
 
-# ── >1000 行文件冻结 ─────────────────────────────────────────────
+# ── >1000 行文件分档（2026-11-08 用户裁定：1000 警告 / 1500 硬拆）────
 
 
 def _big_file(tree: Path, rel: str, lines: int) -> Path:
     return _write(tree / rel, "\n".join(f"line-{i}" for i in range(lines)) + "\n")
 
 
-def test_large_file_growth_fails(tree: Path, tmp_path: Path) -> None:
-    _big_file(tree, "big.ts", 1005)
-    baseline = _write(tmp_path / "large.txt", "frontend/src/big.ts 1001\n")
+def test_growth_within_warn_band_passes(
+    tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """1000-1500 警告带：清单内增长只留痕不拦截（用户裁定 2026-11-08）。"""
+    _big_file(tree, "big.ts", 1025)
+    baseline = _write(tmp_path / "large.txt", "frontend/src/big.ts 1002\n")
+
+    assert any_base.check_large_files(tree, baseline) is False
+    assert "警告" in capsys.readouterr().out
+
+
+def test_growth_over_hard_limit_fails(tree: Path, tmp_path: Path) -> None:
+    """>1500 硬拆线：清单内增长即红。"""
+    _big_file(tree, "big.ts", 1600)
+    baseline = _write(tmp_path / "large.txt", "frontend/src/big.ts 1500\n")
 
     assert any_base.check_large_files(tree, baseline) is True
 
 
+def test_new_file_in_warn_band_passes(
+    tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """1000-1500 警告带：新越线文件只警告不入册不拦截。"""
+    _big_file(tree, "new-big.ts", 1023)
+    baseline = _write(tmp_path / "large.txt", "# empty\n")
+
+    assert any_base.check_large_files(tree, baseline) is False
+    assert "警告" in capsys.readouterr().out
+
+
 def test_new_over_limit_file_fails(tree: Path, tmp_path: Path) -> None:
-    _big_file(tree, "new-big.ts", 1001)
+    """新文件超 1500 硬拆线即红（未入册）。"""
+    _big_file(tree, "new-big.ts", 1601)
     baseline = _write(tmp_path / "large.txt", "# empty\n")
 
     assert any_base.check_large_files(tree, baseline) is True

@@ -219,6 +219,9 @@ export interface AgentTab {
   hasUnread: boolean
   /** 是否可关闭（主 Agent 不可关闭） */
   canClose: boolean
+  /** 是否固定（钉住）：固定签不受批量关签影响、不给单签关闭入口。
+   *  与工作区页签 isPinned 同一语义（判定单源 = utils/tabCloseSemantics） */
+  isPinned?: boolean
   /** 消息列表 */
   messages?: unknown[]
 }

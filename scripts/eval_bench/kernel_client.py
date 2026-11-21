@@ -53,6 +53,16 @@ def _http_json(method: str, url: str, body: dict | None = None, token: str | Non
                 time.sleep(_TRANSIENT_BACKOFF * (attempt + 1))
                 continue
             raise err from exc
+        except TimeoutError as exc:
+            # socket 读超时（响应慢，如内核长流调用期间状态读被阻塞）——与
+            # URLError 同路径瞬时重试；Python 3.10+ urlopen 读阶段超时抛的是
+            # TimeoutError 不是 URLError，不接住会穿透调用方的容错轮询链
+            # （实测：单次 30s 慢响应炸掉整个 8h 评测 trial，R21）。
+            err = KernelClientError(f"读超时 {url}: {exc}")
+            if attempt < _TRANSIENT_RETRIES:
+                time.sleep(_TRANSIENT_BACKOFF * (attempt + 1))
+                continue
+            raise err from exc
     raise RuntimeError("unreachable: 重试循环必然 return 或 raise")  # pragma: no cover
 
 

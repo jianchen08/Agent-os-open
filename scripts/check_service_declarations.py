@@ -487,7 +487,8 @@ def main() -> int:
             continue
         manifest = manifests[owner]
         allowed = (
-            {item.split(".", 1)[0] for item in required_services(manifest)}
+            set(required_services(manifest))
+            | {item.split(".", 1)[0] for item in required_services(manifest)}
             | set(kernel_table)
             | provided_namespaces(manifest)
         )

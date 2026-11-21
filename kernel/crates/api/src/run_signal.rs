@@ -29,6 +29,10 @@ pub struct RunSignalHub {
     /// 注册到达也不丢（permit 存储）；等待侧以「先建 notified future 再查
     /// 权威状态」消除丢醒窗口（见 wait_run_stop handler 顺序注释）。
     waiters: parking_lot::Mutex<HashMap<String, (Arc<tokio::sync::Notify>, Instant)>>,
+    /// run_id → 落标时刻：已发停止信号的 run。用于 state 行已被删除（会话/
+    /// 任务删除后）时仍让后续 wait_run_stop 直接返回 suspended——权威状态
+    /// 行没了，等待方不能靠 `get_run` 判断，只能靠信号中枢的记忆。
+    cancelled: parking_lot::Mutex<HashMap<String, Instant>>,
 }
 
 impl RunSignalHub {
@@ -38,6 +42,7 @@ impl RunSignalHub {
         HUB.get_or_init(|| {
             Arc::new(Self {
                 waiters: parking_lot::Mutex::new(HashMap::new()),
+                cancelled: parking_lot::Mutex::new(HashMap::new()),
             })
         })
         .clone()
@@ -49,7 +54,26 @@ impl RunSignalHub {
         if run_id.is_empty() {
             return;
         }
+        {
+            let mut cancelled = self.cancelled.lock();
+            if cancelled.len() >= SWEEP_WATERMARK {
+                cancelled.retain(|_, born| born.elapsed() < ENTRY_TTL);
+            }
+            cancelled.insert(run_id.to_string(), Instant::now());
+        }
         self.entry(run_id).notify_one();
+    }
+
+    /// 该 run 是否已发过停止信号（含 state 行已删除的删除后场景）。
+    pub fn is_cancelled(&self, run_id: &str) -> bool {
+        if run_id.is_empty() {
+            return false;
+        }
+        let mut cancelled = self.cancelled.lock();
+        if cancelled.len() >= SWEEP_WATERMARK {
+            cancelled.retain(|_, born| born.elapsed() < ENTRY_TTL);
+        }
+        cancelled.contains_key(run_id)
     }
 
     /// 占等待位：返回该 run 的通知 future。调用方必须**先本方法再查权威
@@ -121,5 +145,17 @@ mod tests {
         let hub = RunSignalHub::global();
         hub.signal("");
         assert!(!hub.wait("", Duration::from_millis(20)).await);
+    }
+
+    /// 停止信号记忆：state 行被删除后，wait_run_stop 仍能据中枢记忆返回
+    /// suspended（删除场景下权威状态不可读）。
+    #[tokio::test]
+    async fn signalled_run_stays_cancelled() {
+        let hub = RunSignalHub::global();
+        assert!(!hub.is_cancelled("r-deleted-pipe"));
+        hub.signal("r-deleted-pipe");
+        assert!(hub.is_cancelled("r-deleted-pipe"));
+        assert!(hub.wait("r-deleted-pipe", Duration::from_millis(20)).await);
+        assert!(!hub.is_cancelled(""), "空 id 不构成取消维度");
     }
 }

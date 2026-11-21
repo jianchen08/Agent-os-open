@@ -1394,6 +1394,30 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
+    it('收到 user_input_ack(ok:true) 登记 markSendAcked（受理对账，撤销在途计时）', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-1',
+        clientMessageId: 'cmid-ack-ok-1',
+      })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_input_ack',
+          client_message_id: 'cmid-ack-ok-1',
+          thread_id: 'thread-1',
+          ok: true,
+        }),
+      })
+
+      // 受理回执撤销 20s 看门狗：TTL 到点零超时广播
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(onTimeout).not.toHaveBeenCalled()
+      disconnect()
+    })
+
     it('stream_start 按 pipeline_id 撤销在途超时', async () => {
       const { service, ws, disconnect } = await setupConnected()
       const onTimeout = vi.fn()

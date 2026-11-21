@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- AgentOS multi-device mount - macOS LaunchAgent TEMPLATE (not activated).
+     Supervision = launchd KeepAlive (event-driven, zero polling): when rclone
+     exits, launchd relaunches it after ThrottleInterval. Same role that
+     systemd Restart=on-failure plays on Linux (agentos-device-mount@.service)
+     and that the Task Scheduler watchdog plays on Windows. No macOS endpoint
+     exists in the current device set, so this file is untested; activation is
+     pending a real Mac. Prereqs: macFUSE, an rclone remote for the device (same
+     name as the Windows desktop branch), mount point directory under /Volumes.
+     Install: replace __RCLONE__ / __DEVICE__ / __MOUNTPOINT__, copy to
+     ~/Library/LaunchAgents/com.agentos.device-mount.plist, then
+     launchctl load -w ~/Library/LaunchAgents/com.agentos.device-mount.plist-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentos.device-mount</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RCLONE__</string>
+    <string>mount</string>
+    <string>__DEVICE__:/home/ubuntu</string>
+    <string>__MOUNTPOINT__</string>
+    <string>--vfs-cache-mode</string>
+    <string>writes</string>
+    <string>--vfs-write-back</string>
+    <string>0s</string>
+    <string>--links</string>
+    <string>--rc</string>
+    <string>--rc-addr</string>
+    <string>127.0.0.1:5572</string>
+    <string>--rc-no-auth</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/agentos-device-mount.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/agentos-device-mount.log</string>
+</dict>
+</plist>

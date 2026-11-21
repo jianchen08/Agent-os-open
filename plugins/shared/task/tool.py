@@ -126,12 +126,19 @@ _REOPEN_EVAL_EVIDENCE_FIELDS: dict[str, Any] = {
 # 目标态本身就是 stopped → running）。
 _RESUME_BLOCKED_STATUSES = frozenset({"completed", "failed"})
 
+# run 终态集（耗时终点的采信前提）：只有终态 run 的 ended_at 是有效终点。
+# 非终态 run 上的残留 ended_at 是「新一轮覆盖写 run_started_at 却没清上一轮
+# run_ended_at」的脏值，照单收下会算出负耗时（2026-11-16 实证 -26.4s）。
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "suspended", "cancelled"})
+
 
 def _chat_dispatch_params(
     pipeline_id: str,
     message: str,
     inputs: dict[str, Any],
     state_overlay: dict[str, Any] | None = None,
+    force: bool = True,
+    background: bool = True,
 ) -> dict[str, Any]:
     """chat.send_message 背景派发参数装配（注入/返工重开/重试共用）。
 
@@ -140,11 +147,24 @@ def _chat_dispatch_params(
     旧内核兼容提示，注入面被内核身份覆盖。
     state_overlay：经内核 validate_state_overlay 校验透传的派发 overlay
     （顶层扁平键，恢复合并之后应用——显式派发指令 > 恢复基线）。
+    force：强制发送通道（缺省 True）。送消息给下级的语义是「现在就生效」——
+    内核先做引擎层停止（当前 running 置 suspended）再投递，本条成为队首由
+    链尾 drain 消费，立即跑新一轮；false = 排队等当前 run 的自然边界（旧行为，
+    外部表现「发了没反应」，仅调试旧内核时用）。
+    background：内核是否 spawn 后立即回执（缺省 True = 不阻塞）。
+    **running 态注入必须传 False**：background 分支在内核 `tokio::spawn` 里派发，
+    capability 在 spawn 前就返回 `{"status":"dispatched"}`，任何派发失败（tenant
+    解析 / 注入管道反查会话 / 入队失败）只落日志与系统通知，调用方拿到的是
+    无条件"已受理"→ 插件据此置 injected=True 即假成功（2026-11-16 实证：回执
+    成功但目标任务零新活动）。前台分支把派发错误原样抛出，失败转 INJECT_FAILED
+    如实报错。前台派发只 await 到「入队/占链」为止（dispatch_user_input 在
+    spawn_chain/try_enqueue_direct 处即返回，不等 run 跑完），不阻塞 UI/LLM。
     """
     params: dict[str, Any] = {
         "pipeline_id": pipeline_id,
         "message": message,
-        "background": True,
+        "background": background,
+        "force": force,
         **_caller_user_id_params(inputs),
     }
     if state_overlay is not None:
@@ -414,12 +434,42 @@ class TaskTool(BuiltinTool):
 
         started = _as_utc(datetime.fromisoformat(task.started_at))
 
+        # 耗时下界恒 0：起点/终点写入面不同源（state 聚合行 created_at 与任务域
+        # completed_at 各自由不同写面落），返工重开/恢复会把起点推到终点之后，
+        # naive 串按 UTC 归一也可能让起点落在当前时刻之后——两种形态都会算出
+        # 负值（实测多次）。负耗时对消费方无意义（前端显示 -26.4s），按 0 收敛
+        # 并留痕，不静默保留脏值。
         if task.completed_at:
             completed = _as_utc(datetime.fromisoformat(task.completed_at))
 
-            return (completed - started).total_seconds()
+            elapsed = (completed - started).total_seconds()
 
-        return (datetime.now(UTC) - started).total_seconds()
+            if elapsed < 0:
+                logger.warning(
+                    "[TaskTool] 任务耗时算得负值（起点晚于终点，按 0 收敛）| task=%s"
+                    " | started=%s | completed=%s | raw=%.1fs",
+                    task.id,
+                    task.started_at,
+                    task.completed_at,
+                    elapsed,
+                )
+                return 0.0
+
+            return elapsed
+
+        elapsed = (datetime.now(UTC) - started).total_seconds()
+
+        if elapsed < 0:
+            logger.warning(
+                "[TaskTool] 任务耗时算得负值（起点晚于当前时刻，按 0 收敛）| task=%s"
+                " | started=%s | raw=%.1fs",
+                task.id,
+                task.started_at,
+                elapsed,
+            )
+            return 0.0
+
+        return elapsed
 
     async def _calc_elapsed_from_runs(self, pipeline_id: str) -> float | None:
         """任务耗时（秒）——state 桥路径：run 记录起点终点直算。
@@ -469,10 +519,18 @@ class TaskTool(BuiltinTool):
 
             ended_raw = str(run.get("ended_at") or "")
 
+            # 终点只采信终态 run 的 ended_at。非终态 run 上残留的 ended_at 是
+            # 「上一轮终态没被清」的脏值：内核 record_run_start 只覆盖写
+            # run_id/run_status/run_started_at，不清上一轮 run_ended_at
+            # （store.rs record_run_start），于是新一轮 run 带着旧终点。若照单
+            # 收下，终点（旧）早于起点（新）→ 耗时为负（2026-11-16 实证
+            # -26.4s）。非终态一律改用当前时间。
+            if status not in _TERMINAL_RUN_STATUSES:
+                all_terminal = False
+                continue
+
             if ended_raw:
                 ended_ats.append(_as_utc(datetime.fromisoformat(ended_raw)))
-            elif status not in ("completed", "failed", "suspended", "cancelled"):
-                all_terminal = False
 
         if not created_ats:
             return None
@@ -480,9 +538,9 @@ class TaskTool(BuiltinTool):
         started = min(created_ats)
 
         if all_terminal and ended_ats:
-            return (max(ended_ats) - started).total_seconds()
+            return max(0.0, (max(ended_ats) - started).total_seconds())
 
-        return (datetime.now(UTC) - started).total_seconds()
+        return max(0.0, (datetime.now(UTC) - started).total_seconds())
 
     @staticmethod
     def _format_elapsed(seconds: float | None) -> str:
@@ -710,7 +768,9 @@ class TaskTool(BuiltinTool):
                         "description": (
                             "操作类型（缺省 get）：\n"
                             "- get：查询任务。不传 task_id 返回列表简表，传 task_id 返回详情\n"
-                            "- continue：继续执行（重试/恢复/注入指令/已完成任务带 message 返工重开，针对非容器任务）\n"
+                            "- continue：继续执行（重试/恢复/注入指令/已完成任务带 message 返工重开，针对非容器任务）。"
+                            "同一任务链续作/回归审查/验证复跑一律用本动作，不新开任务；"
+                            "completed 返工必须带 message，验收标准变更带 acceptance_criteria\n"
                             "- stop：停止任务（统一进入 stopped 状态，针对非容器任务）\n"
                             "- delete：删除任务\n"
                             "- change：变更任务运行状态（仅L1）。"
@@ -1448,9 +1508,13 @@ class TaskTool(BuiltinTool):
 
         如实回报契约（20261019 事故②）：`injected` 只在 chat.send_message 成功
         返回后置位；capability 缺席/发送异常一律 INJECT_FAILED 显式失败——
-        硬编码 true 曾让上级拿谎报汇报成功，纠正消息实际丢失。成功结果注明
-        队列语义：注入=受理入队、run 边界消费、停止会退回（防"已注入"被当
-        "已消费"）。
+        硬编码 true 曾让上级拿谎报汇报成功，纠正消息实际丢失。
+
+        派发语义 = 强制发送通道（force=true）：内核先做引擎层停止（目标管道
+        当前 running 置 suspended、不退回待处理队列），再把本条投递入队并由
+        链尾 drain 首个消费 —— 消息打断当前轮次并立刻起跑新一轮，不等 run
+        的自然边界。成功回执 `semantics=stop_then_dispatch` 如实声明这条时序
+        （防"已注入"被当"已消费"）。
         """
 
         # P0-3 纵深防御：入口显式校验归属，即便被直接调用或新增调用路径也不裸奔。
@@ -1484,9 +1548,18 @@ class TaskTool(BuiltinTool):
             )
 
         try:
-            # GAP-1 统一：注入走 chat.send_message 注入分支（task_id 即 pipeline_id，
-            # background 立即返回——UI/LLM 不阻塞等待 run 完成）。
-            await _chat_sender(_chat_dispatch_params(target_pipeline_id, message, inputs))
+            # GAP-1 统一：注入走 chat.send_message 注入分支（task_id 即 pipeline_id）。
+            # background=False（前台派发）是本路径的送达前提：后台分支在内核
+            # `tokio::spawn` 里派发，capability 在 spawn 前就返回
+            # {"status":"dispatched"}，派发失败（tenant 解析 / 注入反查会话 /
+            # 入队失败）只落日志与系统通知——调用方拿无条件"已受理"再置
+            # injected=True 即假成功（2026-11-16 实证：回执成功、目标任务零新活动）。
+            # 前台分支把派发错误原样抛出转 INJECT_FAILED；它只 await 到「入队/
+            # 占链」为止（dispatch_user_input 在 spawn_chain/try_enqueue_direct
+            # 处即返回），不等 run 跑完，不阻塞 UI/LLM。
+            await _chat_sender(
+                _chat_dispatch_params(target_pipeline_id, message, inputs, background=False)
+            )
         except Exception as _wake_err:
             logger.warning("[TaskTool] 消息注入失败: %s", _wake_err)
             return create_failure_result(
@@ -1507,7 +1580,7 @@ class TaskTool(BuiltinTool):
                 "target_pipeline_id": target_pipeline_id,
                 "message_preview": message[:100],
                 "trigger": "chat.send_message",
-                "semantics": "queued_until_run_boundary",
+                "semantics": "stop_then_dispatch",
             },
             metadata={"action": "continue_inject"},
         )
@@ -1692,7 +1765,7 @@ class TaskTool(BuiltinTool):
                 "target_pipeline_id": target_pipeline_id,
                 "message_preview": message[:100],
                 "trigger": "chat.send_message",
-                "semantics": "queued_until_run_boundary",
+                "semantics": "stop_then_dispatch",
             },
             metadata={"action": "continue_reopen"},
         )
@@ -1865,6 +1938,38 @@ class TaskTool(BuiltinTool):
                 message[:80],
             )
 
+        # 带 message 的 continue = 强制发送（2026-11-14）：停当前（已停则幂等）
+        # → 投递该条 → 触发新一轮。不再只写 metadata 后 resume 旧 run——旧
+        # run 已停止没有可恢复的执行，消息仅落 metadata 不会驱动任何一轮，
+        # 外部表现「发了没反应」。
+        if message and _chat_sender is not None:
+            try:
+                await _chat_sender(_chat_dispatch_params(task.id, message, inputs))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TaskTool] stopped 任务强制发送失败: %s", exc)
+                return create_failure_result(
+                    error=f"消息未派发（任务保持 {old_status}）: {exc}",
+                    error_code="INJECT_FAILED",
+                    metadata={"task_id": task.id, "action": "continue_resume"},
+                )
+            logger.info(
+                "[TaskTool] stopped 任务强制发送完成（投递+触发新一轮）| task_id=%s | preview=%s",
+                task.id,
+                message[:80],
+            )
+            return create_success_result(
+                data={
+                    "task_id": task.id,
+                    "resumed": True,
+                    "old_status": old_status,
+                    "new_status": TaskStatus.RUNNING.value,
+                    "message_injected": True,
+                    "trigger": "chat.send_message",
+                    "semantics": "stop_then_dispatch",
+                },
+                metadata={"action": "continue_resume"},
+            )
+
         # GAP-1 统一：恢复 = resume_pipeline（按管道恢复最新 suspended run）
         if _pipeline_executor is not None:
             try:
@@ -1896,7 +2001,9 @@ class TaskTool(BuiltinTool):
         }
 
         if message:
-            result_data["message_injected"] = True
+            # chat capability 缺席（sidecar 未注入）→ 消息未派发，如实告警，
+            # 不得以 message_injected=true 谎报（只写了 metadata 不等于生效）。
+            result_data["warning"] = "chat capability 未接线，消息未派发（仅 resume）"
 
         return create_success_result(
             data=result_data,

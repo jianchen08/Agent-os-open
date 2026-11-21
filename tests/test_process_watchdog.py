@@ -43,8 +43,15 @@ def _make_pm() -> ProcessManager:
     return pm
 
 
-def _make_info(pid: int, idle_secs: float, command: str = "cargo build", backend=None) -> ProcessInfo:
-    """构造一个 running 进程记录，idle_secs 表示距上次访问过了多久。"""
+def _make_info(
+    pid: int, idle_secs: float, command: str = "cargo build", backend=None, quiet_secs: float | None = None
+) -> ProcessInfo:
+    """构造一个 running 进程记录。
+
+    idle_secs = 距上次访问多久；quiet_secs = 距上次输出多久（孤儿判据基准，
+    ADR 2026-11-07 起 = 无输出时长）。缺省与 idle_secs 同步（持续产出/持续
+    访问的活跃进程在两套判据下都不该被孤儿杀）。
+    """
     return ProcessInfo(
         pid=pid,
         command=command,
@@ -53,6 +60,7 @@ def _make_info(pid: int, idle_secs: float, command: str = "cargo build", backend
         process=None,  # 策略测试不需要真实 process 对象
         status="running",
         last_access_time=time.time() - idle_secs,  # idle_secs 前被访问
+        last_output_time=time.time() - (idle_secs if quiet_secs is None else quiet_secs),
         backend=backend,
     )
 
@@ -172,19 +180,25 @@ async def test_kills_by_idle_not_age():
 
 
 # ---------------------------------------------------------------------------
-# 兜底：idle 超 30 分钟无条件杀（即使内存没涨）
+# 兜底：无输出超 30 分钟无条件杀（即使内存没涨）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_orphan_timeout_fallback():
-    """内存没超(50%)，但 idle > 30 分钟 → 兜底杀（进程被遗忘）。"""
+    """内存没超(50%)，但无输出 > 30 分钟 → 兜底杀（进程挂死/被遗忘）。
+
+    ADR 2026-11-07 孤儿判据改版：判据 = 无输出时长（last_output_time）而非
+    无访问时长——本例 last_access 新鲜（agent 还在轮询）但无输出超阈值，
+    照杀；反之 test_kills_by_idle_not_age 的长输出任务不被孤儿杀。
+    """
     pm = _make_pm()
     backend = _FakeBackend(memory_sequence=[0.50])
     pm._memory_backend = backend
 
     pm.active_processes = {
-        301: _make_info(301, idle_secs=2000, backend=backend),  # 33 分钟没访问 > 1800s 阈值
+        # 刚被访问过（轮询）但 33 分钟无输出 > 1800s 阈值
+        301: _make_info(301, idle_secs=2, quiet_secs=2000, backend=backend),
     }
 
     await pm._watchdog_check_once()

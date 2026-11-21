@@ -22,7 +22,8 @@
 #             （条目级注入保真符号链接）+ 硬链接去重 + zstd 压缩出 .tar.zst：
 #             uv sync --python-platform 钉死（坑⑳）；plugins/sdk 必进部署面（坑⑯）；
 #             快照选取规则与 deploy/init.sh 同律（_host + 独占宿主插件，合宿成员
-#             跳过）；部署面排除构建垃圾（target/ .mypy_cache .venv-* node_modules *.dll）；
+#             跳过）；部署面排除构建垃圾（target/ .mypy_cache .venv-* node_modules *.dll
+#             .cache，.cache 另有 overlay 现清双保险——移动端存储优化 2026-11-19）；
 #             config 副本脱敏 + 产物 key 断言（坑㊳配套：真 key 永不进 APK，
 #             deploy/sanitize_seed_config.py 两面，违约 fail-closed 拦截）。
 #
@@ -91,6 +92,11 @@ TOOLS_ROOT="${BUILD_MOBILE_TOOLS:-$REPO_ROOT/.zctmp/tools}"
 NDK_HOME="${ANDROID_NDK_HOME:-$TOOLS_ROOT/android-sdk/ndk/27.3.13750724}"
 UV_VERSION="${BUILD_MOBILE_UV_VERSION:-0.13.0}"        # P0.2 设备线实证版本，钉死保 digest 可复现
 SNAPSHOT_PYTHON="${BUILD_MOBILE_PYTHON:-3.12}"         # 快照解释器钉值（P0.2 设备线 3.12.15 同线）
+# 种子最终压缩（materialize 重写遍决定成品级别）：zstd 解压耗时与级别基本无关，
+# 级别只影响构建耗时，故取 19（level 3→19 实测 415MB→325MB，种子内 17 个 venv
+# site-packages 高度同构，长窗口收益落在这里）。
+SEED_ZSTD_LEVEL="${BUILD_MOBILE_SEED_ZSTD_LEVEL:-19}"
+SEED_ZSTD_THREADS="${BUILD_MOBILE_SEED_ZSTD_THREADS:-4}"
 PBS_TAG="${BUILD_MOBILE_PBS_TAG:-20261013}"            # python-build-standalone 发布 tag
 PBS_PY="${BUILD_MOBILE_PBS_PY:-3.12.15}"               # 与 SNAPSHOT_PYTHON 小版本对齐
 PROOT_VERSION="${BUILD_MOBILE_PROOT_VERSION:-5.5.0}"   # proot-me 静态构建（x86_64）
@@ -668,7 +674,13 @@ step_apk() {
         log "step apk: FAIL syncweb 链失败"
         return 3
     fi
-    log "step apk: gradlew assembleDebug（JAVA_HOME=$TOOLS_ROOT/jdk21/jdk）"
+    # JDK 解析：tools/jdk21/jdk 符号链接可能被并行 WSL 侧构建改指/悬空
+    # （2026-11-19 打包轮实证：链接指 ../jdk21-linux/ 且目标缺失）——悬空回退
+    # Windows JDK（jdk-win32）。
+    local jdk_home="$TOOLS_ROOT/jdk21/jdk"
+    [[ -d "$jdk_home/bin" ]] || jdk_home="$TOOLS_ROOT/jdk21/jdk-win32"
+    [[ -f "$jdk_home/bin/java.exe" ]] || { log "step apk: FAIL 无可用 Windows JDK（jdk 与 jdk-win32 均缺 bin/java.exe）"; return 3; }
+    log "step apk: gradlew assembleDebug（JAVA_HOME=$jdk_home）"
     # 换 arch 重打包前清陈旧 APK 输出与 native 合并中间层：AGP 增量打包对
     # "上一颗更大/含他 ABI .so"的 outputs 不截断，残留字节直接进新包（实测
     # x86_64 重打含 arm64 陈旧尾巴 69MB vs 干净 40MB）
@@ -677,7 +689,7 @@ step_apk() {
         "$REPO_ROOT/app-mobile/android/app/build/intermediates/merged_native_libs" \
         "$REPO_ROOT/app-mobile/android/app/build/intermediates/stripped_native_libs" \
         "$REPO_ROOT/app-mobile/android/app/build/intermediates/assets"
-    if ! (cd "$REPO_ROOT/app-mobile/android" && JAVA_HOME="$TOOLS_ROOT/jdk21/jdk" \
+    if ! (cd "$REPO_ROOT/app-mobile/android" && JAVA_HOME="$jdk_home" \
             ./gradlew assembleDebug --console=plain); then
         log "step apk: FAIL gradle assembleDebug"
         return 3
@@ -837,13 +849,19 @@ step_rootfs() {
     # （由快照承载）；构建垃圾不入种子（R5 拆账：target/ 1.28GB + .venv-hindsight
     # 575MB + .mypy_cache 275MB，合计部署面 2.17GB→~350MB）；*.dll=Windows cdylib
     # 设备无用；node_modules（gitignored 产物，dsh_adapter runtime 含指向宿主绝对
-    # 路径的符号链接，tar 不可重建也无设备价值）排除。
-    log "step rootfs: 部署面拷贝（plugins/shared + plugins/sdk + config + skills + deploy，构建垃圾排除）"
+    # 路径的符号链接，tar 不可重建也无设备价值）排除；.cache=构建/下载缓存
+    # （设备端零价值；运行期真机 root/.cache 膨胀另由 start_stack.sh 启动清场，
+    # 见移动端存储优化台账 2026-11-19）；deploy/remote=部署机真值面
+    # （fmin systemd 单元/本地 mcp 真值与审计日志）不进种子（2026-11-18 个人信息
+    # 出仓处置，assert-seed 禁入断言兜底）。
+    log "step rootfs: 部署面拷贝（plugins/shared + plugins/sdk + config + skills + deploy，构建垃圾与 deploy/remote 真值面排除）"
     (cd "$REPO_ROOT" && tar cf - \
         --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' \
         --exclude='.venv-*' --exclude='target' --exclude='.mypy_cache' \
+        --exclude='.cache' \
         --exclude='*.dll' \
         --exclude='node_modules' \
+        --exclude='deploy/remote' \
         plugins/shared plugins/sdk config skills deploy) \
         | (cd "$overlay/opt/agentos" && tar xf -)
     local deploy_item
@@ -853,6 +871,15 @@ step_rootfs() {
             return 3
         fi
     done
+    # .cache 现清双保险：tar 排除漏网（嵌套面/未来新增部署项带出）时，打包前对
+    # overlay 现场再清一遍（幂等；无 .cache 时零操作零日志）。此类目录是构建/
+    # 下载缓存，种子内零价值、纯占装机体积。
+    local cache_dir cache_swept=0
+    while IFS= read -r cache_dir; do
+        rm -rf "$cache_dir"
+        cache_swept=$((cache_swept + 1))
+    done < <(find "$overlay/opt/agentos" -type d -name .cache 2>/dev/null)
+    [[ "$cache_swept" -gt 0 ]] && log "step rootfs: overlay .cache 现清 $cache_swept 处（排除清单双保险）"
 
     # 桌面专属 external MCP 不进移动种子（设计公理 2026-11-01：能在打包期做好
     # 的就在打包期做好）。windows-mcp 命令面=uvx，安卓 proot 永不可 spawn——
@@ -863,7 +890,7 @@ step_rootfs() {
     # 再生，只删目录会复活）+ config/mcp.json 条目本体。
     local mcp_json="$overlay/opt/agentos/config/mcp.json"
     if [[ -f "$mcp_json" ]] && grep -q 'windows-mcp' "$mcp_json"; then
-        if ! "$PYTHON_BIN" - "$mcp_json" <<'PY'
+        if ! "$PYTHON_BIN" - "$(win_path "$mcp_json")" <<'PY'
 import json, sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as f:
@@ -985,7 +1012,8 @@ EOF
     # 文件 + resolv 写定国内 DNS + venv 装配后布局预烤 plugin-venvs/ + 发现
     # 缓存预烤（T4/R-2 层 2：内核 boot 对账通过即跳过扫描/G2 复验），幂等。
     log "step rootfs: 种子物化（hardlink→实体文件）+resolv 写定+venv 预烤+发现缓存预烤+快照丢弃"
-    if ! "$PYTHON_BIN" "$(win_path "$REPO_ROOT/deploy/materialize_seed.py")" --seed "$(win_path "$ROOTFS_SEED")" --bake-discovery-cache --drop-snapshots; then
+    if ! "$PYTHON_BIN" "$(win_path "$REPO_ROOT/deploy/materialize_seed.py")" --seed "$(win_path "$ROOTFS_SEED")" \
+        --bake-discovery-cache --drop-snapshots --zstd-level "$SEED_ZSTD_LEVEL" --zstd-threads "$SEED_ZSTD_THREADS"; then
         log "step rootfs: FAIL 种子物化/烘焙失败（hardlink 残留或 venv 快照缺失）"
         return 3
     fi
@@ -1012,7 +1040,7 @@ required = [
     "bin",                       # ubuntu 顶层符号链接（bin→usr/bin）
     "usr/bin/env",
     "opt/agentos/plugins/sdk/pyproject.toml",
-    "opt/agentos/venvs/_host/",
+    "opt/agentos/plugin-venvs/_host/lib/python3.12/site-packages/",  # 装配面 site-packages 根（丢弃快照后唯一来源）
     "opt/agentos/plugin-venvs/",                    # 烘焙登记处（装配后布局预烤）
     "opt/agentos/plugin-venvs/_host/pyvenv.cfg",    # 烘焙骨架（合宿宿主键）
     "usr/local/bin/uv",

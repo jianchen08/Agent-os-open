@@ -126,3 +126,86 @@ def _map_linux_native_working_dir(exec_backend: dict[str, Any], working_dir: str
     if normalized.startswith("/"):
         return normalized
     return workspace or "/workspace"
+
+
+# ── mxc_native 传输辅助（与 providers/mxc_native_provider.py 的
+#    _build_request 同语义；跨插件不可 import，漂移由 provider 单测钉死）──
+
+
+def _map_mxc_working_dir(exec_backend: dict[str, Any], working_dir: str | None) -> str:
+    """``/workspace`` 约定路径 → 宿主 workspace 绝对路径。
+
+    MXC 1.0.0 schema 的 ``process.cwd`` 按宿主路径解释（wslc 侧映射由引擎
+    完成——执行器契约未文档化处的假设，真机 smoke 校准）。相对路径按
+    workspace 根解析；空落 workspace（cwd 必须存在）。
+    """
+    workspace = str(exec_backend.get("workspace", "") or "")
+    if not working_dir:
+        return workspace
+    normalized = working_dir.replace("\\", "/")
+    if normalized == "/workspace":
+        return workspace or working_dir
+    if normalized.startswith("/workspace/"):
+        return (workspace or "/workspace") + normalized[len("/workspace") :]
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        return working_dir
+    base = workspace.rstrip("/\\")
+    return f"{base}/{normalized}" if base else working_dir
+
+
+def _build_mxc_request(
+    exec_backend: dict[str, Any],
+    command: str,
+    working_dir: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    """构造 MXC 1.0.0 stable schema 请求（一次性执行）。
+
+    环境变量只注入**非敏感**的运行时变量（XDG/npm 缓存导向 workspace）：
+    请求 JSON 会落盘，AGENTOS_BRIDGE_TOKEN 等密钥不得写入请求文件。
+    """
+    workspace = str(exec_backend.get("workspace", "") or "")
+    env_pairs: list[str] = []
+    if workspace:
+        # py311 目标：反斜杠转义不能写在 f-string 表达式内（3.12 才允许）
+        workspace_root = workspace.rstrip("/\\")
+        rt = f"{workspace_root}/.task_runtime"
+        env_pairs = [
+            f"XDG_CACHE_HOME={rt}/cache",
+            f"npm_config_cache={rt}/npm-cache",
+            f"PYTHONUSERBASE={rt}/pyuser",
+        ]
+    request: dict[str, Any] = {
+        "version": str(exec_backend.get("request_version", "1.0.0")),
+        "process": {
+            "commandLine": command,
+            "cwd": _map_mxc_working_dir(exec_backend, working_dir),
+            "env": env_pairs,
+            "inheritDefaultEnv": True,
+        },
+        "filesystem": exec_backend.get("policy") or {},
+        "network": exec_backend.get("network") or {"egress": {"default": "deny"}},
+        "containment": str(exec_backend.get("mxc_backend", "")),
+        "lifecycle": {"destroyOnExit": True},
+    }
+    if request["containment"] == "processcontainer":
+        # ProcessContainer 直接 CreateProcess（不套 shell）→ cmd 语义由本层
+        # 包装；Win32k 锁死会让 git/powershell 等控制台程序 STATUS_DLL_INIT_FAILED
+        # （真机实证），故 ui.disable 缺省放开（剪贴板/合成输入仍锁）。
+        request["process"]["commandLine"] = f'cmd.exe /d /s /c "{command}"'
+        request["ui"] = {"disable": False}
+    if timeout and timeout > 0:
+        # timeout 缺省 = 由 bash 工具层看门狗/句柄生命周期托管；0 不写入请求，
+        # 避免把「无超时」误表达成「立即超时」。MXC schema 单位是毫秒。
+        request["process"]["timeout"] = int(timeout * 1000)
+    image = exec_backend.get("image")
+    if image:
+        request["wslc"] = {"image": str(image)}
+    return request
+
+
+def _mxc_executor_argv(exec_backend: dict[str, Any], request_path: str) -> list[str]:
+    """执行器 argv：``[executor] + executor_args``（``{request}`` 替换为请求路径）。"""
+    executor = str(exec_backend.get("executor", "") or "")
+    args = [str(x) for x in exec_backend.get("executor_args", ["{request}"])]
+    return [executor, *(arg.replace("{request}", request_path) for arg in args)]

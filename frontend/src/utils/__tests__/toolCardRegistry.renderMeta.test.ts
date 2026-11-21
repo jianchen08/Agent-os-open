@@ -8,8 +8,8 @@
  * 读文件卡片无法打开文件、条目只显示原始工具名。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { loadRenderIntents } from '@/utils/renderIntent'
 import { loadOutputSchemas } from '@/utils/outputSchemaView'
+import { loadRenderIntents } from '@/utils/renderIntent'
 import {
   enhanceActivityWithToolConfig,
   registerGlobalOpenFileCallback,

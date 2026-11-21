@@ -434,6 +434,9 @@ class _FakeKeepaliveProc:
         self.wait_timeout: float | None = None
         self._terminate_error = terminate_error
 
+    def poll(self) -> int | None:
+        return None  # 保活会话存活语义（等待循环冻结取证 poll() 用）
+
     def terminate(self) -> None:
         if self._terminate_error is not None:
             raise self._terminate_error
@@ -494,3 +497,172 @@ class TestKeepaliveLifecycle:
         assert _MOD._keepalive_proc is None
         _MOD.terminate_keepalive()  # 不抛
         assert _MOD._keepalive_proc is None
+
+
+# ── 发行版冻结兜底：两段式取证 → 冻结冷却 → wsl --shutdown 最后一级自愈 ──
+
+
+class _FakeClock:
+    """模块命名空间 fake clock：整体替换 wsl_health 的 time 引用（禁改全局
+    time.monotonic）。monotonic() 每读步进 step，等待循环确定性前进；sleep
+    掐零（循环节奏由 monotonic 步进承载）。"""
+
+    def __init__(self, start: float = 1000.0, step: float = 1.0) -> None:
+        self.now = start
+        self.step = step
+
+    def monotonic(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+    def sleep(self, _seconds: float) -> None:
+        return None
+
+
+class _FakeProc:
+    """Popen 替身：poll() 返回预设退出态（exited=True 即刻退出 = 信号A命中）。"""
+
+    def __init__(self, exited: bool) -> None:
+        self._poll_result: int | None = 0 if exited else None
+
+    def poll(self) -> int | None:
+        return self._poll_result
+
+
+def _popen_recorder(exit_pattern: list[bool]) -> tuple[list[list[Any]], Any]:
+    """Popen 替身工厂：按 exit_pattern（越界循尾值）逐次产出 _FakeProc 并记录命令行。"""
+    calls: list[list[Any]] = []
+    procs: list[_FakeProc] = []
+
+    def _spawn(*args: Any, **kwargs: Any) -> _FakeProc:
+        calls.append(list(args))
+        exited = exit_pattern[len(procs)] if len(procs) < len(exit_pattern) else exit_pattern[-1]
+        proc = _FakeProc(exited)
+        procs.append(proc)
+        return proc
+
+    return calls, _spawn
+
+
+@pytest.fixture
+def fake_clock(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """fake clock 注入模块命名空间 + 冻结兜底模块级状态每用例归零。"""
+    clock = _FakeClock()
+    monkeypatch.setattr(_MOD, "time", clock)
+    monkeypatch.setattr(_MOD, "_last_freeze_shutdown", 0.0)
+    _MOD._keepalive_proc = None
+    yield clock
+    _MOD._keepalive_proc = None
+
+
+class TestFreezeShutdownFallback:
+    """发行版级卡死兜底（wsl --shutdown 最后一级自愈）。
+
+    三分支各有「不触发」钉子 + 触发分支（shutdown 恰一次 + 重拉 + 最终 True）；
+    时序断言全走模块命名空间 fake clock。全程 mock，禁止真实执行 wsl.exe --shutdown。
+    """
+
+    @staticmethod
+    def _stub_frozen(monkeypatch: pytest.MonkeyPatch, *, probe_rc: int = 124) -> tuple[Any, _RunStub]:
+        """冻结场景公共打桩：无既存保活会话、信号B复核 rc=probe_rc、shutdown 经
+        subprocess.run 录制。is_docker_reachable 由各用例按场景覆写。"""
+        monkeypatch.setattr(_MOD, "_keepalive_running", lambda: False)
+        probe = MagicMock(return_value=_MOD.ProbeResult(rc=probe_rc, message="stub"))
+        monkeypatch.setattr(_MOD, "probe_wsl_alive", probe)
+        shutdown_stub = _RunStub()
+        monkeypatch.setattr(_MOD.subprocess, "run", shutdown_stub)
+        return probe, shutdown_stub
+
+    def test_frozen_shutdown_respawn_and_recover(
+        self, monkeypatch: pytest.MonkeyPatch, windows_platform: None, fake_clock: Any
+    ) -> None:
+        """冻结确认（会话退出+probe rc=124）→ shutdown 恰一次 + 重拉保活 +
+        deadline 重置后 daemon 就绪返回 True。"""
+        monkeypatch.setattr(_MOD, "is_docker_reachable", _probe_seq(False, False, True))
+        probe, shutdown_stub = self._stub_frozen(monkeypatch)
+        popen_calls, popen = _popen_recorder([True, False])
+        monkeypatch.setattr(_MOD.subprocess, "Popen", popen)
+
+        assert _MOD.ensure_docker_engine(timeout=5.0) is True
+        assert shutdown_stub.calls == [["wsl.exe", "--shutdown"]]
+        assert len(popen_calls) == 2, "首次拉起 + shutdown 后重拉，恰两次"
+        assert popen_calls[0] == popen_calls[1], "重拉走同一 detached 命令路径"
+        assert _MOD._keepalive_proc is not None
+        probe.assert_called_once_with(timeout=8)
+
+    def test_healthy_keepalive_no_trigger(
+        self, monkeypatch: pytest.MonkeyPatch, windows_platform: None, fake_clock: Any
+    ) -> None:
+        """保活会话健康存活（poll()=None）+ docker 不可达 → 不触发，干等就绪 True。"""
+        monkeypatch.setattr(_MOD, "is_docker_reachable", _probe_seq(False, False, True))
+        probe, shutdown_stub = self._stub_frozen(monkeypatch)
+        popen_calls, popen = _popen_recorder([False])
+        monkeypatch.setattr(_MOD.subprocess, "Popen", popen)
+
+        assert _MOD.ensure_docker_engine(timeout=5.0) is True
+        assert shutdown_stub.calls == []
+        probe.assert_not_called()
+        assert len(popen_calls) == 1
+
+    @pytest.mark.parametrize("probe_rc", [0, 2])
+    def test_signal_b_not_frozen_no_trigger(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        windows_platform: None,
+        fake_clock: Any,
+        probe_rc: int,
+    ) -> None:
+        """会话已退出但 probe_wsl_alive 复核 rc!=124（0=冷启动慢/2=磁盘丢失）
+        → 不触发 shutdown（防 VM 冷启动误判）。"""
+        monkeypatch.setattr(_MOD, "is_docker_reachable", _probe_seq(False, False, True))
+        probe, shutdown_stub = self._stub_frozen(monkeypatch, probe_rc=probe_rc)
+        popen_calls, popen = _popen_recorder([True])
+        monkeypatch.setattr(_MOD.subprocess, "Popen", popen)
+
+        assert _MOD.ensure_docker_engine(timeout=5.0) is True
+        assert shutdown_stub.calls == []
+        probe.assert_called_once_with(timeout=8)
+
+    def test_cooldown_window_blocks_second_shutdown(
+        self, monkeypatch: pytest.MonkeyPatch, windows_platform: None, fake_clock: Any
+    ) -> None:
+        """首次 shutdown 落冷却戳：600s 窗口内二次冻结证据不再 shutdown。"""
+        monkeypatch.setattr(_MOD, "is_docker_reachable", _probe_seq())
+        _, shutdown_stub = self._stub_frozen(monkeypatch)
+        popen_calls, popen = _popen_recorder([True])
+        monkeypatch.setattr(_MOD.subprocess, "Popen", popen)
+
+        assert _MOD.ensure_docker_engine(timeout=5.0) is False  # 首轮触发一次 shutdown
+        assert len(shutdown_stub.calls) == 1
+
+        fake_clock.now = 1500.0  # 距首次 shutdown ≈500s，仍在 600s 窗口内
+        assert _MOD.ensure_docker_engine(timeout=5.0) is False
+        assert len(shutdown_stub.calls) == 1, "冷却窗口内二次证据不得二次 shutdown"
+
+    def test_cooldown_expiry_reenables_shutdown(
+        self, monkeypatch: pytest.MonkeyPatch, windows_platform: None, fake_clock: Any
+    ) -> None:
+        """600s 窗口过期后二次证据恢复 shutdown 能力（防永久锁死）。"""
+        shutdown_stub = _RunStub()
+
+        def _docker(timeout: float = 5.0) -> bool:
+            return len(shutdown_stub.calls) >= 2
+
+        monkeypatch.setattr(_MOD, "is_docker_reachable", _docker)
+        monkeypatch.setattr(_MOD, "_keepalive_running", lambda: False)
+        monkeypatch.setattr(
+            _MOD,
+            "probe_wsl_alive",
+            MagicMock(return_value=_MOD.ProbeResult(rc=124, message="stub")),
+        )
+        monkeypatch.setattr(_MOD.subprocess, "run", shutdown_stub)
+        popen_calls, popen = _popen_recorder([True])
+        monkeypatch.setattr(_MOD.subprocess, "Popen", popen)
+
+        assert _MOD.ensure_docker_engine(timeout=5.0) is False  # 第一次 shutdown
+        assert len(shutdown_stub.calls) == 1
+
+        fake_clock.now = 1700.0  # 距首次 ≈700s，窗口已过期
+        assert _MOD.ensure_docker_engine(timeout=5.0) is True
+        assert len(shutdown_stub.calls) == 2

@@ -1,7 +1,7 @@
 /** 认证 API 服务 */
 
 import apiClient from './client'
-import { API_ENDPOINTS } from '../../constants/api'
+import { API_ENDPOINTS, AUTH_LOGIN_TIMEOUT } from '../../constants/api'
 import { requestWithRetry } from '../../utils/retry'
 import type {
   LoginResponse,
@@ -72,7 +72,15 @@ export async function login(
   }
 
   return requestWithRetry(async () => {
-    const response = await apiClient.post<LoginResponse>(API_ENDPOINTS.AUTH.LOGIN, requestData)
+    const response = await apiClient.post<LoginResponse>(
+      API_ENDPOINTS.AUTH.LOGIN,
+      requestData,
+      // 登录专用超时（AUTH_LOGIN_TIMEOUT=120s；普通端点 30s）：内核停顿期单次
+      // 即可超 30s，通用值会让用户必然拿到 ERR_ABORTED。noAutoRetry 关掉拦截器
+      // 自动重试——重试治不了「内核整体停顿」，只会把最坏等待放大数倍；等待过程
+      // 由 LoginModal 的秒数走表如实呈现，失败文案引导用户重按。
+      { timeout: AUTH_LOGIN_TIMEOUT, noAutoRetry: true },
+    )
     return response.data
   }, options)
 }

@@ -24,11 +24,18 @@ from dataclasses import dataclass, field
 
 # ── 枚举与词表（真值：文档类型规范 §二 / §一；viewer.html TYPES + KIND_TOKEN）──
 
-#: 追溯链上的六种文档类型（``rule`` 已于 v2.1 移出枚举——规则配置数据非文档类型）。
-DOC_TYPES: frozenset[str] = frozenset({"requirement", "plan", "adr", "design", "report", "ledger"})
+#: 七种文档类型：追溯链六种（``rule`` 已于 v2.1 移出枚举——规则配置数据非文档类型）
+#: + ``standard``（文档治理方案 D1，2026-11-14：Standards 层落 ``docs/guides/`` /
+#: ``docs/schemas/``，承载「现在是什么」的稳定事实；单独成类型才能让防膨胀判据按
+#: type 机械分流，见 docs/schemas/文档治理标准.md）。
+DOC_TYPES: frozenset[str] = frozenset(
+    {"requirement", "plan", "adr", "design", "report", "ledger", "standard"}
+)
 
-#: 文档状态四值（文档类型规范 §四 frontmatter 三字段）。
-DOC_STATUSES: frozenset[str] = frozenset({"draft", "active", "superseded", "archived"})
+#: 文档状态五值（文档类型规范 §六矩阵）。``deprecated`` 为废弃态（文档治理方案 D5：
+#: 废弃三处置落此状态），与 ``superseded`` 的分界 = 有无替代件：被新件取代用
+#: superseded（必有取代双链），无替代而停用用 deprecated。
+DOC_STATUSES: frozenset[str] = frozenset({"draft", "active", "superseded", "archived", "deprecated"})
 
 #: frontmatter 允许的字段集合——仅三字段（domain/supersedes/truth_for 已裁撤）。
 FRONTMATTER_FIELDS: frozenset[str] = frozenset({"doc_id", "type", "status"})
@@ -57,6 +64,13 @@ REL_BELONGS_TO = "归属"
 REL_SUPERSEDES = "取代"
 #: 依赖关系名（方案 §4.2：depends_on 机械提取）。
 REL_DEPENDS_ON = "依赖"
+
+#: ``type: standard`` 的唯一归宿（文档类型规范 §二「类型 = 链位」）。
+#:
+#: Standards 层承载「现在是什么」的稳定事实，仓内落位只有两处：操作/指南面
+#: ``docs/guides/`` 与 schema/规约面 ``docs/schemas/``。其余目录出现 standard
+#: 即归属错位（决策归 ADR、过程归 working、闭环结论归 report）。
+STANDARD_ROOTS: tuple[str, ...] = ("docs/guides/", "docs/schemas/")
 
 #: 项目根节点 id。
 #:

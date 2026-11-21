@@ -14,8 +14,8 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
-import { ChatInput } from '../ChatInput'
 import { userScopedKey as pk } from '@/utils/userScopedStorage'
+import { ChatInput } from '../ChatInput'
 
 const mocks = vi.hoisted(() => ({
   fetchPipelineStates: vi.fn(),

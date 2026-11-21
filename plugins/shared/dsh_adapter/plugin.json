@@ -6,13 +6,80 @@
   ],
   "name": "DSH Plugin Adapter",
   "description": "DeepSeek Harness (DSH) 插件适配器：非 MCP 后端工具经 Node runtime 桥接（通道 A）、前端视觉组件经 vendor 移植层 + render 意图路由、DSH 插件包清单翻译。DSH 源码零改动（只读参考，MIT 许可）。工具声明即注册（capabilities.tools = LLM 面，无需类型豁免）。",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
   "capabilities": {
-    "tools": [],
+    "tools": [
+      {
+        "name": "dsh.tool.list",
+        "description": "List tools registered by installed DSH plugins in the DSH host (name/description/parameters). Call dsh.tool.call to execute one.",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        },
+        "category": "system",
+        "render": {
+          "card": "generic"
+        }
+      },
+      {
+        "name": "dsh.tool.call",
+        "description": "Execute a tool registered by an installed DSH plugin (bridge tool/call). Discover names with dsh.tool.list first.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "DSH 工具名（先 dsh.tool.list 查）"
+            },
+            "args": {
+              "type": "object",
+              "description": "工具参数（按其 parameters）"
+            }
+          },
+          "required": [
+            "tool"
+          ]
+        },
+        "output_schema": {
+          "type": [
+            "object",
+            "array",
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "category": "system",
+        "render": {
+          "card": "generic"
+        }
+      }
+    ],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
@@ -94,6 +161,12 @@
       "id": "dsh_plugins",
       "path": "config/plugins/dsh_adapter/dsh_adapter.yaml",
       "label": "DSH 插件配置"
+    },
+    {
+      "id": "llm",
+      "path": "config/plugins/llm/llm.yaml",
+      "label": "LLM 默认模型（agentDefaultModel 翻译源）",
+      "settings": false
     }
   ],
   "permissions": {
@@ -107,7 +180,8 @@
     },
     "network": {
       "allowed_hosts": [
-        "registry.npmmirror.com"
+        "registry.npmmirror.com",
+        "registry.npmjs.org"
       ]
     },
     "env_vars": [
@@ -117,15 +191,236 @@
     ],
     "system_calls": [
       "node",
-      "npm"
+      "npm",
+      "pnpm"
     ]
   },
   "priority": 50,
   "contributes": {
-    "renderers": [],
+    "renderers": [
+      {
+        "tool": "ask_user_question",
+        "card": "generic"
+      },
+      {
+        "tool": "bash",
+        "card": "terminal"
+      },
+      {
+        "tool": "cordis_define",
+        "card": "generic"
+      },
+      {
+        "tool": "cordis_inspect_list",
+        "card": "generic"
+      },
+      {
+        "tool": "cordis_inspect_query",
+        "card": "generic"
+      },
+      {
+        "tool": "cordis_inspect_self",
+        "card": "generic"
+      },
+      {
+        "tool": "cordis_run",
+        "card": "generic"
+      },
+      {
+        "tool": "cordis_stop",
+        "card": "generic"
+      },
+      {
+        "tool": "cordis_undefine",
+        "card": "generic"
+      },
+      {
+        "tool": "create_goal",
+        "card": "generic"
+      },
+      {
+        "tool": "edit",
+        "card": "diff"
+      },
+      {
+        "tool": "get_goal",
+        "card": "generic"
+      },
+      {
+        "tool": "glob",
+        "card": "search"
+      },
+      {
+        "tool": "grep",
+        "card": "search"
+      },
+      {
+        "tool": "interrupt_agent",
+        "card": "generic"
+      },
+      {
+        "tool": "job_kill",
+        "card": "generic"
+      },
+      {
+        "tool": "job_list",
+        "card": "generic"
+      },
+      {
+        "tool": "job_output",
+        "card": "generic"
+      },
+      {
+        "tool": "list_agents",
+        "card": "generic"
+      },
+      {
+        "tool": "list_subagent_models",
+        "card": "generic"
+      },
+      {
+        "tool": "lsp",
+        "card": "generic"
+      },
+      {
+        "tool": "present",
+        "card": "generic"
+      },
+      {
+        "tool": "ralph",
+        "card": "generic"
+      },
+      {
+        "tool": "read",
+        "card": "read"
+      },
+      {
+        "tool": "read_image",
+        "card": "generic"
+      },
+      {
+        "tool": "schedule_create",
+        "card": "generic"
+      },
+      {
+        "tool": "schedule_delete",
+        "card": "generic"
+      },
+      {
+        "tool": "schedule_list",
+        "card": "generic"
+      },
+      {
+        "tool": "schedule_update",
+        "card": "generic"
+      },
+      {
+        "tool": "send_message",
+        "card": "generic"
+      },
+      {
+        "tool": "session_event_read",
+        "card": "generic"
+      },
+      {
+        "tool": "session_event_search",
+        "card": "generic"
+      },
+      {
+        "tool": "session_event_trace",
+        "card": "generic"
+      },
+      {
+        "tool": "session_search",
+        "card": "generic"
+      },
+      {
+        "tool": "session_trace",
+        "card": "generic"
+      },
+      {
+        "tool": "skill",
+        "card": "generic"
+      },
+      {
+        "tool": "spawn_teammate",
+        "card": "generic"
+      },
+      {
+        "tool": "subagent",
+        "card": "generic"
+      },
+      {
+        "tool": "team_task_create",
+        "card": "generic"
+      },
+      {
+        "tool": "team_task_get",
+        "card": "generic"
+      },
+      {
+        "tool": "team_task_list",
+        "card": "generic"
+      },
+      {
+        "tool": "team_task_update",
+        "card": "generic"
+      },
+      {
+        "tool": "terminal_close",
+        "card": "generic"
+      },
+      {
+        "tool": "terminal_list",
+        "card": "generic"
+      },
+      {
+        "tool": "terminal_open",
+        "card": "generic"
+      },
+      {
+        "tool": "terminal_read",
+        "card": "generic"
+      },
+      {
+        "tool": "terminal_signal",
+        "card": "generic"
+      },
+      {
+        "tool": "todo_write",
+        "card": "generic"
+      },
+      {
+        "tool": "update_goal",
+        "card": "generic"
+      },
+      {
+        "tool": "wait_agent",
+        "card": "generic"
+      },
+      {
+        "tool": "web_fetch",
+        "card": "web"
+      },
+      {
+        "tool": "web_search",
+        "card": "web"
+      },
+      {
+        "tool": "workflow",
+        "card": "generic"
+      },
+      {
+        "tool": "write",
+        "card": "diff"
+      }
+    ],
     "dsh_adapter": {
       "source_commit": "b830ec950faba0a46dda564be3e2d854afed94f1",
       "source_version": "0.2.1-rc.5",
+      "manager_package": "@deepseek-ai/dsh-plugin-manager",
+      "manager_version": "0.2.1-rc.5",
+      "profile_layout": "dsh.profile.bundles + cordis.patch.yml + pnpm (user-space dsh_runtime)",
       "backend_channel": "node-runtime-bridge",
       "frontend_channel": "render-intent (native blocks)",
       "out_of_scope": [
@@ -152,7 +447,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #1d2539 78%, #e8ecf5)",
           "--ds-text-muted": "color-mix(in srgb, #1d2539 55%, #e8ecf5)",
           "--ds-border-subtle": "color-mix(in srgb, #1d2539 16%, transparent)",
-          "--region-sidebar-bg": "rgba(242, 245, 250, 1)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -178,7 +473,8 @@
           "--bubble-user-text": "#e1e2e7",
           "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #e8ecf5 80%, transparent)",
-          "--bubble-ai-text": "#222b4d"
+          "--bubble-ai-text": "#222b4d",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -209,7 +505,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #1a6d88 78%, #04060d)",
           "--ds-text-muted": "color-mix(in srgb, #1a6d88 55%, #04060d)",
           "--ds-border-subtle": "color-mix(in srgb, #1a6d88 16%, transparent)",
-          "--region-sidebar-bg": "rgba(238, 249, 255, 0.5)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -235,7 +531,8 @@
           "--bubble-user-text": "#465a5e",
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #04060d 80%, transparent)",
-          "--bubble-ai-text": "#bdf3ff"
+          "--bubble-ai-text": "#bdf3ff",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -266,7 +563,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #123139 78%, #f4f8f7)",
           "--ds-text-muted": "color-mix(in srgb, #123139 55%, #f4f8f7)",
           "--ds-border-subtle": "color-mix(in srgb, #123139 16%, transparent)",
-          "--region-sidebar-bg": "#0b2a33",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -293,6 +590,7 @@
           "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #f4f8f7 80%, transparent)",
           "--bubble-ai-text": "#2058bd",
+          "--chat-input-bg": "var(--dsw-specific-input-major)",
           "--font-ui": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
         }
       },
@@ -313,7 +611,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #262319 78%, #f4efe4)",
           "--ds-text-muted": "color-mix(in srgb, #262319 55%, #f4efe4)",
           "--ds-border-subtle": "color-mix(in srgb, #262319 16%, transparent)",
-          "--region-sidebar-bg": "rgba(246, 241, 230, 0.321569)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -339,7 +637,8 @@
           "--bubble-user-text": "#ece7e7",
           "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #f4efe4 80%, transparent)",
-          "--bubble-ai-text": "#4a1f1a"
+          "--bubble-ai-text": "#4a1f1a",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -370,7 +669,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #1d2539 78%, #e8ecf5)",
           "--ds-text-muted": "color-mix(in srgb, #1d2539 55%, #e8ecf5)",
           "--ds-border-subtle": "color-mix(in srgb, #1d2539 16%, transparent)",
-          "--region-sidebar-bg": "rgba(242, 245, 250, 0.901961)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -396,7 +695,8 @@
           "--bubble-user-text": "#e1e2e7",
           "--bubble-link": "#ffffff",
           "--bubble-ai-bg": "color-mix(in srgb, #e8ecf5 80%, transparent)",
-          "--bubble-ai-text": "#222b4d"
+          "--bubble-ai-text": "#222b4d",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -427,7 +727,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #fff5ec 78%, #141a2e)",
           "--ds-text-muted": "color-mix(in srgb, #fff5ec 55%, #141a2e)",
           "--ds-border-subtle": "color-mix(in srgb, #fff5ec 16%, transparent)",
-          "--region-sidebar-bg": "rgba(12, 15, 28, 0.901961)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -453,7 +753,8 @@
           "--bubble-user-text": "#494642",
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #141a2e 80%, transparent)",
-          "--bubble-ai-text": "#fff3e6"
+          "--bubble-ai-text": "#fff3e6",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -484,7 +785,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #172347 78%, #dce6f5)",
           "--ds-text-muted": "color-mix(in srgb, #172347 55%, #dce6f5)",
           "--ds-border-subtle": "color-mix(in srgb, #172347 16%, transparent)",
-          "--region-sidebar-bg": "rgba(11, 25, 66, 0.878431)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -511,7 +812,7 @@
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "#f8fafff0",
           "--bubble-ai-text": "#172347",
-          "--chat-input-bg": "#fffdf8d1"
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         }
       },
       {
@@ -531,7 +832,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #7dffb3 78%, #040805)",
           "--ds-text-muted": "color-mix(in srgb, #7dffb3 55%, #040805)",
           "--ds-border-subtle": "color-mix(in srgb, #7dffb3 16%, transparent)",
-          "--region-sidebar-bg": "#060d08",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -558,6 +859,7 @@
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #040805 80%, transparent)",
           "--bubble-ai-text": "#00e676",
+          "--chat-input-bg": "var(--dsw-specific-input-major)",
           "--font-ui": "\"Menlo\",\"Consolas\",\"JetBrains Mono\",\"Source Code Pro\",\"PingFang SC\",\"Microsoft YaHei\",monospace"
         }
       },
@@ -578,7 +880,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #14263f 78%, #eef5ff)",
           "--ds-text-muted": "color-mix(in srgb, #14263f 55%, #eef5ff)",
           "--ds-border-subtle": "color-mix(in srgb, #14263f 16%, transparent)",
-          "--region-sidebar-bg": "#2e9bff",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -605,6 +907,7 @@
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #eef5ff 80%, transparent)",
           "--bubble-ai-text": "#124a8f",
+          "--chat-input-bg": "var(--dsw-specific-input-major)",
           "--font-ui": "\"PingFang SC\", \"Microsoft YaHei\", \"Hiragino Sans GB\", \"Helvetica Neue\", \"Segoe UI\", sans-serif"
         },
         "backgrounds": {
@@ -636,7 +939,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #e7ead7 78%, #18221b)",
           "--ds-text-muted": "color-mix(in srgb, #e7ead7 55%, #18221b)",
           "--ds-border-subtle": "color-mix(in srgb, #e7ead7 16%, transparent)",
-          "--region-sidebar-bg": "rgba(12, 22, 15, 0.54902)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -663,6 +966,7 @@
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #18221b 80%, transparent)",
           "--bubble-ai-text": "#83c94e",
+          "--chat-input-bg": "var(--dsw-specific-input-major)",
           "--font-ui": "\"Courier New\", \"PingFang SC\", \"Microsoft YaHei\", \"SimSun\", monospace"
         }
       },
@@ -683,7 +987,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #e6e6e6 78%, #f4faf7)",
           "--ds-text-muted": "color-mix(in srgb, #e6e6e6 55%, #f4faf7)",
           "--ds-border-subtle": "color-mix(in srgb, #e6e6e6 16%, transparent)",
-          "--region-sidebar-bg": "#eef6f2",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -729,7 +1033,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #F8F3F5 78%, #071321)",
           "--ds-text-muted": "color-mix(in srgb, #F8F3F5 55%, #071321)",
           "--ds-border-subtle": "color-mix(in srgb, #F8F3F5 16%, transparent)",
-          "--region-sidebar-bg": "rgba(17, 25, 39, 0.36)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -755,7 +1059,8 @@
           "--bubble-user-text": "#404849",
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #071321 80%, transparent)",
-          "--bubble-ai-text": "#dcf8fa"
+          "--bubble-ai-text": "#dcf8fa",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -786,7 +1091,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #1b2431 78%, #eef1f5)",
           "--ds-text-muted": "color-mix(in srgb, #1b2431 55%, #eef1f5)",
           "--ds-border-subtle": "color-mix(in srgb, #1b2431 16%, transparent)",
-          "--region-sidebar-bg": "#f6f8fa",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -813,6 +1118,7 @@
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #eef1f5 80%, transparent)",
           "--bubble-ai-text": "#af2430",
+          "--chat-input-bg": "var(--dsw-specific-input-major)",
           "--font-ui": "\"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"WenQuanYi Micro Hei\", \"Segoe UI\", sans-serif"
         }
       },
@@ -833,7 +1139,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #0b111f 78%, #16244a)",
           "--ds-text-muted": "color-mix(in srgb, #0b111f 55%, #16244a)",
           "--ds-border-subtle": "color-mix(in srgb, #0b111f 16%, transparent)",
-          "--region-sidebar-bg": "rgba(236, 244, 252, 0.85098)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -859,7 +1165,8 @@
           "--bubble-user-text": "#2c2e35",
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #16244a 80%, transparent)",
-          "--bubble-ai-text": "#c3ceea"
+          "--bubble-ai-text": "#c3ceea",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -890,7 +1197,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #0a1e4a 78%, #d0e8f8)",
           "--ds-text-muted": "color-mix(in srgb, #0a1e4a 55%, #d0e8f8)",
           "--ds-border-subtle": "color-mix(in srgb, #0a1e4a 16%, transparent)",
-          "--region-sidebar-bg": "rgba(242, 247, 252, 0.560784)",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -916,7 +1223,8 @@
           "--bubble-user-text": "#0e2242",
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #d0e8f8 80%, transparent)",
-          "--bubble-ai-text": "#122b54"
+          "--bubble-ai-text": "#122b54",
+          "--chat-input-bg": "var(--dsw-specific-input-major)"
         },
         "backgrounds": {
           "image": {
@@ -947,7 +1255,7 @@
           "--ds-text-secondary": "color-mix(in srgb, #000 78%, #2c66b8)",
           "--ds-text-muted": "color-mix(in srgb, #000 55%, #2c66b8)",
           "--ds-border-subtle": "color-mix(in srgb, #000 16%, transparent)",
-          "--region-sidebar-bg": "#ece9d8",
+          "--region-sidebar-bg": "var(--dsw-specific-sidebar-fill)",
           "--region-chat-bg": "transparent",
           "--region-workspace-bg": "transparent",
           "--bubble-ai-mode": "flat",
@@ -974,6 +1282,7 @@
           "--bubble-link": "#000000",
           "--bubble-ai-bg": "color-mix(in srgb, #2c66b8 80%, transparent)",
           "--bubble-ai-text": "#deecfa",
+          "--chat-input-bg": "var(--dsw-specific-input-major)",
           "--font-ui": "Tahoma, \"Microsoft YaHei\", \"PingFang SC\", \"SimSun\", \"宋体\", sans-serif"
         }
       }
@@ -982,18 +1291,18 @@
       {
         "id": "dsh_plugin_manager",
         "title": "DSH 插件",
-        "icon": "🧩",
+        "icon": "data:image/svg+xml;base64,PHN2ZyBmaWxsPSIjNGE1ZmE4IiByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RGVlcFNlZWs8L3RpdGxlPjxwYXRoIGQ9Ik0yMy43NDggNC42NTFjLS4yNTQtLjEyNC0uMzY0LjExMy0uNTEyLjIzMy0uMDUxLjA0LS4wOTQuMDktLjEzNy4xMzctLjM3Mi4zOTctLjgwNi42NTctMS4zNzMuNjI2LS44MjktLjA0Ni0xLjUzNy4yMTQtMi4xNjMuODQ4LS4xMzMtLjc4Mi0uNTc1LTEuMjQ4LTEuMjQ3LTEuNTQ4LS4zNTItLjE1NS0uNzA4LS4zMTEtLjk1NS0uNjUtLjE3Mi0uMjQtLjIxOS0uNTA5LS4zMDUtLjc3NC0uMDU1LS4xNi0uMTEtLjMyMy0uMjkzLS4zNS0uMi0uMDMxLS4yNzguMTM2LS4zNTYuMjc2LS4zMTMuNTcyLS40MzQgMS4yMDItLjQyMiAxLjg0LjAyNyAxLjQzNi42MzMgMi41OCAxLjgzOCAzLjM5My4xMzcuMDk0LjE3Mi4xODcuMTI5LjMyMy0uMDgyLjI4LS4xOC41NTMtLjI2Ni44MzMtLjA1NS4xNzktLjEzNy4yMTgtLjMyOC4xNGE1LjUgNS41IDAgMCAxLTEuNzM3LTEuMTc5Yy0uODU3LS44MjgtMS42MzEtMS43NDMtMi41OTctMi40NmExMiAxMiAwIDAgMC0uNjg5LS40N2MtLjk4NS0uOTU3LjEzLTEuNzQzLjM4Ny0xLjgzNi4yNy0uMDk4LjA5NC0uNDMzLS43NzgtLjQyOC0uODcyLjAwMy0xLjY3LjI5NS0yLjY4Ny42ODVhMyAzIDAgMCAxLS40NjUuMTM2IDkuNiA5LjYgMCAwIDAtMi44ODMtLjEwMWMtMS44ODUuMjEtMy4zOSAxLjEtNC40OTcgMi42MjJDLjA4MiA4Ljc3Ni0uMjMxIDEwLjg1NC4xNTIgMTMuMDJjLjQwMyAyLjI4NCAxLjU2OCA0LjE3NSAzLjM2IDUuNjUzIDEuODU3IDEuNTMzIDMuOTk3IDIuMjg0IDYuNDM4IDIuMTQgMS40ODItLjA4NSAzLjEzMi0uMjg0IDQuOTk0LTEuODYuNDcuMjM0Ljk2Mi4zMjggMS43OC4zOTguNjI5LjA1OCAxLjIzNS0uMDMxIDEuNzA1LS4xMjkuNzM1LS4xNTUuNjg0LS44MzYuNDE4LS45NjEtMi4xNTUtMS4wMDQtMS42ODItLjU5NS0yLjExMi0uOTI2IDEuMDk1LTEuMjk1IDIuNzY4LTMuNTk4IDMuMjg0LTYuNzMzLjA1LS4zNDYuMTE1LS44MzQuMTA4LTEuMTE0LS4wMDQtLjE3MS4wMzUtLjIzOC4yMy0uMjU3YTQuMiA0LjIgMCAwIDAgMS41NDUtLjQ3NWMxLjM5Ny0uNzYzIDEuOTYtMi4wMTYgMi4wOTMtMy41MTcuMDItLjIzLS4wMDQtLjQ2Ny0uMjQ3LS41ODhNMTEuNTggMTguMTY4Yy0yLjA4OC0xLjY0Mi0zLjEwMS0yLjE4My0zLjUyLTIuMTYtLjM5LjAyNC0uMzIuNDcyLS4yMzQuNzYzLjA5LjI4OC4yMDcuNDg3LjM3MS43NC4xMTQuMTY3LjE5Mi40MTYtLjExMy42MDMtLjY3My40MTYtMS44NDItLjE0LTEuODk3LS4xNjgtMS4zNjEtLjgwMS0yLjUtMS44Ni0zLjMwMS0zLjMwNi0uNzc1LTEuMzkzLTEuMjI1LTIuODg4LTEuMjk5LTQuNDgyLS4wMi0uMzg1LjA5NC0uNTIyLjQ3Ny0uNTkyYTQuNyA0LjcgMCAwIDEgMS41My0uMDM4YzIuMTMxLjMxMSAzLjk0NiAxLjI2NCA1LjQ2NyAyLjc3NC44NjguODYgMS41MjUgMS44ODcgMi4yMDIgMi44OS43MiAxLjA2NiAxLjQ5NCAyLjA4MiAyLjQ4IDIuOTE1LjM0OC4yOTEuNjI2LjUxMy44OTIuNjc3LS44MDIuMDktMi4xNC4xMDktMy4wNTUtLjYxNXptMS4wMDEtNi40NGEuMzA2LjMwNiAwIDAgMSAuNDE1LS4yODcuMy4zIDAgMCAxIC4xMTMuMDc0LjMuMyAwIDAgMSAuMDg2LjIxNGMwIC4xNy0uMTM2LjMwNy0uMzA4LjMwN2EuMzAzLjMwMyAwIDAgMS0uMzA2LS4zMDdtMy4xMSAxLjU5NmMtLjIuMDgxLS40LjE1MS0uNTkxLjE2YTEuMjUgMS4yNSAwIDAgMS0uNzk4LS4yNTRjLS4yNzQtLjIzLS40Ny0uMzU4LS41NTEtLjc1OGExLjcgMS43IDAgMCAxIC4wMTUtLjU4OGMuMDctLjMyNy0uMDA3LS41MzctLjIzOC0uNzI3LS4xODgtLjE1Ni0uNDI2LS4xOTktLjY4OS0uMTk5YS42LjYgMCAwIDEtLjI1NC0uMDc4LjI1My4yNTMgMCAwIDEtLjExNC0uMzU4IDEgMSAwIDAgMSAuMTkyLS4yMWMuMzU2LS4yMDIuNzY3LS4xMzYgMS4xNDYuMDE2LjM1Mi4xNDQuNjE4LjQwOCAxLjAwMS43ODIuMzkyLjQ1MS40NjIuNTc2LjY4NS45MTUuMTc2LjI2NC4zMzYuNTM2LjQ0Ni44NDguMDY2LjE5NC0uMDIuMzUzLS4yNS40NSIvPjwvc3ZnPg==",
         "space": "workspace",
         "slot": "tab",
         "path": "/p/dsh_plugin_manager",
         "widget": "webview",
         "props": {
           "pluginId": "dsh_adapter",
-          "htmlPath": "/page/manager",
+          "externalFramePath": "/api/dsh/official-ui?ensure=1",
           "widgetId": "dsh_plugin_manager"
         },
         "order": 40,
-        "description": "DSH 生态插件管理：已装清单（实扫）/安装（审批卡=翻译预览）/启停/卸载/发现源/失败原因展示"
+        "description": "DSH 插件管理页：内嵌 DSH 官方 Web 应用（dsh-client-ui-plugin-manager），所见的插件列表与操作即官方界面本身"
       }
     ]
   },
@@ -1027,76 +1336,6 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "Serve skin hooks.mjs (DSH original mechanism: frontend fetches and runs via blob import; contract x-org.linxin666.skin-center/v1alpha1)"
-    },
-    {
-      "route_id": "dsh_plugins_list",
-      "method": "GET",
-      "path": "/ext/dsh_adapter/api/dsh/plugins",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "已装清单（运行时工作区 node_modules 实扫 + 逐包翻译预览摘要；设计 §4.1 GET plugins）"
-    },
-    {
-      "route_id": "dsh_plugins_index",
-      "method": "GET",
-      "path": "/ext/dsh_adapter/api/dsh/plugins/index",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 45000,
-      "max_concurrency": 2,
-      "description": "发现源：format 1 静态索引多源消费，缓存+不可达标记过期（设计 §4.1 GET index；发现与安装解耦，只读不执行代码）"
-    },
-    {
-      "route_id": "dsh_plugins_install",
-      "method": "POST",
-      "path": "/ext/dsh_adapter/api/dsh/plugins/install",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 60000,
-      "max_concurrency": 2,
-      "description": "安装 {pkg, version?}：缺省版本=索引最新精确版本（禁 dist-tag）；engines.dsh 不兼容安装前拦截；审批=human-interaction 卡（内容=翻译预览），批准后 npm install --prefix 工作区"
-    },
-    {
-      "route_id": "dsh_plugins_uninstall",
-      "method": "POST",
-      "path": "/ext/dsh_adapter/api/dsh/plugins/uninstall",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 60000,
-      "max_concurrency": 2,
-      "description": "卸载 {pkg}：有依赖者拒绝并列依赖者；皮肤目录回收+状态清理"
-    },
-    {
-      "route_id": "dsh_plugins_enable",
-      "method": "POST",
-      "path": "/ext/dsh_adapter/api/dsh/plugins/enable",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "启用 {pkg}：状态即生效（下轮桥 boot 裁剪轴重算；皮肤包=皮肤目录回同步，主题选择器即现）"
-    },
-    {
-      "route_id": "dsh_plugins_disable",
-      "method": "POST",
-      "path": "/ext/dsh_adapter/api/dsh/plugins/disable",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 10000,
-      "max_concurrency": 4,
-      "description": "禁用 {pkg}：状态即生效（桥 context 内重挂载语义；皮肤包=皮肤目录回收，主题选择器即消）"
-    },
-    {
-      "route_id": "dsh_manager_page",
-      "method": "GET",
-      "path": "/ext/dsh_adapter/page/manager",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "管理页 HTML（contributes.pages 的 dsh_plugin_manager webview 自伺服；mode_coding 先例同构）"
     },
     {
       "route_id": "dsh_hooks_translate",
@@ -1157,6 +1396,36 @@
       "timeout_ms": 30000,
       "max_concurrency": 8,
       "description": "DSH webServer 通配反代（AC-X2；路由表由已装包 register 决定）"
+    },
+    {
+      "route_id": "dsh_client_ui",
+      "method": "GET",
+      "path": "/ext/dsh_adapter/api/dsh/client-ui",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "已装 DSH 包的客户端 UI 贡献清单：每包的 client 入口、slots.register 槽位、映射到灵汐页面位的页、未接通/无对应位（前端组件宿主据此装载插件 client bundle）"
+    },
+    {
+      "route_id": "dsh_client_bundle",
+      "method": "GET",
+      "path": "/ext/dsh_adapter/client-bundle/{path:path}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "DSH 插件 client bundle 与静态资源供给（包名形态校验 + 后缀白名单 + resolve 后仍在包目录内；前端带 Bearer 拉取后以 blob 脚本执行，不裸开静态目录）"
+    },
+    {
+      "route_id": "dsh_official_ui",
+      "method": "GET",
+      "path": "/ext/dsh_adapter/api/dsh/official-ui",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "官方插件管理页入口状态 {available,url,reason}：数据源=桥 boot 后 webServerOrigin（官方 DSH Web 应用监听面）；未就绪如实报原因，不编链接"
     }
   ]
 }

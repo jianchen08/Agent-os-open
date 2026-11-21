@@ -1,14 +1,15 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎 | @ci: python-coverage
 """_trim_covered_messages 与 _estimate_assembled_tokens 单元测试。
 
-契约：裁剪侧与估算侧都逐条按全局 seq 过滤/累加，与压缩侧
-save_compression_result 的 max(seq) 同一真相源。system 消息占用 sequence
-号，故「非 system 消息条数 < max_end」不代表已覆盖——未被压缩的 recent 段
-（sequence > max_end，含已提交的 NoopInvoker 任务）必须保留。
+估算侧契约：逐条按全局 seq 过滤/累加，与压缩侧 save_compression_result
+的 max(seq) 同一真相源。system 消息占用 sequence 号，故「非 system 消息
+条数 < max_end」不代表已覆盖——未被压缩的 recent 段（sequence > max_end，
+含已提交的 NoopInvoker 任务）必须保留。
 
-压缩块来源为模块级 _memory_backend（Hindsight/capability），测试通过
-set_memory_backend 注入 FakeBackend（search 返回带 metadata.tags 的 L1
-chunk，与 _parse_seq_from_tags 解析契约一致）。
+裁剪侧契约（2026-11-16 修复）：证据源 = 历史已应用压缩块消息
+（role=system 且 metadata.compression_ref.seq_range=[start,end]，本插件
+_build_batch_blocks 产此形态），不再检索记忆库——孤儿 chunk（落库后回写
+前被打断的覆盖声明）不驱动删除；被删原文由调用方与删除 ops 同批冻结。
 """
 
 from __future__ import annotations
@@ -98,6 +99,23 @@ def _l1_chunk(
     }
 
 
+def _applied_block(seq_range: list[int]) -> dict[str, Any]:
+    """构造一条历史中的已应用压缩块消息（_build_batch_blocks 生产形态）。"""
+    return {
+        "role": "system",
+        "name": "compressed",
+        "content": f'<compressed seq="{seq_range[0]}-{seq_range[1]}" level="L1">x</compressed>',
+        "metadata": {
+            "compression_ref": {
+                "kind": "process",
+                "seq_range": list(seq_range),
+                "stored_at": "2026-11-16T00:00:00+00:00",
+                "memory_ids": [],
+            }
+        },
+    }
+
+
 def _msg(role: str, seq: int | None, content: str = "x") -> dict[str, Any]:
     """构造一条消息；seq=None 表示不带 seq 字段。"""
     m: dict[str, Any] = {"role": role, "content": content}
@@ -116,19 +134,18 @@ def _non_sys_count(msgs: list[dict[str, Any]]) -> int:
 
 
 class TestTrimCoveredMessages:
-    """_trim_covered_messages 回归测试。"""
+    """_trim_covered_messages 回归测试（证据源 = 历史已应用块）。"""
 
     @pytest.mark.asyncio
-    async def test_无压缩块原样返回(self) -> None:
-        """没有 L1 压缩块时不裁剪。"""
+    async def test_无已应用块原样返回(self) -> None:
+        """历史里没有已应用压缩块时不裁剪；孤儿 chunk 在库也不裁。"""
 
-        plugin.set_memory_backend(_FakeBackend([]))
+        plugin.set_memory_backend(_FakeBackend([_l1_chunk(5, 1)]))
 
         p = ContextWindowGuardPlugin()
-        ctx = _make_context()
         messages = [_msg("user", 1), _msg("assistant", 2)]
 
-        result = await p._trim_covered_messages(ctx, messages)
+        result = await p._trim_covered_messages(messages)
 
         assert result is messages
 
@@ -136,18 +153,15 @@ class TestTrimCoveredMessages:
     async def test_核心回归_system占号致non_sys_count小于max_end不全裁(self) -> None:
         """system 消息占用 sequence 号时，不得把未覆盖的 recent 段一起裁掉。
 
-        场景：max_end=899（全局记录号），非 system 消息中穿插了 system
-        消息占用 sequence 号，使非 system 消息条数（<899）小于 max_end，
-        且存在 sequence > 899 的未压缩 recent 段（NoopInvoker 任务）——
-        必须保留 seq>899 的消息。
+        场景：已应用块声明覆盖 seq 1-899（全局记录号），非 system 消息中
+        穿插了 system 消息占用 sequence 号，使非 system 消息条数（<899）
+        小于 max_end，且存在 sequence > 899 的未压缩 recent 段（NoopInvoker
+        任务在此）——必须保留 seq>899 的消息。
         """
 
-        plugin.set_memory_backend(_FakeBackend([_l1_chunk(899, 1)]))
-
         p = ContextWindowGuardPlugin()
-        ctx = _make_context()
 
-        messages: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = [_applied_block([1, 899])]
         # seq 1-100：部分已被压缩的非 system + 穿插 system
         for i in range(1, 101):
             messages.append(_msg("system", i) if i % 10 == 0 else _msg("user", i))
@@ -155,7 +169,7 @@ class TestTrimCoveredMessages:
         for i in range(900, 911):
             messages.append(_msg("assistant", i))
 
-        result = await p._trim_covered_messages(ctx, messages)
+        result = await p._trim_covered_messages(messages)
 
         # 绝不能全裁：必须保留 seq>899 的非 system 消息（900-910，共 11 条）
         kept_non_sys = _non_sys_count(result)
@@ -172,23 +186,21 @@ class TestTrimCoveredMessages:
     async def test_system消息全保留与压缩侧统一(self) -> None:
         """system 消息不参与裁剪，全部保留（与压缩侧 pure_system_msgs 原样保留一致）。"""
 
-        plugin.set_memory_backend(_FakeBackend([_l1_chunk(50, 1)]))
-
         p = ContextWindowGuardPlugin()
-        ctx = _make_context()
 
         messages = [
+            _applied_block([1, 50]),
             _msg("system", 5),   # 在覆盖区间内的 system
             _msg("user", 10),    # 被覆盖的非 system，应裁
             _msg("system", 30),  # 在覆盖区间内的 system
             _msg("assistant", 60),  # 未覆盖，保留
         ]
 
-        result = await p._trim_covered_messages(ctx, messages)
+        result = await p._trim_covered_messages(messages)
 
         kept_roles = [m["role"] for m in result]
-        # 两条 system 都在，assistant(seq>50) 保留，user(seq10<=50) 被裁
-        assert kept_roles.count("system") == 2
+        # 三条 system（含块消息）都在，assistant(seq>50) 保留，user(seq10<=50) 被裁
+        assert kept_roles.count("system") == 3
         assert "assistant" in kept_roles
         assert "user" not in kept_roles
 
@@ -196,18 +208,16 @@ class TestTrimCoveredMessages:
     async def test_无seq的非system消息保留(self) -> None:
         """无 seq 的非 system 消息（重注入压缩块等）默认保留。"""
 
-        plugin.set_memory_backend(_FakeBackend([_l1_chunk(50, 1)]))
-
         p = ContextWindowGuardPlugin()
-        ctx = _make_context()
 
         messages = [
+            _applied_block([1, 50]),
             _msg("user", 10),          # 被覆盖，裁
             _msg("assistant", None),   # 无 sequence，保留
             _msg("user", 60),          # 未覆盖，保留
         ]
 
-        result = await p._trim_covered_messages(ctx, messages)
+        result = await p._trim_covered_messages(messages)
 
         contents = [m["content"] for m in result]
         assert "x" in contents  # 至少保留了无 seq 和 seq>50 的
@@ -228,12 +238,10 @@ class TestTrimCoveredMessages:
         但裁剪后非 system 为 0，触发防护，返回原消息避免上下文裁空。
         """
 
-        plugin.set_memory_backend(_FakeBackend([_l1_chunk(100, 1)]))
-
         p = ContextWindowGuardPlugin()
-        ctx = _make_context()
 
         messages = [
+            _applied_block([1, 100]),
             _msg("user", 1),
             _msg("assistant", 2),
             _msg("user", 3),
@@ -241,7 +249,7 @@ class TestTrimCoveredMessages:
             _msg("assistant", 5),
         ]
 
-        result = await p._trim_covered_messages(ctx, messages)
+        result = await p._trim_covered_messages(messages)
 
         # 全部非 system 的 seq 都 <= 100，裁后非 system=0 < 10% → 防护触发，返回原消息
         assert result is messages
@@ -250,12 +258,9 @@ class TestTrimCoveredMessages:
     async def test_正常裁剪保留recent段并打日志(self, caplog: pytest.LogCaptureFixture) -> None:
         """正常裁剪：大部分被覆盖，保留少量 recent 段（>10%），记录 INFO 日志。"""
 
-        plugin.set_memory_backend(_FakeBackend([_l1_chunk(5, 1)]))
-
         p = ContextWindowGuardPlugin()
-        ctx = _make_context()
 
-        messages: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = [_applied_block([1, 5])]
         # 5 条被覆盖的非 system
         for i in range(1, 6):
             messages.append(_msg("user", i))
@@ -264,7 +269,7 @@ class TestTrimCoveredMessages:
             messages.append(_msg("assistant", i))
 
         with caplog.at_level("INFO"):
-            result = await p._trim_covered_messages(ctx, messages)
+            result = await p._trim_covered_messages(messages)
 
         # 保留 seq 6-8 三条，裁掉 seq 1-5
         kept_seqs = [
@@ -276,26 +281,12 @@ class TestTrimCoveredMessages:
         # 日志记录了裁剪动作
         assert any("裁剪被压缩块覆盖" in r.message for r in caplog.records)
 
-    @pytest.mark.asyncio
-    async def test_无pipeline_id原样返回(self) -> None:
-        """pipeline_id 为空时不裁剪。"""
-
-        plugin.set_memory_backend(_FakeBackend([_l1_chunk(50, 1)]))
-
-        p = ContextWindowGuardPlugin()
-        ctx = PluginContext(state={}, config={}, _services={})
-        messages = [_msg("user", 1)]
-
-        result = await p._trim_covered_messages(ctx, messages)
-
-        assert result is messages
-
 
 class TestEstimateAssembledTokens:
     """_estimate_assembled_tokens 的 recent 累加回归测试。
 
-    契约：与 _trim_covered_messages 同源——按全局 sequence 判定 recent 段
-    （seq > max_end），system 消息占号不影响判定。
+    契约：与压缩侧 save_compression_result 的 seq 标签同一真相源——按全局
+    sequence 判定 recent 段（seq > max_end），system 消息占号不影响判定。
     """
 
     @pytest.mark.asyncio

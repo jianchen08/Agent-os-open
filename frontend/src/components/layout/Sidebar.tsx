@@ -35,6 +35,7 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { registerSessionProject, createSessionWithProject } from '@/services/sessionCreation'
 import { saveSessionExecutionOptions } from '@/services/sessionExecutionOptions'
+import { subscribeHighlight } from '@/services/uiBridge/commandExecutor'
 import { openPluginPage, openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
@@ -50,9 +51,6 @@ import {
 import { SidebarBellButton, SidebarUserMenu } from './SidebarUserMenu'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { Session } from '@/types'
-
-/** fixed sessions + plugin container id */
-type SidebarView = 'sessions' | string
 
 
 interface SidebarProps {
@@ -80,7 +78,11 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   // 模态框统一状态: { mode: 'create' } 或 { mode: 'edit', sessionId } 或 null
   const [modal, setModal] = useState<{ mode: 'create' | 'edit'; sessionId?: string } | null>(null)
   const [isSaving, setIsSaving] = useState(false)
-  const [activeView, setActiveView] = useState<SidebarView>('sessions')
+  const activeView = useUIStore((s) => s.sidebarActiveView)
+  const setActiveView = useUIStore((s) => s.setSidebarActiveView)
+  // uiBridge 命令面高亮态（P1 高亮最小增量：订阅 ui_command highlight 广播，≤5s 自动消退）
+  const [highlightItemId, setHighlightItemId] = useState<string | null>(null)
+  useEffect(() => subscribeHighlight((hl) => setHighlightItemId(hl === null ? null : hl.itemId)), [])
   const [contribTick, setContribTick] = useState(0)
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -539,8 +541,13 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           'theme-sidebar-area',
           // 移动端 fixed 抽屉：顶沿避让状态栏（全屏沉浸下系统栏浮于内容上，
           // --safe-area-top 由壳注入/env 提供，桌面=0）；fixed 相对视口定位，
-          // 不受外层抽屉容器 top 约束
-          isMobile && !sidebarCollapsed && 'fixed left-0 z-50 shadow-2xl top-[var(--safe-area-top,0px)]',
+          // 不受外层抽屉容器 top 约束。底部 = safe-area-bottom 锚定 + 盒内
+          // safe-area-pb（P0-6：高度由 top/bottom 双锚定拉伸求出，不靠
+          // 100dvh calc——top 偏移与 dvh 叠加的时序差会把底栏推出屏外，
+          // MuMu 实测 shots/03；safe-area-pb 再兜 env 通道）
+          isMobile
+          && !sidebarCollapsed
+          && 'fixed left-0 bottom-[var(--safe-area-bottom,0px)] z-50 shadow-2xl top-[var(--safe-area-top,0px)] safe-area-pb',
         )}
         style={
           sidebarCollapsed && !isMobile
@@ -559,9 +566,11 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   minWidth: `${SIDEBAR_STYLES.width.mobile}px`,
                   maxWidth: `${SIDEBAR_STYLES.width.mobile}px`,
                   flexShrink: 0,
-                  // fixed 抽屉的 h-full 相对视口取高，不扣顶部安全区偏移会把
-                  // 底栏（用户/设置/主题/通知）整体推出视口外（top+height>dvh）
-                  height: 'calc(100dvh - var(--safe-area-top, 0px) - var(--safe-area-bottom, 0px))',
+                  // 高度交给 top/bottom 双锚定拉伸（className 的 bottom-[var(--safe-area-bottom)]
+                  // + top-[var(--safe-area-top)]），inline height:auto 压掉基类 h-full——
+                  // 100dvh calc 与 top 偏移叠加在 insets 动态时序下会把底栏推出屏外
+                  // （P0-6，MuMu 实测 shots/03，2026-10-13 的 dvh 减法修复实测无效）
+                  height: 'auto',
                 }
               : {
                   width: '100%',
@@ -613,6 +622,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 activeView === 'tasks'
                   ? 'text-[var(--ds-accent-primary)]'
                   : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+                highlightItemId === 'builtin.tasks' && 'ring-1 ring-[var(--ds-accent-primary)]',
               )}
               style={
                 activeView === 'tasks'
@@ -640,6 +650,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     selected
                       ? 'text-[var(--ds-accent-primary)]'
                       : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+                    highlightItemId === entry.id && 'ring-1 ring-[var(--ds-accent-primary)]',
                   )}
                   style={
                     selected
@@ -688,7 +699,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 <button
                   type="button"
                   onClick={handleOpenNewSessionModal}
-                  className="text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors hover:bg-[var(--hover-overlay)]"
+                  className={cn(
+                    'text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors hover:bg-[var(--hover-overlay)]',
+                    highlightItemId === 'builtin.new_session' && 'ring-1 ring-[var(--ds-accent-primary)]',
+                  )}
                   data-testid="new-session-button"
                 >
                   <span
@@ -709,6 +723,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     activeView === 'tasks'
                       ? 'text-foreground'
                       : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+                    highlightItemId === 'builtin.tasks' && 'ring-1 ring-[var(--ds-accent-primary)]',
                   )}
                   style={
                     activeView === 'tasks'
@@ -741,6 +756,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                         selected
                           ? 'text-foreground'
                           : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+                        highlightItemId === entry.id && 'ring-1 ring-[var(--ds-accent-primary)]',
                       )}
                       style={
                         selected
@@ -877,7 +893,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               {/* 插件状态项条带（dock/status 贡献，原 StatusBar 迁移；无项不渲染） */}
               <PluginStatusItems />
               <div
-                className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
+                className="border-border mt-auto flex min-h-9 shrink-0 items-center gap-0.5 border-t px-1.5 pb-[max(env(safe-area-inset-bottom,0px),var(--safe-inset-bottom,0px),8px)]"
                 data-testid="sidebar-footer"
               >
                 <SidebarUserMenu

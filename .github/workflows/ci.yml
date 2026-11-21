@@ -133,9 +133,9 @@ jobs:
           workspaces: kernel
           shared-key: agentos-0.2
 
-      - name: Run gates (kernel-fmt, kernel-clippy)
+      - name: Run gates (kernel-fmt, kernel-clippy, kernel-env-registry)
         working-directory: ${{ github.workspace }}
-        run: python scripts/run_gates.py --filter kernel-fmt,kernel-clippy
+        run: python scripts/run_gates.py --filter kernel-fmt,kernel-clippy,kernel-env-registry
 
   # ── Rust Build ─────────────────────────────────────────────
   rust-build:
@@ -408,11 +408,14 @@ jobs:
         # config-seed-ver（2026-10-24 ADR config-seed-version-arbitration）：
         # 出厂默认 version 声明 + 变更必抬版本——治用户空间陈旧副本遮蔽包内
         # 修复（评估通过空转事故根因）；纯 git+正则零第三方依赖。
+        # state-reads-declaration（2026-11-12 ADR plugin-state-reads-
+        # declaration-gate）：插件 manifest state.reads 漏声明守卫（切片投喂
+        # 下关缺省键恒读不到，静默降级；基线双向棘轮）。
         # gate-protected 不在此列（2026-11-04 P-04 评估，ADR
         # 2026-11-04-gate-protected-always-on-job）——本 job 有 if: python_full，
         # 纯 docs/ / 纯 config/ 变更跳过它，而保护清单里恰有 docs/schemas/、
         # docs/graph/viewer.html 与两个 config/ 文件：标记校验已挪恒跑 job。
-        run: uv run --frozen python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,kernel-db-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,tool-schema-contract,agent-tool-ids,step-declaration-parity,config-static,config-seed-ver,plugin-venv-health,enforcement-tier
+        run: uv run --frozen python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,kernel-db-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,tool-schema-contract,agent-tool-ids,step-declaration-parity,config-static,config-seed-ver,plugin-venv-health,enforcement-tier,state-reads-declaration
 
   # ── Python Test（插件 SDK）─────────────────────────────────
   python-test:
@@ -571,8 +574,8 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Run gates (plugins-heavy)
-        run: python scripts/run_gates.py --filter plugins-heavy
+      - name: Run gates (native-artifacts + plugins-heavy)
+        run: python scripts/run_gates.py --filter native-artifacts,plugins-heavy
 
   # ── 变更关联测试（非核心插件/配置 → 对应单元+集成测试）────────────────
   # related 车道：system/tools 插件、config、tests 面变更只跑受影响测试，
@@ -617,13 +620,14 @@ jobs:
   #      计数只减不增（baseline 内嵌脚本，随 channel_api 批次逐域下调）。
   # 纯 Python 检查（重新生成 + 计数），不依赖 Node/内核，独立轻量 job，
   # 与 run_gates.py 无耦合（本闸承诺由本 job 持有）。
-  # 本 job 同时承载主题色卫生闸（run_gates --filter 追加步）：endpoints 车道
-  # 触发面前缀 = plugins/ + frontend/src/，是「仅改 plugins/**（含 plugin.json
-  # 声明模板）」时主题色门禁的唯一 CI 触达点——frontend-test job 只看 frontend/**，
-  # 不补此步则插件模板硬编码颜色可溜过 CI（2026-10-25 用户裁定：插件声明模板
-  # 同受「颜色一律随主题」约束）。
+  # 本 job 同时承载主题色卫生闸 + 主题对比度闸（run_gates --filter 追加步）：
+  # endpoints 车道触发面前缀 = plugins/ + frontend/src/，是「仅改 plugins/**
+  # （含 plugin.json 声明模板与 web/webview 资产）」时两主题门的唯一 CI 触达点
+  # ——frontend-test job 只看 frontend/**，不补此步则插件模板硬编码颜色与
+  # 资产低对比对可溜过 CI（2026-10-25 / 2026-11-07 用户裁定：插件声明模板
+  # 同受「颜色一律随主题」约束，资产渲染面同受对比度约束）。
   frontend-endpoints-sync:
-    name: Frontend Endpoints Sync (生成物漂移闸 + /ext/ 手写棘轮闸 + 主题色卫生)
+    name: Frontend Endpoints Sync (生成物漂移闸 + /ext/ 手写棘轮闸 + 主题色卫生 + 主题对比度)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.endpoints == 'true'
@@ -638,8 +642,8 @@ jobs:
       - name: Run endpoints sync checks (drift + handwritten ratchet)
         run: python scripts/check_frontend_endpoints_sync.py
 
-      - name: Run theme color hygiene gate (plugin.json 声明模板同受主题色约束)
-        run: python scripts/run_gates.py --filter frontend-theme-color-hygiene
+      - name: Run theme color hygiene + theme contrast gates (plugin.json 声明模板同受主题色约束；web/webview 资产同受对比度约束)
+        run: python scripts/run_gates.py --filter frontend-theme-color-hygiene,frontend-theme-contrast
 
   # ── 插件配置写面机械门禁（2026-09-28 配置读写单源化批次 E1）──────────
   # 公理：配置读写同源落用户空间——插件禁止自拼路径直写 config/.env/data
@@ -678,6 +682,34 @@ jobs:
 
       - name: Run version sync gate
         run: python scripts/check_version_sync.py
+
+  # ── grants 工具分级覆盖门禁（P1.5，ADR 2026-11-19 D2 的 CI 兜底）────
+  # LLM 可见工具面（manifests capabilities.tools ∩ config/agents/** tool_ids
+  # 白名单 + mode.yaml inject_tool_ids + call_tool/dsh.tool.call 动态可达目标）
+  # 必须被 config/plugins/grants/tool_policy.yaml 全覆盖，缺口即红（fail-closed，
+  # 运行时未分类恒 deny 的静态互补）。键模型镜像 plugins/shared/grants/policy.py。
+  # 独立轻量恒跑 job（同 plugin-config-write-surface 形态）；执法经 run_gates
+  # --filter 接线（元门禁 V1 单一真源）。需 PyYAML（agent yaml + 策略表解析），
+  # 定版与 uv.lock 对齐。
+  # 当前态：P1 并行精化策略表——其补表提交落地前，本车道对已提交版策略表红
+  # （预期态），P1 落地即绿；完整缺口报告随 job 日志输出（脚本 --report 可另存），
+  # 作为 P1 补表输入。
+  tool-policy-coverage:
+    name: Tool Policy Coverage (grants 分级覆盖门禁)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyYAML (定版与 uv.lock 对齐)
+        run: pip install PyYAML==6.0.3
+
+      - name: Run gates (tool-policy-coverage)
+        run: python scripts/run_gates.py --filter tool-policy-coverage
 
   # ── Timing Gate（关键时序不变量，独立阻塞，§9.4/§6.4）──────────────
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
@@ -749,10 +781,10 @@ jobs:
       - name: Install dependencies (pnpm workspace,根 lock；不同步直接红——安全审查：禁 fallback 绕过锁定)
         run: pnpm install --frozen-lockfile
 
-      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100% + any/大文件冻结 + 主题色卫生)
+      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100% + any/大文件冻结 + 主题色卫生 + 主题对比度)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage,frontend-any-baseline,frontend-theme-color-hygiene
+        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage,frontend-any-baseline,frontend-theme-color-hygiene,frontend-theme-contrast
 
       # ── knip/jscpd 跨平台计数观察（执行方案 0-1 前置，2026-09-24）──
       # 基线已按 Windows pnpm 口径收紧（99/547）。本观察态步骤收集 Linux 侧
@@ -852,8 +884,8 @@ jobs:
           ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: npm ci
 
-      - name: Run gates (electron-compile, electron-test)
-        run: python scripts/run_gates.py --filter electron-compile,electron-test
+      - name: Run gates (electron-compile, electron-test, installer-userdata-guard)
+        run: python scripts/run_gates.py --filter electron-compile,electron-test,installer-userdata-guard
 
   # ── Pre-commit（项目代码质量门禁入口）────────────────────────────────
   # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"。
@@ -973,7 +1005,21 @@ jobs:
         # pyyaml 前置：render-card-sync 经 _scan_dsh_translator exec
         # dsh_adapter/translator.py（顶层 import yaml），本 job 裸 python
         # 无三方包 → ModuleNotFoundError 假红（2026-11-06 CI 实证）。
-        run: pip install -q pyyaml && python scripts/run_gates.py --filter traceability-gate,doc-baseline-sync,doc-paths,doc-frontmatter,working-index-fresh,kernel-port-sync,openapi-drift,file-length-baseline,render-card-sync,shell-config-sync,frontend-plugin-pages-sync,shared-root-imports,service-declaration,observability-config,gate-protected
+        # plugin-tiers（ADR 2026-11-07-plugin-tiered-single-copy-model 刀 4）：
+        # Tier1 清单 ↔ plugins/shared 一致性对账闸搭本恒跑 job——
+        # plugin_tiers.yaml 属 config/ 面，纯 config 变更不点亮 python_full，
+        # 恒跑 job 是「清单变更必过闸」的唯一落点（run_gates 注册处注同源）。
+        # electron-boundary（ADR 2026-11-16-lint-error-ratchet-electron-boundary-
+        # gate）：Electron 主/渲染进程导入边界零容忍闸——electron↔frontend 互导
+        # 禁令 + 渲染侧 electron 包运行时引用禁令 + preload 最小面。electron/
+        # frontend 双向改动都可能单侧引入违规（electron 车道闸不住 frontend 侧
+        # 反之亦然），恒跑 job 是无盲区落点（同 file-length-baseline 形态）。
+        # graph-check（ADR 2026-11-17-graph-check-gate-fail-closed-and-ci-face）：
+        # 文档双链/doc_id/type-status 矩阵三件校验。graph.yml 虽有独立 job 跑它，
+        # 但那是 ci.yml 之外的独立 workflow，不在本汇总 job 的 needs 里——分支
+        # 保护唯一入口「All checks passed」不含它的结论，红不红都能合。恒跑
+        # job 是既有成本为零的落点（纯 stdlib，docs 面改动才点亮 docs 车道）。
+        run: pip install -q pyyaml && python scripts/run_gates.py --filter traceability-gate,doc-baseline-sync,doc-paths,doc-frontmatter,working-index-fresh,kernel-port-sync,openapi-drift,file-length-baseline,async-blocking,render-card-sync,shell-config-sync,frontend-plugin-pages-sync,shared-root-imports,service-declaration,observability-config,gate-protected,plugin-tiers,electron-boundary,graph-check
 
   # ── All Checks Passed（汇总门禁，分支保护唯一入口）───────────────────────
   # Phase 1（2026-08-23）：分支保护规则只挂本 job 一个名字。

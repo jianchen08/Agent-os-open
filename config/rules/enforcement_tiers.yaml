@@ -1,3 +1,4 @@
+version: 1
 # 规范执法档位注册表（方案 AI辅助编程体系落地AgentOS_20261022 §3.6 件 4）
 # 执法器：scripts/check_rule_enforcement_tier.py —— 无档位的规范不得入库。
 #
@@ -12,9 +13,16 @@
 # 棘轮放行（只减不增；触碰即清：改到哪个规则文件就登记哪个并从基线移除）。
 rules:
   - path: document_context_rules.md
-    tier: review
-    note: 上下文读取与文档规范——读级序/文档落位/结构清单约定，执法面为编排器
-      与审查 AI 的流程核查（无独立机械 gate）。
+    tier: mixed
+    gates: [doc-frontmatter, graph-check, doc-paths, working-index-fresh, doc-baseline-sync]
+    metrics: [human_review]
+    review_docs: [docs/working/规则语义档审查检查表.md]
+    note: 上下文读写规则 mixed 档（文档治理方案 v2 阶段 2 升档，2026-11-14）。机械
+      子集=新文档三字段强制（doc-frontmatter，含 docs/decisions 新件 type 必为 adr）+
+      type-status 矩阵与双链悬空（graph-check）+ 活文档路径存在性（doc-paths）+
+      working 索引新鲜度（working-index-fresh）+ 生成物与基线一致（doc-baseline-sync）；
+      指标子集=human_review（文档落位/归属/收录闸门四问需语义判断）；语义子集=检查表
+      第 4 节（收录闸门 G-1/G-3、存真唯一、ADR 准入判据 A/B）。
   - path: information_integrity_rules.md
     tier: review
     note: 信息诚实原则——来源标注/达成度如实/失败记录，执法面为审查 AI 对

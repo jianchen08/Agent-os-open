@@ -50,6 +50,8 @@ interface UIState {
   sidebarRatio: number | null
   /** 消息搜索关键词（Sidebar 与 ChatContainer 共享） */
   messageSearchQuery: string
+  /** 侧边栏当前视图（'sessions' | 'tasks' | 插件页 id；Sidebar 高亮与 uiBridge 快照同源） */
+  sidebarActiveView: string
   /** 工作区全屏（侧栏/聊天让位隐藏、工作区独占；FiveSpaceLayout 渲染）。
    *  入口两处：面板标题栏全屏钮、webview 桥 workspace.fullscreen（插件页面
    *  进入游玩态时请求全屏，如酒馆玩法页开新局/进局）。会话 UI 态不持久化。 */
@@ -93,6 +95,8 @@ interface UIActions {
   setSidebarRatio: (ratio: number | null) => void
   /** 设置消息搜索关键词 */
   setMessageSearchQuery: (query: string) => void
+  /** 设置侧边栏当前视图（Sidebar 点击写入；uiBridge 上报同源读取） */
+  setSidebarActiveView: (view: string) => void
   /** 设置待定位消息目标（Sidebar 消息命中点击写入，MessageList 定位后消费清除） */
   setMessageJump: (target: MessageJumpTarget | null) => void
 }
@@ -117,6 +121,7 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
     }
   })(),
   messageSearchQuery: '',
+  sidebarActiveView: 'sessions',
   workspaceFullscreen: false,
   mobileWorkspaceOpen: false,
   messageJump: null,
@@ -216,6 +221,9 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   },
   setMessageSearchQuery: (query: string) => {
     set({ messageSearchQuery: query })
+  },
+  setSidebarActiveView: (view: string) => {
+    set({ sidebarActiveView: view })
   },
   setMessageJump: (target: MessageJumpTarget | null) => {
     set({ messageJump: target })

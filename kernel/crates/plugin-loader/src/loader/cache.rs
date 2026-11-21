@@ -10,6 +10,13 @@
 //! 复验；任一不匹配/缓存缺席/版本不识别 → 整体回退现行全量路径（漂移照常）。
 //! 缓存只加速冷启动一致态，热发现 watcher 走 `discover` 原路不受影响。
 //!
+//! 摘要口径（2026-11-20 启动优化 A 扩展，两侧同律）：运行期/开发期写入面
+//! 目录（`__pycache__`/`.venv*`/`.audit_tmp`/`data`/`tests`，见
+//! [`is_runtime_dir_name`]）整棵子树在摘要面外——装机面此类文件可达数十万
+//! （实测 20 万文件 200s 全爬），排除后 boot 走查只对源码面字节。真实源码
+//! （plugin.json/*.py 等）仍在摘要面，变更照常打穿；烘焙旧缓存残留的运行期
+//! 条目按同律豁免（存量装机免重烘焙即命中）。
+//!
 //! 格式契约（与 materialize_seed.py `build_discovery_cache` 字节对齐）见
 //! docs/working/移动版精细测试_台账.md「T4 第一刀」设计节。
 
@@ -27,23 +34,58 @@ use super::PluginLoaderImpl;
 pub const DISCOVERY_CACHE_ENV: &str = "AGENTOS_DISCOVERY_CACHE";
 
 /// 缓存工件文件名（与烘焙侧 CACHE_ENTRY 尾段一致）。
-pub const DISCOVERY_CACHE_FILENAME: &str = "discovery-cache.json";
+const DISCOVERY_CACHE_FILENAME: &str = "discovery-cache.json";
 
 /// 只识别此版本；其余（更高/更低/缺失）一律回退全量路径（防格式漂移静默错读）。
 const DISCOVERY_CACHE_VERSION: u64 = 1;
 
 /// 可派生 Python 工件（T4 设备轮实证排除，两侧同律）：解释器运行期在插件面内
 /// 写 `__pycache__/` 字节码缓存，boot 间即新于缓存——非漂移，不入摘要不比对。
-/// 除此类外暂不扩其他运行期写入类别（.log/.lock 等，需求第一；台账留观察项）。
 const PYCACHE_DIR: &str = "__pycache__";
 const PYC_EXT: &str = ".pyc";
 
+/// 运行期/开发期写入面目录排除（2026-11-20 启动优化 A，两侧同律——烘焙侧
+/// materialize_seed.py 与 overlay_installed_update.py 同规则；ADR 草稿
+/// docs/working/2026-11-20-discovery-digest-runtime-exclusion_ADR草稿.md）：
+/// 这些目录整棵子树由运行期（venv 供给/审计暂存/插件数据）或开发期（tests）
+/// 写入，非插件运行语义载体，装机面可达数十万文件——不入摘要不比对不判
+/// unexpected。摘要契约 = 「缓存候选对运行语义字节可信」，非「面字节冻结」：
+/// 真实源码（plugin.json/*.py 等，不在排除目录内）仍在摘要面，变更照常打穿。
+/// 烘焙旧缓存残留的此类条目按同律豁免（完整性对账跳过），存量装机免重烘焙
+/// 即得提速。目录名单边新增 = 混布期安全回退全量，无错读风险。
+const AUDIT_TMP_DIR: &str = ".audit_tmp";
+const VENV_DIR_PREFIX: &str = ".venv";
+const RUNTIME_DATA_DIR: &str = "data";
+const TESTS_DIR: &str = "tests";
+
+/// 目录段是否属于运行期/开发期写入面（摘要在面外）。
+fn is_runtime_dir_name(name: &str) -> bool {
+    name == PYCACHE_DIR
+        || name.starts_with(VENV_DIR_PREFIX)
+        || name == AUDIT_TMP_DIR
+        || name == RUNTIME_DATA_DIR
+        || name == TESTS_DIR
+}
+
+/// 缓存键（相对路径）是否在摘要面外：任一路径段命中 [`is_runtime_dir_name`]，
+/// 或尾段为 `.pyc`。完整性对账用它豁免旧缓存残留的运行期条目。
+fn is_runtime_face_path(rel: &str) -> bool {
+    let mut last = "";
+    for seg in rel.split('/') {
+        if is_runtime_dir_name(seg) {
+            return true;
+        }
+        last = seg;
+    }
+    last.ends_with(PYC_EXT)
+}
+
 /// 候选流条目：(manifest, manifest 路径, 是否出自缓存已验证字节)。
-pub(crate) type DiscoverCandidate = (PluginManifest, PathBuf, bool);
+pub(super) type DiscoverCandidate = (PluginManifest, PathBuf, bool);
 
 /// 缓存工件（serde 默认宽容缺字段——缺关键字段走对账失败回退，不 panic）。
 #[derive(Debug, Deserialize)]
-pub(crate) struct DiscoveryCacheFile {
+struct DiscoveryCacheFile {
     version: u64,
     #[serde(default)]
     face_root: String,
@@ -158,12 +200,21 @@ impl PluginLoaderImpl {
             &mut seen_links,
         )?;
         // 覆盖完备性：磁盘走查到的条目可能少于缓存（缓存登记而磁盘缺席）。
+        // 摘要面外的键（运行期/开发期写入面，2026-11-20 口径扩展）按同律豁免——
+        // 烘焙旧缓存残留的 .venv*/data/tests 等条目不构成缺席漂移，存量装机
+        // 免重烘焙即命中（新口径烘焙侧同律不再登记此类条目）。
         for key in cache.files.keys() {
+            if is_runtime_face_path(key) {
+                continue;
+            }
             if !seen_files.contains(key) {
                 return Err(format!("face file missing on disk: {key}"));
             }
         }
         for key in cache.links.keys() {
+            if is_runtime_face_path(key) {
+                continue;
+            }
             if !seen_links.contains(key) {
                 return Err(format!("face link missing on disk: {key}"));
             }
@@ -271,10 +322,13 @@ fn push_root_candidates(
 }
 
 /// 插件面递归走查：常规文件逐个 sha256 对照 `files`；符号链接 read_link 对照
-/// `links`；磁盘多出条目即漂移。缓存工件本体自指排除；可派生 Python 工件
-/// （`__pycache__/` 目录与 `*.pyc`）同排除（运行期解释器写入，非漂移，两侧
-/// 同律）。rel 路径恒 `/` 分隔（与烘焙侧 POSIX 键对齐；Windows 反斜杠只在
-/// dev 出现，缓存面根不存在 → 天然回退）。manifest 候选字节按 `wanted` 捕获。
+/// `links`；磁盘多出条目即漂移。缓存工件本体自指排除；运行期/开发期写入面
+/// （`__pycache__/`、`.venv*`、`.audit_tmp/`、`data/`、`tests/` 目录整棵子树
+/// 与 `*.pyc` 文件，[`is_runtime_dir_name`]）同排除——非漂移不比对不判
+/// unexpected，两侧同律（烘焙侧 materialize_seed.py / overlay_installed_update.py
+/// 同规则），真实源码变更仍在摘要面照常打穿。rel 路径恒 `/` 分隔（与烘焙侧
+/// POSIX 键对齐；Windows 反斜杠只在 dev 出现，缓存面根不存在 → 天然回退）。
+/// manifest 候选字节按 `wanted` 捕获。
 #[allow(clippy::too_many_arguments)]
 fn walk_face(
     dir: &Path,
@@ -301,10 +355,11 @@ fn walk_face(
         let ft = entry
             .file_type()
             .map_err(|e| format!("file_type {}: {e}", child.display()))?;
-        // 可派生 Python 工件排除（T4 设备轮实证：boot 期 Python 解释器会在插件
-        // 面内写 __pycache__/*.pyc，boot 间即新于缓存 → 误判面变回退全量）。
-        // 两侧同律（烘焙侧 materialize face 扫描同排除），非漂移不比对不入册。
-        if ft.is_dir() && name == PYCACHE_DIR {
+        // 运行期/开发期写入面排除（T4 pyc 实证 + 2026-11-20 口径扩展）：目录
+        // 整棵子树不入摘要不比对不判 unexpected（venv 供给/审计暂存/插件数据/
+        // tests 均非运行语义载体）；`*.pyc` 文件同理。两侧同律，源码变更照常
+        // 打穿。
+        if ft.is_dir() && is_runtime_dir_name(&name) {
             continue;
         }
         if ft.is_file() && name.ends_with(PYC_EXT) {
@@ -359,7 +414,7 @@ fn walk_face(
     Ok(())
 }
 
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
+fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
@@ -393,9 +448,15 @@ mod tests {
         plugins
     }
 
-    /// 与烘焙侧同构的缓存字节（测试手写；file 键与走查侧同为 `/` 分隔；
-    /// 可派生 pyc 工件与走查/烘焙两侧同律排除）。
-    fn cache_bytes(plugins_root: &Path, mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    /// 与烘焙侧同构的缓存字节（测试手写；file 键与走查侧同为 `/` 分隔）。
+    /// `legacy_shape=true` = 2026-11-20 前旧烘焙口径（只排 `__pycache__`/`*.pyc`，
+    /// `.venv*`/`data`/`tests` 条目照常登记——存量装机缓存形态）；缺省新口径
+    /// 与走查/烘焙两侧同律排除（[`is_runtime_dir_name`]）。
+    fn cache_bytes_shape(
+        plugins_root: &Path,
+        legacy_shape: bool,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> Vec<u8> {
         let sha = |p: &Path| sha256_hex(&fs::read(p).unwrap());
         let root_str = plugins_root.to_string_lossy().to_string();
         let face_cut = root_str.len() + 1;
@@ -406,7 +467,12 @@ mod tests {
                 let p = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if p.is_dir() {
-                    if name == PYCACHE_DIR {
+                    let excluded = if legacy_shape {
+                        name == PYCACHE_DIR
+                    } else {
+                        is_runtime_dir_name(&name)
+                    };
+                    if excluded {
                         continue;
                     }
                     stack.push(p);
@@ -435,12 +501,54 @@ mod tests {
         (serde_json::to_string(&v).unwrap() + "\n").into_bytes()
     }
 
+    fn cache_bytes(plugins_root: &Path, mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+        cache_bytes_shape(plugins_root, false, mutate)
+    }
+
     fn write_cache(plugins_root: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
         fs::write(
             plugins_root.join("shared/discovery-cache.json"),
             cache_bytes(plugins_root, mutate),
         )
         .unwrap();
+    }
+
+    /// 旧烘焙口径缓存（登记 `.venv*`/`data`/`tests` 条目，存量装机形态）。
+    fn write_legacy_cache(plugins_root: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+        fs::write(
+            plugins_root.join("shared/discovery-cache.json"),
+            cache_bytes_shape(plugins_root, true, mutate),
+        )
+        .unwrap();
+    }
+
+    /// 给迷你插件面加运行期/开发期写入树（装机实证形态：venv 供给、审计暂存、
+    /// 插件运行数据、tests 开发面；`.venv-x` 验证前缀匹配非精确名）。
+    fn add_runtime_trees(plugins: &Path) {
+        fs::create_dir_all(plugins.join("shared/llm/.venv-x/bin")).unwrap();
+        fs::write(plugins.join("shared/llm/.venv-x/bin/python.exe"), b"PYEXE").unwrap();
+        fs::create_dir_all(plugins.join("shared/llm/__pycache__")).unwrap();
+        fs::write(
+            plugins.join("shared/llm/__pycache__/server.cpython-312.pyc"),
+            b"\x00PYC",
+        )
+        .unwrap();
+        fs::create_dir_all(plugins.join("shared/_host/.audit_tmp")).unwrap();
+        fs::write(
+            plugins.join("shared/_host/.audit_tmp/audit_ledger.json"),
+            b"{}",
+        )
+        .unwrap();
+        fs::create_dir_all(plugins.join("shared/llm_core/data/kb")).unwrap();
+        fs::write(plugins.join("shared/llm_core/data/kb/chunk.bin"), b"KB").unwrap();
+        fs::create_dir_all(plugins.join("shared/llm/tests")).unwrap();
+        fs::write(
+            plugins.join("shared/llm/tests/test_llm.py"),
+            b"def test_x(): pass\n",
+        )
+        .unwrap();
+        fs::create_dir_all(plugins.join("shared/data")).unwrap();
+        fs::write(plugins.join("shared/data/permission_modes.json"), b"{}").unwrap();
     }
 
     fn boot_roots(plugins_root: &Path) -> Vec<String> {
@@ -567,9 +675,9 @@ mod tests {
     }
 
     /// face 外根（用户面）照常现行扫描：缓存命中面内、用户副本动态现扫，
-    /// 双源裁决语义与全量路径一致（UserFirst 用户赢 → 用户胜者不进免验集）。
+    /// 同 id 归约语义与全量路径一致（version-max 用户 9.0.0 胜 → 不进免验集）。
     #[tokio::test]
-    async fn out_of_face_user_root_scanned_live_and_wins_under_user_first() {
+    async fn out_of_face_user_root_scanned_live_and_version_max_wins() {
         let _env_lock = crate::test_env::user_space_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let plugins = write_face(tmp.path());
@@ -591,7 +699,7 @@ mod tests {
         let llm = manifests.iter().find(|m| m.id == "llm_service").unwrap();
         assert_eq!(
             llm.version, "9.0.0",
-            "UserFirst 用户副本胜出（与全量路径同裁决）"
+            "用户副本 version-max 胜出（与全量路径同归约）"
         );
         assert!(
             !outcome.cache_verified_winner_ids.contains("llm_service"),
@@ -663,6 +771,148 @@ mod tests {
             2,
             "免验集不受运行期工件影响（cache_skipped 恢复满额）"
         );
+    }
+
+    /// 运行期/开发期写入树（2026-11-20 口径扩展） boot 间新增/变更不失效缓存：
+    /// `.venv-x/`（venv 供给写、前缀匹配）、`.audit_tmp/`（运行期审计台账，
+    /// 2026-11-19 装机 200s 打穿实证）、`data/`（插件运行数据，hindsight 35k
+    /// 实证）、`tests/`（开发面，2026-11-20 dsh_adapter 打穿实证）、
+    /// `__pycache__/` 在这些树内新增/改写后仍短路，免验集满额。
+    #[tokio::test]
+    async fn runtime_trees_do_not_invalidate_cache() {
+        let _env_lock = crate::test_env::user_space_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = write_face(tmp.path());
+        add_runtime_trees(&plugins);
+        write_cache(&plugins, |_| {});
+        // boot 间写入：venv 内新增、审计台账改写、运行数据新增、tests 源修改、
+        // pyc 新增——全部落在摘要面外目录
+        fs::create_dir_all(plugins.join("shared/llm/.venv-x/lib")).unwrap();
+        fs::write(plugins.join("shared/llm/.venv-x/lib/new_pkg.py"), b"x=1\n").unwrap();
+        fs::write(
+            plugins.join("shared/_host/.audit_tmp/audit_ledger.json"),
+            b"{\"n\":2}",
+        )
+        .unwrap();
+        fs::write(plugins.join("shared/llm_core/data/kb/more.bin"), b"KB2").unwrap();
+        fs::write(
+            plugins.join("shared/llm/tests/test_llm.py"),
+            b"def test_y(): pass\n",
+        )
+        .unwrap();
+        fs::write(plugins.join("shared/llm/__pycache__/loose.pyc"), b"\x00P2").unwrap();
+        let loader = PluginLoaderImpl::new(plugins.join("shared"), None::<PathBuf>);
+        let roots = boot_roots(&plugins);
+        let root_refs = as_refs(&roots);
+        let (manifests, outcome) = loader.discover_boot_cached(&root_refs).await.unwrap();
+        assert!(
+            outcome.hit,
+            "运行期/开发期写入树的新增与变更不算漂移：boot 仍短路"
+        );
+        assert_eq!(sorted_ids(&manifests).len(), 2);
+        assert_eq!(
+            outcome.cache_verified_winner_ids.len(),
+            2,
+            "免验集不受运行期写入树影响"
+        );
+    }
+
+    /// 真实源码变更仍打穿（排除口径不许吞源码漂移）：同一含运行期树的面里，
+    /// plugin.json 改写 / 插件 .py 改写 / 面内新增源码文件，三者均回退全量。
+    #[tokio::test]
+    async fn source_changes_still_invalidate_cache_with_runtime_trees() {
+        let _env_lock = crate::test_env::user_space_env_lock();
+        // plugin.json（manifest）改写
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = write_face(tmp.path());
+        add_runtime_trees(&plugins);
+        write_cache(&plugins, |_| {});
+        fs::write(
+            plugins.join("shared/llm/plugin.json"),
+            r#"{"id":"llm_service","name":"Test llm","version":"0.2.0","plugin_type":"tool","language":"python","host_type":"sidecar","entry":"python server.py","capabilities":{}}"#,
+        )
+        .unwrap();
+        let loader = PluginLoaderImpl::new(plugins.join("shared"), None::<PathBuf>);
+        let roots = boot_roots(&plugins);
+        let root_refs = as_refs(&roots);
+        let (_, outcome) = loader.discover_boot_cached(&root_refs).await.unwrap();
+        assert!(!outcome.hit, "manifest 源码变更必须打穿");
+
+        // 插件 .py 源码改写
+        let tmp2 = tempfile::tempdir().unwrap();
+        let plugins2 = write_face(tmp2.path());
+        add_runtime_trees(&plugins2);
+        write_cache(&plugins2, |_| {});
+        fs::write(plugins2.join("shared/llm_core/sub/deep.py"), b"DEEP=43\n").unwrap();
+        let loader2 = PluginLoaderImpl::new(plugins2.join("shared"), None::<PathBuf>);
+        let roots2 = boot_roots(&plugins2);
+        let root_refs2 = as_refs(&roots2);
+        let (manifests2, outcome2) = loader2.discover_boot_cached(&root_refs2).await.unwrap();
+        assert!(!outcome2.hit, "插件 .py 源码变更必须打穿");
+        assert_eq!(manifests2.len(), 2, "回退后全量扫描结果不缺");
+
+        // 面内新增源码文件（非排除目录内）
+        let tmp3 = tempfile::tempdir().unwrap();
+        let plugins3 = write_face(tmp3.path());
+        add_runtime_trees(&plugins3);
+        write_cache(&plugins3, |_| {});
+        fs::write(plugins3.join("shared/llm/extra_tool.py"), b"x=1\n").unwrap();
+        let loader3 = PluginLoaderImpl::new(plugins3.join("shared"), None::<PathBuf>);
+        let roots3 = boot_roots(&plugins3);
+        let root_refs3 = as_refs(&roots3);
+        let (_, outcome3) = loader3.discover_boot_cached(&root_refs3).await.unwrap();
+        assert!(!outcome3.hit, "面内新增源码文件必须打穿");
+    }
+
+    /// 存量装机迁移容错（r297 实证形态）：旧烘焙口径缓存登记了 `.venv-x/`、
+    /// `data/`、`tests/`、`.audit_tmp/` 条目，且盘上这些文件在烘焙后又改过
+    /// （运行期台账重写/测试源同步/数据增长）——新走查按摘要面外同律豁免
+    /// （不比对也不判缺席），免重烘焙即命中；同形态下源码漂移照常打穿。
+    #[tokio::test]
+    async fn legacy_cache_with_runtime_entries_still_hits() {
+        let _env_lock = crate::test_env::user_space_env_lock();
+        // 旧口径缓存 + 运行期文件烘焙后又变 → 仍命中
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = write_face(tmp.path());
+        add_runtime_trees(&plugins);
+        write_legacy_cache(&plugins, |_| {});
+        fs::write(
+            plugins.join("shared/_host/.audit_tmp/audit_ledger.json"),
+            b"{\"n\":9}",
+        )
+        .unwrap();
+        fs::write(
+            plugins.join("shared/llm/tests/test_llm.py"),
+            b"def test_z(): pass\n",
+        )
+        .unwrap();
+        fs::write(
+            plugins.join("shared/llm_core/data/kb/chunk.bin"),
+            b"KB-CHANGED",
+        )
+        .unwrap();
+        let loader = PluginLoaderImpl::new(plugins.join("shared"), None::<PathBuf>);
+        let roots = boot_roots(&plugins);
+        let root_refs = as_refs(&roots);
+        let (manifests, outcome) = loader.discover_boot_cached(&root_refs).await.unwrap();
+        assert!(
+            outcome.hit,
+            "旧缓存残留运行期条目（含摘要失配）按同律豁免：存量装机免重烘焙即命中"
+        );
+        assert_eq!(sorted_ids(&manifests).len(), 2);
+        assert_eq!(outcome.cache_verified_winner_ids.len(), 2);
+
+        // 同形态下源码漂移仍打穿（豁免不吞源码漂移）
+        let tmp2 = tempfile::tempdir().unwrap();
+        let plugins2 = write_face(tmp2.path());
+        add_runtime_trees(&plugins2);
+        write_legacy_cache(&plugins2, |_| {});
+        fs::write(plugins2.join("shared/llm/server.py"), b"print('CHANGED')\n").unwrap();
+        let loader2 = PluginLoaderImpl::new(plugins2.join("shared"), None::<PathBuf>);
+        let roots2 = boot_roots(&plugins2);
+        let root_refs2 = as_refs(&roots2);
+        let (_, outcome2) = loader2.discover_boot_cached(&root_refs2).await.unwrap();
+        assert!(!outcome2.hit, "旧缓存形态下源码漂移必须照常回退全量");
     }
 
     /// plugin.yaml 兜底 manifest 同样经缓存候选（与 scan_root 同款双解析）。

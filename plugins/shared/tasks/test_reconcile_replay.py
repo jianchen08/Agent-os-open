@@ -1009,6 +1009,123 @@ async def test_legacy_timeout_status_migrates_to_failed() -> None:
 
 
 # ═══════════════════════════════════════════════════════════
+# 第八刀：遗留 run.plugin_errors 超界行收敛（ADR 2026-11-17-bounded-error-
+# ledger-and-iteration-cow P4 延伸）——有界账本只管新写，修复前旧内核逐次
+# 追加的存量行无界（装机实测单行 395KB），启动对账一次性收敛到引擎物化形态。
+# ═══════════════════════════════════════════════════════════
+
+
+def _legacy_error(
+    plugin_id: str, message: str, code: str = "TOOL_EXEC_FAILED"
+) -> dict[str, Any]:
+    """遗留错误条目（修复前旧内核逐次追加形状：无 count、一次失败一条）。"""
+    return {"plugin_id": plugin_id, "code": code, "message": message}
+
+
+async def test_legacy_plugin_errors_over_bound_rows_are_bounded() -> None:
+    """超界遗留行收敛到引擎物化形态：≤8 组 × message ≤1024 字符。
+
+    聚合语义与引擎 materialize_plugin_errors 对齐：(plugin_id, message) 为
+    键、首现序保留、末见 code 胜出、count = 全史出现次数；超长 message 截
+    1024 字符（先截断后聚合，同引擎记账口径）。
+    """
+    fat = (
+        [
+            _legacy_error("llm_core", "quota exhausted upstream 429", code="A1"),
+            _legacy_error("llm_core", "quota exhausted upstream 429", code="A1"),
+            _legacy_error("llm_core", "quota exhausted upstream 429", code="A2"),
+            _legacy_error("bash", "x" * 2000),
+        ]
+        + [_legacy_error(f"tool_{i}", f"boom {i}") for i in range(10)]
+    )
+    row = _child_row("failed", **{"run.plugin_errors": fat})
+    state = _StateCap([row])
+
+    report = await reconcile.reconcile_startup(state, _RunsCap())
+
+    entries = [r for r in report if r["kind"] == "legacy_plugin_errors_bounded"]
+    assert len(entries) == 1 and entries[0]["migrated"] is True
+    writes = [u for u in state.updates if "run.plugin_errors" in u.get("fields", {})]
+    assert len(writes) == 1
+    bounded = writes[0]["fields"]["run.plugin_errors"]
+    assert len(bounded) == 8, "12 个不同组截到前 8 组（引擎「第 9 种及以后丢弃」同界）"
+    first = bounded[0]
+    assert first["plugin_id"] == "llm_core"
+    assert first["count"] == 3, "同 (plugin_id, message) 三条聚合 count=3"
+    assert first["code"] == "A2", "末见 code 胜出（引擎合并同口径）"
+    bash_entry = next(e for e in bounded if e["plugin_id"] == "bash")
+    assert len(bash_entry["message"]) == 1024, "超长 message 截 1024 字符"
+    assert [e["plugin_id"] for e in bounded][:3] == ["llm_core", "bash", "tool_0"], (
+        "首现序保留（= 引擎物化顺序契约）"
+    )
+
+
+async def test_legacy_plugin_errors_within_bound_rows_not_rewritten() -> None:
+    """界内行（≤8 条且无超长 message）零写零报告（幂等省写）。"""
+    ok = [_legacy_error("llm_core", f"err {i}") for i in range(3)]
+    row = _child_row("completed", **{"run.plugin_errors": ok})
+    state = _StateCap([row])
+
+    report = await reconcile.reconcile_startup(state, _RunsCap())
+
+    assert [r for r in report if r["kind"] == "legacy_plugin_errors_bounded"] == []
+    assert state.updates == []
+
+
+async def test_legacy_plugin_errors_write_failure_degrades_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """写失败降级留痕（migrated=False + WARNING），不阻断装载，下轮重试。"""
+    fat = [_legacy_error("llm_core", "boom")] * 12
+    row = _child_row("failed", **{"run.plugin_errors": fat})
+    state = _StateCap([row], fail_update=True)
+
+    with caplog.at_level(logging.WARNING):
+        report = await reconcile.reconcile_startup(state, _RunsCap())
+
+    entry = next(r for r in report if r["kind"] == "legacy_plugin_errors_bounded")
+    assert entry["migrated"] is False
+    assert any("plugin_errors" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_legacy_plugin_errors_session_rows_also_bounded() -> None:
+    """会话行（无任务域键）同样收敛：机械界按键判，不按任务身份判。
+
+    run.plugin_errors 是引擎镜像键非任务域键，快照膨胀面覆盖会话管道
+    （前端任务树与会话面板同源消费），迁移按键收敛不设身份守卫。
+    """
+    fat = [_legacy_error("llm_core", "quota 429")] * 20
+    session = {
+        "pipeline_id": "session-9",
+        "thread_id": "thread-9",
+        "run.plugin_errors": fat,
+    }
+    state = _StateCap([session])
+
+    report = await reconcile.reconcile_startup(state, _RunsCap())
+
+    entries = [r for r in report if r["kind"] == "legacy_plugin_errors_bounded"]
+    assert len(entries) == 1 and entries[0]["pipeline_id"] == "session-9"
+    writes = [u for u in state.updates if "run.plugin_errors" in u.get("fields", {})]
+    assert len(writes) == 1
+    bounded = writes[0]["fields"]["run.plugin_errors"]
+    assert len(bounded) == 1 and bounded[0]["count"] == 20
+
+
+async def test_legacy_plugin_errors_bounding_is_idempotent() -> None:
+    """收敛后的行第二轮不再命中（幂等省写）：_StateCap.update 真改行可验。"""
+    fat = [_legacy_error("llm_core", "boom")] * 12
+    row = _child_row("failed", **{"run.plugin_errors": fat})
+    state = _StateCap([row])
+
+    await reconcile.reconcile_startup(state, _RunsCap())
+    await reconcile.reconcile_startup(state, _RunsCap())
+
+    writes = [u for u in state.updates if "run.plugin_errors" in u.get("fields", {})]
+    assert len(writes) == 1, "收敛后的行已界内，第二轮零写"
+
+
+# ═══════════════════════════════════════════════════════════
 # 判据统一与补发接冒泡（ADR 2026-11-06
 # task-settlement-notify-guard-identity-and-lineage-bubble D1/D3/D4/D5）
 # ═══════════════════════════════════════════════════════════

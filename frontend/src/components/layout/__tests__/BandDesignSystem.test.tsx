@@ -135,16 +135,18 @@ describe('工作区标签压缩省略与滚动锁', () => {
       />,
     )
 
-  it('面板形态（移动端/无顶带槽位）标签不压缩（shrink-0），长标题仍受上限收口', () => {
+  it('面板形态（移动端/无顶带槽位）标签可压缩有上下限，truncate 省略（P1-2 修订：原 shrink-0 不压缩契约让位于呼吸位改造——MuMu 实测 shots/01 长标签把右侧图标组挤出屏）', () => {
     renderPanel(tabs)
     const tab = screen.getByRole('tab')
     const tokens = tab.className.split(/\s+/)
-    expect(tokens).toContain('shrink-0')
-    expect(tokens).not.toContain('shrink')
-    expect(tab.className).not.toMatch(/\bmin-w-\[/)
-    expect(tab.className).toMatch(/max-w-\[/)
+    // 可压缩（给右侧图标组让位），下限 64px 保可点选，上限 120px 收口
+    expect(tokens).toContain('shrink')
+    expect(tab.className).toContain('min-w-[64px]')
+    expect(tab.className).toContain('max-w-[120px]')
+    // 文字省略号收边（truncate），不再用渐变遮蔽（压缩态 CJK 遮罩切字）
     const text = screen.getByTestId('tab-label')
     expect(text.className).toContain('min-w-0')
+    expect(text.className).toContain('truncate')
   })
 
   it('顶带形态（有槽位）标签可压缩且有上下限——挤压时省略而非溢出', () => {

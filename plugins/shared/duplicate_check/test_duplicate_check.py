@@ -640,6 +640,11 @@ def _fail(tool: str) -> dict[str, Any]:
     return {"tool_name": tool, "success": False}
 
 
+def _fail_executed(tool: str, exit_code: int = 1) -> dict[str, Any]:
+    """已执行完的失败：命令进程跑完、退出码非零（bash 失败信封带 metadata）。"""
+    return {"tool_name": tool, "success": False, "metadata": {"exit_code": exit_code}}
+
+
 def _ok(tool: str) -> dict[str, Any]:
     return {"tool_name": tool, "success": True}
 
@@ -648,19 +653,19 @@ class TestToolFailBreaker:
     """失败熔断：同工具连败→摘工具面→硬上限终止；成功清零；自愈不误伤。"""
 
     def test_below_threshold_no_action(self) -> None:
-        """连败 <5：只记账，不摘工具面不终止（自愈空间）。"""
+        """连败 <10：只记账，不摘工具面不终止（自愈空间）。"""
         plugin = DuplicateCheckPlugin()
-        state = _tool_exec_state([_fail("human_interaction")] * 4)
+        state = _tool_exec_state([_fail("human_interaction")] * 9)
         updates = _exec_updates(plugin, state)
-        assert updates["router.tool_fail_streak"]["human_interaction"] == 4
+        assert updates["router.tool_fail_streak"]["human_interaction"] == 9
         assert "tool_ids" not in updates
         assert updates.get("should_stop") is not True
 
     def test_threshold_bans_tool_and_warns(self) -> None:
-        """连败=5：工具从 tool_ids 摘除 + 强警告 + 记入 banned（一次性）。"""
+        """连败=10：工具从 tool_ids 摘除 + 强警告 + 记入 banned（一次性）。"""
         plugin = DuplicateCheckPlugin()
         state = _tool_exec_state(
-            [_fail("human_interaction")] * 5,
+            [_fail("human_interaction")] * 10,
             tool_ids=["file_read", "human_interaction"],
         )
         updates = _exec_updates(plugin, state)
@@ -672,9 +677,9 @@ class TestToolFailBreaker:
         assert updates.get("should_stop") is not True
 
     def test_hard_limit_terminates_with_signature(self) -> None:
-        """连败=8：should_stop + 署名 tool_fail_loop + 主 agent 收尾通知。"""
+        """连败=15：should_stop + 署名 tool_fail_loop + 主 agent 收尾通知。"""
         plugin = DuplicateCheckPlugin()
-        state = _tool_exec_state([_fail("human_interaction")] * 8, agent_level="L1")
+        state = _tool_exec_state([_fail("human_interaction")] * 15, agent_level="L1")
         updates = _exec_updates(plugin, state)
         assert updates["should_stop"] is True
         assert updates["router.stop_reason"] == "tool_fail_loop"
@@ -703,6 +708,30 @@ class TestToolFailBreaker:
         assert updates.get("router.tool_fail_streak", {}).get("web_operate", 0) == 0
         assert "router.tool_fail_banned" not in updates
         assert "tool_ids" not in updates  # 不禁用即不摘工具面
+
+    def test_executed_command_failure_not_counted(self) -> None:
+        """命令进程已跑完（metadata.exit_code）的失败不计连败（用户裁定 2026-11-11）。
+
+        事故形态：跑测试/编译/grep 连续多轮报错——每轮命令都正常执行、
+        退出码非零，旧口径按工具故障累计，几轮就把 bash 摘出工具面，任务
+        被迫中断。退出码是命令的业务结果，LLM 可据输出自愈。
+        """
+        plugin = DuplicateCheckPlugin()
+        results = [_fail_executed("bash") for _ in range(12)]
+        state = _tool_exec_state(results, tool_ids=["bash", "file_read"])
+        updates = _exec_updates(plugin, state)
+        assert updates.get("router.tool_fail_streak", {}).get("bash", 0) == 0
+        assert "router.tool_fail_banned" not in updates
+        assert "tool_ids" not in updates  # 不禁用即不摘工具面
+
+    def test_bare_failure_without_exit_code_still_counted(self) -> None:
+        """对照：无执行痕迹的失败（工具起不来/未注册）照旧计连败并禁用。"""
+        plugin = DuplicateCheckPlugin()
+        results = [{"tool_name": "bash", "success": False, "error_code": "EXECUTION_FAILED"}] * 10
+        state = _tool_exec_state(results, tool_ids=["bash", "file_read"])
+        updates = _exec_updates(plugin, state)
+        assert updates["router.tool_fail_streak"]["bash"] == 10
+        assert updates["router.tool_fail_banned"] == ["bash"]
 
     def test_http_network_errors_still_counted(self) -> None:
         """网络层执行不了（HTTP_ERROR/TIMEOUT，非数字状态码）照旧计连败。"""
@@ -742,9 +771,9 @@ class TestToolFailBreaker:
         )
 
     def test_exempt_tool_not_counted(self) -> None:
-        """豁免清单内工具不计连败。"""
+        """豁免清单内工具不计连败（超过硬上限仍不终止）。"""
         plugin = DuplicateCheckPlugin(config={"fail_breaker_exempt_tools": ["human_interaction"]})
-        state = _tool_exec_state([_fail("human_interaction")] * 9)
+        state = _tool_exec_state([_fail("human_interaction")] * 20)
         updates = _exec_updates(plugin, state)
         assert "human_interaction" not in (updates.get("router.tool_fail_streak") or {})
         assert updates.get("should_stop") is not True
@@ -769,7 +798,7 @@ class TestToolFailBreaker:
         """已摘除工具若仍出现失败（防御纵深）→ 直达硬上限终止。"""
         plugin = DuplicateCheckPlugin()
         state = _tool_exec_state(
-            [_fail("human_interaction")] * 8,
+            [_fail("human_interaction")] * 15,
             tool_ids=[],
             **{"router.tool_fail_banned": ["human_interaction"]},
         )
@@ -925,3 +954,120 @@ class TestApprovalChannelRetryExemption:
         )
         updates = _exec_updates(plugin, state)
         assert "router.recent_tool_sigs" not in updates
+
+
+class TestDynamicFailBreaker:
+    """动态类失败熔断另计（方案 §7.2 #14）：转发壳按目标工具名归属、不动 tool_ids。
+
+    转发壳 ``call_tool`` 是全部动态工具的唯一入口——按壳名计连败会二选一皆错：
+    摘壳 = 全部动态工具失联；不摘 = 好坏工具混计、真坏的永不被识别。故：
+    按目标名归属 + 独立计数 + 只两级（阈值告警 / 硬上限终止），绝不动 ``tool_ids``。
+    """
+
+    @staticmethod
+    def _dyn_fail(target: str, **extra: Any) -> dict[str, Any]:
+        """转发壳失败信封：tool_name 是壳名，目标在 arguments.tool。"""
+        res: dict[str, Any] = {
+            "tool_name": "call_tool",
+            "success": False,
+            "arguments": {"tool": target, "arguments": {}},
+        }
+        res.update(extra)
+        return res
+
+    def test_target_attributed_separately_from_regular_streak(self) -> None:
+        """目标工具名归属到动态桶；常规桶不被壳名污染。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([self._dyn_fail("mcp_fetch")] * 3)
+        updates = _exec_updates(plugin, state)
+        assert updates["router.dynamic_tool_fail_streak"] == {"mcp_fetch": 3}
+        assert "router.tool_fail_streak" not in updates
+
+    def test_threshold_warns_without_touching_tool_ids(self) -> None:
+        """达阈值（默认 10）：告警但**不改 tool_ids**（摘壳 = 全部动态工具失联）。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [self._dyn_fail("mcp_fetch")] * 10,
+            tool_ids=["call_tool", "file_read"],
+        )
+        updates = _exec_updates(plugin, state)
+        assert "tool_ids" not in updates, "动态类熔断不得摘转发壳"
+        assert updates["router.dynamic_tool_fail_banned"] == ["mcp_fetch"]
+        assert "router.tool_fail_banned" not in updates
+        ops = updates["messages"]["_ops"]
+        assert any("mcp_fetch" in str(op) and "call_tool" in str(op) for op in ops)
+        assert updates.get("should_stop") is not True
+
+    def test_hard_limit_terminates_loop(self) -> None:
+        """达硬上限（默认 15）：终止管道，署名与常规熔断同一 stop_reason。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([self._dyn_fail("mcp_fetch")] * 15, agent_level="L1")
+        updates = _exec_updates(plugin, state)
+        assert updates["should_stop"] is True
+        assert updates["router.stop_reason"] == "tool_fail_loop"
+
+    def test_success_clears_dynamic_streak_only_its_own_target(self) -> None:
+        """成功只清目标自己的计数，不影响其它动态目标/常规工具。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [self._dyn_fail("a")] * 2 + [_ok("call_tool")] + [self._dyn_fail("b")],
+            **{"router.dynamic_tool_fail_streak": {"a": 2}},
+        )
+        # 种子 a=2 + 两次失败 = 4；call_tool 成功信封没有 arguments.tool → 归属回
+        # 壳名本身（进常规桶并被清零），不清 a
+        updates = _exec_updates(plugin, state)
+        assert updates["router.dynamic_tool_fail_streak"]["a"] == 4
+        assert updates["router.dynamic_tool_fail_streak"]["b"] == 1
+
+    def test_forged_arguments_on_other_tool_not_expanded(self) -> None:
+        """非转发壳工具在参数里伪造 tool 字段不触发展开（判定键展开白名单式）。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([
+            {"tool_name": "web_operate", "success": False,
+             "arguments": {"tool": "bash_execute", "arguments": {}}},
+        ])
+        updates = _exec_updates(plugin, state)
+        assert updates["router.tool_fail_streak"] == {"web_operate": 1}
+        assert "router.dynamic_tool_fail_streak" not in updates
+
+    def test_shell_self_failure_still_goes_to_dynamic_bucket(self) -> None:
+        """壳自身失败（取不到目标名）仍归动态桶——**落常规桶会摘壳致全部动态工具失联**。
+
+        壳失败四类（TOOL_NOT_FOUND / INVALID_ARGUMENTS / DYNAMIC_TOOLS_UNAVAILABLE /
+        TOOL_EXECUTOR_UNAVAILABLE）都是「动态面被误用」，不是「转发壳坏了」。落常规桶
+        的后果在真实链路上是：连败 10 次 → `call_tool` 被摘出 `tool_ids` → 次轮
+        `tool_schema` 按 `tool_ids` 不再输出 call_tool 的 schema、`agent_config_load`
+        每 run 才重注入 → **当轮全部动态工具失联且不可自愈**。
+        """
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([{"tool_name": "call_tool", "success": False}])
+        updates = _exec_updates(plugin, state)
+        assert updates["router.dynamic_tool_fail_streak"] == {"call_tool": 1}
+        assert "router.tool_fail_streak" not in updates
+
+    def test_shell_self_failure_never_removes_call_tool_from_tool_ids(self) -> None:
+        """壳自身失败 ×10：告警但不摘壳（真实链路回归锁，上轮 MF#1 ② 残留）。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [{"tool_name": "call_tool", "success": False}] * 10,
+            tool_ids=["call_tool", "file_read"],
+        )
+        updates = _exec_updates(plugin, state)
+        assert "tool_ids" not in updates, "壳自身失败不得摘 call_tool（= 全部动态工具失联）"
+        assert updates["router.dynamic_tool_fail_banned"] == ["call_tool"]
+        assert "router.tool_fail_banned" not in updates
+
+    def test_regular_tool_business_failure_not_counted(self) -> None:
+        """常驻工具的业务 `data.success=false` 不算工具故障（上轮 MF-R2 回归锁）。
+
+        `dsh.tool.call` 等常驻工具会原样透传业务失败信封（顶层 success=True、
+        data.success=False）。若把它计入连败，10 次业务失败就会摘掉常驻工具面。
+        """
+        plugin = DuplicateCheckPlugin()
+        business_failure = {"tool_name": "dsh.tool.call", "success": True, "data": {"success": False}}
+        state = _tool_exec_state([dict(business_failure) for _ in range(10)])
+        updates = _exec_updates(plugin, state)
+        assert "router.tool_fail_streak" not in updates, "业务失败不得计入连败"
+        assert "router.dynamic_tool_fail_streak" not in updates
+        assert "tool_ids" not in updates
+        assert "router.tool_fail_banned" not in updates

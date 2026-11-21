@@ -67,6 +67,10 @@ from file_channel import (  # noqa: E402
     FILE_CHANNEL_SCOPES,
     FileChannelConfig,
 )
+from remote_fs import (  # noqa: E402
+    RemoteFsError as _RemoteFsError,
+    RemoteFsService,
+)
 
 plugin = AgentOSPlugin("sync_agent")
 logger = logging.getLogger(__name__)
@@ -118,6 +122,10 @@ class Assembly:
 
 _assembly: Assembly | None = None
 _engine: SyncAgentEngine | None = None
+#: 远端文件面（SFTP；settings.remote_fs 空/关闭 = None，端点诚实报未配置）。
+_remote_fs: RemoteFsService | None = None
+#: 建服务时用的配置段快照（每调用比对，变了就重建——内核按调用注入配置）。
+_remote_fs_section: dict[str, Any] = {}
 
 #: 云端注册表透传短 TTL 缓存（秒）：心跳态要新鲜，只缓存成功面（降级不缓存，
 #: 恢复即见）；重配对/卸载即清。
@@ -415,7 +423,10 @@ async def _on_load(params: dict[str, Any]) -> None:
 
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
-    global _engine
+    global _engine, _remote_fs
+    if _remote_fs is not None:
+        _remote_fs.close_all()
+        _remote_fs = None
     if _engine is not None:
         await _engine.stop()
         _engine = None
@@ -450,7 +461,8 @@ def _identity_payload() -> dict[str, Any]:
 def _post_enroll(
     endpoint: str, admin_jwt: str, payload: dict[str, Any]
 ) -> tuple[int, dict[str, Any] | None]:
-    """登录直签发出站（stdlib urllib，_relay_verify 同款零三方依赖口径；admin JWT 即凭据）。"""
+    """登录直签发出站（stdlib urllib，_relay_verify 同款零三方依赖口径；admin JWT 即凭据）。
+    同步单发，调用方经 ``asyncio.to_thread`` 下放（30s 长超时不进事件循环）。"""
     return _http_json("POST", endpoint, token=admin_jwt, payload=payload, timeout=30.0)
 
 
@@ -478,7 +490,9 @@ async def _handle_enroll(raw_body: str) -> dict[str, Any]:
         return _error("relay_url 必填（relay 端点基址，如 http://<host>:<port>/ext/sync_relay）", 400)
     if not admin_jwt:
         return _error("admin_jwt 必填（relay 内核登录态——登录即入网的凭据锚）", 400)
-    status, result = _post_enroll(f"{relay_url}/enroll", admin_jwt, _identity_payload())
+    status, result = await asyncio.to_thread(
+        _post_enroll, f"{relay_url}/enroll", admin_jwt, _identity_payload()
+    )
     if status == 0:
         return _error("入网失败：relay 不可达", 502)
     if status >= 300:
@@ -489,11 +503,19 @@ async def _handle_enroll(raw_body: str) -> dict[str, Any]:
         return _error("签发响应缺 device_token（relay 协议违约）", 502)
     tenant = str((result or {}).get("tenant_id", "") or "")
     state = _assembly.state
-    state.save_credential(_CRED_RELAY_URL, relay_url)
-    state.save_credential(_CRED_DEVICE_TOKEN, device_token)
-    state.save_credential(_CRED_TENANT, tenant)
-    # 重入网清账：游标/资产/已应用按旧 relay 账本记账，换账本即作废（HLC 保留）。
-    state.reset_pairing_state()
+
+    def _persist_enrollment() -> None:
+        # 凭据落盘 + 重入网清账（SQLite 多次独立 commit，慢盘 fsync 数十 ms/次）
+        # 同步体出事件循环：与出站/备份面同刀（11e503214 审计口径，心跳活性锁
+        # test_outbound_loop_liveness 实测 Windows fsync 慢盘上循环内停摆 0.3s+）。
+        # 连接 serialized 模式（check_same_thread=False）下跨线程用安全。
+        state.save_credential(_CRED_RELAY_URL, relay_url)
+        state.save_credential(_CRED_DEVICE_TOKEN, device_token)
+        state.save_credential(_CRED_TENANT, tenant)
+        # 重入网清账：游标/资产/已应用按旧 relay 账本记账，换账本即作废（HLC 保留）。
+        state.reset_pairing_state()
+
+    await asyncio.to_thread(_persist_enrollment)
     await _restart_engine()
     logger.info("[sync_agent] 登录入网完成: device=%s relay=%s", _assembly.device_id, relay_url)
     return _ok(
@@ -530,17 +552,26 @@ def _handle_status() -> dict[str, Any]:
 
 async def _relay_verify(relay_url: str, token: str) -> tuple[int, dict[str, Any] | None]:
     """relay /verify 出站（测试 monkeypatch 面）；返回 (status, body)。0=网络失败。
-    stdlib urllib 实现（云端 venv 无 aiohttp 的 2026-10-22 实证后改道）。"""
-    return _http_json("GET", f"{relay_url}/verify", token=token)
+    stdlib urllib 实现（云端 venv 无 aiohttp 的 2026-10-22 实证后改道）；
+    同步单发下放线程池（宿主 watchdog 判事件循环停滞即整组退出）。"""
+    return await asyncio.to_thread(
+        _http_json, "GET", f"{relay_url}/verify", token=token
+    )
 
 
 async def _post_borrow_auth(
     endpoint: str, device_id: str, token: str
 ) -> tuple[int, dict[str, Any] | None]:
     """目标侧 borrow_auth 出站（测试 monkeypatch 面）；返回 (status, body)。0=网络失败。
-    stdlib urllib 实现（同 _relay_verify 改道口径），30s 长超时容忍目标慢启动。"""
-    return _http_json(
-        "POST", endpoint, token=token, payload={"device_id": device_id}, timeout=30.0
+    stdlib urllib 实现（同 _relay_verify 改道口径），30s 长超时容忍目标慢启动；
+    同步单发下放线程池。"""
+    return await asyncio.to_thread(
+        _http_json,
+        "POST",
+        endpoint,
+        token=token,
+        payload={"device_id": device_id},
+        timeout=30.0,
     )
 
 
@@ -627,8 +658,10 @@ def _is_loopback_url(url: str) -> bool:
 
 
 async def _login_admin(password: str, port: str) -> tuple[int, dict[str, Any] | None]:
-    """本机内核 login 出站（sync_relay/server.py 孪生；测试 monkeypatch 面）。"""
-    return _http_json(
+    """本机内核 login 出站（sync_relay/server.py 孪生；测试 monkeypatch 面；
+    同步单发下放线程池）。"""
+    return await asyncio.to_thread(
+        _http_json,
         "POST",
         f"http://127.0.0.1:{port}/api/v1/auth/login",
         payload={"username": "admin", "password": password},
@@ -1096,6 +1129,61 @@ async def _handle_backup_restore(raw_body: str) -> dict[str, Any]:
     return _ok(_json_response(result, 200))
 
 
+def _ensure_remote_fs() -> RemoteFsService | None:
+    """按当前注入配置惰性建/重建远端文件面（段空 = 关面）。
+
+    配置面约定与 exec_channel 同款：``settings.yaml`` 的嵌套块
+    ``settings.remote_fs``。内核是**按调用**注入配置（``plugin.get_config()``
+    每次调用刷新），on_load 期取到的可能还是默认值域——只在装载期建一次会让
+    后加的配置永不生效。段内容变了才重建（连接随之丢弃）。
+    """
+    global _remote_fs, _remote_fs_section
+    settings = plugin.get_config().get("settings") or {}
+    section = settings.get("remote_fs") if isinstance(settings, dict) else None
+    if not isinstance(section, dict):
+        section = {}
+    if section != _remote_fs_section:
+        if _remote_fs is not None:
+            _remote_fs.close_all()
+        try:
+            _remote_fs = RemoteFsService.from_config(section)
+        except _RemoteFsError as exc:
+            # 配置非法只停用本面，不拒载（连接/同步面优先级更高）
+            logger.warning("[sync_agent] 远端文件面配置非法，已停用：%s", exc)
+            _remote_fs = None
+        _remote_fs_section = dict(section)
+    return _remote_fs
+
+
+async def _handle_remote_fs(
+    rest: list[str],
+    method: str,
+    query: dict[str, str],
+    raw_body: str,
+) -> dict[str, Any]:
+    """/ext/sync_agent/fs/** 分发（SFTP 阻塞操作出事件循环执行）。
+
+    4xx 走 ``ok+json_response`` 透出状态码：``protocol_error`` 会被内核统一
+    折成 502，调用方错误与服务端故障就分不开了（artifacts 插件同款口径）。
+    """
+    service = _ensure_remote_fs()
+    if service is None:
+        return _ok(
+            _json_response(
+                {
+                    "error": "远端文件面未配置（config/plugins/sync_agent/settings.yaml "
+                    "的 settings.remote_fs.enabled=false 或 targets 为空）"
+                },
+                400,
+            )
+        )
+    try:
+        status, payload = await asyncio.to_thread(service.handle, rest, method, query, raw_body)
+    except _RemoteFsError as exc:
+        return _ok(_json_response({"error": str(exc)}, exc.status))
+    return _ok(_json_response(payload, status))
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -1139,7 +1227,8 @@ async def http_handle(
     if rest == ["enroll"] and method == "POST":
         return await _handle_enroll(raw_body)
     if rest == ["status"] and method == "GET":
-        return _handle_status()
+        # 状态面含 file-channel git 探针（同步子进程），出事件循环执行。
+        return await asyncio.to_thread(_handle_status)
     if rest == ["relay", "devices"] and method == "GET":
         return await _handle_relay_devices()
     if rest == ["probe"] and method == "POST":
@@ -1156,11 +1245,14 @@ async def http_handle(
     if rest == ["backup", "run"] and method == "POST":
         return await _handle_backup_run(raw_body, _authorization(headers))
     if rest == ["backup", "status"] and method == "GET":
-        return _handle_backup_status()
+        # 备份仓库 git 探针（同步子进程），出事件循环执行。
+        return await asyncio.to_thread(_handle_backup_status)
     if rest == ["backup", "points"] and method == "GET":
-        return _handle_backup_points()
+        return await asyncio.to_thread(_handle_backup_points)
     if rest == ["backup", "restore"] and method == "POST":
         return await _handle_backup_restore(raw_body)
+    if rest and rest[0] == "fs":
+        return await _handle_remote_fs(rest[1:], method, query or {}, raw_body)
     return _error(f"sync_agent: no route for {method} {path}", 404)
 
 
@@ -1235,7 +1327,10 @@ async def sync_capture_execute(
     render={"card": "generic"},
 )
 async def get_status() -> dict[str, Any]:
-    """端侧同步运行状态（配对/断网续传/收敛进度的可观测面）。"""
+    """端侧同步运行状态（配对/断网续传/收敛进度的可观测面）。
+
+    ``status_dict`` 含 file-channel git 探针（同步子进程），出事件循环执行。
+    """
     if _engine is None:
         if _assembly is None:
             return {"loaded": False}
@@ -1245,7 +1340,7 @@ async def get_status() -> dict[str, Any]:
             "device_id": _assembly.device_id,
             "tier": _assembly.device_tier,
         }
-    return {"loaded": True, "paired": True, **_engine.status_dict()}
+    return {"loaded": True, "paired": True, **await asyncio.to_thread(_engine.status_dict)}
 
 
 if __name__ == "__main__":

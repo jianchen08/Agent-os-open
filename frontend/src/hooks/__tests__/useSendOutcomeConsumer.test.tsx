@@ -80,7 +80,7 @@ describe('useSendOutcomeConsumer（发送终局消费）', () => {
     expect(onLanded).not.toHaveBeenCalled()
   })
 
-  it('timeout：判死文案落操作点（不触发清空）', () => {
+  it('timeout：默认判死文案落操作点（不触发清空）', () => {
     const textRef = setupRefs('你好')
     const onLanded = vi.fn()
     const onError = vi.fn()
@@ -91,8 +91,24 @@ describe('useSendOutcomeConsumer（发送终局消费）', () => {
         sendOutcomes: [outcome(4, { kind: 'timeout', draftKey: 'd1' })],
       })
     })
-    expect(onError).toHaveBeenCalledWith('发送超时，已停止执行——请重新发送')
+    expect(onError).toHaveBeenCalledWith('发送超时，未收到送达确认——请重试')
     expect(onLanded).not.toHaveBeenCalled()
+  })
+
+  it('timeout：ack 已受理的宽限耗尽随 reason 透出（不诱导重发）', () => {
+    const textRef = setupRefs('你好')
+    const onError = vi.fn()
+    renderHook(() =>
+      useSendOutcomeConsumer({ draftKey: 'd1', textRef, onLanded: vi.fn(), onError }),
+    )
+    const reason = '消息已受理，执行启动较慢（并发繁忙）——稍候可在会话中查看结果，无需重发'
+
+    act(() => {
+      useChatInputStore.setState({
+        sendOutcomes: [outcome(12, { kind: 'timeout', draftKey: 'd1', reason })],
+      })
+    })
+    expect(onError).toHaveBeenCalledWith(reason)
   })
 
   it('failed：带原因与无原因双文案', () => {

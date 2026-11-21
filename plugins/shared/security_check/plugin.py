@@ -95,17 +95,36 @@ def set_frontend_emit(fn: FrontendEmitFn | None) -> None:
     _frontend_emit = fn
 
 
-from _libs.pipeline_base.plugin import IInputPlugin, PluginContext, PluginResult
-from _libs.pipeline_base.types import StateKeys
-from _root_api import zone_policy
-from sensitive_paths import is_sensitive_path
+from _libs.pipeline_base.plugin import IInputPlugin, PluginContext, PluginResult  # noqa: E402 — sys.path 装配后导入
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
+from _root_api import zone_policy  # noqa: E402
+from approval_scope import (  # noqa: E402 — 同目录模块，sys.path 装配后导入
+    APPROVED_SIGNATURES_KEY,  # noqa: F401 — 再出口（server/tests 消费）
+    PERMANENT_WHITELIST as _PERMANENT_WHITELIST,
+    PIPELINE_PERMISSION_MODES as _PIPELINE_PERMISSION_MODES,  # noqa: F401 — 再出口（server 消费）
+    ApprovalScopeMixin,
+    coerce_tool_args as _coerce_tool_args,
+    format_parsed_command_list,
+    get_grants_caps,
+    load_permanent_whitelist,
+    load_pipeline_permission_modes,
+    save_permanent_whitelist,
+    save_pipeline_permission_modes,
+    set_grants_caps,  # noqa: F401 — 再出口（tests 经 _mod 注入 grants 两面）
+    set_grants_ref_resolver,  # noqa: F401 — 再出口（tests 夹具经 _mod 复位解析缝）
+    split_command_segments,
+    state_file_path,
+    write_audit_event,
+    zone_entries_via_project_service,  # noqa: F401 — 再出口（对账测试消费真源读取路径）
+)
+from sensitive_paths import is_sensitive_path  # noqa: E402 — 同目录模块
 
 from agentos_plugin_sdk.approval_contract import (  # noqa: E402 — sys.path 装配后导入（与同块一致）
     InteractionErrorCode,
     OptionSemantics,
 )
-from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader
-from agentos_plugin_sdk.tool_result_protocol import (
+from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader  # noqa: E402
+from agentos_plugin_sdk.tool_result_protocol import (  # noqa: E402
     merge_pre_decided,
     tool_result_entry,
 )
@@ -170,6 +189,35 @@ def _resolve_permission_modes_file(settings: dict[str, Any] | None = None) -> st
 
 _PERMISSION_MODES_FILE = _resolve_permission_modes_file()
 
+#: 动态工具薄转发壳（plugins/shared/search 的 call_tool）工具名。
+#: 展开**只认这一个工具名**（白名单式）：否则任意工具都能伪造 `tool`/`arguments`
+#: 字段冒充别的工具参与判定（伪造判定键 = 绕开审批）。动态工具本身不在
+#: `tool_ids` 白名单里，若只按 `call_tool` 这个名字判定，目标工具整体免审——
+#: 必须展开为「目标工具名 + 目标参数」走既有判定链（四档 + 规则 + 位置闸 +
+#: 层级闸全部按展开后的键生效）。
+DYNAMIC_FORWARD_TOOL = "call_tool"
+#: 展开后的判定参数键名（与 call_tool 的 input_schema 一致）。
+_TARGET_TOOL_ARG = "tool"
+_TARGET_ARGS_ARG = "arguments"
+
+
+def _effective_tool_call(tc: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """取判定的（工具名, 参数）：动态转发壳调用展开为目标工具 + 目标参数。
+
+    只对 `name == DYNAMIC_FORWARD_TOOL` 且声明了非空目标名的条目展开；目标名
+    缺失时按本工具原样判定（不明白放行）。非转发壳调用原样返回，判定链其余
+    行为零变化。
+    """
+    name = str(tc.get("name", "") or "")
+    args = _coerce_tool_args(tc)
+    if name != DYNAMIC_FORWARD_TOOL:
+        return name, args
+    target = str(args.get(_TARGET_TOOL_ARG) or "").strip()
+    if not target:
+        return name, args
+    inner = args.get(_TARGET_ARGS_ARG)
+    return target, inner if isinstance(inner, dict) else {}
+
 
 def apply_permission_modes_settings(settings: dict[str, Any] | None) -> None:
     """settings 注入到站重解权限模式落点（server.py on_load 落点）。
@@ -181,6 +229,42 @@ def apply_permission_modes_settings(settings: dict[str, Any] | None) -> None:
     """
     global _PERMISSION_MODES_FILE  # noqa: PLW0603
     _PERMISSION_MODES_FILE = _resolve_permission_modes_file(settings)
+
+
+# ── 管道级免审批/永久白名单持久化（实现面在 approval_scope.py）──────────────
+# 落点派生与权限模式表同目录（读写同源单键 _PERMISSION_MODES_FILE）；以下薄
+# 包装供 server.py 以既有导入形态消费（模块级表对象与 approval_scope 同一实例）。
+def _state_file_path(filename: str) -> str:
+    """与权限模式表同目录派生的持久化落点。"""
+    return state_file_path(_PERMISSION_MODES_FILE, filename)
+
+
+def _load_pipeline_permission_modes() -> None:
+    """启动加载管道级覆盖表（allowed_modes 沿用四档枚举）。"""
+    load_pipeline_permission_modes(
+        _state_file_path("permission_modes_pipeline.json"), PERMISSION_MODES
+    )
+
+
+def _save_pipeline_permission_modes() -> None:
+    """持久化管道级覆盖表（原子替换）。"""
+    save_pipeline_permission_modes(_state_file_path("permission_modes_pipeline.json"))
+
+
+def _load_permanent_whitelist() -> None:
+    """启动加载永久免审批白名单（解析失败按空集 fail-closed）。"""
+    load_permanent_whitelist(_state_file_path("permanent_whitelist.json"))
+
+
+def _save_permanent_whitelist() -> None:
+    """持久化永久免审批白名单（原子替换）。"""
+    save_permanent_whitelist(_state_file_path("permanent_whitelist.json"))
+
+
+def audit_event(event: dict[str, Any]) -> None:
+    """追加一行审计事件到 security_audit.jsonl（失败留痕不阻断业务）。"""
+    write_audit_event(_state_file_path("security_audit.jsonl"), event)
+
 
 # accept_edits 放行的文件类工具
 _FILE_TOOLS: frozenset[str] = frozenset({"file_read", "file_write"})
@@ -256,11 +340,11 @@ def _save_permission_modes() -> None:
     try:
         import json  # noqa: PLC0415
 
-        os.makedirs(os.path.dirname(_PERMISSION_MODES_FILE), exist_ok=True)
-        tmp = _PERMISSION_MODES_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_PERMISSION_MODES, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _PERMISSION_MODES_FILE)
+        target = Path(_PERMISSION_MODES_FILE)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps(_PERMISSION_MODES, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(target)
     except Exception as exc:
         logger.warning("[security_check] 权限模式表持久化失败 | error=%s", exc)
 
@@ -278,24 +362,31 @@ _policy_loader = IsolationPolicyLoader()
 _APPROVAL_OPTIONS: list[dict[str, str]] = [
     {"id": "approved_once", "label": "仅本次执行", "semantics": "approve_once"},
     {"id": "approved_remember", "label": "本管道内同命令免批", "semantics": "approve_and_remember"},
+    {
+        "id": "approved_pipeline_scope",
+        "label": "本管道后续免审批",
+        "semantics": "approve_pipeline_scope",
+        "description": (
+            "确认后本管道及其派生子任务内的后续工具调用不再弹审批确认"
+            "（切换前会再弹一次警告确认；内置安全底线仍然生效）；"
+            "管道结束自动失效，可经撤销端点提前恢复"
+        ),
+    },
+    {
+        "id": "approved_permanent_whitelist",
+        "label": "本次命令全部加入永久免审批白名单",
+        "semantics": "approve_permanent_whitelist",
+        "description": (
+            "批准本次批次，并将卡上全部命令（复合命令按解析出的每条子命令）"
+            "的工具+参数精确指纹加入跨管道跨会话的永久免审批名单，"
+            "此后完全相同的命令不再询问；可在设置中逐条移除"
+        ),
+    },
     {"id": "denied", "label": "拒绝执行", "semantics": "deny"},
 ]
 
 
-def _coerce_tool_args(tc: dict[str, Any]) -> dict[str, Any]:
-    """args 容错归一（执法与审批格式化共面）：JSON 字符串 → 解析 dict；
-    非 dict（含非法 JSON/合法非 dict）→ 空参数（与「视为空参数」既有口径一致）。"""
-    args = tc.get("args", tc.get("arguments", {}))
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return args if isinstance(args, dict) else {}
-
-
-class SecurityCheckPlugin(IInputPlugin):
+class SecurityCheckPlugin(ApprovalScopeMixin, IInputPlugin):
     """安全检查 Input 插件。
 
     配置驱动的统一参数匹配引擎，支持：
@@ -368,16 +459,9 @@ class SecurityCheckPlugin(IInputPlugin):
             ],
         )
 
-        # 本管道内已记忆"通过"的命令指纹集合。
-        # 作用域为单管道实例：每个 PipelineEngine 创建时 fork() 出独立插件实例
-        # （registry.py fork 对每个插件深拷贝重建），新实例集合为空，天然按管道隔离，
-        # 跨管道/跨会话不泄漏。仅记忆用户选择"本管道内同命令免批"的精确指纹，拒绝绝不记忆。
-        self._approved_signatures: set[str] = set()
-
         # 连续拒绝计数（按工具签名）：防止模型反复提交同一被拦请求导致死循环。
-        # 与 _approved_signatures 同作用域（单管道隔离）。一旦模型换了请求（签名变化），
-        # 新签名计数从 0 开始。偶发拒绝（1-2 次）靠 messages 写回反馈给模型改正；
-        # 达到阈值仍重复 → 模型无法自我纠正，终止任务（死循环最终防线）。
+        # 与指纹记忆同作用域（单管道）。指纹记忆 v2 起迁管道级 state 键
+        # task.approved_signatures（子任务可读、随管道终态回收），实例字段退役。
         self._rejected_signatures: dict[str, int] = {}
         self._reject_threshold = self._config.get("reject_threshold", 3)
 
@@ -386,6 +470,9 @@ class SecurityCheckPlugin(IInputPlugin):
         self._rules = self._load_rules()
         # 降级提示每实例只发一次（同一降级周期不刷屏）
         self._degrade_notice_sent = False
+        # grants 面（分级/账本）降级横幅每管道只发一次（键=pipeline_id，
+        # 错误风暴不刷屏；用户裁定 2026-11-19：可见性由横幅承担，不逐调用弹卡）
+        self._grants_degraded_notified: set[str] = set()
 
         # 危险工具轨道 2 数据源：config_files 注入的 builtin_tools_config
         # （见 _get_dangerous_operations / _parse_dangerous_ops_config）
@@ -554,6 +641,43 @@ class SecurityCheckPlugin(IInputPlugin):
                 exc,
             )
 
+    async def _notify_grants_degraded_once(self, ctx: PluginContext) -> None:
+        """grants 面（分级/账本）不可用或异常时推送一次性降级横幅（禁静默、禁弹卡风暴）。
+
+        用户裁定（2026-11-19）：加认证不得改变既有审批逻辑——grants 面缺席/异常
+        一律等价于 grants 面不存在（inert 放行，既有审批档与白名单语义零变化），
+        可见性由本横幅承担。同一管道只推一次（键=pipeline_id，错误风暴不刷屏）；
+        通道未注入或发射失败只留日志，绝不阻断安全检查。镜像
+        ``_notify_rules_degraded_once`` 的先例形态。
+        """
+        pipeline_id = self._current_pipeline_id(ctx)
+        if pipeline_id in self._grants_degraded_notified:
+            return
+        self._grants_degraded_notified.add(pipeline_id)
+        emit = _frontend_emit
+        if emit is None:
+            logger.warning(
+                "[%s] frontend.emit 未注入，grants 降级提示不推前端（仅日志）",
+                self.name,
+            )
+            return
+        thread_id = str(ctx.state.get(StateKeys.SESSION_ID) or ctx.state.get("thread_id") or "")
+        payload = {
+            "thread_id": thread_id,
+            "pipeline_id": pipeline_id,
+            "message": (
+                "授权分级面暂不可用，已按既有审批语义放行，不影响审批档与白名单。"
+            ),
+        }
+        try:
+            await emit("grants_degraded", payload, thread_id)
+        except Exception as exc:  # noqa: BLE001 —— 通知是增强能力，失败不阻断安全检查
+            logger.warning(
+                "[%s] grants_degraded 事件推送失败（忽略）: %s",
+                self.name,
+                exc,
+            )
+
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行安全检查逻辑。
 
@@ -606,14 +730,35 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第三道：按模式分流 ──
 
-        # 权限档单点解析：隔离/worktree 未显式选择 → 生效档即旁路（免审批默认，
-        # 隔离容器即安全边界）；显式选旁路同档。命中旁路 → 基础检查通过即整体
-        # 放行（isolation_level 是隔离唯一真相源，解析优先级见 _resolve_permission_mode）。
+        # 权限档单点解析：管道级覆盖（审批卡授予）> 显式选择 > 隔离默认
+        # （旁路）> 插件配置 > default。命中旁路 → 基础检查通过即整体放行
+        # （isolation_level 是隔离唯一真相源，解析优先级见 _resolve_permission_mode）。
         execution_contexts = ctx.state.get("execution_contexts", [])
+        self._remember_lineage(ctx)
         isolated = self._is_isolated(ctx, execution_contexts)
         mode = self._resolve_permission_mode(ctx, isolated=isolated)
         if mode == "bypass":
-            logger.info("[%s] 旁路档免审批放行（隔离默认或显式选择），基础检查已通过", self.name)
+            # 管道覆盖档的来源是「本管道后续免审批」授予：终审规则仍逐次人审
+            # （免审批摩擦，不豁免终审；与手动会话级 bypass 的既有语义区分）。
+            # 规则降级态无从匹配终审 → 整体压制覆盖（回落既有链弹卡，保守优先）。
+            override = None if self._rules_degraded else self._pipeline_override_mode(ctx)
+            if override:
+                final_updates = await self._enforce_final_approval(ctx, tool_calls)
+                if final_updates is not None:
+                    return {**final_updates, **zone_updates}
+            # 高风险类闸（P1，ADR D3：旁路档免审批摩擦不免 device_control/financial
+            # 逐次人审；deny 恒拒）。grants 分级面缺席/异常 → inert，既有免审批语义
+            # 零变化（异常降级横幅一次性提示，用户裁定 2026-11-19）。
+            high_risk_updates = await self._enforce_grants_high_risk_bypass(ctx, tool_calls)
+            if high_risk_updates is not None:
+                return {**high_risk_updates, **zone_updates}
+            if override:
+                logger.info(
+                    "[%s] 管道覆盖档免审批放行（终审规则未命中），基础检查已通过",
+                    self.name,
+                )
+            else:
+                logger.info("[%s] 旁路档免审批放行（隔离默认或显式选择），基础检查已通过", self.name)
             return {**zone_updates}
 
         decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated, mode=mode)
@@ -637,8 +782,9 @@ class SecurityCheckPlugin(IInputPlugin):
             违规时的软拦截决策字典；全部通过返回 None。
         """
         for tc in tool_calls:
-            tool_name = tc.get("name", "")
-            args = tc.get("args", {})
+            # 判定键展开：call_tool 按目标工具名 + 目标参数过三道底线（A13：
+            # 只认这一个工具名，防伪造 target 字段骗过展开）。
+            tool_name, args = _effective_tool_call(tc)
 
             # 1. 路径遍历检测
             traversal_reason = self._check_path_traversal(args)
@@ -703,14 +849,27 @@ class SecurityCheckPlugin(IInputPlugin):
         workspace = ctx.state.get("workspace", "") or None
         project_root = ctx.state.get("project_root", "") or None
         session_zones = zone_policy.load_session_zones(ctx.state)
-        for tc in tool_calls:
-            tool_name = tc.get("name", "")
+        # 容器路由对齐（R11）：execution_contexts 与 raw_tool_calls 按下标对齐
+        # （isolation_guard 同循环构造）；provider=docker 的调用在容器内文件系统
+        # 执行（外部容器无宿主挂载），宿主写区/读黑名单对其路径参数不 governing
+        # ——容器绝对路径（/app/...）在宿主 resolve 会得到盘符根假路径（真跑
+        # 实证：E:\app\output 误判写区外弹授权卡，管道卡死等人工 24h）。
+        # 键不对齐（长度不一致）时不豁免（fail-closed）。bash 命令词法扫描
+        # （出厂 skills/ 直写兜底）不受豁免，保持全量执法。
+        contexts = ctx.state.get("execution_contexts", [])
+        aligned = contexts if len(contexts) == len(tool_calls) else []
+        for idx, tc in enumerate(tool_calls):
+            # 判定键展开：目标工具若是 file_write 等路径类工具，位置闸按目标参数
+            # 执法（动态面不得成为绕开写区授权的通道）。
+            tool_name, args = _effective_tool_call(tc)
+            container_routed = bool(aligned and aligned[idx].get("provider") == "docker")
             param_ops = self._path_param_operations.get(tool_name)
-            args = _coerce_tool_args(tc)
             if isinstance(tc.get("args", tc.get("arguments")), str) and args:
                 # 字符串形态归一即回写：授权补参须落在派发对象上（tool_core
                 # 派发读 args 键；解析副本随弃，原地补参不可见）。
                 tc["args"] = args
+            if container_routed:
+                continue
             for param, op in (param_ops or {}).items():
                 raw_value = args.get(param)
                 if not raw_value:
@@ -891,7 +1050,7 @@ class SecurityCheckPlugin(IInputPlugin):
         zone_updates: dict[str, Any],
         write: bool,
     ) -> dict[str, Any] | None:
-        """区域授权卡（读写共用骨架）：两选项（仅本管道 / 永久写入配置）。
+        """区域授权卡（读写共用骨架）：三选项（仅本管道 / 永久写入配置 / 拒绝执行）。
 
         写面（ADR 2026-09-24-read-deny-write-zones）：写区外路径弹卡，批准的
         授权经 ``zone_updates`` 落 state 键 ``task.authorized_write_zones``
@@ -932,10 +1091,13 @@ class SecurityCheckPlugin(IInputPlugin):
             title = f"授权写入 {grant_dir}"
             description = f"工具 {tool_name} 要写的路径在写区外。批准后写操作按会话权限档执行；拒绝则本次申请作废。"
             # 选项语义声明（ADR 2026-10-01 决策 2）：human 归一点据此把任何词形
-            # 归一到这两个 id/语义；消费端只认 grant_write* 语义。
+            # 归一到规范 id/语义；消费端只认 grant_write* 语义。deny 项（与审批卡
+            # 同词形）供用户显式拒绝——human 侧武装拒绝记忆（同卡重试不弹卡），
+            # 消费端落下方不匹配分支按拒绝软拦截。
             options: list[dict[str, str]] = [
                 {"id": "pipeline", "label": "仅当前会话", "semantics": "grant_write"},
                 {"id": "permanent", "label": "永久写入配置", "semantics": "grant_write_permanent"},
+                {"id": "denied", "label": "拒绝执行", "semantics": "deny"},
             ]
         else:
             title = f"授权读取 {grant_dir}"
@@ -946,6 +1108,7 @@ class SecurityCheckPlugin(IInputPlugin):
             options = [
                 {"id": "pipeline", "label": "仅当前会话", "semantics": "grant_read"},
                 {"id": "permanent", "label": "永久读取配置", "semantics": "grant_read_permanent"},
+                {"id": "denied", "label": "拒绝执行", "semantics": "deny"},
             ]
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
@@ -961,6 +1124,9 @@ class SecurityCheckPlugin(IInputPlugin):
                     "options": options,
                     "priority": "high",
                     "user_id": ctx.state.get("user_id", ""),
+                    # 审批非阻塞 M1：category 由发起方显式传（设计 §四——
+                    # 不由后端按标题猜测），权限审批类恒 permission。
+                    "category": "permission",
                     # 卡片来源四元组（管道 state 权威值）：授权卡与审批卡同族，
                     # 必须可见发起 agent（名/层级）/会话/管道，缺项由 human 侧省略。
                     "agent_id": str(ctx.state.get("agent.id", "") or ""),
@@ -1023,17 +1189,25 @@ class SecurityCheckPlugin(IInputPlugin):
             OptionSemantics.GRANT_READ_PERMANENT.value,
         )
         if (write and not grant_write_sem) or (not write and not grant_read_sem):
+            explicit_deny = semantics == OptionSemantics.DENY.value
             logger.warning(
-                "[%s] %s授权语义不匹配（按拒绝） | tool=%s | selected=%s | semantics=%s",
+                "[%s] %s | tool=%s | selected=%s | semantics=%s",
                 self.name,
-                "写区" if write else "读",
+                ("用户显式拒绝授权" if explicit_deny else f"{'写区' if write else '读'}授权语义不匹配（按拒绝）"),
                 tool_name,
                 wait_res.get("selected_option", ""),
                 semantics,
             )
+            # 授权卡下方自由文本随 feedback 回传：用户说明/改法进入工具返回值。
+            feedback = str(wait_res.get("feedback") or "").strip()
+            suffix = f"；用户反馈: {feedback[:2000]}" if feedback else ""
             if write:
-                return self._soft_block(ctx, tool_name, f"写区授权未批准：路径 {grant_dir} 不在写区内")
-            return self._soft_block(ctx, tool_name, f"读授权未批准：路径 {grant_dir} 位于读黑名单")
+                return self._soft_block(
+                    ctx, tool_name, f"写区授权未批准：路径 {grant_dir} 不在写区内{suffix}"
+                )
+            return self._soft_block(
+                ctx, tool_name, f"读授权未批准：路径 {grant_dir} 位于读黑名单{suffix}"
+            )
 
         state_key = zone_policy.STATE_KEY if write else zone_policy.STATE_KEY_READ
         if semantics in (OptionSemantics.GRANT_WRITE.value, OptionSemantics.GRANT_READ.value):
@@ -1113,14 +1287,26 @@ class SecurityCheckPlugin(IInputPlugin):
         Returns:
             需要处置（软拦截/弹审批）时的决策字典；全部放行返回 None。
         """
+        # 本批卡面覆盖的全部命令指纹：授予"同命令免批/永久白名单"时一次
+        # 覆盖卡上展示的所有命令（含复合命令解析出的每条子命令）。
+        batch_signatures = self._approval_batch_signatures(ctx, tool_calls, isolated=isolated)
         for tc in tool_calls:
-            tool_name = tc.get("name", "")
-            args = tc.get("args", {})
+            # 判定键展开：四档 + 规则匹配 + 危险工具分类 + 命令指纹全部按
+            # 「目标工具名 + 目标参数」执行（动态调用与直接调用同判定）。
+            tool_name, args = _effective_tool_call(tc)
 
             # 免审判定（声明推导）：非隔离 ∧ 无危险声明命中 → 直接放行；
             # 第一道内置底线（路径遍历/敏感目录/nul）已在本闸之前强制执行。
             if not isolated and not self._is_dangerous_tool(ctx, tool_name, args):
                 continue
+
+            # grants 分级裁决（规则匹配前查表，ADR 2026-11-19 执法点）：verdict
+            # 只在规则未覆盖分支生效（规则面优先，grant 永不豁免规则裁决）。
+            # grants 面缺席 → ("unavailable", None)、调用异常 → ("error", None)，
+            # 两者同构 inert 处置（既有语义零变化，用户裁定 2026-11-19）。
+            action_key = self._grants_action_key(tool_name, args)
+            policy_cap, _ledger_cap = get_grants_caps()
+            grants_status, grants_verdict = await self._grants_classify(policy_cap, tool_name, action_key)
 
             # ── 进入授权：allow 白名单/已记忆指纹放行，其余按权限模式处置
             #    （未命中规则视为参数安全放行，命中 block/needs_approval 才拦截）──
@@ -1134,13 +1320,26 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
                 continue
 
-            # 命中本管道内已记忆的命令指纹 → 放行（用户此前选了"同命令免批"）
-            signature = self._make_signature(tool_name, args)
-            if signature and signature in self._approved_signatures:
+            # 命令免审批按解析出的每条子命令判定：整条调用的全部指纹都在
+            # 白名单/已记忆集合才放行（部分命中仍需人审，fail-closed）。
+            signatures = self._make_signatures(tool_name, args)
+            if signatures and all(signature in _PERMANENT_WHITELIST for signature in signatures):
                 logger.info(
-                    "[%s] 危险工具命中本管道已记忆指纹，放行 | tool=%s",
+                    "[%s] 危险工具命中永久免审批白名单，放行 | tool=%s | cmds=%d",
                     self.name,
                     tool_name,
+                    len(signatures),
+                )
+                continue
+
+            # 命中本管道内已记忆的命令指纹 → 放行（用户此前选了"同命令免批"）
+            approved_signatures = self._approved_signatures_from_state(ctx)
+            if signatures and all(signature in approved_signatures for signature in signatures):
+                logger.info(
+                    "[%s] 危险工具命中本管道已记忆指纹，放行 | tool=%s | cmds=%d",
+                    self.name,
+                    tool_name,
+                    len(signatures),
                 )
                 continue
 
@@ -1160,13 +1359,320 @@ class SecurityCheckPlugin(IInputPlugin):
                 tool_name=tool_name,
                 action=action,
                 rule_name=rule_name,
-                signature=signature,
+                signatures=signatures,
+                batch_signatures=batch_signatures,
                 mode=mode,
+                action_key=action_key,
+                grants_status=grants_status,
+                grants_verdict=grants_verdict,
             )
             if isinstance(mode_decision, dict):
                 return mode_decision
             # "pass"：本工具放行，继续下一工具
         return None
+
+    # ── grants 账本执法面（P1 接线，ADR 2026-11-19-grants-ledger-and-tool-classification）──
+    # 语义基线（D1/D3 + 执行方案 §2 + 用户裁定 2026-11-19）：分级裁决在规则匹配前
+    # 查表，但规则面优先——verdict 只作用于「规则未覆盖」分支，永不豁免/改写规则
+    # 裁决（block/final_approval 恒不可豁免）；grants 面缺席/异常一律 inert 放行
+    # （既有审批语义零变化，等价于 grants 面不存在），可见性由一次性降级横幅承担
+    # （grants_degraded，键=pipeline_id 每管道一次）；auto 类零账本依赖照常。
+
+    #: 多动作工具的动作参数名（与 _OP_ARGS 同源口径；file_write/memory 等均用 action）。
+    _GRANTS_ACTION_PARAM_NAMES: tuple[str, ...] = ("action", "operation", "op")
+    #: 旁路档仍逐次人审的高风险 effect 类（D3：免审批摩擦不免高风险类）。
+    _GRANTS_HIGH_RISK_EFFECTS: frozenset[str] = frozenset({"device_control", "financial"})
+
+    def _grants_action_key(self, tool_name: str, args: dict[str, Any]) -> str:
+        """动作键派生（分级表 ``tool.action`` 查表键的动作位）。
+
+        显式动作参数（action/operation/op，多动作工具 memory/file_write/task_manage
+        等）> 命令执行类固定 execute（isolation policy command_in_container，bash）>
+        空串（单动作工具按整工具键查表，PolicyEngine 整工具回落同键）。
+        """
+        for name in self._GRANTS_ACTION_PARAM_NAMES:
+            value = args.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            if _policy_loader.resolve(tool_name).execution == "command_in_container":
+                return "execute"
+        except Exception:  # noqa: BLE001 — 策略解析失败按无动作位查整工具键
+            pass
+        return ""
+
+    @staticmethod
+    async def _grants_classify(
+        policy_cap: Any,
+        tool_name: str,
+        action_key: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """分级裁决：返回 ``(status, verdict)``，status ∈ ok | unavailable | error。
+
+        cap 缺席 = unavailable（执法面 inert 降级）；返回形态异常或调用异常 =
+        error（与 unavailable 同构处置：inert 放行 + 一次性降级横幅，既有审批
+        语义零变化——用户裁定 2026-11-19：加认证不得改变既有审批逻辑）。
+        """
+        if policy_cap is None:
+            return "unavailable", None
+        try:
+            verdict = await policy_cap.call("classify", {"tool": tool_name, "action": action_key})
+        except Exception as exc:  # noqa: BLE001 — 分级面异常按 error 处置（调用方 inert 放行 + 横幅）
+            logger.warning("[security_check] grants.policy.classify 异常: %s", exc)
+            return "error", None
+        if not isinstance(verdict, dict) or not verdict.get("verdict"):
+            return "error", None
+        return "ok", verdict
+
+    async def _grants_issue(
+        self,
+        ctx: PluginContext,
+        *,
+        tool: str,
+        action: str,
+        granularity: str,
+        subject_kind: str,
+        subject_id: str,
+        evidence: str | None = None,
+        pipeline_id: str | None = None,
+    ) -> None:
+        """授予面双写：审批卡授予同步落账本（v1 真源 = JSON 文件/state 键，写面不动）。
+
+        调用序保证真源写面先行且已成功；账本失败只留日志不回滚授予（双写过渡期
+        账本是投影/查询面，审批主流程不被账本可用性阻断）。
+        """
+        _policy_cap, ledger_cap = get_grants_caps()
+        if ledger_cap is None:
+            return
+        try:
+            result = await ledger_cap.call(
+                "request",
+                {
+                    "subject_kind": subject_kind,
+                    "subject_id": subject_id,
+                    "tool": tool,
+                    "action": action,
+                    "granularity": granularity,
+                    "source": "approval_card",
+                    "evidence": evidence,
+                    "pipeline_id": pipeline_id,
+                },
+            )
+            if isinstance(result, dict) and result.get("ok"):
+                logger.info(
+                    "[%s] 授予面双写账本 | subject=%s/%s | tool=%s | action=%s | granularity=%s",
+                    self.name,
+                    subject_kind,
+                    subject_id,
+                    tool,
+                    action,
+                    granularity,
+                )
+            else:
+                logger.warning("[%s] 授予面账本写入被拒: %s", self.name, result)
+        except Exception as exc:  # noqa: BLE001 — 双写过渡：账本失败不回滚真源授予
+            logger.warning("[%s] 授予面账本写入失败（真源已生效）: %s", self.name, exc)
+
+    async def _grants_consume(self, grant: dict[str, Any], *, tool_name: str, action_key: str) -> None:
+        """grant 命中后消费记账（uses+1）。失败留痕不阻断放行——放行已由命中成立。"""
+        _policy_cap, ledger_cap = get_grants_caps()
+        if ledger_cap is None:
+            return
+        try:
+            result = await ledger_cap.call(
+                "consume",
+                {
+                    "grant_id": str(grant.get("grant_id") or ""),
+                    "context": {"tool": tool_name, "action": action_key},
+                },
+            )
+            if not (isinstance(result, dict) and result.get("ok")):
+                logger.warning("[%s] grant 消费记账失败: %s", self.name, result)
+        except Exception as exc:  # noqa: BLE001 — 记账失败不阻断放行
+            logger.warning("[%s] grant 消费记账异常: %s", self.name, exc)
+
+    async def _grants_issue_on_remember(self, ctx: PluginContext, tool_name: str, request_id: str) -> None:
+        """approved_remember 授予面双写：账本 task 粒度 grant（subject=本管道）。
+
+        动作位从触发本次审批的调用派生（与执法侧 `_grants_action_key` 同一
+        派生面，issue/authorize 两端同键可匹配）。
+        """
+        action_key = ""
+        for tc in ctx.state.get(StateKeys.RAW_TOOL_CALLS, []):
+            name, args = _effective_tool_call(tc)
+            if name == tool_name:
+                action_key = self._grants_action_key(tool_name, args)
+                break
+        pipeline_id = self._current_pipeline_id(ctx)
+        await self._grants_issue(
+            ctx,
+            tool=tool_name,
+            action=action_key,
+            granularity="task",
+            subject_kind="pipeline",
+            subject_id=pipeline_id,
+            evidence=request_id,
+            pipeline_id=pipeline_id,
+        )
+
+    async def _dispatch_grants_verdict(
+        self,
+        ctx: PluginContext,
+        *,
+        tool_name: str,
+        action_key: str,
+        status: str,
+        verdict: dict[str, Any] | None,
+        signatures: list[str],
+        batch_signatures: list[str],
+    ) -> str | dict[str, Any]:
+        """规则未覆盖的调用按分级裁决分流（grant 只作用此分支，规则面优先）。
+
+        - unavailable（grants 面缺席）/ error（分级或账本面异常、畸形形态）→
+          inert 放行 + 一次性降级横幅（既有审批语义零变化——等价于 grants 面
+          不存在，黑名单未命中按档放行的老语义；用户裁定 2026-11-19）；
+        - auto → 放行 + 审计事件（无卡无账本写，验收①）；
+        - deny → 拦截；
+        - per_call_approval → 既有审批卡（逐次人审）；
+        - task_grant/domain_grant → 账本 authorize：命中消费放行（uses+1，验收②④）；
+          miss 弹既有审批卡（五选项零变化）。
+        """
+        if status == "unavailable":
+            return "pass"
+        if status == "error" or not isinstance(verdict, dict):
+            # error（分级面异常）与畸形入参（ok 恒携 verdict dict）同构处置：
+            # 等价 grants 面不存在——inert 放行 + 一次性降级横幅，可见性由
+            # 横幅承担，不逐调用弹卡（用户裁定 2026-11-19）。
+            await self._notify_grants_degraded_once(ctx)
+            return "pass"
+        verdict_name = str(verdict.get("verdict") or "")
+        policy_key = str(verdict.get("policy_key") or "")
+        if verdict_name == "auto":
+            audit_event(
+                {
+                    "event": "grants_auto_allow",
+                    "tool": tool_name,
+                    "action": action_key,
+                    "policy_key": policy_key,
+                    "effect": verdict.get("effect"),
+                    "pipeline_id": self._current_pipeline_id(ctx),
+                    "session_id": str(ctx.state.get(StateKeys.SESSION_ID, "") or ""),
+                    "user_id": str(ctx.state.get("user_id", "") or ""),
+                }
+            )
+            return "pass"
+        if verdict_name == "deny":
+            logger.warning(
+                "[%s] 分级 deny 拦截 | tool=%s | key=%s",
+                self.name,
+                tool_name,
+                policy_key,
+            )
+            return self._soft_block(ctx, tool_name, f"分级策略拒绝执行（deny）: {policy_key or tool_name}")
+        if verdict_name == "per_call_approval":
+            return await self._await_approval(
+                ctx,
+                tool_name,
+                f"分级策略逐次人审: {policy_key or tool_name}",
+                signatures=signatures,
+                batch_signatures=batch_signatures,
+            )
+        # task_grant / domain_grant：查账本（账本面缺席/异常均等价 grants 面不
+        # 存在：inert 放行 + 一次性降级横幅，用户裁定 2026-11-19——双写过渡期
+        # 账本是投影/查询面，其可用性不阻断审批主流程）
+        _policy_cap, ledger_cap = get_grants_caps()
+        if ledger_cap is None:
+            await self._notify_grants_degraded_once(ctx)
+            return "pass"
+        try:
+            result = await ledger_cap.call(
+                "authorize",
+                {
+                    "subject_kind": "pipeline",
+                    "subject_id": self._current_pipeline_id(ctx),
+                    "tool": tool_name,
+                    "action": action_key,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — 账本异常按等价缺席处置（inert 放行 + 横幅）
+            logger.warning("[%s] grants.ledger.authorize 异常: %s", self.name, exc)
+            await self._notify_grants_degraded_once(ctx)
+            return "pass"
+        grant = result.get("grant") if isinstance(result, dict) else None
+        if isinstance(result, dict) and result.get("authorized") and isinstance(grant, dict):
+            await self._grants_consume(grant, tool_name=tool_name, action_key=action_key)
+            logger.info(
+                "[%s] grant 命中放行 | tool=%s | action=%s | grant_id=%s | granularity=%s",
+                self.name,
+                tool_name,
+                action_key,
+                grant.get("grant_id"),
+                grant.get("granularity"),
+            )
+            return "pass"
+        return await self._await_approval(
+            ctx,
+            tool_name,
+            "账本无有效 grant（分级 " + (policy_key or verdict_name) + "）",
+            signatures=signatures,
+            batch_signatures=batch_signatures,
+        )
+
+    async def _enforce_grants_high_risk_bypass(
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """旁路档高风险类闸（ADR D3：免审批摩擦不免高风险 grant，沿位置闸先例）。
+
+        逐调用查分级：``per_call_approval`` ∧ effect ∈ {device_control, financial}
+        → 逐次人审卡（验收⑦）；deny → 恒拒（分级禁用不属审批摩擦）；其余 verdict
+        照常放行（旁路档免审批摩擦语义零变化）。grants 分级面缺席/异常一律
+        inert 放行 + 一次性降级横幅（既有旁路语义零变化——旁路档静默放行是既有
+        路径，异常弹卡会让每个隔离管道都卡住；用户裁定 2026-11-19）。
+
+        Returns:
+            需要处置（卡/拦截）时的决策字典；全部放行返回 None。
+        """
+        policy_cap, _ledger_cap = get_grants_caps()
+        if policy_cap is None:
+            return None
+        updates: dict[str, Any] = {}
+        for tc in tool_calls:
+            tool_name, args = _effective_tool_call(tc)
+            action_key = self._grants_action_key(tool_name, args)
+            status, verdict = await self._grants_classify(policy_cap, tool_name, action_key)
+            if status == "error" or not isinstance(verdict, dict):
+                # 分级面异常/畸形形态 → 等价 grants 面不存在：inert 放行 +
+                # 一次性降级横幅（不逐调用弹卡，用户裁定 2026-11-19）。
+                await self._notify_grants_degraded_once(ctx)
+                continue
+            verdict_name = str(verdict.get("verdict") or "")
+            effect = str(verdict.get("effect") or "")
+            policy_key = str(verdict.get("policy_key") or "")
+            decision: dict[str, Any] | None = None
+            if verdict_name == "deny":
+                logger.warning(
+                    "[%s] 旁路档分级 deny 拦截 | tool=%s | key=%s",
+                    self.name,
+                    tool_name,
+                    policy_key,
+                )
+                decision = self._soft_block(
+                    ctx, tool_name, f"分级策略拒绝执行（deny）: {policy_key or tool_name}"
+                )
+            elif verdict_name == "per_call_approval" and effect in self._GRANTS_HIGH_RISK_EFFECTS:
+                decision = await self._await_approval(
+                    ctx,
+                    tool_name,
+                    f"高风险操作逐次人审（旁路档不免）: {policy_key or tool_name}",
+                    signatures=self._make_signatures(tool_name, args),
+                )
+            if decision is not None:
+                if decision.get("pre_decided_results"):
+                    return {**decision, **updates}
+                updates.update(decision)
+        return updates or None
 
     async def _dispatch_by_permission_mode(
         self,
@@ -1175,15 +1681,20 @@ class SecurityCheckPlugin(IInputPlugin):
         tool_name: str,
         action: str,
         rule_name: str | None,
-        signature: str | None,
+        signatures: list[str],
+        batch_signatures: list[str],
         mode: str,
+        action_key: str,
+        grants_status: str,
+        grants_verdict: dict[str, Any] | None,
     ) -> str | dict[str, Any]:
         """按权限模式处置未命中白名单/记忆指纹的危险工具。
 
         模式决定"未命中规则"的档位：default=确认、accept_edits=文件放行、
         auto=尽量自动。旁路档不进入本方法（_do_work 单点判定整体放行）。
         default / auto(ask) / accept_edits(命令类) 且**未命中任何规则**
-        → 参数安全，直接放行。命中 needs_approval/block 规则的参数（rm -rf 等关键词）
+        → grants 分级分流（P1 接线：规则面优先，verdict 只作用规则未覆盖分支）。
+        命中 needs_approval/block 规则的参数（rm -rf 等关键词）
         已在 _match_rules 返回对应 action，只有 action 为空（未命中）才走到放行分支；
         规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
 
@@ -1192,8 +1703,12 @@ class SecurityCheckPlugin(IInputPlugin):
             tool_name: 工具名
             action: 规则匹配动作（allow/needs_approval/block 或空）
             rule_name: 命中的规则名（未命中为空）
-            signature: 命令指纹（弹审批时供"同命令免批"记忆）
+            signatures: 当前调用的命令指纹集合（复合命令按子命令拆分）
+            batch_signatures: 本批卡面覆盖的全部命令指纹（授予面）
             mode: ``_do_work`` 解析好的生效权限档
+            action_key: grants 分级查表动作位（``_grants_action_key`` 派生）
+            grants_status: 分级裁决状态（ok/unavailable/error）
+            grants_verdict: 分级裁决结果 dict（status=ok 时非 None）
 
         Returns:
             "pass"（放行）；或处置完成的决策字典（auto 自动拒绝 / 弹审批）。
@@ -1216,11 +1731,17 @@ class SecurityCheckPlugin(IInputPlugin):
             return self._soft_block(ctx, tool_name, f"安全规则自动拒绝: {rule_name or 'block'}")
 
         if not rule_name:
-            logger.info(
-                "[%s] 黑名单规则未命中，放行 | tool=%s",
-                self.name,
-                tool_name,
+            grants_decision = await self._dispatch_grants_verdict(
+                ctx,
+                tool_name=tool_name,
+                action_key=action_key,
+                status=grants_status,
+                verdict=grants_verdict,
+                signatures=signatures,
+                batch_signatures=batch_signatures,
             )
+            if isinstance(grants_decision, dict):
+                return grants_decision
             return "pass"
         reason = "参数命中安全规则: " + rule_name
         logger.warning(
@@ -1233,7 +1754,8 @@ class SecurityCheckPlugin(IInputPlugin):
             ctx,
             tool_name,
             reason,
-            signature=signature,
+            signatures=signatures,
+            batch_signatures=batch_signatures,
         )
 
     def _explicit_permission_mode(self, ctx: PluginContext) -> str | None:
@@ -1251,15 +1773,23 @@ class SecurityCheckPlugin(IInputPlugin):
         session_id = str(ctx.state.get(StateKeys.SESSION_ID, "") or "")
         return _PERMISSION_MODES.get(session_id)
 
+    def _state_file_path(self, filename: str) -> str:
+        """实例侧持久化落点（委托模块级单键派生，读写同源）。"""
+        return _state_file_path(filename)
+
     def _resolve_permission_mode(self, ctx: PluginContext, *, isolated: bool = False) -> str:
         """解析当前调度的生效权限档（单点解析，OBS-R255-1）。
 
-        key 为 session_id（会话级模式：同会话内所有管道共享同一显式档，
-        与写入端 http.handle 同键）。优先级：用户显式选择（http.handle 写入
-        的 _PERMISSION_MODES）> 隔离免审批默认（isolated=True 且未显式选择
-        → 旁路档承载，隔离容器即安全边界）> 插件配置（pipeline yaml
-        security_check config 的 mode 字段）> 默认 "default"。
+        优先级：管道级覆盖档（本管道键或血缘链命中）> 用户显式选择
+        （http.handle 写入的 _PERMISSION_MODES，键 session_id）> 隔离免审批
+        默认（isolated=True 且未显式选择 → 旁路档承载，隔离容器即安全边界）>
+        插件配置（pipeline yaml security_check config 的 mode 字段）> 默认
+        "default"。规则降级态压制管道覆盖档（终审不可匹配 → 保守回弹卡）。
         """
+        if not self._rules_degraded:
+            override = self._pipeline_override_mode(ctx)
+            if override:
+                return override
         explicit = self._explicit_permission_mode(ctx)
         if explicit:
             return explicit
@@ -1273,7 +1803,9 @@ class SecurityCheckPlugin(IInputPlugin):
         tool_name: str,
         rule_name: str,
         *,
-        signature: str | None = None,
+        signatures: list[str] | None = None,
+        batch_signatures: list[str] | None = None,
+        final_approval: bool = False,
     ) -> dict[str, Any]:
         """等待用户审批并返回审批结果。
 
@@ -1283,17 +1815,22 @@ class SecurityCheckPlugin(IInputPlugin):
         服务的场景）。审批通过后写入 allowed=True；
         拒绝/超时/取消走 _soft_block（软拦截，反馈给 LLM）。
 
-        三个审批选项：
+        五个审批选项：
         - approved_once   : 仅本次执行通过（不记忆指纹）
         - approved_remember: 本管道内同命令（同工具+同指纹）后续免审批；
-                            仅当 signature 非空时记忆，无指纹的命令退化为"仅本次"
+                            授予面 = batch_signatures（卡上全部命令，复合命令按
+                            解析出的每条子命令各记一条），无指纹命令退化为"仅本次"
+        - approved_pipeline_scope: 本管道（含派发子树）权限档切旁路（先警告确认）
+        - approved_permanent_whitelist: 命令精确指纹入永久白名单（跨管道跨会话，
+                            授予面同 batch_signatures）
         - denied          : 拒绝（软拦截）
 
         Args:
             ctx: 插件执行上下文
             tool_name: 触发审批的工具名称
             rule_name: 触发审批的规则/原因描述
-            signature: 当前命令的归一化指纹，用于"同命令免批"记忆；None 表示无法记忆
+            signatures: 当前调用的命令指纹集合（复合命令按子命令拆分）
+            batch_signatures: 本批卡面覆盖的全部命令指纹（授予面；缺省退回 signatures）
 
         Returns:
             安全决策结果字典
@@ -1309,12 +1846,19 @@ class SecurityCheckPlugin(IInputPlugin):
         # 提取工具调用的具体参数，显示给用户审批
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         args_preview = self._format_args_for_approval(tool_calls, tool_name)
+        if final_approval:
+            args_preview += "\n\n终审操作：管道免审批不适用，须逐次确认。"
+
+        # 授予面：卡上展示的全部命令（含复合命令解析段）；缺省退回当前调用。
+        grant_signatures = list(batch_signatures) if batch_signatures is not None else list(signatures or [])
+        if not grant_signatures:
+            grant_signatures = list(signatures or [])
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
         # 拒绝记忆作用域（ADR 2026-10-01 决策 6 精确化）：工具+指纹精确键——
         # 同命令拒绝压制重试，换命令不牵连；指纹不可算时退化为工具键（与旧
-        # 标题键同粒度）。指纹复用调用方已算好的 signature。
-        memory_key = signature or tool_name
+        # 标题键同粒度）。复合命令用整批指纹拼接键，避免首段相同即误压制。
+        memory_key = "|".join(grant_signatures) if grant_signatures else tool_name
         # request_id 预初始化：create_choice_request 抛异常时尚未赋值，
         # 但 except 链日志需引用它，占位为 "-" 表示请求未创建成功。
         request_id = "-"
@@ -1326,11 +1870,14 @@ class SecurityCheckPlugin(IInputPlugin):
                     "session_id": session_id,
                     "thread_id": session_id,
                     "tab_id": "",
-                    "title": f"安全审批: {tool_name}",
+                    "title": f"终审审批: {tool_name}" if final_approval else f"安全审批: {tool_name}",
                     "description": args_preview,
                     "options": list(_APPROVAL_OPTIONS),
                     "priority": "high",
                     "memory_key": memory_key,
+                    # 审批非阻塞 M1：category 由发起方显式传（设计 §四——
+                    # 不由后端按标题猜测），安全审批恒 permission。
+                    "category": "permission",
                     # 归属归因（M2）：记录创建者用户，审批面归属校验据此放行
                     # 创建者本人（一用户一租户：user_id 即归属租户）。
                     "user_id": ctx.state.get("user_id", ""),
@@ -1393,26 +1940,43 @@ class SecurityCheckPlugin(IInputPlugin):
             # 自持 label/别名反查表。语义缺空（无契约卡的透传）按拒绝 fail-closed。
             semantics = str(result.get("selected_semantics", "") or "")
 
+            if semantics == OptionSemantics.APPROVE_PIPELINE_SCOPE.value:
+                # 「本管道后续免审批」= 管道级权限档切换（含派发子树）：先弹
+                # 警告确认（cancel/超时/服务不可用一律不切档），本次调用放行
+                # （语义含"本次+后续"；确认失败退化为"仅本次"）。
+                await self._grant_pipeline_scope(ctx, hi_cap, tool_name, rule_name)
+                return {}
+
+            if semantics == OptionSemantics.APPROVE_PERMANENT_WHITELIST.value:
+                # 永久白名单：卡上全部命令的精确指纹逐条落名单文件（跨管道
+                # 跨会话）；无指纹命令退化为"仅本次"（同 approved_remember 退化）。
+                await self._grant_permanent_whitelist(ctx, grant_signatures, tool_name)
+                return {}
+
             if semantics in (OptionSemantics.APPROVE_ONCE.value, OptionSemantics.APPROVE_AND_REMEMBER.value):
                 # "同命令免批"：记忆精确指纹，本管道内同工具+同命令后续免审批。
-                # 仅当指纹可计算时才记忆；无指纹（如无法归一化的参数）退化为"仅本次"。
-                if semantics == OptionSemantics.APPROVE_AND_REMEMBER.value and signature:
-                    self._approved_signatures.add(signature)
+                # 授予面 = 卡上全部命令（复合命令按解析段逐条记忆）；无指纹
+                # （如无法归一化的参数）退化为"仅本次"。
+                if semantics == OptionSemantics.APPROVE_AND_REMEMBER.value and grant_signatures:
+                    updates = self._remember_signatures(ctx, grant_signatures)
+                    # 授予面双写（P1）：真源 state 键已落，账本补 task 粒度
+                    # grant（subject=本管道，tool+action 类级）。
+                    await self._grants_issue_on_remember(ctx, tool_name, request_id)
                     logger.info(
-                        "[%s] Approval granted (remember signature) | request_id=%s | tool=%s | sig=%s",
+                        "[%s] Approval granted (remember signatures) | request_id=%s | tool=%s | count=%d",
                         self.name,
                         request_id,
                         tool_name,
-                        signature,
+                        len(grant_signatures),
                     )
-                else:
-                    logger.info(
-                        "[%s] Approval granted (once) | request_id=%s | tool=%s | option=%s",
-                        self.name,
-                        request_id,
-                        tool_name,
-                        result.get("selected_option", ""),
-                    )
+                    return updates
+                logger.info(
+                    "[%s] Approval granted (once) | request_id=%s | tool=%s | option=%s",
+                    self.name,
+                    request_id,
+                    tool_name,
+                    result.get("selected_option", ""),
+                )
                 return {}
 
             logger.warning(
@@ -1426,7 +1990,13 @@ class SecurityCheckPlugin(IInputPlugin):
             )
             # 审批拒绝属于软拦截——用户主观选择拒绝，不应结束管道，
             # 而是把拒绝结果作为 tool_result 返回给 LLM，让 LLM 决定下一步。
-            return self._soft_block(ctx, tool_name, f"用户拒绝执行: {rule_name}")
+            # 自由文本（审批卡下方输入框）随 feedback 回传：用户写的说明/改法
+            # 必须进入工具返回值（此前被丢弃，模型只看到笼统"拒绝"）。
+            feedback = str(result.get("feedback") or "").strip()
+            reason = f"用户拒绝执行: {rule_name}"
+            if feedback:
+                reason += f"；用户反馈: {feedback[:2000]}"
+            return self._soft_block(ctx, tool_name, reason)
 
         except InteractionDeniedError as e:
             logger.warning(
@@ -1526,6 +2096,58 @@ class SecurityCheckPlugin(IInputPlugin):
         digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
         return f"{tool_name}:{digest}"
 
+    def _make_signatures(self, tool_name: str, args: dict[str, Any]) -> list[str]:
+        """命令指纹集合：复合命令按解析出的每条子命令各算一个指纹。
+
+        命令类参数（command/cmd）先经 ``split_command_segments`` 解析（引号/
+        转义感知切 ``&&``/``||``/``;``/``|``/``&``/换行），逐段复用
+        ``_make_signature`` 的精确指纹算法；白名单/同命令免批按段授权，
+        用户卡上看到的每条命令都可单独复用（而非整串复合命令一个指纹）。
+        无命令参数（路径/内容/代码类）或解析为空 → 退回单指纹。
+        """
+        command = args.get("command") or args.get("cmd")
+        if isinstance(command, str) and command.strip():
+            key = (
+                "command"
+                if isinstance(args.get("command"), str) and str(args.get("command")).strip()
+                else "cmd"
+            )
+            signatures: list[str] = []
+            for segment in split_command_segments(command):
+                signature = self._make_signature(tool_name, {**args, key: segment})
+                if signature and signature not in signatures:
+                    signatures.append(signature)
+            if signatures:
+                return signatures
+        signature = self._make_signature(tool_name, args)
+        return [signature] if signature else []
+
+    def _approval_batch_signatures(
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict[str, Any]],
+        *,
+        isolated: bool,
+    ) -> list[str]:
+        """本批审批卡覆盖的全部命令指纹（逐调用解析子命令，去重保序）。
+
+        授权粒度 = 逐条精确指纹（含完整参数）；卡面「解析出的免审批命令」列表
+        是展示粒度（按可执行文件名归并），故卡面条目数 ≤ 授权面指纹数——如
+        `rm -rf /tmp/a` + `rm -rf /tmp/b` → 卡面 1 条 / 授权面 2 枚指纹。归并键
+        不进本方法输入输出。非隔离批次按危险工具门槛过滤（安全工具不进授权
+        面）；隔离批次全量收（规则轨道对全部调用生效）。
+        """
+        signatures: list[str] = []
+        for tc in tool_calls:
+            # 卡面指纹按展开后的目标工具算：用户看到的命令就是被授权的命令。
+            tool_name, args = _effective_tool_call(tc)
+            if not isolated and not self._is_dangerous_tool(ctx, tool_name, args):
+                continue
+            for signature in self._make_signatures(tool_name, args):
+                if signature not in signatures:
+                    signatures.append(signature)
+        return signatures
+
     def _soft_block(
         self,
         ctx: PluginContext,
@@ -1569,20 +2191,29 @@ class SecurityCheckPlugin(IInputPlugin):
             metadata["approval_channel_missing"] = True
         entries: list[dict[str, Any]] = []
         for tc in tool_calls:
-            if tc.get("name", "") != tool_name:
+            # 按展开名匹配：动态转发壳被拦时条目名是 call_tool，判定名是目标工具
+            if _effective_tool_call(tc)[0] != tool_name:
                 continue
             extra: dict[str, Any] = {}
             if retry_allowed:
                 # 参数原样透传（dict/str JSON 均可），duplicate_check 侧归一定签名
                 extra["retry_allowed"] = True
                 extra["arguments"] = tc.get("arguments", tc.get("args", {}))
+            # 条目名必须是**原调用名**（call_tool），不是展开后的目标名：tool_core 的
+            # match_entries 先按 call_id 匹配、**无 id 时按 entry.tool_name == tc.name
+            # 兜底**——写目标名会让兜底失配，预填拒绝不生效（动态调用照常执行）。
+            # 目标名经 metadata.target_tool 下行，供 duplicate_check 落动态桶。
+            call_name = str(tc.get("name", "") or "")
+            entry_meta = dict(metadata)
+            if tool_name != call_name:
+                entry_meta["target_tool"] = tool_name
             entries.append(
                 tool_result_entry(
-                    tool_name,
+                    call_name or tool_name,
                     call_id=tc.get("id"),
                     success=False,
                     error=f"[审批拒绝] {reason}",
-                    metadata=metadata,
+                    metadata=entry_meta,
                     **extra,
                 )
             )
@@ -1647,11 +2278,21 @@ class SecurityCheckPlugin(IInputPlugin):
             触发工具的 args 字典；找不到时返回空字典
         """
         for tc in tool_calls:
-            if tc.get("name", "") == tool_name:
-                args = tc.get("args", tc.get("arguments", {}))
-                if isinstance(args, str):
-                    return {}
-                return args if isinstance(args, dict) else {}
+            call_name = str(tc.get("name", "") or "")
+            judged_name, judged_args = _effective_tool_call(tc)
+            if judged_name != tool_name:
+                continue
+            if call_name == DYNAMIC_FORWARD_TOOL and judged_name != call_name:
+                # 转发壳条目必须用**展开后的目标参数**：外层参数是
+                # {"tool":..., "arguments":{...}}，_make_signature 只看顶层
+                # command/code/content/path* → 取外层恒得 None、拒绝计数永不
+                # 累计（同一被拦动态危险调用可无限重试）。
+                return judged_args if isinstance(judged_args, dict) else {}
+            # 非转发壳调用保持原语义（字符串 args 不解析 → 无指纹）
+            raw_args = tc.get("args", tc.get("arguments", {}))
+            if isinstance(raw_args, str):
+                return {}
+            return raw_args if isinstance(raw_args, dict) else {}
         return {}
 
     @staticmethod
@@ -1666,11 +2307,19 @@ class SecurityCheckPlugin(IInputPlugin):
             格式化的审批描述文本，包含工具名 + 具体操作内容预览
         """
         lines = ["请审批以下工具执行请求：", ""]
+        parsed_segments: list[str] = []
 
         for tc in tool_calls:
-            name = tc.get("name", "")
-            args = _coerce_tool_args(tc)
+            call_name = str(tc.get("name", "") or "")
+            # 卡面必须展示**被判定的真实操作**：call_tool 条目若按外层参数渲染，
+            # args.get("command") 恒空 → 用户对一条危险命令点「批准」却看不到命令
+            # 内容（人审同意面失真；叠加「永久白名单」按命令指纹授权的后果更重）。
+            name, args = _effective_tool_call(tc)
             lines.append(f"工具: {name}")
+            if name != call_name:
+                lines.append(f"（经 {call_name} 动态转发；审批与授权按目标工具 {name} 展开）")
+            if not isinstance(args, dict):
+                args = _coerce_tool_args(tc)
 
             # 提取关键参数：命令、路径、代码等
             # 命令类（bash_execute 等）
@@ -1681,6 +2330,8 @@ class SecurityCheckPlugin(IInputPlugin):
                 if len(str(cmd)) > 500:
                     cmd_preview += "\n... (命令过长，已截断)"
                 lines.append(f"命令:\n{cmd_preview}")
+                # 命令免审批按解析出的每条子命令授权（指纹逐段精确）；卡面列表按命令级归并（同命令只列一条，条数与参数摘要行内标注）。
+                parsed_segments.extend(split_command_segments(str(cmd)))
 
             # 路径类（file_write/read/delete 等）
             for path_key in ("path", "file_path", "directory", "dest", "target", "output_path", "working_dir"):
@@ -1710,6 +2361,10 @@ class SecurityCheckPlugin(IInputPlugin):
                 lines.append(f"URL: {url}")
 
             lines.append("")
+
+        # 本批全部调用的命令按命令级归并展示（同命令不同参数只列一条）。
+        if len(parsed_segments) > 1:
+            lines.extend(format_parsed_command_list(parsed_segments))
 
         return "\n".join(lines).strip()
 
@@ -1821,62 +2476,68 @@ class SecurityCheckPlugin(IInputPlugin):
         best_allow: tuple[str, str] = ("", "")
         allow_priority = -1
         for rule in self._rules:
-            # 检查工具是否匹配（支持 ["*"] 通配 + 可选模糊匹配）
-            tools = rule.get("tools", [])
-            if not self._tool_matches_rule(tool_name, tools):
+            if not self._rule_hit(rule, tool_name, args):
                 continue
-
-            params = rule.get("params", [])
-            boundary_exempt = bool(rule.get("workspace_boundary_exempt"))
-            for param_name in params:
-                value = args.get(param_name)
-                if value is None:
-                    continue
-                value_str = str(value)
-                if boundary_exempt:
-                    value_str = self._scrub_workspace_boundary_paths(value_str)
-
-                patterns = rule.get("patterns", [])
-                for pattern_def in patterns:
-                    pat_type = pattern_def.get("type", "keyword")
-                    pat_value = pattern_def.get("value", "")
-
-                    matched = False
-                    if pat_type == "keyword":
-                        # S4 安全整改（评估 2026-09-24 / 执行方案批次 1）：argv
-                        # 归一化匹配——裸子串匹配可被空白变体绕过（"rm  -rf"
-                        # 双空格不含单空格子串 "rm -rf"）。归一化 = shlex 分词
-                        # （解析失败的退化输入回退按任意空白切分）后单空格
-                        # 重join + 大小写折叠，语义保持（只吃空白/大小写差异）。
-                        if self._keyword_in(pat_value, value_str):
-                            matched = True
-                    elif pat_type == "regex":
-                        # 正则匹配
-                        try:
-                            if re.search(pat_value, value_str):
-                                matched = True
-                        except re.error:
-                            logger.warning(
-                                "[%s] Invalid regex in rule '%s': %s",
-                                self.name,
-                                rule.get("name", "?"),
-                                pat_value,
-                            )
-
-                    if matched:
-                        action = rule.get("action", "block")
-                        rule_name = rule.get("name", "unknown")
-                        priority = self._rule_priority(rule)
-                        if action == "allow":
-                            # 记录最高优先级 allow（平级取先声明者）
-                            if priority > allow_priority:
-                                best_allow, allow_priority = (action, rule_name), priority
-                        elif priority > reject_priority:
-                            first_reject, reject_priority = (action, rule_name), priority
+            action = rule.get("action", "block")
+            rule_name = rule.get("name", "unknown")
+            priority = self._rule_priority(rule)
+            if action == "allow":
+                # 记录最高优先级 allow（平级取先声明者）
+                if priority > allow_priority:
+                    best_allow, allow_priority = (action, rule_name), priority
+            elif priority > reject_priority:
+                first_reject, reject_priority = (action, rule_name), priority
 
         if best_allow[0] and allow_priority >= reject_priority:
             return best_allow
         return first_reject
+
+    def _rule_hit(self, rule: dict[str, Any], tool_name: str, args: dict[str, Any]) -> bool:
+        """单规则命中判定（工具/参数/关键词/正则；匹配面双入口共用）。
+
+        `_match_rules`（action 裁决）与 `_match_final_approval`（终审匹配）共用
+        本判定，防两套匹配逻辑漂移。
+        """
+        # 检查工具是否匹配（支持 ["*"] 通配 + 可选模糊匹配）
+        tools = rule.get("tools", [])
+        if not self._tool_matches_rule(tool_name, tools):
+            return False
+
+        params = rule.get("params", [])
+        boundary_exempt = bool(rule.get("workspace_boundary_exempt"))
+        for param_name in params:
+            value = args.get(param_name)
+            if value is None:
+                continue
+            value_str = str(value)
+            if boundary_exempt:
+                value_str = self._scrub_workspace_boundary_paths(value_str)
+
+            for pattern_def in rule.get("patterns", []):
+                pat_type = pattern_def.get("type", "keyword")
+                pat_value = pattern_def.get("value", "")
+
+                if pat_type == "keyword":
+                    # S4 安全整改（评估 2026-09-24 / 执行方案批次 1）：argv
+                    # 归一化匹配——裸子串匹配可被空白变体绕过（"rm  -rf"
+                    # 双空格不含单空格子串 "rm -rf"）。归一化 = shlex 分词
+                    # （解析失败的退化输入回退按任意空白切分）后单空格
+                    # 重join + 大小写折叠，语义保持（只吃空白/大小写差异）。
+                    if self._keyword_in(pat_value, value_str):
+                        return True
+                elif pat_type == "regex":
+                    # 正则匹配
+                    try:
+                        if re.search(pat_value, value_str):
+                            return True
+                    except re.error:
+                        logger.warning(
+                            "[%s] Invalid regex in rule '%s': %s",
+                            self.name,
+                            rule.get("name", "?"),
+                            pat_value,
+                        )
+        return False
 
     def _scrub_workspace_boundary_paths(self, value: str) -> str:
         """剔除参数值中用户根 workspaces 地界内的路径（声明豁免规则的匹配面收缩）。

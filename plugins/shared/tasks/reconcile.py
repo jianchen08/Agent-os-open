@@ -34,8 +34,9 @@ run 域的用户停止词，照旧），词汇 = stopped（ADR 2026-10-30 词汇
   与簿记脱钩——实证事故链起点）；
 - 僵尸告警：任务投影真终态（completed/failed）× run 簿记非终态
   （running/suspended）→ 纯 logger.warning 不裁决。**写不了也不该写**：
-  本插件 manifest state.writes 只声明 task.*（run 簿记键不在声明面，
-  双状态裁定「run_status 内核持有、插件不可写」的机械执法），run 簿记
+  本插件 manifest state.writes 只声明 task.* 与 run.plugin_errors 单键
+  （后者 = 第八刀界内收敛唯一 run 侧出口；run 簿记键不在声明面，双状态裁定
+  「run_status 内核持有、插件不可写」的机械执法），run 簿记
   残留属内核域，由该管道下一次 run 的 init/finalize 自然重写收敛；
 - 历史迁移：任务投影 cancelled（含历史 canceled 双拼写）存量行 → stopped
   （一次性开机通过，词汇退役收尾）。
@@ -230,6 +231,15 @@ _TERMINAL_REPLAY_RUN_EVENTS: dict[str, str] = {
     "failed": "run.failed",
 }
 
+_CRASH_SWEEP_REASON = "crash_swept"
+"""内核崩溃清扫署名（reap_orphan_runs）。
+
+带此署名的 failed run 属“重启打断”而非真失败：reconcile **不投影**
+task.status=failed——任务保持 running，由 tasks boot 自动恢复
+（auto_resume_drained_tasks）拉起续跑轮；拉起失败才写 failed
+（failure_class=relaunch_failed）。ADR 2026-11-13-crash-swept-no-failed-task-projection。
+"""
+
 # 未回执补发面的时效窗（ADR 2026-10-28 D2-1）：只有「上一轮工作窗口内漏发」
 # 的候选才补发；更早的漏发属历史积压 → 转人工治理（既不通知也不静默清回执）。
 #
@@ -392,6 +402,10 @@ async def reconcile_startup(
     # 第七刀（ADR 2026-11-02-state-key-governance）：timeout 死枚举值存量行
     # → failed（同迁移刀形态，簿记读面无关）。
     divergences.extend(await _migrate_legacy_timeout_rows(state_cap, rows))
+    # 第八刀（ADR 2026-11-17-bounded-error-ledger-and-iteration-cow P4 延伸）：
+    # 遗留 run.plugin_errors 超界行收敛（有界账本只管新写，存量行无收缩机制，
+    # 前端快照每轮原样拖出）。键级机械收敛，不设任务身份守卫（引擎镜像键）。
+    divergences.extend(await _migrate_legacy_plugin_error_rows(state_cap, rows))
     # 第六刀（ADR 2026-11-02-state-key-governance）：幽灵 owned 登记清理
     # （子管道行已不存在的登记键与挂号键回收；读面无关，全量行即判据）。
     divergences.extend(await _sweep_ghost_owned_registrations(state_cap, rows))
@@ -503,13 +517,24 @@ async def reconcile_startup(
             "kind": kind,
         }
         if kind == "undecided_run_terminal" and run_status in ("failed", "cancelled"):
-            entry["followed_write"] = (
-                await _follow_write_failed(
+            if run_status == "cancelled":
+                entry["followed_write"] = await _follow_write_user_stop(
+                    state_cap, pid, run, task_id
+                )
+            elif str(row.get("run_stop_reason") or "") == _CRASH_SWEEP_REASON:
+                # 崩溃清扫行不投影 failed：任务保持 running，boot 自动恢复直接
+                # 拉起续跑轮；只有拉起失败才由 auto_resume 写 failed。
+                entry["deferred"] = "crash_swept_auto_resume"
+                logger.info(
+                    "[task_reconcile] 崩溃清扫行不投影 failed（等自动恢复拉起）"
+                    "| pipeline=%s | task=%s",
+                    pid,
+                    task_id,
+                )
+            else:
+                entry["followed_write"] = await _follow_write_failed(
                     state_cap, pid, run, task_id, str(row.get("run_stop_reason") or "")
                 )
-                if run_status == "failed"
-                else await _follow_write_user_stop(state_cap, pid, run, task_id)
-            )
             # owned 镜像已退役（ADR 2026-11-02-state-key-governance）：父会话
             # 面板 join 子行真值，无镜像可随写。
         if kind == "suspended_run_drain":
@@ -864,6 +889,113 @@ async def _migrate_legacy_timeout_rows(
                 "task_id": task_id,
                 "kind": "legacy_timeout_migrated",
                 "legacy": "timeout",
+                "migrated": migrated,
+            }
+        )
+    return out
+
+
+# ═══════════════════════════════════════════════════════════
+# 第八刀：遗留 run.plugin_errors 超界行收敛
+# （ADR 2026-11-17-bounded-error-ledger-and-iteration-cow P4 延伸）
+# ═══════════════════════════════════════════════════════════
+
+# 界值镜像引擎侧 kernel/crates/engine MAX_PLUGIN_ERROR_ENTRIES /
+# MAX_PLUGIN_ERROR_MESSAGE_CHARS（跨语言共以此 ADR 为协调点，改动须同刀）。
+_MAX_PLUGIN_ERROR_ENTRIES = 8
+_MAX_PLUGIN_ERROR_MESSAGE_CHARS = 1024
+_PLUGIN_ERROR_DEFAULT_CODE = "PLUGIN_EXEC_FAILED"
+
+
+def _canonicalize_plugin_errors(entries: list[Any]) -> list[dict[str, Any]] | None:
+    """遗留错误数组 → 引擎物化形态（``materialize_plugin_errors`` 同构）。
+
+    Returns:
+        界内（≤8 条且无超长 message）→ None（无需迁移，幂等省写）；
+        超界 → 聚合收敛结果：按 ``(plugin_id, message)`` 聚合、首现序保留、
+        末见 code 胜出、count = 全史出现次数、message 先截 1024 字符再聚合
+        （同引擎记账口径）、截到前 8 组（引擎「第 9 种及以后丢弃」同界）。
+        非 dict 条目不可解释，重构时丢弃。
+    """
+    dicts = [e for e in entries if isinstance(e, dict)]
+    over_bound = len(entries) > _MAX_PLUGIN_ERROR_ENTRIES or any(
+        len(str(e.get("message") or "")) > _MAX_PLUGIN_ERROR_MESSAGE_CHARS
+        for e in dicts
+    )
+    if not over_bound:
+        return None
+    out: list[dict[str, Any]] = []
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in dicts:
+        message = str(e.get("message") or "")[:_MAX_PLUGIN_ERROR_MESSAGE_CHARS]
+        key = (str(e.get("plugin_id") or ""), message)
+        code = str(e.get("code") or _PLUGIN_ERROR_DEFAULT_CODE)
+        seen = index.get(key)
+        if seen is None:
+            entry: dict[str, Any] = {
+                "plugin_id": key[0],
+                "code": code,
+                "message": message,
+                "count": 1,
+            }
+            index[key] = entry
+            if len(out) < _MAX_PLUGIN_ERROR_ENTRIES:
+                out.append(entry)
+        else:
+            seen["count"] += 1
+            seen["code"] = code
+    return out
+
+
+async def _migrate_legacy_plugin_error_rows(
+    state_cap: Any, rows: list[Any]
+) -> list[dict[str, Any]]:
+    """第八刀：遗留 ``run.plugin_errors`` 超界行收敛到引擎物化形态。
+
+    背景：有界错误账本（ADR 2026-11-17）只管新写——修复前旧内核逐次追加
+    无界（装机实测单行 395KB / 单行 1152 条），存量行无任何收缩机制，前端
+    state 快照每轮轮询原样拖出（实测 3.2MB/次）。本刀按键收敛，不设任务
+    身份守卫：该键是引擎镜像键非任务域键，快照膨胀面覆盖会话管道（任务树
+    与会话面板同源消费）。写失败降级留痕（观测面不阻断装载），下轮装载重试。
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = state_fields.as_list(
+            row.get("run.plugin_errors"), field="run.plugin_errors"
+        )
+        if not raw:
+            continue
+        canonical = _canonicalize_plugin_errors(raw)
+        if canonical is None:
+            continue
+        pid = str(row.get("pipeline_id") or "")
+        migrated = False
+        try:
+            await state_cap.call(
+                "update",
+                {"pipeline_id": pid, "fields": {"run.plugin_errors": canonical}},
+            )
+            migrated = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[task_reconcile] plugin_errors 历史迁移写失败（降级留痕，下轮装载重试）"
+                "| pipeline=%s | before=%d | err=%s",
+                pid, len(raw), exc,
+            )
+        else:
+            logger.info(
+                "[task_reconcile] plugin_errors 历史迁移完成 | pipeline=%s | "
+                "%d 条 → %d 组（界内收敛）",
+                pid, len(raw), len(canonical),
+            )
+        out.append(
+            {
+                "pipeline_id": pid,
+                "kind": "legacy_plugin_errors_bounded",
+                "before": len(raw),
+                "after": len(canonical),
                 "migrated": migrated,
             }
         )

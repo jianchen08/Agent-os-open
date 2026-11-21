@@ -57,6 +57,51 @@ pub const DEFAULT_DEBOUNCE: std::time::Duration = std::time::Duration::from_mill
 /// 轮询只兜底不抢跑。
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 默认同步冷却基值（1c 风暴降噪，2026-11-18）：完整发现循环之间的最小间隔。
+///
+/// 防抖（[`DEFAULT_DEBOUNCE`]）只合并窗口内事件——编辑风暴期波次间隔稍大于
+/// 防抖窗就会各跑一整轮全量 discover（100+ 清单跨全部根枚举+校验；装机实测
+/// 19:05/19:31/19:35 反复 "Manifest validated" + Same-id 裁决波，放大合宿
+/// 装载扫描）。冷却把风暴期 sync 频率钳到基值，连续无变化轮按 ×2 退避
+/// （上限 = 轮询间隔，见 [`sync_cooldown_for`]）。可经
+/// `AGENTOS_PLUGIN_WATCHER_COOLDOWN_MS` 覆盖。
+pub const DEFAULT_SYNC_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// 解析 `AGENTOS_PLUGIN_WATCHER_COOLDOWN_MS`（1c 冷却基值覆盖；非法/缺省回默认）。
+fn sync_cooldown_from_env() -> std::time::Duration {
+    match std::env::var("AGENTOS_PLUGIN_WATCHER_COOLDOWN_MS") {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v > 0)
+            .map_or(DEFAULT_SYNC_COOLDOWN, std::time::Duration::from_millis),
+        Err(_) => DEFAULT_SYNC_COOLDOWN,
+    }
+}
+
+/// 同步冷却（纯函数）：连续无变化轮次 → 本轮应等待的最小间隔。
+///
+/// `idle_streak = 0`（上轮有变化/首轮）→ 基值（风暴期波次合并的最小窗）；
+/// 连续无变化 → ×2 指数退避；上限恒为 `max`（生产传轮询间隔——退避永不
+/// 吞轮询节奏，无变化期零额外延迟）。无 IO 无时钟，可同步单测。
+pub fn sync_cooldown_for(idle_streak: u32, base: Duration, max: Duration) -> Duration {
+    let factor = 2u32.saturating_pow(idle_streak.min(30));
+    base.saturating_mul(factor).min(max)
+}
+
+/// 无变化轮判定（1c 退避依据）：报告任一变更面非空即「有变化」——新增/
+/// 变更/卸载/连带卸载/cdylib 集合变更/漂移/依赖拒绝任一出现都重置退避。
+fn report_has_changes(report: &SyncReport) -> bool {
+    !report.new_plugin_ids.is_empty()
+        || !report.changed_plugin_ids.is_empty()
+        || !report.uninstalled.is_empty()
+        || !report.cascade_uninstalled.is_empty()
+        || !report.drifted_plugins.is_empty()
+        || !report.dependency_rejected.is_empty()
+        || report.cdylib_change.is_some()
+}
+
 /// 进程级 G2 tools/list 观测失败累计（重试退避穷尽后探测通道仍不可用）。
 ///
 /// 唯一 inc 点 = [`g2_verify_and_sanitize`] 的 `Err` 分支（spawn_failed=true
@@ -104,8 +149,9 @@ pub struct SyncReport {
     pub tools_registered: usize,
     /// 本次注册的插件 HTTP 端点数（写入 capability_registry → /ext/* catch-all 立即转发）。
     pub http_routes_registered: usize,
-    /// G2：本次发现但**拒绝注册漂移工具**的插件 id（安装期一致性校验——声明 vs
-    /// 实际暴露不一致的贡献被拒绝，其余能力照常注册；报告可见不静默）。
+    /// G2：本次发现但**判定漂移**的插件 id（安装期一致性校验——声明 vs 实际
+    /// 暴露不一致的工具记入 rejected_tools，声明 schema 保留在工具面、调用时
+    /// 显式失败；其余能力照常注册；报告可见不静默）。
     pub drifted_plugins: Vec<String>,
     /// Phase 0（注册闸 L1）：本轮被 enablement profile 过滤（disabled）而未注册的
     /// 插件数——热发现路径与启动期注册循环对齐，按 enablement profile 过滤。
@@ -276,16 +322,28 @@ pub fn apply_discovered_plugins(
 /// G2 校验+净化结果。
 #[derive(Debug, Clone)]
 pub struct G2VerifyOutcome {
-    /// 校验后的 manifest：漂移工具被剔除；strict + spawn 失败时 tools 被清空。
+    /// 校验后的 manifest：**声明原样保留**（被拒工具的 schema 继续进工具面，
+    /// 调用时经账本显式失败，ADR 2026-11-12）；零声明 external MCP 回填观测
+    /// 导入的工具。
     pub manifest: PluginManifest,
-    /// 被拒绝注册的工具名（漂移 missing/schema_mismatch / strict 失败全量 / 冒烟失败）。
+    /// 判定不可调用的声明工具名（漂移 missing/schema_mismatch / output_schema
+    /// 畸形 / 冒烟失败 / provides 方法未回铺）——注册面保留声明，调用经账本拦截。
     pub rejected_tools: Vec<String>,
-    /// 存在漂移信号（missing/schema_mismatch 或仅有 undeclared）。
+    /// 存在**硬漂移**（missing / schema_mismatch——有调用面后果）。软漂移
+    /// （undeclared 多暴露 / descriptive_drift 描述漂移）只记录不置位，
+    /// 不染红插件级契约状态（ADR 2026-11-18-g2-tiered-drift-severity）。
     pub drift: bool,
+    /// 存在**软漂移**（undeclared 多暴露 / descriptive_drift 描述漂移）——
+    /// 只影响观测留痕（validate-all 报告 / 留痕日志），不拒绝、不染红
+    /// 插件级契约状态。与 `drift` 互斥（同一次判定二者至多一真）。
+    pub soft_drift: bool,
     /// spawn/tools-list 本身失败（区别于"比对出漂移"）。
     pub spawn_failed: bool,
     /// 注册闸冒烟（smoke:true 工具）有调用失败被拒。
     pub smoke_failed: bool,
+    /// 拒绝工具已按「声明 schema 保留在工具面 + 调用时显式失败」处置
+    /// （注册/复验路径 true；validate-all 巡检只报告不处置 false）。
+    pub stub_armed: bool,
 }
 
 /// 从 JSON Schema 生成一条代表性样例输入（注册闸冒烟用）。
@@ -321,9 +379,15 @@ pub fn sample_value_from_schema(schema: &serde_json::Value) -> serde_json::Value
 
 /// 注册闸：`output_schema` 声明合法性（与插件其它声明同一套 fail-closed——
 /// 不再是 tool_core 运行时才暴露的特殊小岛）。畸形声明 → 拒绝该工具并返回名单。
-fn reject_malformed_output_schemas(manifest: &mut PluginManifest) -> Vec<String> {
+fn reject_malformed_output_schemas(
+    manifest: &PluginManifest,
+    already_rejected: &[String],
+) -> Vec<String> {
     let mut rejected = Vec::new();
     for tool in &manifest.capabilities.tools {
+        if already_rejected.contains(&tool.name) {
+            continue;
+        }
         if let Some(out) = &tool.output_schema {
             if let Some(msg) = output_schema_error(out) {
                 warn!(
@@ -331,17 +395,11 @@ fn reject_malformed_output_schemas(manifest: &mut PluginManifest) -> Vec<String>
                     plugin = %manifest.id,
                     tool = %tool.name,
                     error = %msg,
-                    "注册闸：output_schema 声明不合法，拒绝该工具（声明即校验）"
+                    "注册闸：output_schema 声明不合法，拒绝该工具（声明即校验；声明 schema 保留在工具面，调用显式失败）"
                 );
                 rejected.push(tool.name.clone());
             }
         }
-    }
-    if !rejected.is_empty() {
-        manifest
-            .capabilities
-            .tools
-            .retain(|t| !rejected.contains(&t.name));
     }
     rejected
 }
@@ -370,17 +428,19 @@ pub(crate) fn member_scoped_actual_tools(
 }
 
 /// 注册闸冒烟：对声明了 `smoke: true` 的工具构造样例输入真调一次，验证"基本能力
-/// 能跑"（fail-closed）。调用异常/返回 failure → 拒绝该工具 + 记 `smoke_failed`。
+/// 能跑"（fail-closed）。调用异常/返回 failure → 拒绝该工具 + 记 `smoke_failed`
+/// （拒绝=记入名单，声明 schema 保留在工具面、调用显式失败，ADR 2026-11-12）。
 /// 副作用敏感/需要真实参数的能力由插件**显式** `smoke: true` 才被冒烟——缺省不冒烟，
-/// 避免注册期误伤生产工具。
+/// 避免注册期误伤生产工具；已被前面判拒的工具不重复冒烟。
 async fn run_smoke(
     invoker: &dyn PluginInvoker,
-    manifest: &mut PluginManifest,
+    manifest: &PluginManifest,
+    already_rejected: &[String],
 ) -> (Vec<String>, bool) {
     let mut rejected = Vec::new();
     let mut failed = false;
     for tool in &manifest.capabilities.tools {
-        if tool.smoke != Some(true) {
+        if tool.smoke != Some(true) || already_rejected.contains(&tool.name) {
             continue;
         }
         let sample =
@@ -418,12 +478,6 @@ async fn run_smoke(
             }
         }
     }
-    if !rejected.is_empty() {
-        manifest
-            .capabilities
-            .tools
-            .retain(|t| !rejected.contains(&t.name));
-    }
     (rejected, failed)
 }
 
@@ -439,7 +493,8 @@ const DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS: u32 = 5;
 
 /// BUG-51 复验预算上限：观测失败（账本 verify_incomplete）插件的自动复验
 /// 连续失败达 N 轮即落终态 verify_failed（账本可见，插件管理 error 透出原因），
-/// 停止该插件的逐轮自动重验，工具面保持遮挡（判定「插件当前不可用」，卡2）。
+/// 停止该插件的逐轮自动重验，工具面保留声明 schema、调用保持拦截
+/// （判定「插件当前不可用」，卡2；ADR 2026-11-12 后不再遮挡工具面）。
 /// 声明/代码指纹变化（用户动手修）或复验成功即重置预算。不设上限的逐轮
 /// spawn 复验只会对真坏插件无限燃烧进程与日志。
 ///
@@ -490,14 +545,17 @@ fn is_dynamic_mcp(manifest: &PluginManifest) -> bool {
 ///
 /// - 无 tools 且无 services（route 仅插件 / InProcess / native）→ 跳过，原样返回；
 ///   例外：零声明的 external MCP（[`is_dynamic_mcp`]）不跳过——观测导入其全部工具；
-/// - 比对出可拒绝漂移（missing / schema_mismatch）→ 剔除漂移工具，其余照常；
+/// - 比对出可拒绝漂移（missing / schema_mismatch）→ 工具记入 `rejected_tools`
+///   （命中声明工具即 `stub_armed=true`），**manifest 声明原样保留**：schema
+///   继续进工具面（失败桩），调用时经契约账本显式失败（ADR 2026-11-12）；
 /// - spawn/list_tools 失败 = **观测失败 ≠ 判定失败**：重试 2 次（退避见
 ///   [`G2_OBSERVE_RETRY_BACKOFF_MS`]）后仍失败 → 保留声明注册不动
-///   （spawn_failed=true 供账本标记"校验未完成"，调用方择机复验）。观测通道
-///   故障永远无权处置被校验对象——不得把好插件工具砍掉；
-/// - 声明了 `smoke: true` 的工具 → 样例输入真调一次，失败拒绝（fail-closed）。
+///   （spawn_failed=true 供账本标记"校验未完成"，调用侧临时拦截并如实说明）；
+///   观测通道故障永远无权处置被校验对象——不得把好插件工具砍掉；
+/// - 声明了 `smoke: true` 的工具 → 样例输入真调一次，失败记入 `rejected_tools`
+///   （fail-closed，同样保留声明 schema 在面）。
 ///
-/// 纯校验+净化，无注册副作用；调用方决定后续注册行为。
+/// 纯校验+判定，无注册副作用；调用方决定后续注册行为（注册面恒按声明注册）。
 pub async fn g2_verify_and_sanitize(
     invoker: &dyn PluginInvoker,
     manifest: PluginManifest,
@@ -515,8 +573,10 @@ pub async fn g2_verify_and_sanitize(
             manifest,
             rejected_tools: Vec::new(),
             drift: false,
+            soft_drift: false,
             spawn_failed: false,
             smoke_failed: false,
+            stub_armed: false,
         };
     }
     let listed = 'probe: {
@@ -583,8 +643,10 @@ pub async fn g2_verify_and_sanitize(
                     manifest,
                     rejected_tools: Vec::new(),
                     drift: false,
+                    soft_drift: false,
                     spawn_failed: false,
                     smoke_failed: false,
+                    stub_armed: false,
                 };
             }
             // 合宿成员（声明 host_group，任意组名）的工具经宿主注册为 `{plugin_id}.{tool}`
@@ -599,30 +661,42 @@ pub async fn g2_verify_and_sanitize(
             };
             let mismatches = compare_tools(&declared_with_services(&manifest), &actual);
             let rejected = rejected_tool_names(&mismatches);
-            let mut outcome = if rejected.is_empty() {
-                G2VerifyOutcome {
-                    manifest,
-                    rejected_tools: Vec::new(),
-                    drift: !mismatches.is_empty(),
-                    spawn_failed: false,
-                    smoke_failed: false,
-                }
-            } else {
-                let mut sanitized = manifest;
-                sanitized
-                    .capabilities
-                    .tools
-                    .retain(|t| !rejected.contains(&t.name));
-                G2VerifyOutcome {
-                    manifest: sanitized,
-                    rejected_tools: rejected.into_iter().collect(),
-                    drift: true,
-                    spawn_failed: false,
-                    smoke_failed: false,
-                }
+            // 插件级 drift = **硬漂移**（missing / schema_mismatch，有调用面后果）。
+            // 软漂移（undeclared 上游多暴露 / descriptive_drift 描述文本漂移）只记录
+            // 不染红插件状态——它们不影响任何一次真实调用的成败，源级/描述级差异
+            // ≠ 适配器失效（ADR 2026-11-18-g2-tiered-drift-severity；
+            // 2026-11-18 omnisearch 事故：56 条 undeclared 噪音把修好的插件永久
+            // 顶在 drifted 状态）。
+            let hard_drift = mismatches.iter().any(|m| {
+                matches!(
+                    m,
+                    agentos_invoker::verify::VerifyMismatch::Missing { .. }
+                        | agentos_invoker::verify::VerifyMismatch::SchemaMismatch { .. }
+                )
+            });
+            let soft_drift = !hard_drift
+                && mismatches.iter().any(|m| {
+                    matches!(
+                        m,
+                        agentos_invoker::verify::VerifyMismatch::Undeclared { .. }
+                            | agentos_invoker::verify::VerifyMismatch::DescriptiveDrift { .. }
+                    )
+                });
+            // 声明原样保留（ADR 2026-11-12）：被拒工具仍以 manifest 声明的
+            // schema 注册进工具面（失败桩），调用时经账本显式失败——工具数组
+            // 不因 G2 判定/复验转正增减，prompt 前缀缓存稳定。
+            let mut outcome = G2VerifyOutcome {
+                manifest,
+                rejected_tools: rejected.into_iter().collect(),
+                drift: hard_drift,
+                soft_drift,
+                spawn_failed: false,
+                smoke_failed: false,
+                stub_armed: false,
             };
             // output_schema 声明合法性：畸形 → 拒绝该工具（声明即校验，fail-closed）
-            let malformed = reject_malformed_output_schemas(&mut outcome.manifest);
+            let malformed =
+                reject_malformed_output_schemas(&outcome.manifest, &outcome.rejected_tools);
             if !malformed.is_empty() {
                 outcome.drift = true;
                 outcome.rejected_tools.extend(malformed);
@@ -640,13 +714,24 @@ pub async fn g2_verify_and_sanitize(
                 outcome.drift = true;
                 outcome.rejected_tools.extend(unregistered);
             }
-            // 冒烟：声明了 smoke:true 的工具样例调用一次，失败剔除（fail-closed）
-            let (smoke_rejected, smoke_failed) = run_smoke(invoker, &mut outcome.manifest).await;
+            // 冒烟：声明了 smoke:true 的工具样例调用一次，失败拒绝（fail-closed）；
+            // 已被前面判拒的工具不重复冒烟（避免对必败工具额外 spawn 调用）。
+            let (smoke_rejected, smoke_failed) =
+                run_smoke(invoker, &outcome.manifest, &outcome.rejected_tools).await;
             if smoke_failed {
                 outcome.smoke_failed = true;
                 outcome.drift = true;
                 outcome.rejected_tools.extend(smoke_rejected);
             }
+            // 拒绝工具统一按失败桩处置（声明 schema 保留在工具面、调用显式失败）。
+            // 只有确实命中声明工具的拒绝才武装（provides 未回铺的服务名无工具可桩，
+            // 账本仍记 drift 而非 sanitized）。
+            outcome.stub_armed = outcome
+                .manifest
+                .capabilities
+                .tools
+                .iter()
+                .any(|t| outcome.rejected_tools.contains(&t.name));
             outcome
         }
         Err(e) => {
@@ -665,8 +750,10 @@ pub async fn g2_verify_and_sanitize(
                 manifest,
                 rejected_tools: Vec::new(),
                 drift: false,
+                soft_drift: false,
                 spawn_failed: true,
                 smoke_failed: false,
+                stub_armed: false,
             }
         }
     }
@@ -676,7 +763,7 @@ pub async fn g2_verify_and_sanitize(
 pub struct G2BootSummary {
     /// 判定通过（无漂移）数
     pub verified: usize,
-    /// 判定漂移（已按净化后 manifest 重注册）数
+    /// 判定漂移（声明 schema 保留在工具面、调用显式失败）数
     pub drifted: usize,
     /// 观测失败（重试后仍 spawn/tools-list 失败）数
     pub spawn_failed: usize,
@@ -781,7 +868,9 @@ pub async fn g2_boot_verify_all(
             continue;
         }
         summary.drifted += 1;
-        // 判定失败：用净化后 manifest 重注册该插件能力（复用 re-enable：scope revoke + 重注册）。
+        // 判定失败：声明 schema 保留在工具面（失败桩）、调用时经账本显式失败
+        // （ADR 2026-11-12）。仍按 outcome.manifest 重注册（声明原样 = 全量），
+        // 保证 scope/http 路由与启用态一致。
         // 拒注是"声明与实现不一致已实际收口"的异常事件，从 info 提升为 warn——
         // 消除"被拒数日无人知晓"（e2e G5；清单明细另经
         // GET /api/v1/plugins/contract-status 暴露）。
@@ -796,7 +885,7 @@ pub async fn g2_boot_verify_all(
             rejected = ?outcome.rejected_tools,
             tools,
             http_routes,
-            "注册闸 G2（boot）：插件声明与实现不一致，已按净化后 manifest 重注册（需修改插件）"
+            "注册闸 G2（boot）：插件声明与实现不一致，拒绝工具已按声明注册为失败桩（schema 保留在工具面、调用显式失败；需修改插件）"
         );
     }
     summary
@@ -1181,22 +1270,21 @@ async fn sync_gate_register_new(
             ));
         }
         if outcome.drift {
-            if outcome.rejected_tools.is_empty() {
-                // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
-                warn!(
-                    target: "plugin_watcher",
-                    plugin = %m.id,
-                    "G2 校验：插件存在未声明暴露的工具（不拒绝注册）"
-                );
-            } else {
-                warn!(
-                    target: "plugin_watcher",
-                    plugin = %m.id,
-                    rejected = ?outcome.rejected_tools,
-                    "G2 校验：插件声明与实现漂移，拒绝注册漂移工具（其余能力照常）"
-                );
-                drifted_plugins.push(m.id.clone());
-            }
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                rejected = ?outcome.rejected_tools,
+                "G2 校验：插件声明与实现漂移，相关工具降级为失败桩（schema 保留在工具面、调用显式失败；其余能力照常）"
+            );
+            drifted_plugins.push(m.id.clone());
+        } else if outcome.soft_drift {
+            // 软漂移留痕（undeclared 多暴露 / 描述文本漂移）——不拒绝注册、
+            // 不染红插件状态，validate-all 报告可见（ADR 2026-11-18 分档）
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                "G2 校验：插件存在未声明暴露的工具（不拒绝注册）"
+            );
         }
         if outcome.spawn_failed {
             warn!(
@@ -1608,24 +1696,23 @@ async fn sync_reverify_apply(
             ));
         }
         if outcome.drift {
-            if outcome.rejected_tools.is_empty() {
-                // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
-                warn!(
-                    target: "plugin_watcher",
-                    plugin = %m.id,
-                    "G2 复验：插件存在未声明暴露的工具（不拒绝注册）"
-                );
-            } else {
-                warn!(
-                    target: "plugin_watcher",
-                    plugin = %m.id,
-                    rejected = ?outcome.rejected_tools,
-                    decl_changed,
-                    code_changed,
-                    "G2 复验：声明与实现漂移，剔除漂移工具后重注册（其余能力照常）"
-                );
-                report.drifted_plugins.push(m.id.clone());
-            }
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                rejected = ?outcome.rejected_tools,
+                decl_changed,
+                code_changed,
+                "G2 复验：声明与实现漂移，相关工具降级为失败桩后重注册（schema 保留在工具面、调用显式失败；其余能力照常）"
+            );
+            report.drifted_plugins.push(m.id.clone());
+        } else if outcome.soft_drift {
+            // 软漂移留痕（undeclared 多暴露 / 描述文本漂移）——不拒绝注册、
+            // 不染红插件状态，validate-all 报告可见（ADR 2026-11-18 分档）
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                "G2 复验：插件存在未声明暴露的工具（不拒绝注册）"
+            );
         }
         if outcome.spawn_failed {
             warn!(
@@ -1765,6 +1852,8 @@ pub struct PluginWatcher {
     enabled_ids: Option<Arc<tokio::sync::RwLock<HashSet<String>>>>,
     debounce: Duration,
     poll_interval: Duration,
+    /// 1c 同步冷却基值（风暴降噪；env 可覆盖默认，测试可注入短值）。
+    sync_cooldown: Duration,
 }
 
 impl PluginWatcher {
@@ -1795,6 +1884,7 @@ impl PluginWatcher {
             enabled_ids: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            sync_cooldown: sync_cooldown_from_env(),
         }
     }
 
@@ -1890,6 +1980,12 @@ impl PluginWatcher {
         self
     }
 
+    /// 自定义同步冷却基值（1c 风暴降噪；测试用短值加速）。
+    pub fn with_sync_cooldown(mut self, sync_cooldown: Duration) -> Self {
+        self.sync_cooldown = sync_cooldown;
+        self
+    }
+
     /// 启动后台 consumer 任务，返回可注入触发源的 handle。
     ///
     /// consumer 逻辑：收到触发信号 → 防抖（窗口内持续有事件就重置，静默 `debounce` 后执行）
@@ -1920,6 +2016,7 @@ impl PluginWatcher {
             enabled_ids,
             debounce,
             poll_interval,
+            sync_cooldown,
         } = self;
         let (trigger, mut rx) = mpsc::unbounded_channel::<()>();
         let sync_count = Arc::new(AtomicU32::new(0));
@@ -1974,6 +2071,9 @@ impl PluginWatcher {
                 let mut known_cdylib = known_cdylib;
                 // 卡3：已通知过 verify_failed 的插件集（转正清账，再跨线可再报）。
                 let mut known_verify_failed: HashSet<String> = HashSet::new();
+                // 1c 风暴降噪：上一轮 sync 完成时刻 + 连续无变化轮次（退避依据）。
+                let mut last_sync_done: Option<tokio::time::Instant> = None;
+                let mut idle_streak: u32 = 0;
 
                 loop {
                     // 等首个触发事件；所有 sender drop → 退出。
@@ -1983,6 +2083,17 @@ impl PluginWatcher {
                     // 防抖：窗口内持续有事件就重新等待，静默 debounce 时长后才执行。
                     while let Ok(Some(_)) = tokio::time::timeout(debounce, rx.recv()).await {
                         // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
+                    }
+                    // 同步冷却（1c）：距上一轮完成不足本轮冷却窗 → 补足等待。
+                    // 风暴期后续波在 mpsc 排队，等待期间到达的事件与本波合并成
+                    // 一轮（sync 频率钳到冷却窗）；连续无变化轮退避拉长冷却窗
+                    // （上限 = 轮询间隔，无变化期零额外延迟）。
+                    let cooldown = sync_cooldown_for(idle_streak, sync_cooldown, poll_interval);
+                    if let Some(done) = last_sync_done {
+                        let elapsed = done.elapsed();
+                        if elapsed < cooldown {
+                            tokio::time::sleep(cooldown - elapsed).await;
+                        }
                     }
                     // 执行一次同步（幂等：无新插件则 no-op）。
                     // enablement 取数：配置了重读根 → 每次 sync 从盘上 profile 现读
@@ -2017,6 +2128,15 @@ impl PluginWatcher {
                         }
                     };
                     sync_count_task.fetch_add(1, Ordering::Relaxed);
+                    last_sync_done = Some(tokio::time::Instant::now());
+                    // 退避推进（1c）：有变化轮重置冷却到基值；连续无变化轮 ×2
+                    // 退避（上限 = 轮询间隔）——无变化期 discover 重扫频率随
+                    // 空闲时长自适应降低，插件一有变更立即回到风暴合并窗。
+                    if report_has_changes(&report) {
+                        idle_streak = 0;
+                    } else {
+                        idle_streak = idle_streak.saturating_add(1);
+                    }
                     // 卡3：verify_failed 跨线检测（账本 diff，恰在进入终态那轮
                     // 触发一次通知；转正后清账，再跨线可再报）。
                     notify_verify_failed_crossings(
@@ -2157,17 +2277,19 @@ fn spawn_notify_watcher(
     Some(watcher)
 }
 
-/// notify 监听根集合：内置插件根 + 用户插件根（去重；用户根缺失时只有内置根）。
+/// notify 监听根集合：Tier1 根 + Tier2 根（去重；Tier2 根未交付时只有 Tier1 根）。
 ///
-/// 用户插件根经 `agentos_core::user_space` 解析（与 loader 的 `user_root`、
-/// 配置读写面同一单点）——三处共用一份解析，避免"监听的目录"与"发现的目录"
-/// 分叉（历史上 `AGENTOS_PLUGINS_DIR` 未设时 watcher 与 discover 各推一份 root
-/// 的坑，见 bin 装配注释）。
+/// 双根由 boot 从实例启动配置解析后回写 env（ADR 2026-11-07
+/// plugin-tiered-single-copy-model：env 只承载已解析值，零推导）——与 invoker
+/// 热路径 `collect_plugin_roots` 同源消费同一对变量，避免"监听的目录"与
+/// "发现的目录"分叉（历史上 `AGENTOS_PLUGINS_DIR` 未设时 watcher 与 discover
+/// 各推一份 root 的坑，见 bin 装配注释）。
 fn watch_roots(plugins_dir: &Path) -> Vec<PathBuf> {
     let mut roots = vec![plugins_dir.to_path_buf()];
-    if let Some(user_plugins) = agentos_core::user_space::user_plugins_dir() {
-        if !roots.contains(&user_plugins) {
-            roots.push(user_plugins);
+    if let Ok(tier2) = std::env::var("AGENTOS_PLUGIN_TIER2_ROOT") {
+        let tier2 = PathBuf::from(tier2.trim());
+        if !tier2.as_os_str().is_empty() && !roots.contains(&tier2) {
+            roots.push(tier2);
         }
     }
     roots

@@ -345,9 +345,8 @@ class TestToolPassthrough:
         tool = BashTool()
         tool.process_manager = _SentinelPM(captured)  # type: ignore[assignment]
         _run(
-            tool.execute(
+            tool.run_command(
                 {
-                    "action": "execute",
                     "command": "ls",
                     "_container_id": "cua-ws1",
                     "_exec_backend": dict(_BACKEND_BASE),
@@ -364,9 +363,8 @@ class TestToolPassthrough:
         tool = BashTool()
         tool.process_manager = _SentinelPM(captured)  # type: ignore[assignment]
         _run(
-            tool.execute(
+            tool.run_command(
                 {
-                    "action": "execute",
                     "command": "ls",
                     "_exec_backend": dict(_BACKEND_BASE),
                 }

@@ -471,3 +471,158 @@ fn migrate_drop_legacy_message_slots_rebuilds_only_on_legacy_columns() {
     };
     assert_eq!(before, after, "无旧列的现行表不得被重建");
 }
+
+/// 护栏（ADR-2026-11-17 §⑤）：`pipeline_pending_inputs` 列集合 = 6 列信封。
+/// 旧列复活（新增派发字段直上表）必红——新增字段应进 request JSON 单列，
+/// 不是加列（加列 = DB 迁移 + core 类型 + trait 三处同步，正是本 ADR 消灭的成本）。
+#[test]
+fn pending_inputs_table_columns_are_six_envelope_only() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(DDL).unwrap();
+    let mut cols: Vec<String> = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(pipeline_pending_inputs)")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    cols.sort_unstable();
+    assert_eq!(
+        cols,
+        vec![
+            "client_message_id",
+            "created_at",
+            "id",
+            "pipeline_id",
+            "request",
+            "tenant_id",
+        ],
+        "队列表列集合必须收敛为 6 列信封（防旧列复活；新增字段应进 request JSON）"
+    );
+}
+
+/// 护栏（ADR-2026-11-17 §④⑤）：旧 15 列行 → request 回填迁移的语义保全。
+/// 断言四件事：①迁移后表收敛为 6 列；②`route_id` 优先落 `pipeline_id`
+/// （入队时解析后的路由键，空则回退 pipeline_id 列）；③legacy
+/// `agent_id` / `thinking_strength` 非空值并入 `state_overlay` 对应键
+/// （排队中的用户选择不丢，且不覆盖显式 overlay 键）；④迁移幂等。
+#[test]
+fn migrate_pending_input_dispatch_request_backfills_legacy_rows() {
+    use super::super::schema::migrate_pending_input_dispatch_request;
+
+    let conn = Connection::open_in_memory().unwrap();
+    // 旧 15 列形态按 HEAD 前旧 DDL 原样重建；source 列存 serde 序列化串
+    // （`"task"` 带引号）。行 1 = 全量字段非空；行 2 = legacy 身份/强度/overlay
+    // 全空（回归默认形态）。
+    conn.execute_batch(
+        r#"CREATE TABLE pipeline_pending_inputs (
+             id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+             user_id TEXT NOT NULL, content TEXT NOT NULL, thread TEXT NOT NULL,
+             source TEXT NOT NULL, agent_id TEXT NOT NULL DEFAULT 'agentos',
+             route_id TEXT NOT NULL DEFAULT '', thinking_strength TEXT NOT NULL DEFAULT '',
+             client_message_id TEXT NOT NULL DEFAULT '', execution_context TEXT,
+             state_overlay TEXT, pipeline_config_id TEXT, created_at TEXT NOT NULL);
+           INSERT INTO pipeline_pending_inputs VALUES (
+             'in_lg1', 'P-thread-key', 'default', 'u1', '排队中', 'T-lg', '"task"',
+             'general_agent', 'P-route', '{"depth":"high"}', 'cmid-9',
+             '{"mode":"isolated"}', '{"task.goal":"done"}', 'custom_pipe',
+             '2026-11-16T01:00:00Z');
+           INSERT INTO pipeline_pending_inputs VALUES (
+             'in_lg2', 'P2', 'default', 'u2', '无身份', 'T2', '"user"',
+             '', '', '', '', NULL, NULL, NULL, '2026-11-16T02:00:00Z');"#,
+    )
+    .unwrap();
+
+    migrate_pending_input_dispatch_request(&conn).unwrap();
+
+    // ① 列集合收敛为 6 列信封（旧列物理消失）
+    let mut cols: Vec<String> = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(pipeline_pending_inputs)")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    cols.sort_unstable();
+    assert_eq!(
+        cols,
+        vec![
+            "client_message_id",
+            "created_at",
+            "id",
+            "pipeline_id",
+            "request",
+            "tenant_id",
+        ],
+        "迁移后必须收敛为 6 列信封，实际: {cols:?}"
+    );
+
+    // ②③ 行 1：全量回填语义
+    let (pipeline_col, request): (String, String) = conn
+        .query_row(
+            "SELECT pipeline_id, request FROM pipeline_pending_inputs WHERE id='in_lg1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        pipeline_col, "P-route",
+        "索引投影取 route_id（入队时解析后的路由键），非 thread 侧 pipeline_id 列"
+    );
+    let req: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(req["thread_id"], "T-lg");
+    assert_eq!(req["user_id"], "u1");
+    assert_eq!(req["pipeline_id"], "P-route");
+    assert_eq!(req["content"], "排队中");
+    assert_eq!(req["client_message_id"], "cmid-9");
+    assert_eq!(req["source"], "task", "source 剥 serde 引号还原字符串值");
+    assert_eq!(
+        req["execution_context"],
+        serde_json::json!({"mode": "isolated"})
+    );
+    assert_eq!(req["pipeline_config_id"], "custom_pipe");
+    assert_eq!(
+        req["state_overlay"],
+        serde_json::json!({
+            "task.goal": "done",
+            "agent.id": "general_agent",
+            "thinking_strength": "{\"depth\":\"high\"}",
+        }),
+        "legacy agent_id/thinking_strength 非空并入 overlay，且不覆盖显式 overlay 键"
+    );
+
+    // 行 2：legacy 身份/强度/overlay 全空 → 不伪造 overlay 键（null）
+    let request2: String = conn
+        .query_row(
+            "SELECT request FROM pipeline_pending_inputs WHERE id='in_lg2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let req2: serde_json::Value = serde_json::from_str(&request2).unwrap();
+    assert_eq!(
+        req2["state_overlay"],
+        serde_json::Value::Null,
+        "空 overlay + 空 legacy 值不得伪造 overlay 键"
+    );
+    assert_eq!(req2["pipeline_id"], "P2", "route_id 空回退 pipeline_id 列");
+    assert_eq!(req2["source"], "user");
+    assert_eq!(
+        req2["pipeline_config_id"],
+        serde_json::Value::Null,
+        "空 config id 回填 null（= autonomous 缺省）"
+    );
+
+    // ④ 幂等：request 列已在 → 再跑无动作（不丢行不重复）
+    migrate_pending_input_dispatch_request(&conn).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pipeline_pending_inputs", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(n, 2, "重复迁移不得丢行/重复行");
+}

@@ -1,0 +1,22 @@
+So after removing block, else ends `                }` then for ends `            }`. Insert block between them.
+Anchor replace: `                    }\r\n                }\r\n            }\r\n            ("application/json"` — the first `                    }` would be... after deletion, what precedes else-close? The legis block ends `                    }` then `                }` (else close) then `            }` (for close). So anchor `                    }\r\n                }\r\n            }\r\n            ("application/json".into(), "{\\\"ok\\\":true}".into())` unique? The ok:true string appears once. Good.
+Replace with:
+```
+}
+}
+// v5 玩法扩展常驻段（MF-18：qing 也接入——营建转化/天命积累/词条常驻/失地/整合）
+{
+let sc = st.scenario.clone();
+let w = st.worlds.get_mut(&cur).unwrap();
+crate::game::init_game_layer_once(w, &sc);
+for _ in crate::game::tick_standing(w, &sc) {}
+}
+}
+("application/json".into(), "{\"ok\":true}".into())
+```
+Wait — borrow issue: inside the block, `st.worlds.get_mut(&cur)` — st.scenario is a field of st; `let sc = st.scenario.clone();` then `st.worlds.get_mut` — fine.
+But qing branch: after step_year, series push used `st.series.entry(cur)` — moved cur? In qing branch: `st.series.entry(cur).or_default()` — that moves cur! Then after if/else, `st.worlds.get_mut(&cur)` would use moved value → compile error. Look: qing branch line: `st.series.entry(cur).or_default().push(...)` vs standard branch: `st.series.entry(cur.clone()).or_default()`. The qing branch moves cur. So my block referencing cur after if/else fails for... no — it fails to compile regardless because cur moved in one branch. Fix: in block use `st.current.clone()` instead of cur:
+```
+{
+let sc = st.scenario.clone();
+let cur = st.current.clone();

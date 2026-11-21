@@ -238,6 +238,25 @@ def _make_plugin(caller: Any) -> LLMCore:
     )
 
 
+def _boot_identity(plugin: LLMCore) -> Any:
+    """构造调用意图视图（R4 后实例不持身份字段；测试按构造配置显式构造）。
+
+    活契约：``_call_llm`` 只读传入的 ModelIntent 快照（模型意图随 state 走），
+    实例上不再有 ``_boot_identity`` 等身份字段；凭据不进管道面（批 5 收窄）。
+    """
+    cfg = plugin._config  # noqa: SLF001
+    model_name = str(cfg.get("model_name") or "")
+    return plugin_mod.ModelIntent(
+        model_id=model_name,
+        model=model_name,
+        provider=str(cfg.get("provider") or ""),
+        api_base=cfg.get("api_base"),
+        context_window=cfg.get("context_window"),
+        supports_vision=False,
+        default_params=dict(cfg.get("default_params") or {}),
+    )
+
+
 def _make_ctx(state: dict[str, Any]) -> Any:
     ctx = MagicMock()
     ctx.state = state
@@ -261,8 +280,7 @@ async def test_call_llm_without_selection_is_noop() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
-
-        identity=plugin._boot_identity,
+        identity=_boot_identity(plugin),
     )
 
     args = caller.captured_args
@@ -299,8 +317,7 @@ async def test_call_llm_applies_selected_param_set() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
-
-        identity=plugin._boot_identity,
+        identity=_boot_identity(plugin),
     )
 
     args = caller.captured_args
@@ -325,8 +342,7 @@ async def test_call_llm_keeps_defaults_when_strength_missing() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
-
-        identity=plugin._boot_identity,
+        identity=_boot_identity(plugin),
     )
 
     args = caller.captured_args
@@ -352,8 +368,7 @@ async def test_call_llm_legacy_gear_word_is_noop() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
-
-        identity=plugin._boot_identity,
+        identity=_boot_identity(plugin),
     )
 
     args = caller.captured_args
@@ -393,8 +408,7 @@ async def test_call_llm_disable_param_set_overrides_enabled_default() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
-
-        identity=plugin._boot_identity,
+        identity=_boot_identity(plugin),
     )
 
     args = caller.captured_args
@@ -431,8 +445,7 @@ async def test_call_llm_applies_thinking_toggle_param_set() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
-
-        identity=plugin._boot_identity,
+        identity=_boot_identity(plugin),
     )
 
     args = caller.captured_args

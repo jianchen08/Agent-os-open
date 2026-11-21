@@ -2,7 +2,7 @@
 /**
  * MessageItem 剩余缺口补充测试（与既有 MessageItem*.test 互补）：
  * - pendingInteractions 非空时 selector 真实求值：assistant 流式消息 +
- *   同会话 pending 交互 → 「等待用户响应...」（区别于空 store 的「思考中...」）；
+ *   同会话 pending 交互 → 「等待用户响应...」（区别于空 store 的「执行中」）；
  * - 工具卡打开文件链：chat_card 声明 filePathSource → 卡片打开按钮 →
  *   MessageItem onOpenFile 包装 → 全局打开回调收到 (filePath, taskId)。
  */
@@ -60,13 +60,13 @@ describe('MessageItem pending 交互等待态', () => {
     expect(screen.getByText('等待用户响应...')).toBeInTheDocument()
   })
 
-  it('他线程 pending 交互：不算本消息等待，渲染「思考中...」', () => {
+  it('他线程 pending 交互：不算本消息等待，渲染「执行中」', () => {
     pendingInteractions = [{ threadId: 'session-other', status: 'pending' }]
     renderWithProviders(
       <MessageItem message={makeMessage({ role: 'assistant', status: 'streaming' })} />,
     )
     expect(screen.queryByText('等待用户响应...')).not.toBeInTheDocument()
-    expect(screen.getByText('思考中...')).toBeInTheDocument()
+    expect(screen.getByText('执行中')).toBeInTheDocument()
   })
 })
 

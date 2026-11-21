@@ -115,11 +115,40 @@
 # 3 行、LoginModal 死 default 分支 1 行等，判据见 docs/working/本地CI转绿_台账_20261028.md）。
 # 归因 ADR：docs/decisions/2026-10-28-frontend-giant-file-freeze.md
 vitest_failures=0
-eslint_errors=0
-vitest_coverage_pct=99.60
+# 2026-11-16 lint 执法强度升级（ADR 2026-11-16-lint-error-ratchet-electron-
+# boundary-gate）：src 块全部 10 条 warn 规则升 error（no-restricted-syntax/
+# no-explicit-any/import-x/order/no-unused-vars/consistent-type-imports/
+# react-refresh/no-non-null-assertion/exhaustive-deps/no-console/no-duplicates）
+# ——warn 不拦合并=可无声新增面；纠偏规则必须 error 级，存量由本行吸收。
+# 实测口径（dev/0.2@a7f93f3bc 工作树）：eslint --fix 先清可自动修复面
+# （843→689，92 文件 import 归位），升级后 689 errors / 0 warnings。
+# 分布：no-restricted-syntax 165（内联 style 主体）/no-explicit-any 142/
+# import-x/order 119（非可自动修复形态）/no-unused-vars 97/react-refresh 68/
+# no-non-null-assertion 34/consistent-type-imports 27/exhaustive-deps 24/
+# no-console 11/no-duplicates 2。存量按既有惯例 eslint-disable + HACK 登记
+# 逐批清偿（error 棘轮只减不增）。
+eslint_errors=689
+# 2026-11-08 校准：99.60→99.57（-0.03pp）——ContentCardRenderer.invisible
+# 废弃测试删除（webview 卡渲染池重构替代面，c427d29b0 池测试承接新逻辑），
+# 其覆盖的旧渲染分支随池重构退役；非代码质量退化，归因分级收尾打包轮
+# （docs/working/分级模型刀1-2内核配置化根_台账.md 关联流水）。
+# 校准（2026-11-20 推送前审查轮）：99.57→99.50（实测 99.51=23798/23914，按既有
+# ±0.03pp 时序抖动惯例留一档余量取 99.50）。归因：①基线定于 2026-11-08，其后特性
+# 增量 +3532 行（20382→23914，场景面板/流式状态/grants 账本/设备接入等并行轮）；
+# ②本夜推送前三批补测 +68 行（StreamLiveLine 渲染面/grantsLedgerStore 装载撤销/
+# sceneInstances 边界/TreeParts 菜单 onSelect 链/WebviewWidget 探测异常/voice 原生桥
+# 回退/面板开启移动视口/SceneHistory 兜底分组等，测试全绿 0 失败、eslint 0 错）；
+# ③残差为结构性不可达集——常量开关后的死回退（MCR DefaultTextRenderer）、jsdom
+# 无法度量的 DOM 量测（skinRuntime 顶带钳位）、180s 等待上限分支、TreeParts 项目
+# 菜单死分支（已登记待清）；④测量期间并行轮两度增行（移动靶）。下批收紧目标 =
+# useVoiceInput 会话装配分支/grantsLedgerStore 204-207/RjsfForm 358/532/618。
+vitest_coverage_pct=99.50
 # 批次8-1 warnings 棘轮（只减不增）：844 = 2026-09-24 实测起步（no-explicit-any/import-x/order 优先清偿）
 # 收紧 844→843（2026-10-30 独立CI轮间：P-21 failureAttribution 三测试文件失效 disable 清偿 + import-x/order 归位，实测 843）
-eslint_warnings=843
+# 收紧 843→0（2026-11-16 lint 执法强度升级）：src 块全部 warn 规则升 error，
+# warn 面整体清零——warn 棘轮就此退役（无 warn 可计），执法强度由 eslint_errors
+# 棘轮独占承接（同日 ADR 2026-11-16-lint-error-ratchet-electron-boundary-gate）。
+eslint_warnings=0
 #
 # 收紧（2026-09-18 覆盖率补测批，dev/0.2@16b413b83 工作树实测 99.36）：
 # vitest 全量 502 文件 5606 用例 0 失败，Lines 15315/15413 = 99.36%（99.12 →

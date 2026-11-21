@@ -155,13 +155,22 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：文件管理/检索经两步法动态可达 ──
 - file_read
 - file_write
 - task_evaluate
-- create_directory
-- copy_file
-- delete_file
-- enhanced_search
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 境界命名必须有辨识度，禁止使用「一级/二级」等无辨识度的命名方式
 - 每个境界的突破条件必须明确且递进，不能只是「修炼更久」
@@ -225,16 +234,8 @@ deliverables:
 recommended_metrics:
 - metric_id: file_check
   default_params:
-    action: read
+    check: not_empty
     path: '{{workspace}}/docs/system_design.md'
-- metric_id: semantic_check
-  default_params:
-    criteria:
-      required_sections:
-      - 升级体系
-      - 战斗系统
-      - 经济系统
-      - 体系一致性
 version: 1.0.0
 is_active: true
 status: active

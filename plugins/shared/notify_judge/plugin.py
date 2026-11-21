@@ -49,8 +49,24 @@ _capability_caller: CapabilityCaller | None = None
 # 查看态查询通道（pipeline-executor.is_pipeline_viewed，server.py on_load 注入）。
 _view_checker: CapabilityCaller | None = None
 
+# 管道活跃查询通道（pipeline-executor.is_pipeline_active，server.py on_load 注入）：
+# 通知出队冲刷（批次 5）的空闲判据——RunChainRegistry 在途执行链。
+_activity_checker: CapabilityCaller | None = None
+
+# 事件发射通道（event-bus.notify("emit", ...)，server.py on_load 注入）：
+# 空闲冲刷的 notify_flush 帧出口（打标晚于 new_message 帧的时序错位补发面）。
+_event_emitter: CapabilityCaller | None = None
+
 # 查看态查询超时（秒）：内核内存查询，秒级余量足够；失败按不在场回退判定链。
 _VIEW_CHECK_TIMEOUT_SECONDS = 5.0
+
+# 活跃查询/事件发射超时（秒）：均为内核内存查询与广播，秒级余量足够。
+_FLUSH_CALL_TIMEOUT_SECONDS = 5.0
+
+# 已冲刷消息记账（同消息只冲一次）：judge 每轮至多判定一条尾消息，重复判
+# 定（管道重跑/重放）命中记账即跳过；上限裁剪防长跑无界增长。
+_flushed_message_ids: set[str] = set()
+_FLUSHED_ID_CAP = 500
 
 
 def set_capability_caller(caller: CapabilityCaller | None) -> None:
@@ -63,6 +79,24 @@ def set_view_checker(caller: CapabilityCaller | None) -> None:
     """注入查看态查询 caller（server.py on_load；测试注入 fake 同一口）。"""
     global _view_checker  # noqa: PLW0603 — 同上模块级单例
     _view_checker = caller
+
+
+def set_activity_checker(caller: CapabilityCaller | None) -> None:
+    """注入管道活跃查询 caller（server.py on_load；测试注入 fake 同一口）。"""
+    global _activity_checker  # noqa: PLW0603 — 同上模块级单例
+    _activity_checker = caller
+
+
+def set_event_emitter(emitter: CapabilityCaller | None) -> None:
+    """注入事件发射 caller（server.py on_load；测试注入 fake 同一口）。"""
+    global _event_emitter  # noqa: PLW0603 — 同上模块级单例
+    _event_emitter = emitter
+
+
+def reset_flush_bookkeeping_for_test() -> None:
+    """清空已冲刷消息记账（测试隔离用；生产链路无调用方）。"""
+    global _flushed_message_ids  # noqa: PLW0603 — 同上模块级单例
+    _flushed_message_ids = set()
 
 
 # 消息 metadata 契约键（前端 systemNotifier：metadata.notify_worthy===true 必弹）。
@@ -156,7 +190,9 @@ class NotifyJudge:
         if self._window_has_silent_call(window):
             return {}  # 交互卡路径已通知，防双响
         if self._fast_cut(text):
-            return self._worthy_update(final)
+            update = self._worthy_update(final)
+            await self._flush_if_idle(state, final)
+            return update
         try:
             worthy = await self._llm_judge(window)
         except Exception as exc:  # 降级契约：fail-closed 减噪，失败不弹
@@ -164,9 +200,68 @@ class NotifyJudge:
             return {}
         if not worthy:
             return {}
-        return self._worthy_update(final)
+        update = self._worthy_update(final)
+        # 通知出队冲刷（批次 5，用户裁定「管道空闲必须立即冲刷」）：打标经
+        # messages set-op 落库晚于 new_message 帧（post 时序错位），toast 唯一
+        # 消费面在帧到达时读 metadata——押单只能等下一轮事件捎出。管道空闲
+        # （无在途执行链）即经 event-bus 补发 notify_flush 帧立即出队；流式
+        # 进行中押单不打断（现状语义：等下一事件捎出）。
+        await self._flush_if_idle(state, final)
+        return update
 
     # ── 规则面 ──
+
+    async def _flush_if_idle(self, state: dict[str, Any], final: dict[str, Any]) -> None:
+        """通知出队冲刷（批次 5）：空闲即经 event-bus 补发 notify_flush 帧。
+
+        - 记账防重：同消息只冲一次（管道重跑/重放的重复判定不双发）；
+        - 空闲判据 = pipeline-executor.is_pipeline_active（RunChainRegistry
+          在途执行链）；查询失败/通道未注入 = 按空闲发（通知面只增不减，
+          与查看态门「失败按不在场回退」同口径——最坏多弹一次不打断流）；
+        - 活跃（流式进行中）→ 押住不发（不打断流，现状语义：等下一事件捎出）；
+        - emitter 未注入（测试/未接线形态）→ 静默跳过。
+        """
+        global _flushed_message_ids  # noqa: PLW0603 — 记账推进（声明置顶：函数体先读后写）
+        emitter = _event_emitter
+        if emitter is None:
+            return
+        message_id = str(final.get("id") or final.get("seq") or "")
+        if not message_id or message_id in _flushed_message_ids:
+            return
+        pipeline_id = str(state.get("pipeline_id") or "")
+        if _activity_checker is not None and pipeline_id:
+            try:
+                resp = await _activity_checker(
+                    "is_pipeline_active",
+                    {"pipeline_id": pipeline_id},
+                    _FLUSH_CALL_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001 —— 查询失败按空闲发（不减通知面）
+                logger.debug("[notify_judge] 活跃查询失败，按空闲冲刷 | err=%s", exc)
+                resp = None
+            if isinstance(resp, dict) and resp.get("active") is True:
+                logger.debug(
+                    "[notify_judge] 管道流式进行中，通知押单不打断 | pipeline_id=%s",
+                    pipeline_id,
+                )
+                return
+        payload: dict[str, Any] = {
+            "message_id": message_id,
+            "pipeline_id": pipeline_id,
+            # 路由键与引擎同款：session_id 优先、thread_id 兜底（pipeline_loop 路由取法）
+            "thread_id": str(state.get("session_id") or state.get("thread_id") or ""),
+            "notify_worthy": True,
+            "title": message_text(final)[:80],
+        }
+        try:
+            await emitter("notify_flush", payload, _FLUSH_CALL_TIMEOUT_SECONDS)
+        except Exception as exc:  # noqa: BLE001 —— 发射失败不阻断消息流（state 打标已落）
+            logger.warning("[notify_judge] notify_flush 发射失败（降级押单）| err=%s", exc)
+            return
+        _flushed_message_ids.add(message_id)
+        if len(_flushed_message_ids) > _FLUSHED_ID_CAP:
+            for stale in sorted(_flushed_message_ids)[: len(_flushed_message_ids) - _FLUSHED_ID_CAP]:
+                _flushed_message_ids.discard(stale)
 
     async def _viewer_watching(self, state: dict[str, Any]) -> bool:
         """用户是否正在前端查看本管道所属会话（查看态门数据面）。

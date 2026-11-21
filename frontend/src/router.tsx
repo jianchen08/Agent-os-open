@@ -1,6 +1,6 @@
 /** 路由配置 定义应用的所有路由，包含登录/注册和受保护的主页面。 */
 
-import { lazy, Suspense, useEffect, useCallback, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useCallback, useState } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
 import { Loader2 } from '@/assets/icons'
 import { composeSendIdentity, primaryModeTag, withModeBinding, withTaskMode } from '@/services/schema/modeOptions'
@@ -9,10 +9,10 @@ import { Sidebar } from './components/layout/Sidebar'
 import { ROUTES } from './constants/routes'
 import { WS_LOCAL_EVENTS } from './constants/websocket'
 import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
-import { useIsMobileViewport } from './hooks/useIsMobileViewport'
 import { useLongTermTasksQuery } from './hooks/queries/useLongTermTasksQuery'
 import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
+import { useIsMobileViewport } from './hooks/useIsMobileViewport'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { useWidgetEvents } from './hooks/useWidgetEvents'
 import { RegisterPage } from './pages/auth/RegisterPage'
@@ -36,8 +36,8 @@ import { useChatInputStore } from './stores/chatInputStore'
 import { useInteractionStore } from './stores/interactionStore'
 import { useNotificationStore } from './stores/notificationStore'
 import { usePendingInputStore } from './stores/pendingInputStore'
-import { usePipelineMessageStore } from './stores/pipelineMessageStore'
 import { usePersonaPossessStore } from './stores/personaPossessStore'
+import { usePipelineMessageStore } from './stores/pipelineMessageStore'
 import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
@@ -66,6 +66,7 @@ const PluginPageRenderer = lazy(() =>
 // 懒加载 fallback 共享单件（与 lazyRoute.tsx 同源，见 lazyFallback.tsx 头注）
 import { LazyRoute, ProtectedRoute } from './router/lazyRoute'
 import { LazyFallback } from './router/lazyFallback'
+import { RouteErrorFallback } from './router/RouteErrorFallback'
 export { LazyRoute }
 
 /** 判断当前视口是否为移动端（< md 断点 768px） */
@@ -390,12 +391,14 @@ function HomePage(): ReactNode {
       agentId,
       pipelineConfigId: effectiveBinding?.pipelineConfigId,
     })
-    // 受理即挂发送在途（2026-11-04 落定语义重定义）：发送按钮转圈+输入锁定直到
-    // 消息落进消息流（气泡认领/队列条出现，landSendByCmid）——ack 受理回执不再
-    // 撤发送态；5s 落定超时（chatInputStore.SEND_LANDING_TIMEOUT_MS）= 判死 +
-    // 宿主停止链（见下方 timeout outcome 订阅），20s ack 看门狗是另一判死出口
-    // （对已判死 cmid 幂等零动作）。content 快照 + draftKey 随条目登记：落定清空
-    // 按快照比对在 ChatInput 执行，清草稿不依赖组件存活。
+    // 受理即挂发送在途（2026-11-04 落定语义重定义；2026-11-18 修订）：发送按钮
+    // 转圈+输入锁定直到消息落进消息流（气泡认领/队列条出现，landSendByCmid）——
+    // ack 受理回执不撤发送态但放宽落定计时到宽限窗口（markSendAcked）；5s 落定
+    // 超时 = 判死出口仅报错，**不再驱动停止链**（超时≠消息已坏，闸门满载/通道
+    // 拥塞下多为消息活着信号被挤丢，自动停 run 制造零执行取消与连带误杀；
+    // 2026-11-18 用户裁定）；20s ack 看门狗是另一判死出口（对已判死 cmid 幂等
+    // 零动作）。content 快照 + draftKey 随条目登记：落定清空按快照比对在
+    // ChatInput 执行，清草稿不依赖组件存活。
     useChatInputStore
       .getState()
       .beginSend(targetPipelineId, userMessageId, params.composerText ?? params.content, params.draftKey)
@@ -425,9 +428,11 @@ function HomePage(): ReactNode {
     // 反应」体感）。护栏按消息 id 存续，新一轮 stream_start 自动解除。
     if (currentPipelineId) {
       markStopRequested(currentPipelineId, ps.streamingState[currentPipelineId]?.messageId ?? null)
-      // 停止受理中：run_status 变 suspended 后按钮仍显示「停止中」，直到
-      // run 级终止事件（pipeline_round_finished/stream_error）或下一轮
-      // stream_start 清除——避免停止期间被误判为可发送空闲态。
+      // 停止受理中：点停即置位——生成观感在受理期间立即让位（ChatContainer
+      // effectiveIsGenerating 不再计停止窗口的生成态：转圈停、发送按钮回），
+      // run 级终止事件（pipeline_round_finished/stream_error）/下一轮 stream_start
+      // 清除；护栏 TTL（STOP_REQUEST_TTL_MS）过期仍无终态事件由 handlers utils
+      // 定时翻转解除——生成观感回落 runs 真值（停止未生效可辨别、可再点）。
       ps.setStopping(currentPipelineId, true)
       ps.stopStreaming(currentPipelineId)
     } else {
@@ -444,27 +449,12 @@ function HomePage(): ReactNode {
     // 真正的 stream_end 丢失由更上层的 keepalive 看门狗（~180s）兜底，此处不重复。
   }, [])
 
-  /** 5s 落定超时 = 判死 + 停止 run（用户裁定 2026-11-04「超时代表后端这条消息
-   *  坏了，应该停止run」）：store 超时终局（chatInputStore kind='timeout'）在此
-   *  驱动既有停止链（同停止按钮：停当前 run + 队列退回），不另起 cancel 通道。
-   *  挂载时以当前序号为水位、不回放历史终局（重载不误停正在跑的管道）。
-   *  连带代价（如实）：停止是管道级的——超时消息若只是事件丢失而管道正跑上一轮
-   *  生成，会连带停掉当前生成；断线时停止帧同样发不出，重连后按序送达。 */
-  const lastTimeoutOutcomeIdRef = useRef(0)
-  useEffect(() => {
-    const outcomes = useChatInputStore.getState().sendOutcomes
-    lastTimeoutOutcomeIdRef.current = outcomes.length > 0 ? outcomes[outcomes.length - 1].id : 0
-    const consumeTimeoutOutcomes = () => {
-      for (const outcome of useChatInputStore.getState().sendOutcomes) {
-        if (outcome.id <= lastTimeoutOutcomeIdRef.current) continue
-        lastTimeoutOutcomeIdRef.current = outcome.id
-        if (outcome.kind === 'timeout') {
-          handleStopGenerate(outcome.pipelineId)
-        }
-      }
-    }
-    return useChatInputStore.subscribe(consumeTimeoutOutcomes)
-  }, [handleStopGenerate])
+  /** 5s 落定超时不再驱动停止链（2026-11-18 用户裁定，修订 2026-11-04「超时=
+   *  消息已坏应停止 run」）：闸门满载/通道拥塞场景实测多为「消息活着、信号被
+   *  挤丢」，自动停 run 制造零执行取消与连带误杀（超时消息若只是事件丢失而
+   *  管道正跑上一轮生成，会连带停掉当前生成）。超时只操作点报错（chatInputStore
+   *  timeout outcome），停止权交还用户（停止按钮/队列条强发语义不变，下方
+   *  onStopGenerate 接线）。 */
 
   /** 强制发送队列条目（2026-10-19 用户裁定；2026-10-27 权威化单帧原语）：
    *  编排本体在内核 dispatch_force_pending（目标条目置队首 + 停当前回复不退回
@@ -679,13 +669,21 @@ function HomePage(): ReactNode {
 export function createRouter() {
   return createBrowserRouter([
     {
-      path: ROUTES.HOME,
-      element: (
-        <ProtectedRoute>
-          <HomePage />
-        </ProtectedRoute>
-      ),
-    },
+      // 顶层错误兜底（无路径父路由，对匹配透明）：路由渲染抛错且无更近
+      // errorElement/边界时落这里，替代 React Router 默认开发者错误页
+      // （"Unexpected Application Error!"，无任何恢复按钮的整页死路——
+      // 2026-11-13 切会话 undefined.container 实证）。恢复卡提供
+      // 重启前端（reload）/返回首页（SPA 导航清错误态）两条出路。
+      errorElement: <RouteErrorFallback />,
+      children: [
+        {
+          path: ROUTES.HOME,
+          element: (
+            <ProtectedRoute>
+              <HomePage />
+            </ProtectedRoute>
+          ),
+        },
     // /admin 无独立路由：user_admin 插件声明页（widget_stage 组台：统计卡+
     // 用户表+启停行操作，contributes.pages path=/admin 仅管理员可见）。
     // /memory、/knowledge-base 无独立路由：hindsight_memory 插件声明页
@@ -695,24 +693,26 @@ export function createRouter() {
     // （pages/debug/* 以 embedded 模式复用），路由侧双通道已退役。
     // /login 无独立路由（ADR 2026-09-28）：整页登录页退役，未认证一律由
     // ProtectedRoute 呈现 AuthGate 登录模态。
-    {
-      path: ROUTES.REGISTER,
-      element: <RegisterPage />,
-    },
-    // 插件 page 独立路由（通配）：插件 page 声明 path 为 /p/<pageId> 即可命中。
-    // 不需要运行时动态加路由——一条通配覆盖所有声明了 path 的插件 page。
-    // 插在 '*' 兜底之前，确保插件 page 被匹配而非跳转 HOME。
-    {
-      path: '/p/:pageId',
-      element: (
-        <LazyRoute>
-          <PluginPageRenderer />
-        </LazyRoute>
-      ),
-    },
-    {
-      path: '*',
-      element: <Navigate to={ROUTES.HOME} replace />,
+        {
+          path: ROUTES.REGISTER,
+          element: <RegisterPage />,
+        },
+        // 插件 page 独立路由（通配）：插件 page 声明 path 为 /p/<pageId> 即可命中。
+        // 不需要运行时动态加路由——一条通配覆盖所有声明了 path 的插件 page。
+        // 插在 '*' 兜底之前，确保插件 page 被匹配而非跳转 HOME。
+        {
+          path: '/p/:pageId',
+          element: (
+            <LazyRoute>
+              <PluginPageRenderer />
+            </LazyRoute>
+          ),
+        },
+        {
+          path: '*',
+          element: <Navigate to={ROUTES.HOME} replace />,
+        },
+      ],
     },
   ])
 }

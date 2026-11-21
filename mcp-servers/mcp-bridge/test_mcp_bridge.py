@@ -21,6 +21,7 @@ sys.path.insert(0, str(HERE))
 # 重解析——双实例防线：PolicyError 等一律在使用点导入（与 check_domain_policy
 # 同一导入点，类身份一致），不在模块级缓存类对象。
 import upstream  # noqa: E402
+from browser_runtime import BrowserLiveError  # noqa: E402
 from server import BridgeApp, make_handler  # noqa: E402
 from upstream import UpstreamError, UpstreamManager, UpstreamSession  # noqa: E402
 
@@ -381,6 +382,95 @@ class TestHTTP:
             raise AssertionError("should fail")
         except urllib.error.HTTPError as e:
             assert e.code == 400
+
+class TestBrowserReadinessGate:
+    """首转发前等浏览器就绪——消除冷启动首调竞态（功能验证发现的 1/3 采样失败）。"""
+
+    def _app(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MCP_BRIDGE_TEST_TOKEN", "tok-gate")
+        cfg = base_config(
+            tmp_path,
+            upstreams={
+                "browser": {
+                    "command": STUB[0],
+                    "args": [STUB[1]],
+                    "tools": ["browser_navigate"],
+                    "domain_policy": {"url_arg_names": ["url"], "allow_private_addresses": True},
+                    "max_args_bytes": 65536,
+                },
+                "other": {
+                    "command": STUB[0],
+                    "args": [STUB[1]],
+                    "tools": ["stub"],
+                    "domain_policy": {"url_arg_names": [], "allow_private_addresses": True},
+                    "max_args_bytes": 65536,
+                },
+            },
+        )
+        return BridgeApp(cfg)
+
+    def _call(self, app, upstream):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode("utf-8")
+        return app.handle_mcp(upstream, body, "Bearer tok-gate", "sess-gate", "host")
+
+    @staticmethod
+    def _install_live(app, enabled=True, upstream="browser"):
+        calls: list[str] = []
+
+        class _Live:
+            def __init__(self):
+                self.enabled = enabled
+                self.upstream = upstream
+
+            def ensure_started(self):
+                calls.append("ensure")
+                return True
+
+            def note_activity(self, *_a, **_k):
+                return None
+
+        app.live = _Live()
+        return calls
+
+    def test_browser_forward_waits_for_browser_ready(self, tmp_path, monkeypatch):
+        app = self._app(tmp_path, monkeypatch)
+        calls = self._install_live(app)
+        code, _payload = self._call(app, "browser")
+        assert code == 200
+        assert calls == ["ensure"], "浏览器型上游首个转发前必须等 CDP 就绪"
+
+    def test_non_browser_upstream_not_gated(self, tmp_path, monkeypatch):
+        app = self._app(tmp_path, monkeypatch)
+        calls = self._install_live(app)
+        code, _payload = self._call(app, "other")
+        assert code == 200
+        assert calls == [], "非浏览器上游不应被浏览器就绪阻塞"
+
+    def test_disabled_runtime_does_not_gate(self, tmp_path, monkeypatch):
+        app = self._app(tmp_path, monkeypatch)
+        calls = self._install_live(app, enabled=False)
+        code, _payload = self._call(app, "browser")
+        assert code == 200
+        assert calls == []
+
+    def test_browser_error_is_fail_soft(self, tmp_path, monkeypatch):
+        """浏览器起不来不阻断转发（保持 fail-soft，由上游握手表错误）。"""
+        app = self._app(tmp_path, monkeypatch)
+
+        class _Live:
+            enabled = True
+            upstream = "browser"
+
+            def ensure_started(self):
+                raise BrowserLiveError("boom")
+
+            def note_activity(self, *_a, **_k):
+                return None
+
+        app.live = _Live()
+        code, _payload = self._call(app, "browser")
+        assert code == 200
+
 
 class TestWindowsCommandResolution:
     def test_windows_resolves_npx_cmd(self, monkeypatch):

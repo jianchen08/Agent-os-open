@@ -111,7 +111,10 @@ tool_ids:
 - delete_file
 - create_directory
 - enhanced_search
-- bash_execute
+- bash
+- log
+- input
+- kill
 - web_operate
 - memory
 - human_interaction
@@ -207,11 +210,12 @@ recommended_metrics:
 version: 1.0.0
 is_active: true
 status: active
-max_iterations: 400
+max_iterations: 1000
 max_reminders: 5
 # run 墙钟看门狗不武装（用户裁定 2026-10-17：任务可合法运行数小时，墙钟预算在该
 # 场景纯误伤——1016 三任务 timeout 强制终局实证）。防挂死由单次调用上界
 # （plugin_call_timeout，内核恒有界）承接，防失控由 max_iterations 承接。
+# 1000 = 2026-11-14 用户裁定上调（400 实测不够：任务 756fcf 402 轮预算耗尽）。
 plugins:
   disabled: []
   enabled:

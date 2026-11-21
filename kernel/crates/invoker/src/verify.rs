@@ -106,6 +106,15 @@ pub fn normalize_member_actual_tools(actual: Vec<ActualTool>, plugin_id: &str) -
 }
 
 /// 一类声明 vs 实际漂移。
+///
+/// 严重度分档（ADR 2026-11-18-g2-tiered-drift-severity）：
+/// - [`VerifyMismatch::Missing`] / [`VerifyMismatch::SchemaMismatch`] = **硬漂移**
+///   （调用契约受损：实现缺工具 / 参数名·类型·required 等结构不一致）→ 进拒绝
+///   集合，调用显式失败（ADR 2026-11-12 失败桩）；
+/// - [`VerifyMismatch::DescriptiveDrift`] / [`VerifyMismatch::Undeclared`] =
+///   **软漂移**（描述性元数据漂移 / 上游多暴露），只记录不拒绝——不影响任何
+///   一次真实调用的成败，拒绝它们是错杀（2026-11-18 omnisearch 事故：源清单
+///   描述文本漂移导致健康工具全量拦停）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum VerifyMismatch {
     /// 声明有、实际没有——实现缺失（拒绝该条贡献）。
@@ -118,7 +127,8 @@ pub enum VerifyMismatch {
         /// 实际工具名（sidecar 上报）。
         name: String,
     },
-    /// 同名工具的输入参数 schema 不一致。
+    /// 同名工具的**硬契约**不一致（剥掉描述性键后仍不等：参数名集合 / 类型 /
+    /// required / enum / default 等结构面漂移，拒绝该工具）。
     SchemaMismatch {
         name: String,
         /// manifest 声明的 schema（缺省空对象）。
@@ -126,18 +136,55 @@ pub enum VerifyMismatch {
         /// sidecar 上报的 schema。
         actual: serde_json::Value,
     },
+    /// 同名工具**仅描述性元数据**不一致（description / title 文本漂移，硬契约
+    /// 完全一致）——记录不拒绝；声明仍以 manifest 为真值展示在工具面。
+    DescriptiveDrift {
+        name: String,
+        /// manifest 声明的 schema（原样）。
+        declared: serde_json::Value,
+        /// sidecar 上报的 schema（原样）。
+        actual: serde_json::Value,
+    },
+}
+
+/// 描述性键：schema 递归剥离目标（纯文档字段，不参与调用成败）。
+const DESCRIPTIVE_KEYS: [&str; 2] = ["description", "title"];
+
+/// 递归剥离 schema 里的描述性键（description / title），返回**硬契约视图**：
+/// 两个视图相等 = 参数名/类型/required/enum/default 等影响调用的结构面完全一致，
+/// 差异只在文档文本（软漂移）；视图不等 = 硬漂移。
+fn hard_contract_view(schema: &serde_json::Value) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if DESCRIPTIVE_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), hard_contract_view(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(hard_contract_view).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 /// 对照 manifest 声明 vs 实际暴露，产出漂移清单（顺序：missing → undeclared →
-/// schema_mismatch，均为稳定排序，便于测试与报告稳定）。
+/// schema_mismatch / descriptive_drift，均为稳定排序，便于测试与报告稳定）。
 ///
 /// - 名字集合差：声明有实际无 → [`VerifyMismatch::Missing`]；实际有声明无 →
 ///   [`VerifyMismatch::Undeclared`]。
-/// - 同名工具：**manifest 声明了 `input_schema` 才做逐字比较**（serde_json 的
-///   Map 比较键序无关）；`None` = 声明未覆盖 schema，以实际为准不比对——
-///   存量插件（0.2 早期）是"代码内 schema"模式（manifest 只写 name/description，
-///   完整 schema 在插件代码里由 SDK 上报），此时比对必然误报；声明了则严格，
-///   漂移即拒绝（新插件按"manifest 为唯一书写处"走严格通道）。
+/// - 同名工具：**manifest 声明了 `input_schema` 才做比对**（serde_json 的 Map
+///   比较键序无关）；`None` = 声明未覆盖 schema，以实际为准不比对——存量插件
+///   （0.2 早期）是"代码内 schema"模式，此时比对必然误报。
+/// - 比对分档（ADR 2026-11-18-g2-tiered-drift-severity）：剥掉描述性键
+///   （description/title，[`hard_contract_view`]）后不等 = 硬契约漂移
+///   （[`VerifyMismatch::SchemaMismatch`]，拒绝）；剥后相等、原样不等 =
+///   描述漂移（[`VerifyMismatch::DescriptiveDrift`]，只记录不拒绝）——
+///   default/enum/required/type 等结构键始终是硬契约，不做剥离。
 pub fn compare_tools(declared: &[ToolCapability], actual: &[ActualTool]) -> Vec<VerifyMismatch> {
     let mut mismatches = Vec::new();
 
@@ -164,18 +211,30 @@ pub fn compare_tools(declared: &[ToolCapability], actual: &[ActualTool]) -> Vec<
         }
     }
 
-    // 同名工具 schema 比对（按声明顺序）：仅 manifest 显式声明了 schema 才比对
+    // 同名工具 schema 比对（按声明顺序）：仅 manifest 显式声明了 schema 才比对。
+    // 分档：剥描述性键（description/title）后不等 = 硬契约漂移（SchemaMismatch，
+    // 拒绝）；剥后相等但原样不等 = 描述漂移（DescriptiveDrift，只记录不拒绝）。
     for tool in declared {
         let Some(declared_schema) = &tool.input_schema else {
             continue; // 声明未覆盖 schema → 以实际为准（存量插件代码内 schema 模式）
         };
         if let Some(actual_tool) = actual.iter().find(|a| a.name == tool.name) {
             if *declared_schema != actual_tool.input_schema {
-                mismatches.push(VerifyMismatch::SchemaMismatch {
-                    name: tool.name.clone(),
-                    declared: declared_schema.clone(),
-                    actual: actual_tool.input_schema.clone(),
-                });
+                if hard_contract_view(declared_schema)
+                    == hard_contract_view(&actual_tool.input_schema)
+                {
+                    mismatches.push(VerifyMismatch::DescriptiveDrift {
+                        name: tool.name.clone(),
+                        declared: declared_schema.clone(),
+                        actual: actual_tool.input_schema.clone(),
+                    });
+                } else {
+                    mismatches.push(VerifyMismatch::SchemaMismatch {
+                        name: tool.name.clone(),
+                        declared: declared_schema.clone(),
+                        actual: actual_tool.input_schema.clone(),
+                    });
+                }
             }
         }
     }
@@ -186,7 +245,9 @@ pub fn compare_tools(declared: &[ToolCapability], actual: &[ActualTool]) -> Vec<
 /// 报告汇总：插件级视角（missing 计数 → 拒绝注册的工具名集合）。
 ///
 /// "拒绝该条贡献"落地的辅助：安装校验发现漂移后，调用方按此集合从注册中
-/// 剔除对应工具（其余能力照常注册）。
+/// 剔除对应工具（其余能力照常注册）。拒绝范围 = 硬漂移（Missing /
+/// SchemaMismatch）；软漂移（Undeclared / DescriptiveDrift）只记录不拒绝
+/// ——它们不影响任何一次真实调用的成败（ADR 2026-11-18-g2-tiered-drift-severity）。
 pub fn rejected_tool_names(mismatches: &[VerifyMismatch]) -> std::collections::HashSet<String> {
     mismatches
         .iter()
@@ -194,7 +255,7 @@ pub fn rejected_tool_names(mismatches: &[VerifyMismatch]) -> std::collections::H
             VerifyMismatch::Missing { name } | VerifyMismatch::SchemaMismatch { name, .. } => {
                 Some(name.clone())
             }
-            VerifyMismatch::Undeclared { .. } => None,
+            VerifyMismatch::Undeclared { .. } | VerifyMismatch::DescriptiveDrift { .. } => None,
         })
         .collect()
 }
@@ -299,6 +360,127 @@ mod tests {
             rejected_tool_names(&m).contains("t1"),
             "schema 漂移 → 拒绝该条贡献"
         );
+    }
+
+    #[test]
+    fn description_only_drift_is_descriptive_not_rejected() {
+        // 描述文本漂移（2026-11-18 omnisearch 事故形态：源清单从描述里增员）：
+        // 参数名/类型/required 全一致 → DescriptiveDrift，只记录不拒绝
+        let d = vec![declared(
+            "t1",
+            Some(json!({
+                "type": "object",
+                "properties": {"a": {"type": "string", "description": "old text"}},
+                "required": ["a"]
+            })),
+        )];
+        let a = vec![actual(
+            "t1",
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string", "description": "new text with more sources"}},
+                "required": ["a"]
+            }),
+        )];
+        let m = compare_tools(&d, &a);
+        assert_eq!(m.len(), 1);
+        match &m[0] {
+            VerifyMismatch::DescriptiveDrift { name, .. } => assert_eq!(name, "t1"),
+            other => panic!("expected DescriptiveDrift, got {other:?}"),
+        }
+        assert!(
+            rejected_tool_names(&m).is_empty(),
+            "描述漂移不影响调用成败 → 不拒绝"
+        );
+    }
+
+    #[test]
+    fn title_only_drift_is_descriptive_not_rejected() {
+        let d = vec![declared(
+            "t1",
+            Some(
+                json!({"type": "object", "properties": {"a": {"type": "string", "title": "Old"}}}),
+            ),
+        )];
+        let a = vec![actual(
+            "t1",
+            json!({"type": "object", "properties": {"a": {"type": "string", "title": "New"}}}),
+        )];
+        let m = compare_tools(&d, &a);
+        assert!(matches!(&m[0], VerifyMismatch::DescriptiveDrift { name, .. } if name == "t1"));
+        assert!(rejected_tool_names(&m).is_empty());
+    }
+
+    #[test]
+    fn hard_contract_change_stays_schema_mismatch_even_with_description_drift() {
+        // 硬契约+描述同时漂移：type 变化是硬漂移 → SchemaMismatch（硬优先）
+        let d = vec![declared(
+            "t1",
+            Some(
+                json!({"type": "object", "properties": {"a": {"type": "string", "description": "old"}}}),
+            ),
+        )];
+        let a = vec![actual(
+            "t1",
+            json!({"type": "object", "properties": {"a": {"type": "integer", "description": "new"}}}),
+        )];
+        let m = compare_tools(&d, &a);
+        assert_eq!(m.len(), 1);
+        assert!(matches!(&m[0], VerifyMismatch::SchemaMismatch { name, .. } if name == "t1"));
+        assert!(rejected_tool_names(&m).contains("t1"));
+    }
+
+    #[test]
+    fn default_and_required_drift_are_hard_mismatch() {
+        // default 是结构契约（LLM 面按声明默认值行动）：漂移按硬漂移处置；
+        // required 集合变化同理。
+        let d = vec![declared(
+            "t1",
+            Some(json!({"type": "object", "properties": {
+                "a": {"type": "integer", "default": 10}
+            }})),
+        )];
+        let a = vec![actual(
+            "t1",
+            json!({"type": "object", "properties": {
+                "a": {"type": "integer", "default": 20}
+            }}),
+        )];
+        let m = compare_tools(&d, &a);
+        assert!(matches!(&m[0], VerifyMismatch::SchemaMismatch { name, .. } if name == "t1"));
+
+        let d2 = vec![declared(
+            "t2",
+            Some(
+                json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": []}),
+            ),
+        )];
+        let a2 = vec![actual(
+            "t2",
+            json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}),
+        )];
+        let m2 = compare_tools(&d2, &a2);
+        assert!(matches!(&m2[0], VerifyMismatch::SchemaMismatch { name, .. } if name == "t2"));
+    }
+
+    #[test]
+    fn descriptive_keys_stripped_recursively() {
+        // 剥离递归到嵌套结构：properties 内、anyOf 数组元素内的描述键都剥
+        let schema = json!({
+            "description": "root doc",
+            "title": "root title",
+            "type": "object",
+            "properties": {
+                "a": {"anyOf": [{"type": "string", "description": "d1"}, {"type": "null"}], "title": "A"}
+            }
+        });
+        let expected = json!({
+            "type": "object",
+            "properties": {
+                "a": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+            }
+        });
+        assert_eq!(hard_contract_view(&schema), expected);
     }
 
     #[test]

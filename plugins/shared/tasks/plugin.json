@@ -11,16 +11,25 @@
     "project.purge_legacy_dirs"
   ],
   "name": "Task Service",
-  "version": "1.2.0",
+  "version": "1.2.3",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
   "state": {
     "writes": [
-      "task.*"
+      "task.*",
+      "run.plugin_errors"
+    ],
+    "volatile_keys": [
+      "task.status"
     ]
   },
+  "persistent_fields": [
+    "task.error",
+    "task.failure_class",
+    "task.failure_reason"
+  ],
   "capabilities": {
     "tools": [],
     "route_signals": [],

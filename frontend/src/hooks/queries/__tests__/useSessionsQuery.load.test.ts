@@ -8,15 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/api/session', () => ({ getSessions: vi.fn() }))
 
-import { getSessions } from '@/services/api/session'
-import { queryClient } from '@/services/query/queryClient'
-import { queryKeys } from '@/services/query/queryKeys'
 import {
   ensureSessionsLoaded,
   forceReloadSessions,
   readSessions,
   updateSessionsCache,
 } from '@/hooks/queries/useSessionsQuery'
+import { getSessions } from '@/services/api/session'
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
 
 describe('ensureSessionsLoaded / forceReloadSessions — 缓存通道', () => {
   beforeEach(() => {

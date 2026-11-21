@@ -444,9 +444,9 @@ class TestSelfReportedAddressAndStorage:
         monkeypatch.setattr("agent_core._lan_ip_toward", lambda _host: "127.0.0.1")
         monkeypatch.setenv("AGENTOS_KERNEL_PORT", "9100")
         engine = self._engine_at(
-            tmp_path, relay_url="http://162.14.69.153/ext/sync_relay"
+            tmp_path, relay_url="http://203.0.113.153/ext/sync_relay"
         )
-        assert engine._self_address() == "http://162.14.69.153", "默认端口不随行"
+        assert engine._self_address() == "http://203.0.113.153", "默认端口不随行"
 
     def test_self_address_loopback_keeps_nondefault_relay_port(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -646,3 +646,112 @@ class TestFlush413:
             assert "length limit exceeded" in str(exc_info.value)
 
         asyncio.run(run())
+
+
+class TestLoopbackRelayHeal:
+    """回环 relay 端口漂移自愈：凭据 URL 跟随 AGENTOS_KERNEL_PORT（2026-11-16 装机事故面）。"""
+
+    _OLD_URL = "http://localhost:5199/ext/sync_relay"
+    _NEW_URL = "http://127.0.0.1:9101/ext/sync_relay"
+
+    def _enqueue(self, engine: SyncAgentEngine, tmp_path: Path) -> None:
+        _write_config(tmp_path / "config", "p.yaml", "data")
+        engine.capture_local_changes()
+
+    def test_heals_to_kernel_port_and_retries_immediately(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENTOS_KERNEL_PORT", "9101")
+        relay = FakeRelay()
+        relay.post_error = ConnectionRefusedError("[WinError 10061] 5199 无监听")
+        relay.get_error = RelayStatusError(401, "denied")  # 探活：4xx = 路由在
+        state = AgentStateStore(tmp_path / "state.db")
+        engine, _, _, _ = _engine(tmp_path, relay=relay, state=state)
+        engine._config.relay_url = self._OLD_URL
+        self._enqueue(engine, tmp_path)
+
+        asyncio.run(engine._flush_when_due())
+
+        assert engine._config.relay_url == self._NEW_URL, "config 热更新"
+        assert state.load_credential("relay_url") == self._NEW_URL, "凭据落盘"
+        assert engine._flush_failures == 0, "清退避立即重试"
+        assert engine._next_flush_at == 0.0, "下一拍立即可投"
+        assert engine.status.failed_flushes == 0, "自愈拍不计失败"
+
+        relay.post_error = None
+        relay.get_error = None
+        asyncio.run(engine._flush_when_due())
+        assert engine.pending_count == 0, "新 URL 续传成功"
+        assert relay.posts[-1][0].startswith(self._NEW_URL), "后续投递走新端口"
+
+    def test_reachable_relay_status_error_does_not_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENTOS_KERNEL_PORT", "9101")
+        relay = FakeRelay()
+        relay.post_error = RelayStatusError(500, "boom")  # relay 可达回状态——业务层，走退避
+        engine, _, _, _ = _engine(tmp_path, relay=relay)
+        engine._config.relay_url = self._OLD_URL
+        self._enqueue(engine, tmp_path)
+
+        asyncio.run(engine._flush_when_due())
+
+        assert engine._config.relay_url == self._OLD_URL
+        assert engine.status.failed_flushes == 1
+
+    def test_remote_relay_never_heals(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AGENTOS_KERNEL_PORT", "9101")
+        relay = FakeRelay()
+        relay.post_error = ConnectionRefusedError("remote down")
+        engine, _, _, _ = _engine(tmp_path, relay=relay)
+        engine._config.relay_url = "http://sync.example.com/ext/sync_relay"
+        self._enqueue(engine, tmp_path)
+
+        asyncio.run(engine._flush_when_due())
+
+        assert engine._config.relay_url == "http://sync.example.com/ext/sync_relay", "远端 relay 不动"
+        assert engine.status.failed_flushes == 1
+
+    def test_probe_unreachable_keeps_old_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENTOS_KERNEL_PORT", "9101")
+        relay = FakeRelay()
+        relay.post_error = ConnectionRefusedError("5199 down")
+        relay.get_error = ConnectionError("9101 down")  # 新端口也不可达：env 与实际不符
+        engine, _, _, _ = _engine(tmp_path, relay=relay)
+        engine._config.relay_url = self._OLD_URL
+        self._enqueue(engine, tmp_path)
+
+        asyncio.run(engine._flush_when_due())
+
+        assert engine._config.relay_url == self._OLD_URL, "保守不动（避免写坏凭据）"
+        assert engine.status.failed_flushes == 1
+
+    def test_missing_kernel_port_env_keeps_old_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AGENTOS_KERNEL_PORT", raising=False)
+        relay = FakeRelay()
+        relay.post_error = ConnectionRefusedError("5199 down")
+        engine, _, _, _ = _engine(tmp_path, relay=relay)
+        engine._config.relay_url = self._OLD_URL
+        self._enqueue(engine, tmp_path)
+
+        asyncio.run(engine._flush_when_due())
+
+        assert engine._config.relay_url == self._OLD_URL, "无端口注入面无法确知目标，不动"
+        assert engine.status.failed_flushes == 1
+
+    def test_same_url_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AGENTOS_KERNEL_PORT", "9101")
+        relay = FakeRelay()
+        relay.post_error = ConnectionRefusedError("transient")
+        engine, _, _, _ = _engine(tmp_path, relay=relay)
+        engine._config.relay_url = self._NEW_URL  # 已是新端口
+        self._enqueue(engine, tmp_path)
+
+        asyncio.run(engine._flush_when_due())
+
+        assert engine.status.failed_flushes == 1, "同 URL：无漂移，普通退避"
+        assert relay.gets == [], "不发起无谓探活"

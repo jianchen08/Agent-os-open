@@ -17,6 +17,7 @@ browser_take_screenshot / browser_console_messages。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -91,7 +92,10 @@ class BrowserTool(BuiltinTool):
 
         arguments = _build_arguments(tool_name, inputs)
         try:
-            result = client.call(tool_name, arguments)
+            # Bridge 调用是同步 HTTP（timeout_secs 缺省 120s），必须出事件循环：
+            # 合宿宿主 async handler 直接跑在宿主循环上，>30s 停滞即被 watchdog
+            # os._exit(1) 整组带走（审计 A-1）。
+            result = await asyncio.to_thread(client.call, tool_name, arguments)
         except BridgeClientError as e:
             return create_failure_result(error=str(e), error_code="BRIDGE_CALL_FAILED")
 

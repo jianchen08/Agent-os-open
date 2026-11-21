@@ -23,9 +23,9 @@ import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { slotRegistry } from '@/services/slots/slotRegistry'
 import { loadSchemaIntoRegistries, registerWidgetStub } from '@/test/schemaLoader'
 
 /**
@@ -93,6 +93,24 @@ describe('WorkspaceNavPage — 声明驱动分组', () => {
     expect(screen.getByTestId('nav-more-toggle')).toHaveTextContent('更多')
     expect(screen.getByTestId('nav-more-toggle')).toHaveTextContent('1')
     expect(screen.queryByTestId('nav-item-notes:floating_notes')).not.toBeInTheDocument()
+  })
+
+  it('图片图标（data:URI）渲染 <img>，emoji 图标按文本渲染', () => {
+    contributionRegistry.register({
+      type: 'pages', id: 'brand', title: '品牌页',
+      space: 'workspace', slot: 'tab', path: '/p/brand', pluginId: 'x',
+      icon: 'data:image/svg+xml;base64,PHN2Zy8+',
+    })
+    contributionRegistry.register({
+      type: 'pages', id: 'emoji', title: '表情页',
+      space: 'workspace', slot: 'tab', path: '/p/emoji', pluginId: 'y',
+      icon: '🧩',
+    })
+    render(<WorkspaceNavPage />)
+    const img = document.querySelector('img[src^="data:image/svg+xml"]')
+    expect(img).not.toBeNull()
+    expect(screen.getByTestId('nav-item-y:emoji')).toHaveTextContent('🧩')
+    expect(screen.queryByText('data:image')).toBeNull()
   })
 
   it('无模式面板声明时模式组不占位（空组不渲染）；无非 workspace 页面时「更多」区不占位', () => {

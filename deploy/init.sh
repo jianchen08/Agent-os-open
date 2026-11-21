@@ -9,6 +9,9 @@
 #    只建 venv 壳不装插件依赖（2026-10-09 WSL2 实测 spawn 即 pydantic missing），
 #    依赖必须按 uv.lock 锁定装齐；--frozen 失败（无锁文件/锁漂移）回退普通 sync。
 # 3/3 .env 落位提示：LLM keys 读序 进程环境 > <AGENTOS_USER_ROOT>/.env。
+# 4/4 部署回读校验（ADR 2026-11-10-deploy-freshness-verification）：部署位
+#    实际字节 vs 随包 deploy/deploy-manifest.json——本次发版的 diff 与二进制
+#    产物是否真的落到本机；缺失/哈希不符/关键项命中即红（旧包无清单则跳过）。
 #
 # 干跑校验：AGENTOS_INIT_DRY_RUN=1 只打印将执行的命令不执行（不动 venv）。
 
@@ -86,4 +89,11 @@ echo "[init] 3/3 配置落位提示："
 echo "  - EnvironmentFile：cp deploy/agentos.env.example /etc/agentos/agentos.env 后填两把密钥等必设项（含明文口令，保持 0600）；"
 echo "    裸起（deploy/start_server.sh）不读该文件，按同名变量以环境变量注入，逐项对齐即可。"
 echo "  - LLM keys：落 <AGENTOS_USER_ROOT>/.env（或经内核设置页写入）；进程环境同名键优先。"
+# ========== 4/4 部署回读校验（ADR 2026-11-10-deploy-freshness-verification）=====
+echo "[init] 4/4 部署回读校验（发版清单 vs 部署位实际字节）..."
+if [ -f "$REPO_ROOT/deploy/deploy-manifest.json" ]; then
+    run bash "$REPO_ROOT/deploy/verify_deploy.sh"
+else
+    echo "[init]   跳过：无 deploy/deploy-manifest.json（旧包/非发布包构建）"
+fi
 echo "[init] 完成。下一步：systemd（deploy/agentos-kernel.service）或 bash deploy/start_server.sh。"

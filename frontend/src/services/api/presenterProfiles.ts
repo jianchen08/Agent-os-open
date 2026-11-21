@@ -13,8 +13,8 @@
 
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/services/api/client'
-import { queryKeys } from '@/services/query/queryKeys'
 import { presenterSourcesFromModes, useModesRegistry } from '@/services/api/modes'
+import { queryKeys } from '@/services/query/queryKeys'
 
 /** 卡目录变化频率低（改卡 yaml / 热发现才变），新鲜窗口 5 分钟 */
 const PRESENTER_STALE_TIME = 5 * 60_000

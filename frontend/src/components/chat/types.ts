@@ -62,7 +62,8 @@ export interface SendMessageParams {
   /** 附件列表 */
   attachments?: Attachment[]
   /** 思考强度（参数组 JSON 串，llm_service thinking-levels 选项 value，随消息
-   *  透传给后端 llm_core 白名单过滤直覆盖；'' = 不覆盖） */
+   *  透传给后端；内核落管道持久 state，llm_core 白名单过滤直覆盖；'' = 本轮
+   *  未选择——不覆盖，继承管道上次选择） */
   thinkingStrength?: string
   /** 显式模型选择（llm.yaml models 键，随消息 model_id 字段透传；内核按
    *  llm_core widget 声明的 frame_field 名单合成 state overlay，llm_core

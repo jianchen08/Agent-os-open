@@ -14,9 +14,9 @@
 
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { MessageList } from '../MessageList'
 import type { ExtendedMessageListProps } from '../MessageList'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // Mock MessageItem（避免深入渲染依赖）

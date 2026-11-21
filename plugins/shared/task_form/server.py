@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """任务表单服务端——自持表单声明 + 取数端点（不塞 channel_api）。
 
-- GET /ext/task_form/form?session_id=   表单字段声明（config/task_form.yaml），
+- GET /ext/task_form/form?session_id=   表单字段声明
+  （config/plugins/task_form/task_form.yaml，manifest config_files 声明路径），
   前端 fieldsUri 直接消费，字段声明唯一在配置文件。
 - GET /ext/task_form/options/agents     执行 Agent 选项 {value:config_id,label:name}
   （读 config/agents/**/*.yaml）。
@@ -17,6 +18,7 @@ ToolExecutionResult{success,data}，data 为 HttpHandleResponse{status,headers,b
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -42,7 +44,7 @@ from _root_api import (  # noqa: E402
 )
 
 # 表单声明 / 执行 Agent 配置根：与 manifest config_files.task_form.path 一致。
-_FORM_REL = os.path.join("config", "task_form.yaml")
+_FORM_REL = os.path.join("config", "plugins", "task_form", "task_form.yaml")
 _AGENTS_REL = os.path.join("config", "agents")
 
 
@@ -159,8 +161,9 @@ async def http_handle(
         return _ok(_json_response({"fields": fields, "id": "task_create", "title": "新建任务"}))
 
     # GET /ext/task_form/options/agents —— 执行 Agent 选项
+    # 配置树全量扫描解析是同步阻塞：出事件循环执行（合宿宿主心跳不冻）。
     if path == "/ext/task_form/options/agents" and method == "GET":
-        return _ok(_json_response({"data": _agent_options()}))
+        return _ok(_json_response({"data": await asyncio.to_thread(_agent_options)}))
 
     # GET /ext/task_form/options/projects —— 项目选项（登记行，全局不过滤会话）；
     # 登记簿故障时 data 为空列表 + warning 提示字段（故障与真空可区分）

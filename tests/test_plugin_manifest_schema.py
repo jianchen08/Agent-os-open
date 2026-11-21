@@ -87,3 +87,45 @@ def test_schema_allows_empty_entry_only_for_composite_note(schema):
         "capabilities": {},
     }
     jsonschema.validate(manifest, schema)  # 不抛即过
+
+
+def _manifest_with_permissions(permissions: dict) -> dict:
+    return {
+        "id": "perm-demo",
+        "name": "perm-demo",
+        "version": "1.0.0",
+        "plugin_type": "tool",
+        "language": "python",
+        "host_type": "sidecar",
+        "entry": "server.py",
+        "capabilities": {},
+        "permissions": permissions,
+    }
+
+
+def test_schema_rejects_unknown_permission_keys(schema):
+    """权限键拼错必须被 schema 拒绝（与内核 serde deny_unknown_fields 同口径）。
+
+    修复前 schema 只有 `"permissions": {"type": "object"}`——任何键都放行，
+    与内核静默丢未知键叠加后，插件"声明了权限"与"没声明"在两侧都不可辨。
+    """
+    for bad in [
+        {"networks": {"allowed_hosts": ["a.com"]}},       # 权限组名拼错
+        {"network": {"allow_hosts": ["a.com"]}},          # 组内键拼错
+        {"filesystem": {"read_path": ["/tmp"]}},          # 组内键拼错
+        {"env_var": ["TOKEN"]},                           # 组名单复数拼错
+    ]:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(_manifest_with_permissions(bad), schema)
+
+
+def test_schema_accepts_valid_permission_forms(schema):
+    """合法声明形态（含空对象）照常通过：schema 收紧不得误伤存量。"""
+    for good in [
+        {},
+        {"filesystem": {"read_paths": ["*"], "write_paths": ["*"]}},
+        {"network": {"allowed_hosts": ["registry.npmjs.org"]}},
+        {"env_vars": ["TOKEN"], "system_calls": ["exec"]},
+    ]:
+        jsonschema.validate(_manifest_with_permissions(good), schema)  # 不抛即过
+

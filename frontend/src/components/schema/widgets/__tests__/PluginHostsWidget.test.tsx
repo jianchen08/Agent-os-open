@@ -19,10 +19,10 @@
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PluginHostsWidget } from '../PluginHostsWidget'
 import { renderWithProviders } from '@/test/renderWithProviders'
-import type { PluginHost, PluginRuntimeRow } from '@/types/pluginHosts'
+import { PluginHostsWidget } from '../PluginHostsWidget'
 import type { PluginHostsSnapshot } from '@/services/api/pluginHosts'
+import type { PluginHost, PluginRuntimeRow } from '@/types/pluginHosts'
 
 const mockGetPluginHosts = vi.fn<() => Promise<PluginHostsSnapshot>>()
 const mockGetPluginRuntimeRows = vi.fn<() => Promise<PluginRuntimeRow[]>>()

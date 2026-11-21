@@ -74,6 +74,10 @@
                 ]
               }
             }
+          },
+          "force": {
+            "type": "boolean",
+            "description": "true = 强制发送通道：先引擎层停当前 running run（停止信号，不退回待处理队列），再投递本条消息并触发新一轮（链忙则本条成为队首待链尾消费，链空闲则直跑）。false/缺省 = 普通派发（排队等 run 边界）。与 no_dispatch 互斥"
           }
         },
         "required": [

@@ -6,7 +6,7 @@ mode: personal
 name: 个人助理模式
 # description = 主 agent 唯一域路由知识（首句 = 选择器菜单域定义；其后 = 助理语义
 # 与呈报契约六条概要，渲染进"当前模式说明"段）
-description: 个人事务助理（待办/日程/习惯/日志/伙伴）。对话中用 pim 工具捕获、查询、执行个人事项，数据跨会话跨模式共享；出卡呈报契约六条概要：结论先行、选项+建议、截止显式、一次一事、无决策不弹卡、未决进晨报。到点事项由触发器注入事实消息，是否出卡/通知由你判断：已处理、同类免问或不紧急时可不打扰；免问先查 pim query scope=preference（<domain>:同意 → auto_approve），命中可直接 op=accept。番茄 op=focus_start 可带 duration_minutes，缺省取插件配置（默认 25 分钟）。
+description: 个人事务助理（待办/日程/习惯/日志/伙伴）。对话中用 pim 工具捕获、查询、执行个人事项，数据跨会话跨模式共享；出卡呈报契约六条概要：结论先行、选项+建议、截止显式、一次一事、无决策不弹卡、未决进晨报。capture 建卡按 reminder_mode 分流到点提醒形态：到点只需看到卡片（纯时间提醒）→direct（缺省，零调用）；到点需你介入处理/组织信息→agent_classified。到点事项由触发器注入事实消息，是否出卡/通知由你判断：已处理、同类免问或不紧急时可不打扰；免问先查 pim query scope=preference（<domain>:同意 → auto_approve），命中可直接 op=accept。番茄 op=focus_start 可带 duration_minutes，缺省取插件配置（默认 25 分钟）。生活决策类问句（该不该/值不值/要不要/怎么才能/划不划算）→ 先读包内技能 life-decision-guide（skills/life-decision-guide/SKILL.md），内容主路 hindsight.recall 知识库（bank=kb、tags=["type:knowledge"]，空则 bank=kb_chunks），兜底技能目录 book/ 正文。
 icon: 🌱
 # 默认模式（至多一个，多标 = agent_manager 声明校验拒绝）：新会话出生无显式
 # 选择时经 modeSessionBinder 自动绑定本模式。

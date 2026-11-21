@@ -21,8 +21,8 @@
 
 import { useMemo } from 'react'
 import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator'
-import { useActiveTabPipelineId } from '@/hooks/useActiveExecutionContext'
 import { usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
+import { useActiveTabPipelineId } from '@/hooks/useActiveExecutionContext'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { mapStateInfoToViewModel } from '@/services/api/pipelines'
 

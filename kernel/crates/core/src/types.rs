@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 内核地基·执行路径身份构造统一(core 类型面) | @ci: rust-test
 //! 核心类型定义
 //!
 //! 对应 0.1 的 `pipeline/types.py`。路由经 DSL 条件表达（G10 单轨裁定），
@@ -130,6 +131,15 @@ pub struct PluginContext<'a> {
     ///
     /// 引擎注入的 BLOB 加载器，插件按需调用加载消息完整内容
     pub content_loader: ContentLoader,
+    /// 并行 for-each 迭代共享基座（只读大字段）。
+    ///
+    /// 迭代 state 是父 state 的"写集克隆"：`messages`/管道不变量等只读大键
+    /// 不进入每个迭代，而是由本基座共享（一次克隆、N 迭代复用）。插件按
+    /// `state.reads` 切片投喂时，state 缺失的声明键从基座回填——插件看到的
+    /// 数据与全量 state 一致，但内存成本与 state 总量解耦。
+    ///
+    /// `None` = 无共享基座（串行/非迭代/未启用共享的常态）。
+    pub base_state: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 impl std::fmt::Debug for PluginContext<'_> {
@@ -142,6 +152,7 @@ impl std::fmt::Debug for PluginContext<'_> {
             .field("session_id", &self.session_id)
             .field("task_id", &self.task_id)
             .field("content_loader", &self.content_loader)
+            .field("base_state", &self.base_state.is_some())
             .finish()
     }
 }
@@ -162,7 +173,17 @@ impl<'a> PluginContext<'a> {
             session_id: String::new(),
             task_id: String::new(),
             content_loader,
+            base_state: None,
         }
+    }
+
+    /// 注入迭代共享基座（并行 for-each 写集克隆路径；缺席 = 无基座）。
+    pub fn with_base_state(
+        mut self,
+        base: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        self.base_state = base;
+        self
     }
 }
 
@@ -384,44 +405,55 @@ pub enum PendingInputSource {
     System,
 }
 
-/// pending 输入条目（pipeline_pending_inputs 表行）。
+/// 一次派发请求（pending 队列「入队 → 激活重放」的载荷，ADR-2026-11-17）。
 ///
-/// 消息在"入队→激活"之间停留在表中，等待窗口内可修改/删除/清空
-/// （ADR-2026-08-26）；激活时消费任务从表取参数执行——内容不再被闭包捕获。
+/// 丢掉逐入口硬编码空值的旧形态后，字段只剩两类：内核机制字段，以及两个
+/// **不透明 map**——`execution_context` / `state_overlay` 的键全部归插件
+/// 声明面（`thread_fields` / `frame_field` / 调用方 `state`），内核不解析键义。
+/// 执行身份 `agent.id`、思考强度 `thinking_strength` 均为声明键，无独立
+/// 形参/列（旧 `agent_id` / `thinking_strength` 两个重复通道已删）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchRequest {
+    /// 派发坐标（会话 thread）
+    pub thread_id: String,
+    /// 发送者（注入面为反调身份）
+    pub user_id: String,
+    /// 管道执行坐标（入队时经 resolve_pipeline_id_for_thread 解析后的路由键，
+    /// 消费时直接用；与链 key 同值）
+    pub pipeline_id: String,
+    /// 消息正文（等待窗口内可经 PUT 修改）
+    pub content: String,
+    /// 前端幂等键（ADR 2026-08-21）：随 user 消息 metadata 落库并在 GET
+    /// messages 回显，前端据此对账去重乐观消息。空串 = 无幂等键
+    /// （触发器注入/旧客户端）。队列表另有同名列投影作去重索引。
+    pub client_message_id: String,
+    /// 来源标注（四入口统一）
+    pub source: PendingInputSource,
+    /// 任务级执行上下文（opaque；键归插件声明面：workspace/isolation 等）
+    pub execution_context: Option<serde_json::Value>,
+    /// 派发 overlay（lineage.* / task.* / agent.id 等扁平键；opaque）
+    pub state_overlay: Option<serde_json::Value>,
+    /// 管道配置 ID（config/pipelines/{id}.yaml）：显式指定 = 按需加载编译该
+    /// 配置执行；None = autonomous（缺省路径与既有行为一致）
+    pub pipeline_config_id: Option<String>,
+}
+
+/// pending 输入行（pipeline_pending_inputs 表行，ADR-2026-08-26 /
+/// ADR-2026-11-17）：队列信封 + 一次派发请求。
+///
+/// 消息在"入队→激活"之间停留在表中，等待窗口内可修改/删除/清空；
+/// 激活时消费任务从表取请求重放执行——内容不再被闭包捕获。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingInputRecord {
     /// 队列条目 ID（12hex，uuid v4 simple 前 12 位，与管道 id 同式）
     pub id: String,
-    /// 所属管道 ID（FIFO 键）
-    pub pipeline_id: String,
     /// 租户（隔离键）
     pub tenant_id: String,
-    /// 发送者
-    pub user_id: String,
-    /// 消息正文（等待窗口内可经 PUT 修改）
-    pub content: String,
-    /// 派发坐标（注入 = 真实会话 thread；创建 = 管道自身）
-    pub thread: String,
-    /// 来源标注
-    pub source: PendingInputSource,
-    /// 执行 agent（任务派发显式指定；主会话路径按线程绑定解析）
-    pub agent_id: String,
-    /// 消费时派发的路由键（resolve_pipeline_id_for_thread 结果——入队时解析，
-    /// 消费时直接用；与链 key 同值）
-    pub route_id: String,
-    /// 思考强度（off/low/medium/high；引擎透传 llm_core）
-    pub thinking_strength: String,
-    /// 前端幂等键（ADR-2026-08-21：随 user 消息 metadata 落库回显，认领用）
-    pub client_message_id: String,
-    /// 任务级 execution_context（workspace_mode/isolation_level 等）
-    pub execution_context: Option<serde_json::Value>,
-    /// 出生注入 overlay（lineage.* / task.* 等扁平键）
-    pub state_overlay: Option<serde_json::Value>,
-    /// 管道配置 ID（config/pipelines/{id}.yaml）：显式指定 = 按需加载编译该配置
-    /// 执行；None = autonomous（缺省路径与既有行为一致）
-    pub pipeline_config_id: Option<String>,
     /// 创建时间（RFC3339；FIFO 序 = created_at, id 升序）
     pub created_at: String,
+    /// 派发请求（表列 `request`，JSON 单列；pipeline_id / client_message_id
+    /// 另有列投影作查询与去重索引键，单一真值仍是 request）
+    pub request: DispatchRequest,
 }
 
 /// 运行实例状态（runs 表 status 字段）。
@@ -458,7 +490,11 @@ impl RunStatus {
     /// [`DECLARED_FAILED_STOP_REASONS`]；表内 task_failed/max_iterations/
     /// duplicate_loop/tool_fail_loop 为 ADR 2026-08-30 契约冻结的既迁存量
     /// （二期随 A1 收口迁声明面，见 ADR 决策 4），timeout=看门狗署名、
-    /// dropped_tool_calls/empty_reply_exhausted=引擎异常终局闸署名。
+    /// dropped_tool_calls/empty_reply_exhausted=引擎异常终局闸署名、
+    /// llm_fail_loop=引擎 LLM 连败熔断署名（2026-11-18：LLM 类插件步连续
+    /// 失败达阈值的结构化熔断，不看错误文本指纹——装机 2026-11-18
+    /// 634adfc6a364 家族实证：gateway 错误文本逐调用易变，按指纹计数
+    /// 的插件层熔断永不达阈，全家僵死 80+ 分钟）。
     pub const FAILED_STOP_REASONS: &[&str] = &[
         "task_failed",
         "max_iterations",
@@ -469,6 +505,7 @@ impl RunStatus {
         "stalled",
         "duplicate_loop",
         "tool_fail_loop",
+        "llm_fail_loop",
         "dropped_tool_calls",
         "empty_reply_exhausted",
     ];
@@ -1652,20 +1689,19 @@ mod tests {
     fn pending_record(source: PendingInputSource) -> PendingInputRecord {
         PendingInputRecord {
             id: "abc123def456".into(),
-            pipeline_id: "p1".into(),
             tenant_id: "t1".into(),
-            user_id: "u1".into(),
-            content: "hello".into(),
-            thread: "th1".into(),
-            source,
-            agent_id: "main".into(),
-            route_id: "r1".into(),
-            thinking_strength: "low".into(),
-            client_message_id: "cmid-1".into(),
-            execution_context: Some(serde_json::json!({"workspace_mode": "isolated"})),
-            state_overlay: None,
-            pipeline_config_id: None,
             created_at: "2026-09-13T00:00:00Z".into(),
+            request: DispatchRequest {
+                thread_id: "th1".into(),
+                user_id: "u1".into(),
+                pipeline_id: "r1".into(),
+                content: "hello".into(),
+                client_message_id: "cmid-1".into(),
+                source,
+                execution_context: Some(serde_json::json!({"workspace_mode": "isolated"})),
+                state_overlay: None,
+                pipeline_config_id: None,
+            },
         }
     }
 
@@ -1673,6 +1709,44 @@ mod tests {
     fn pending_input_record_serde_roundtrip() {
         assert_serde_roundtrip(&pending_record(PendingInputSource::User));
         assert_serde_roundtrip(&pending_record(PendingInputSource::Task));
+    }
+
+    /// 持久化键名快照（ADR-2026-11-17 机械闸）：`request` 列是**有类型**的
+    /// 持久化载荷，新增/删除字段必须显式确认（本断言红即逼迫「新增字段 =
+    /// 显式持久化决策」，防字段悄悄进 state 面）。
+    #[test]
+    fn dispatch_request_persisted_keys_are_pinned() {
+        let request = pending_record(PendingInputSource::User).request;
+        let value = serde_json::to_value(&request).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("DispatchRequest 必须序列化为对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "client_message_id",
+                "content",
+                "execution_context",
+                "pipeline_config_id",
+                "pipeline_id",
+                "source",
+                "state_overlay",
+                "thread_id",
+                "user_id",
+            ],
+            "request 持久化键集合变更必须同批更新本快照（并确认 ADR 影响面）"
+        );
+        // 必填字段缺一不可（反序列化 fail-closed，不靠 #[serde(default)] 造默认值）
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("pipeline_id");
+        assert!(
+            serde_json::from_value::<DispatchRequest>(missing).is_err(),
+            "pipeline_id 缺失必须反序列化失败"
+        );
     }
 
     #[test]

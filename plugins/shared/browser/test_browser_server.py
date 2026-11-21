@@ -186,17 +186,15 @@ class TestConcurrentContainerIdentity:
         )
 
     @staticmethod
-    def _drive_sync(coro: Any) -> Any:
-        """手动步进协程至完成（绕开嵌套事件循环限制，语义等价单步调度）。
+    def _drive_isolated_loop(coro: Any) -> Any:
+        """在独立事件循环里把协程跑到完成（注入点已在线程池 worker 内执行）。
 
-        身份窗口（写→消费）内无挂起点，一次 send 即跑完；若未来窗口引入
-        await，此处显式失败提醒交错模型需重做（身份路由已由显式传参保证）。
+        ``BrowserTool.execute`` 的 Bridge 调用经 ``asyncio.to_thread`` 下放
+        （宿主事件循环活性，审计 A-1），交错注入点 ``BridgeClient.call`` 因此
+        运行在 worker 线程——该线程无运行中的循环，可安全起一个私有循环驱动
+        内层会话，身份窗口（构造客户端→发出调用）仍被完整覆盖。
         """
-        try:
-            coro.send(None)
-        except StopIteration as stop:
-            return stop.value
-        raise AssertionError("execute 含挂起点，交错注入模型失效——请改用任务级交错驱动")
+        return asyncio.run(coro)
 
     @pytest.mark.parametrize(("outer_cid", "inner_cid"), [("cid-A", "cid-B"), ("cid-B", "cid-A")])
     def test_interleaved_sessions_keep_own_container(
@@ -217,7 +215,7 @@ class TestConcurrentContainerIdentity:
                 return real_call(client, tool_name, arguments)
             interleave_state["done"] = True
             inner_tool = tool_mod.BrowserTool({"upstream": "browser"})
-            inner = self._drive_sync(
+            inner = self._drive_isolated_loop(
                 inner_tool.execute(
                     {
                         "_tool_name": "browser_snapshot",

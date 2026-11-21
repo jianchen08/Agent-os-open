@@ -312,3 +312,223 @@ async def test_other_tools_missing_task_id_stay_silent(caplog: Any) -> None:
     with caplog.at_level(logging.DEBUG, logger=_MOD_NAME):
         await _run(_taskless_state("memory"))
     assert not any("task_id 注入失败" in rec.message for rec in caplog.records)
+
+
+# ── 动态工具面：call_tool 快照注入（工具调用路径的可靠定义来源）──────────────
+# 为什么走入参：`pipeline-state.list` 读的是内存 registry，而 registry 只在 run
+# 收尾时由 `stage_exec` 刷新（`reg.update_state(persisted)`）——run 进行中读不到
+# 本轮写入的 `dynamic_tools`。本插件与 `tool_schema` 同轮执行、按 `state.reads`
+# 直接看到活值，故同轮把快照放进入参。以下锁定注入契约。
+
+
+async def test_dynamic_tools_injected_for_call_tool() -> None:
+    """`call_tool` 调用收本轮快照（两组有区分度输入：单条 / 多条定义）。"""
+    defs_one = [{"name": "file_read", "input_schema": {"type": "object"}}]
+    defs_two = defs_one + [{"name": "file_write", "input_schema": {"type": "object"}}]
+    for defs in (defs_one, defs_two):
+        result = await _run(
+            _state(
+                raw_tool_calls=[{"name": "call_tool", "args": {"tool": "file_read", "arguments": {}}}],
+                dynamic_tools=defs,
+            )
+        )
+        args = _calls(result)[0]["args"]
+        assert args["_dynamic_tools"] == defs
+
+
+async def test_dynamic_tools_not_injected_for_other_tools() -> None:
+    """非 `call_tool` 工具不收快照（同一 state 的对照组：call_tool 收、memory 不收）。"""
+    defs = [{"name": "file_read", "input_schema": {"type": "object"}}]
+    state = _state(dynamic_tools=defs)
+    state["raw_tool_calls"] = [
+        {"name": "call_tool", "args": {"tool": "file_read", "arguments": {}}},
+        {"name": "memory", "args": {}},
+    ]
+    calls = _calls(await _run(state))
+    by_name = {c["name"]: c["args"] for c in calls}
+    assert "_dynamic_tools" in by_name["call_tool"], "动态面唯一消费者必须收快照"
+    assert "_dynamic_tools" not in by_name["memory"], "其余工具不得无谓增重"
+
+
+async def test_dynamic_tools_forged_snapshot_not_effective() -> None:
+    """模型夹带 `_dynamic_tools` 伪造定义 → 先剥后注入，服务端值权威。"""
+    forged = {"name": "evil_tool", "input_schema": {"type": "object"}}
+    defs = [{"name": "file_read", "input_schema": {"type": "object"}}]
+    result = await _run(
+        _state(
+            raw_tool_calls=[
+                {"name": "call_tool", "args": {"tool": "evil_tool", "arguments": {}, "_dynamic_tools": [forged]}}
+            ],
+            dynamic_tools=defs,
+        )
+    )
+    args = _calls(result)[0]["args"]
+    assert args["_dynamic_tools"] == defs, "伪造快照必须被服务端快照覆盖"
+
+
+async def test_no_dynamic_tools_state_no_injection() -> None:
+    """state 无 `dynamic_tools`（本轮未引入）→ 不注入该键，不塞空对象。"""
+    result = await _run(_state(raw_tool_calls=[{"name": "call_tool", "args": {"tool": "x", "arguments": {}}}]))
+    args = _calls(result)[0]["args"]
+    assert "_dynamic_tools" not in args
+
+
+# ── R20：视觉输入上限注入（file_read 专属，服务端权威覆盖）──────────────
+
+
+async def test_vision_max_pixels_injected_into_file_read_only() -> None:
+    """state 有规格 → 仅 file_read 收到注入，其余工具不带（避免无谓参数扩散）。"""
+    state = _state(
+        raw_tool_calls=[
+            {"name": "file_read", "args": {"path": "/ws/a.png"}},
+            {"name": "bash_execute", "args": {"command": "ls"}},
+        ],
+        llm_vision_max_pixels=1048576,
+    )
+    result = await _run(state)
+    calls = _calls(result)
+    assert calls[0]["args"]["llm_vision_max_pixels"] == 1048576
+    assert "llm_vision_max_pixels" not in calls[1]["args"]
+
+
+async def test_vision_max_pixels_overrides_forged_value() -> None:
+    """LLM 夹带的伪造规格被服务端权威值覆盖（防绕过切分/伪造超小规格）。"""
+    state = _state(
+        llm_vision_max_pixels=1048576,
+    )
+    state["raw_tool_calls"] = [
+        {"name": "file_read", "args": {"path": "/ws/a.png", "llm_vision_max_pixels": 99999}},
+    ]
+    result = await _run(state)
+    (tc,) = _calls(result)
+    assert tc["args"]["llm_vision_max_pixels"] == 1048576
+
+
+async def test_vision_max_pixels_absent_or_invalid_not_injected() -> None:
+    """state 无键（非视觉模型常态）/脏值 → 不注入，file_read 行为与既往一致。"""
+    result = await _run(_state(raw_tool_calls=[{"name": "file_read", "args": {}}]))
+    assert "llm_vision_max_pixels" not in _calls(result)[0]["args"]
+    for dirty in (0, -3, "1568", True, 1.5):
+        state = _state(llm_vision_max_pixels=dirty)
+        state["raw_tool_calls"] = [{"name": "file_read", "args": {}}]
+        result = await _run(state)
+        assert "llm_vision_max_pixels" not in _calls(result)[0]["args"], f"dirty={dirty!r}"
+
+
+# ── 动态目标（call_tool）嵌套参数注入：与原生同一份注入代码 ──────────────
+
+_DYNAMIC_FS = {
+    "name": "FileSystem",
+    "description": "fs",
+    "input_schema": {"type": "object", "properties": {"mode": {"type": "string"}}},
+    "plugin_id": "mcp_windows_mcp",
+    "source": "code",
+}
+
+
+async def test_call_tool_target_gets_native_context_injected() -> None:
+    """call_tool 的嵌套目标参数收到与原生相同的环境键。"""
+    state = _state(
+        raw_tool_calls=[
+            {"name": "call_tool", "args": {"tool": "FileSystem", "arguments": {"mode": "list"}}}
+        ],
+        dynamic_tools=[_DYNAMIC_FS],
+    )
+    result = await _run(state)
+    nested = _calls(result)[0]["args"]["arguments"]
+    assert nested["mode"] == "list"
+    assert nested["session_id"] == "s-1"
+    assert nested["workspace"] == "/ws/root"
+    assert nested["task_id"] == "t-1"
+    assert "timestamp" in nested
+
+
+async def test_call_tool_target_external_mcp_skips_injection() -> None:
+    """source=mcp 目标：不注入（严格 MCP server 不接受未声明参数）。"""
+    state = _state(
+        raw_tool_calls=[
+            {"name": "call_tool", "args": {"tool": "mcp_fetch", "arguments": {"url": "u"}}}
+        ],
+        dynamic_tools=[{**_DYNAMIC_FS, "name": "mcp_fetch", "source": "mcp"}],
+    )
+    result = await _run(state)
+    nested = _calls(result)[0]["args"]["arguments"]
+    assert nested == {"url": "u"}
+
+
+async def test_call_tool_target_default_params_and_model_overwrite_semantics() -> None:
+    """目标默认参数补缺；workspace 服务端覆盖、session_id 模型值保留（原生语义）。"""
+    state = _state(
+        raw_tool_calls=[
+            {
+                "name": "call_tool",
+                "args": {
+                    "tool": "FileSystem",
+                    "arguments": {"session_id": "model-s", "workspace": "/model/ws"},
+                },
+            }
+        ],
+        dynamic_tools=[_DYNAMIC_FS],
+    )
+    result = await _run(state, config={"default_params": {"FileSystem": {"mode": "list"}}})
+    nested = _calls(result)[0]["args"]["arguments"]
+    assert nested["mode"] == "list", "目标默认参数按原生语义补缺"
+    assert nested["session_id"] == "model-s", "身份键仅补缺，不覆盖模型值"
+    assert nested["workspace"] == "/ws/root", "工作区按原生语义服务端权威覆盖"
+
+
+async def test_dynamic_target_args_parity_with_native_call() -> None:
+    """同一工具/同一 state：动态嵌套参数与原生调用参数逐键一致（除时间戳）。"""
+    state = _state(
+        raw_tool_calls=[
+            {"name": "FileSystem", "args": {"mode": "list"}},
+            {"name": "call_tool", "args": {"tool": "FileSystem", "arguments": {"mode": "list"}}},
+        ],
+        dynamic_tools=[_DYNAMIC_FS],
+    )
+    result = await _run(state)
+    native_args = dict(_calls(result)[0]["args"])
+    dynamic_args = dict(_calls(result)[1]["args"]["arguments"])
+    native_args.pop("timestamp", None)
+    dynamic_args.pop("timestamp", None)
+    assert dynamic_args == native_args
+
+
+async def test_call_tool_target_underscore_forgery_stripped() -> None:
+    """模型在嵌套目标参数里伪造下划线键 → 先剥（与原生同一边界）。"""
+    state = _state(
+        raw_tool_calls=[
+            {
+                "name": "call_tool",
+                "args": {
+                    "tool": "FileSystem",
+                    "arguments": {"mode": "list", "_container_id": "forged"},
+                },
+            }
+        ],
+        dynamic_tools=[_DYNAMIC_FS],
+    )
+    result = await _run(state)
+    nested = _calls(result)[0]["args"]["arguments"]
+    assert "_container_id" not in nested
+
+
+async def test_call_tool_target_json_string_arguments_parsed_before_injection() -> None:
+    """嵌套 arguments 是 JSON 字符串 → 注入方先解析为对象再注入（壳只透传）。"""
+    state = _state(
+        raw_tool_calls=[
+            {
+                "name": "call_tool",
+                "args": {
+                    "tool": "FileSystem",
+                    "arguments": '{"mode": "list"}',
+                },
+            }
+        ],
+        dynamic_tools=[_DYNAMIC_FS],
+    )
+    result = await _run(state)
+    nested = _calls(result)[0]["args"]["arguments"]
+    assert isinstance(nested, dict)
+    assert nested["mode"] == "list"
+    assert nested["workspace"] == "/ws/root"

@@ -7,7 +7,7 @@
   ],
   "name": "Task Submit Tool",
   "description": "任务提交 MCP 工具，将任务提交给指定 Agent 执行",
-  "version": "1.2.0",
+  "version": "1.2.4",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -48,12 +48,12 @@
             },
             "acceptance_criteria": {
               "type": "object",
-              "description": "验收标准（可选，推荐填写）。扁平白话字段，任选组合：\n- files：产出文件相对路径数组，逐文件检查存在且非空，如 [\"chapters/chapter_025.md\"]\n- expect：验收期望的白话描述（评估 agent 在工作区内核对产出），如 \"总纲与25章每章1200-1800字剧情连续，progress.md 记录完整\"\n- command：验收命令（退出码 0 = 通过），如 \"pytest tests/ -q\"\n示例：{\"files\": [\"chapters/chapter_025.md\"], \"expect\": \"总纲与25章每章1200-1800字剧情连续，progress.md 记录完整\"}\n不要写指标名或嵌套对象。"
+              "description": "验收标准（可选，推荐填写）。扁平白话字段，任选组合：\n- files：产出文件相对路径数组，逐文件检查存在且非空，如 [\"chapters/chapter_025.md\"]\n- command：验收命令（退出码 0 = 通过），如 \"pytest tests/ -q\"\n示例：{\"files\": [\"chapters/chapter_025.md\"], \"command\": \"pytest tests/ -q\"}\n不要写指标名或嵌套对象。"
             },
             "project_id": {
               "type": "string",
               "pattern": "^[0-9a-f]{12}$",
-              "description": "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行（默认 worktree 从项目仓库分叉）；缺省为独立任务。项目经 project_create 工具创建（= 真实文件夹 + 登记），或由会话目录登记/前端表单创建后挂靠。"
+              "description": "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行（默认 plain 直接在项目目录工作）；缺省为独立任务。项目经 project_create 工具创建（= 真实文件夹 + 登记），或由会话目录登记/前端表单创建后挂靠。"
             },
             "parent_task_id": {
               "type": "string",
@@ -62,7 +62,7 @@
             },
             "workspace": {
               "type": "string",
-              "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。**不要用它表达'接续'——接续走 inherit_from；本参数只表示'在哪个目录干活'。**可用范围（按任务类型）：根任务可填；普通子任务不可填（继承父任务）。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
+              "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。**不要用它表达'接续'——同一任务链续作用 task_manage(action='continue')；仅换 agent/换目标且需沿用工作空间时才 task_submit + inherit_from；本参数只表示'在哪个目录干活'。**可用范围（按任务类型）：根任务可填；普通子任务不可填（继承父任务）。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
             },
             "workspace_mode": {
               "type": "string",
@@ -70,7 +70,7 @@
                 "worktree",
                 "plain"
               ],
-              "description": "工作空间拓扑（根任务可选，默认 worktree）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。plain：直接在目标目录工作，不建 worktree、不切分支。与 isolation_level（执行环境容器/宿主）相互独立。普通子任务不可选（继承父任务空间）。"
+              "description": "工作空间拓扑（根任务可选，默认 plain）。plain：直接在目标目录工作，不建 worktree、不切分支（默认）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目——仅当并行开发落在同一文件域、可能冲突时显式选择。与 isolation_level（执行环境容器/宿主）相互独立。普通子任务不可选（继承父任务空间）。"
             },
             "isolation_level": {
               "type": "string",
@@ -80,9 +80,17 @@
               ],
               "description": "执行环境隔离级别（根任务可选，默认使用系统配置）。non_isolated：非隔离，直接在宿主环境执行。isolated：隔离，在容器执行环境中工作。只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。普通子任务不可选（继承父任务）。"
             },
+            "execution_profile": {
+              "type": "string",
+              "enum": [
+                "linux-bash",
+                "native-win"
+              ],
+              "description": "执行档（根任务可选，默认 linux-bash）。MXC 隔离后端按注册表（profile→backend）选择：linux-bash=Linux 容器（bash/git/cargo），native-win=Windows 原生 ProcessContainer（PowerShell/cmd）。仅 Windows 平台支持 native-win（其它平台派发期拒绝）；普通子任务不可选（继承父任务）。"
+            },
             "inherit_from": {
               "type": "string",
-              "description": "源任务 ID：填写即接续该任务的工作空间（整份复制其 worktree/分支/基座坐标），上下文重新开始；不填=普通新任务。"
+              "description": "源任务 ID：仅换 agent/换目标且需沿用工作空间时填写；同一任务链续作用 task_manage(continue)。填写即接续该任务的工作空间（整份复制其 worktree/分支/基座坐标），上下文重新开始；不填=普通新任务。"
             },
             "mode": {
               "type": "string",

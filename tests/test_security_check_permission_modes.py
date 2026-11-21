@@ -48,7 +48,7 @@ def _make_plugin(mode_default: str = "default", rules: list[dict[str, Any]] | No
     p._dangerous_ops_by_tool = {
         "file_read": ["read:/etc/"],
         "file_write": ["write:/etc/"],
-        "bash_execute": ["rm -rf", "curl"],
+        "bash": ["rm -rf", "curl"],
     }
     return p
 
@@ -130,7 +130,7 @@ class TestDefaultMode:
     async def test_危险命令弹审批(self) -> None:
         svc = _mock_approval()
         p = _make_plugin()
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
         assert _decision_view(result)["allowed"] is True
 
@@ -139,7 +139,7 @@ class TestDefaultMode:
         _clear_session_modes()
         svc = _mock_approval()
         p = _make_plugin(mode_default="default")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         # 配置默认模式为 default：危险命令走审批链，交互服务恰好收到一次审批请求
         assert len(svc.requests) == 1
         decision = _decision_view(result)
@@ -165,7 +165,7 @@ class TestAcceptEdits:
         svc = _mock_approval()
         p = _make_plugin()
         _set_session_mode("s1", "accept_edits")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
         assert _decision_view(result)["allowed"] is True
 
@@ -178,7 +178,7 @@ class TestAutoMode:
             rules=[
                 {
                     "name": "danger_paths",
-                    "tools": ["bash_execute"],
+                    "tools": ["bash"],
                     "params": ["command"],
                     "action": "block",
                     "patterns": [{"type": "keyword", "value": "danger-x"}],
@@ -186,7 +186,7 @@ class TestAutoMode:
             ]
         )
         _set_session_mode("s1", "auto")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf danger-x /a"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf danger-x /a"})))
         assert len(svc.requests) == 0, "block 规则自动拒绝不得发起审批请求"
         assert _decision_view(result)["allowed"] is True
         assert "pre_decided_results" in result.state_updates, "block 规则自动拒绝须预定拒绝（tool_core 幂等跳过执行）"
@@ -198,7 +198,7 @@ class TestAutoMode:
             rules=[
                 {
                     "name": "risky_cmd",
-                    "tools": ["bash_execute"],
+                    "tools": ["bash"],
                     "params": ["command"],
                     "action": "needs_approval",
                     "patterns": [{"type": "keyword", "value": "rm -rf"}],
@@ -206,7 +206,7 @@ class TestAutoMode:
             ]
         )
         _set_session_mode("s1", "auto")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
         assert _decision_view(result)["allowed"] is True
 
@@ -217,7 +217,7 @@ class TestBypassMode:
         svc = _mock_approval()
         p = _make_plugin()
         _set_session_mode("s1", "bypass")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         assert len(svc.requests) == 0
         assert _decision_view(result)["allowed"] is True
         assert "tool_results" not in result.state_updates
@@ -229,7 +229,7 @@ class TestModePriority:
         svc = _mock_approval()
         p = _make_plugin(mode_default="default")
         _set_session_mode("s1", "bypass")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         assert len(svc.requests) == 0
 
     @pytest.mark.asyncio
@@ -237,7 +237,7 @@ class TestModePriority:
         svc = _mock_approval()
         p = _make_plugin(mode_default="default")
         _set_session_mode("s1", "bypass")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"}, session_id="s2")))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"}, session_id="s2")))
         assert len(svc.requests) >= 1
 
 
@@ -253,7 +253,7 @@ class TestEarlyExitBranches:
     async def test_disabled_plugin_allows_everything(self) -> None:
         """enabled=False → 直接放行（零检查副作用；reason 标注键已退役）。"""
         p = SecurityCheckPlugin(config={"enabled": False})
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        result = await p.execute(_ctx(_tool_state("bash", {"command": "rm -rf /x"})))
         decision = _decision_view(result)
         assert decision["allowed"] is True
         assert not result.state_updates, "disabled 早退零状态写入"
@@ -262,7 +262,7 @@ class TestEarlyExitBranches:
     async def test_non_tool_execute_skips_check(self) -> None:
         """非 tool_execute 核（如 llm_call）→ 免检放行。"""
         p = _make_plugin()
-        state = _tool_state("bash_execute", {"command": "rm -rf /x"})
+        state = _tool_state("bash", {"command": "rm -rf /x"})
         state[StateKeys.CORE_TYPE] = "llm_call"
         result = await p.execute(_ctx(state))
         decision = _decision_view(result)
@@ -381,14 +381,14 @@ class TestDispatchShortCircuits:
         svc = _mock_approval()
         rules: list[dict[str, Any]] = [{
             "name": "safe_curl_help",
-            "tools": ["bash_execute"],
+            "tools": ["bash"],
             "params": ["command"],
             "action": "allow",
             "patterns": [{"type": "keyword", "value": "curl --help"}],
         }]
         p = _make_plugin(rules=rules)
         result = await p.execute(
-            _ctx(_tool_state("bash_execute", {"command": "curl --help | head"}))
+            _ctx(_tool_state("bash", {"command": "curl --help | head"}))
         )
         assert len(svc.requests) == 0, "allow 白名单命中不得发起审批"
         assert _decision_view(result)["reason"] == "all checks passed"

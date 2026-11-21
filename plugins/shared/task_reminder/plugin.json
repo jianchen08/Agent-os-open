@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Task Reminder",
-  "version": "1.1.1",
+  "version": "1.1.5",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -37,7 +37,7 @@
   ],
   "state": {
     "reads": [
-      "_plugin_errors",
+      "_plugin_error_stats",
       "acceptance_criteria",
       "agent_level",
       "conversation_mode",
@@ -47,8 +47,11 @@
       "evaluate_reminder_run",
       "evaluate_reminder_total",
       "evaluation.detected_result",
+      "evaluation.metric_id",
+      "evaluation.mode",
       "iteration",
       "llm_empty_exhausted",
+      "llm_repetition_detected",
       "max_reminders",
       "messages_tail:50",
       "pipeline_id",
@@ -57,6 +60,7 @@
       "raw_tool_calls",
       "reject_count",
       "reject_reason",
+      "reminder_seen_result_fp",
       "run_id",
       "run_started_at",
       "submitted_task_ids",

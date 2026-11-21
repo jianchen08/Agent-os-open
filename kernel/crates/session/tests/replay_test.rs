@@ -95,6 +95,7 @@ async fn overflow_stream_events_triggers_resync_when_gap_in_replay_range() {
     let buf = ReplayBuffer::new(ReplayConfig {
         capacity: 3,
         ttl_secs: 300,
+        ..Default::default()
     });
     for s in 1..=5 {
         buf.record("thread-1", stream_event(s, "m")).await;
@@ -113,6 +114,7 @@ async fn overflow_returns_events_when_replay_range_within_buffer() {
     let buf = ReplayBuffer::new(ReplayConfig {
         capacity: 3,
         ttl_secs: 300,
+        ..Default::default()
     });
     for s in 1..=5 {
         buf.record("thread-1", stream_event(s, "m")).await;
@@ -136,6 +138,7 @@ async fn widget_overflow_keeps_latest_frame_per_widget_id() {
     let buf = ReplayBuffer::new(ReplayConfig {
         capacity: 2,
         ttl_secs: 300,
+        ..Default::default()
     });
     buf.record("thread-1", widget_event(1, "cost_panel", "v1"))
         .await;
@@ -186,6 +189,7 @@ async fn expired_events_evicted_by_ttl() {
     let buf = ReplayBuffer::new(ReplayConfig {
         capacity: 100,
         ttl_secs: 0, // 立即过期
+        ..Default::default()
     });
     buf.record("thread-1", stream_event(1, "m1")).await;
     // 等待使其过期

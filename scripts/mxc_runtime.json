@@ -1,0 +1,55 @@
+{
+  "package": "mxc",
+  "version": "1.1.0",
+  "source": {
+    "kind": "github-release-asset",
+    "repo": "microsoft/mxc",
+    "tag": "v1.1.0",
+    "asset_id": 749925569,
+    "asset_name": "mxc-release-binaries.zip",
+    "size": 533829612,
+    "api_url": "https://api.github.com/repos/microsoft/mxc/releases/assets/749925569",
+    "download_url": "https://github.com/microsoft/mxc/releases/download/v1.1.0/mxc-release-binaries.zip"
+  },
+  "license": {
+    "file": "third_party/mxc/LICENSE.md",
+    "upstream": "https://github.com/microsoft/mxc/blob/v1.1.0/LICENSE.md"
+  },
+  "members": [
+    {
+      "path": "x64/wxc-exec.exe",
+      "size": 12700472,
+      "sha256": "cb8f9253a2288bbb5e980d63216068ea3b640ebaf845ba3fccc0d3fe822f7a0d"
+    },
+    {
+      "path": "x64/mxc_ffi.dll",
+      "size": 8278328,
+      "sha256": "e7ba97ff834bd7a3921a0d0292735cb807a5967013141da540c596bbe59f5bf2"
+    },
+    {
+      "path": "x64/wslcsdk.dll",
+      "size": 6911856,
+      "sha256": "b17d70b14c0ade45b1430f01fad8433269f0536f7dee90c019b5f2daf3bc46c2"
+    },
+    {
+      "path": "x64/wxc-wslc-daemon.exe",
+      "size": 2013544,
+      "sha256": "3515720cfea8d9f49894fe22dcffec723c58de64933f7a60b826459c3303f752"
+    },
+    {
+      "path": "x64/wxc-windows-sandbox-guest.exe",
+      "size": 1508704,
+      "sha256": "1c3f9a57ea9948e19999a27afc95e31837df1c226fa899e96386f4ff4a7cb0c7"
+    },
+    {
+      "path": "x64/wxc-windows-sandbox-daemon.exe",
+      "size": 1611072,
+      "sha256": "659b1609800f41fcf7de903ae4e511b248a0a792adf28fcd163253bd2c878c3d"
+    },
+    {
+      "path": "x64/mxc-diagnostic-console.exe",
+      "size": 1196352,
+      "sha256": "caeaabc248d0a63c825af5f04277274f8924401c758bf4eabd0ce287937b87e1"
+    }
+  ]
+}

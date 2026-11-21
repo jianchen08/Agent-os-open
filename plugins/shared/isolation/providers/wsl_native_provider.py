@@ -66,12 +66,61 @@ def _is_relative_working_dir(normalized: str) -> bool:
     """归一后工作目录是否相对形态（既非 POSIX 绝对也非盘符/UNC 绝对）。"""
     return not normalized.startswith("/") and not _WIN_DRIVE_PREFIX_RE.match(normalized)
 
+
 # metadata 档 IO 单源在 providers.env_metadata（D6 档真相，与 linux_native 共用）；
 # 档文件名后缀随单源。
 
 # find_environment_by_name 合成 context 的任务类型（与 docker 直查通路一致：
 # 环境名反推，无真实任务归属）
 _META_TASK_TYPE = TaskType.ATOMIC
+
+# ── 工具链持久层（ADR 2026-11-07 决策 5）─────────────────────────
+
+# cargo registry 源单源的仓根相对路径（与 docker_assets/agentos/Dockerfile COPY 的
+# 是同一份文件；任何源变更只改该文件单点生效）。
+
+# BASH_ENV 引导文件内容（静态）。$HOME 在发行版 bash 内展开——wsl --exec 下
+# HOME 由 WSL init 按执行用户设置（2026-11-07 实测在案），无需宿主侧探测路径。
+# 文件落 workspace 的 .task_runtime/（随任务空间管理），create 时幂等生成；
+# 文件缺失（遗留环境/被清理）时非交互 bash 静默忽略 BASH_ENV（实测 stderr
+# 干净、rc=0），不产生执行噪音——工具链 env 退化为仅有直接 env 对（如已注入）。
+# PATH 追加只能在此承载：`env K=V` 前缀是整体替换，做不了追加。
+_TOOLCHAIN_BOOTSTRAP_SH = (
+    "# AgentOS wsl_native 工具链环境引导（ADR 2026-11-07 决策 5 工具链持久层）。\n"
+    "# 由 WslNativeProvider 环境创建时生成；工具链持久层 = 发行版 home（VHDX\n"
+    "# ext4 持久），本文件按 $HOME 展开指向。cargo 源配置以注入单源为准\n"
+    "# （与容器镜像同语义；未注入则跳过 cargo 配置播种，官方源为默认）。\n"
+    'export RUSTUP_HOME="$HOME/.rustup"\n'
+    'export CARGO_HOME="$HOME/.cargo"\n'
+    'export PATH="$CARGO_HOME/bin:$PATH"\n'
+)
+
+# 种子写入脚本（发行版侧 python3 执行；argv: [rt_dir, bootstrap, cargo_cfg]，
+# 内容经 JSON 传递——与 _file_op write 同手法，杜绝注入）。cargo 配置取
+# first-write-wins：$HOME 可能是用户领地，覆盖用户自有 cargo 配置比漏种
+# 一次更伤（工具链 env 有直接 env 对 + BASH_ENV 引导两层兜底）。
+_SEED_PY_SCRIPT = (
+    "import json, os, sys\n"
+    "rt_dir = json.loads(sys.argv[1])\n"
+    "bootstrap = json.loads(sys.argv[2])\n"
+    "cargo_cfg = json.loads(sys.argv[3])\n"
+    "os.makedirs(rt_dir, exist_ok=True)\n"
+    "with open(os.path.join(rt_dir, 'toolchain_env.sh'), 'w', encoding='utf-8') as f:\n"
+    "    f.write(bootstrap)\n"
+    "if cargo_cfg:\n"
+    "    cfg = os.path.join(os.path.expanduser('~'), '.cargo')\n"
+    "    dest = os.path.join(cfg, 'config.toml')\n"
+    "    if not os.path.exists(dest):\n"
+    "        os.makedirs(cfg, exist_ok=True)\n"
+    "        with open(dest, 'w', encoding='utf-8') as f:\n"
+    "            f.write(cargo_cfg)\n"
+)
+
+# 环境层零工具链管理（ADR 2026-11-07 决策 5 · 2026-11-10 修订二，CC/Codex
+# 同构）：无探测、无预装、无版本钉子消费——agent 运行中撞到依赖缺失自己装
+# （rustup 首次调用按工作区 rust-toolchain.toml 钉子自动装），持久层保证装
+# 一次永久。环境层只做被动接线：BASH_ENV 引导 + RUSTUP_HOME/CARGO_HOME env
+# 对钉发行版持久 home（见 _runtime_env_pairs 与 _TOOLCHAIN_BOOTSTRAP_SH）。
 
 
 class WslNativeProvider(IsolationProvider):
@@ -86,6 +135,10 @@ class WslNativeProvider(IsolationProvider):
     - state_dir: metadata 档目录（默认 <仓库根>/.ai_workspaces/wsl_native_envs）
     - wsl_exe: wsl 可执行文件（默认 "wsl"；测试可注入替身）
     - bridge_url: AGENTOS_BRIDGE_URL 注入值（缺省读环境变量，与 docker 同源）
+    - distro_home: 发行版持久 home 显式指定（缺省首次执行时经 wsl 探测并缓存；
+      工具链直接 env 对的锚点）
+    - cargo_source_config: cargo 源单源文件路径（注入交付；未注入=跳过播种，
+      单源内容与 Dockerfile COPY 的那份一致）
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -95,17 +148,32 @@ class WslNativeProvider(IsolationProvider):
         self._user = str(user) if user else None
         self._sandbox_cmd: list[str] = [str(x) for x in self._config.get("sandbox_cmd", [])]
         self._wsl_exe = str(self._config.get("wsl_exe", "wsl"))
+        # 仓库根 = providers/ 上溯 4 级（providers→isolation→shared→plugins→根）；
+        # 相对形态注入路径（钉子单源等）按此解析，绝对路径原样（dockerfile_path
+        # 同一约定）
+        self._repo_root = Path(__file__).resolve().parents[4]
         if self._config.get("state_dir"):
             self._state_dir = str(self._config["state_dir"])
         else:
-            # 仓库根 = providers/ 上溯 5 级（providers→isolation→system→shared→plugins→根）
-            self._state_dir = str(
-                Path(__file__).resolve().parents[4] / ".ai_workspaces" / "wsl_native_envs"
-            )
+            self._state_dir = str(self._repo_root / ".ai_workspaces" / "wsl_native_envs")
         self._bridge_url = str(self._config.get("bridge_url", "") or "")
         self._environments: dict[str, IsolationEnvironment] = {}
         # 当前环境 workspace 的 WSL 侧路径（create 时刷新；argv 构建用）
         self._workspace_wsl = str(self._config.get("workspace_wsl", ""))
+        # 工具链持久层（ADR 2026-11-07 决策 5）：发行版持久 home 探测缓存
+        # （None=未探测，""=探测失败/未知）。测试/部署可经 distro_home 显式指定。
+        distro_home = self._config.get("distro_home")
+        self._distro_home = str(distro_home) if distro_home else None
+        # cargo 源单源文件路径：仅经注入（config 覆盖 cargo_source_config）交付；
+        # 未注入 = None = 跳过 distro 侧播种（官方源即 cargo 默认，既有降级语义）。
+        # 不回落仓根路径——插件禁止直读配置目录（ADR 2026-09-14 §2.6，直读守卫）。
+        cargo_source = self._config.get("cargo_source_config")
+        self._cargo_source_path: Path | None
+        if cargo_source:
+            _cs = Path(str(cargo_source))
+            self._cargo_source_path = _cs if _cs.is_absolute() else self._repo_root / _cs
+        else:
+            self._cargo_source_path = None
 
     # ── 后端元数据（guard 注入 / bash 工具侧 argv 构建共用）──────
 
@@ -157,16 +225,12 @@ class WslNativeProvider(IsolationProvider):
             if self._distro not in distros:
                 return False, f"WSL 发行版不存在: {self._distro}（现有: {distros}）"
             if self._user:
-                rc, _, err = await self._popen_run(
-                    self._wsl_argv(["--exec", "true"]), timeout=15
-                )
+                rc, _, err = await self._popen_run(self._wsl_argv(["--exec", "true"]), timeout=15)
                 if rc != 0:
                     return False, f"WSL 用户不可用: {self._user}: {self._decode(err)}"
             # bash 必须在位：执行壳用 bash（dash 对 set -o pipefail 致命退出，
             # 2026-09-14 实测；容器镜像内 dash 容忍——发行版语义不齐，统一 bash）
-            rc_bash, _, _ = await self._popen_run(
-                self._wsl_argv(["--exec", "sh", "-c", "command -v bash"]), timeout=15
-            )
+            rc_bash, _, _ = await self._popen_run(self._wsl_argv(["--exec", "sh", "-c", "command -v bash"]), timeout=15)
             if rc_bash != 0:
                 return False, "发行版缺少 bash（执行壳依赖）"
             if self._sandbox_cmd:
@@ -205,9 +269,13 @@ class WslNativeProvider(IsolationProvider):
                 context.task_id,
                 context.workspace,
             )
-            return self._make_error_environment(
-                context, now, f"工作空间路径不存在: {context.workspace}"
-            )
+            return self._make_error_environment(context, now, f"工作空间路径不存在: {context.workspace}")
+
+        # 环境层零工具链管理（ADR 2026-11-07 决策 5 · 2026-11-10 修订二）：
+        # 工作区校验后直通收养/创建，不 gate 工具链——任务类型/工作区文件内容
+        # 不参与环境选择（嗅探判据退役保持），agent 运行中撞到依赖缺失自己装，
+        # 持久层保证装一次永久。
+
         workspace_wsl = self._to_wsl_path(context.workspace)
 
         # D6① 幂等收养：遗留 metadata 且 workspace 一致 → 直接收养复用，
@@ -226,9 +294,7 @@ class WslNativeProvider(IsolationProvider):
         # mkdir -p：wsl 调用异常 = 存在性未知（D6②：不落 READY、不写档、
         # 带 query_unavailable 标记由上层软失败）；rc!=0 = 确定性失败。
         try:
-            rc, _, err = await self._popen_run(
-                self._wsl_argv(["--exec", "mkdir", "-p", workspace_wsl]), timeout=30
-            )
+            rc, _, err = await self._popen_run(self._wsl_argv(["--exec", "mkdir", "-p", workspace_wsl]), timeout=30)
         except Exception as exc:
             logger.error(
                 "[WslNativeProvider] 工作空间探测不可用（防撞名，跳过创建） | name=%s | error=%s",
@@ -241,10 +307,24 @@ class WslNativeProvider(IsolationProvider):
                 f"隔离查询暂不可用，未创建环境（防撞名）: {exc}",
                 query_unavailable=True,
             )
+        if rc != 0 and not await self._ensure_workspace_dir(workspace_wsl, context.workspace):
+            return self._make_error_environment(context, now, f"工作空间目录创建失败: {self._decode(err)}")
         if rc != 0:
-            return self._make_error_environment(
-                context, now, f"工作空间目录创建失败: {self._decode(err)}"
+            # mkdir 假失败容错（2026-11-13 装机实测形态）：rc!=0 但复核目录
+            # 存在（_ensure_workspace_dir 已含 Windows 侧补建 + test -d 复核）
+            # → 放行并留痕，不落 error environment。
+            logger.warning(
+                "[WslNativeProvider] mkdir rc=%s（stderr=%r）为假失败，目录复核存在，放行 | name=%s",
+                rc,
+                self._decode(err),
+                name,
             )
+
+        # 工具链持久层接线（ADR 2026-11-07 决策 5）：workspace 侧 BASH_ENV 引导
+        # 文件 + distro $HOME/.cargo/config.toml（源配置单源注入时）。被动文件
+        # 播种，无探测无安装；失败不阻断环境创建（工具链 env 有直接 env 对
+        # 兜底），error 留痕不做静默降级。
+        await self._seed_toolchain_env(workspace_wsl)
 
         if not self._write_metadata(name, context.workspace, workspace_wsl, now):
             return self._make_error_environment(context, now, "metadata 档写入失败")
@@ -338,6 +418,9 @@ class WslNativeProvider(IsolationProvider):
         if not command:
             return ExecutionResult(success=False, output=None, error="命令不能为空")
         timeout = float(operation.get("timeout", 30))
+        # 工具链直接 env 对依赖发行版 home 探测（异步、缓存；探测失败仅退化
+        # 为无直接对，BASH_ENV 引导文件仍按 $HOME 展开，效果等价）
+        await self._ensure_distro_home()
         args = self._build_exec_argv(
             working_dir=operation.get("working_dir"),
             command=command,
@@ -372,13 +455,9 @@ class WslNativeProvider(IsolationProvider):
         path = self._map_working_dir(str(operation.get("path", "")))
         try:
             if op == "read":
-                rc, stdout, stderr = await self._popen_run(
-                    self._wsl_argv(["--exec", "cat", path]), timeout=10
-                )
+                rc, stdout, stderr = await self._popen_run(self._wsl_argv(["--exec", "cat", path]), timeout=10)
                 if rc != 0:
-                    return ExecutionResult(
-                        success=False, output=None, error=f"读取失败: {self._decode(stderr)}"
-                    )
+                    return ExecutionResult(success=False, output=None, error=f"读取失败: {self._decode(stderr)}")
                 return ExecutionResult(success=True, output=self._decode(stdout))
 
             if op == "write":
@@ -391,9 +470,9 @@ class WslNativeProvider(IsolationProvider):
                             "--exec",
                             "sh",
                             "-c",
-                            "mkdir -p \"$1\" && python3 -c "
+                            'mkdir -p "$1" && python3 -c '
                             "'import json,sys; open(sys.argv[1],\"w\").write(json.loads(sys.argv[2]))' "
-                            "\"$2\" \"$3\"",
+                            '"$2" "$3"',
                             "--",
                             dir_path,
                             path,
@@ -403,15 +482,11 @@ class WslNativeProvider(IsolationProvider):
                     timeout=10,
                 )
                 if rc != 0:
-                    return ExecutionResult(
-                        success=False, output=None, error=f"写入失败: {self._decode(stderr)}"
-                    )
+                    return ExecutionResult(success=False, output=None, error=f"写入失败: {self._decode(stderr)}")
                 return ExecutionResult(success=True, output=None)
 
             if op == "exists":
-                result = await self._exec(
-                    {"command": f"test -e {path} && echo yes || echo no"}
-                )
+                result = await self._exec({"command": f"test -e {path} && echo yes || echo no"})
                 stdout = (result.output or {}).get("stdout", "")
                 return ExecutionResult(success=True, output={"exists": "yes" in stdout})
 
@@ -420,6 +495,36 @@ class WslNativeProvider(IsolationProvider):
             return ExecutionResult(success=False, output=None, error=f"文件操作失败: {e}")
 
     # ── argv 构建 ───────────────────────────────────────────────
+
+    async def _ensure_workspace_dir(self, workspace_wsl: str, workspace_win: str) -> bool:
+        """工作空间目录存在性复核 + 补建（mkdir 假失败容错）。
+
+        ①wsl 侧 test -d 复核（存在即 True——mkdir rc!=0 但目录实际已建的
+        假失败形态直接放行）；②不存在时 Windows 侧 Path.mkdir 补建（/mnt
+        映射下与 wsl 视图同目录）；③再 test -d 复核。任一步 wsl 调用异常 =
+        存在性未知 → False（调用方落 error environment，与 mkdir 异常同型的
+        软失败面）。
+        """
+        try:
+            if await self._wsl_test_dir(workspace_wsl):
+                return True
+            Path(workspace_win).mkdir(parents=True, exist_ok=True)
+            return await self._wsl_test_dir(workspace_wsl)
+        except Exception as exc:
+            logger.warning(
+                "[WslNativeProvider] 工作空间目录复核异常（按不存在处理） | dir=%s | error=%s",
+                workspace_wsl,
+                exc,
+            )
+            return False
+
+    async def _wsl_test_dir(self, workspace_wsl: str) -> bool:
+        """wsl 侧目录存在性单问（test -d，rc 即答案）。"""
+        rc, _, _ = await self._popen_run(
+            self._wsl_argv(["--exec", "test", "-d", workspace_wsl]),
+            timeout=15,
+        )
+        return rc == 0
 
     def _wsl_argv(self, extra: list[str]) -> list[str]:
         """传输前缀：[wsl_exe, -d distro] + 可选 [-u user] + extra。
@@ -470,19 +575,116 @@ class WslNativeProvider(IsolationProvider):
         - XDG_CACHE_HOME：pip/huggingface/torch/matplotlib 等缓存（自动建目录）
         - npm_config_cache：npm 缓存（npm 自建，不认 XDG）
         - PYTHONUSERBASE：pip install --user 落点（pip/python site 自建自识别）
+        工具链持久层（ADR 2026-11-07 决策 5）：
+        - BASH_ENV：非交互 bash 启动时 source 的引导文件（create 时生成于
+          .task_runtime/toolchain_env.sh），承载 PATH 追加 ~/.cargo/bin 等
+          env 前缀做不了的语义；文件缺失时 bash 静默忽略（实测在案）。
+        - RUSTUP_HOME/CARGO_HOME：直接 env 对把工具链标准路径钉到发行版持久
+          home（VHDX ext4 持久，跨任务可见）；home 未知（未探测/探测失败）
+          不注入——引导文件仍按 $HOME 展开等价兜底。与 docker 后端的
+          _TOOLCHAIN_ENV 标准路径同源（容器 = /usr/local/*，wsl = $HOME/*）。
         workspace_wsl 未知（异常形态）不注入，防 env 值指向文件系统根。
-        TMPDIR/HOME/工具链（cargo/rustup/git/ssh）不动：/tmp 随 WSL 重启清空；
-        后四者是有意共享面（工具链复用、git 身份、凭据），重定向得不偿失。
+        TMPDIR/HOME/git/ssh 不动：/tmp 随 WSL 重启清空；HOME 是工具链持久层
+        锚点本身（有意持久），git 身份与凭据是有意共享面，重定向得不偿失。
         """
         base = self._workspace_wsl
         if not base:
             return []
         rt = f"{base.rstrip('/')}/.task_runtime"
-        return [
+        pairs = [
             f"XDG_CACHE_HOME={rt}/cache",
             f"npm_config_cache={rt}/npm-cache",
             f"PYTHONUSERBASE={rt}/pyuser",
+            f"BASH_ENV={rt}/toolchain_env.sh",
         ]
+        home = self._distro_home
+        if home:
+            pairs.append(f"RUSTUP_HOME={home}/.rustup")
+            pairs.append(f"CARGO_HOME={home}/.cargo")
+        return pairs
+
+    async def _ensure_distro_home(self) -> str:
+        """探测发行版持久 home（工具链直接 env 对的锚点），结果缓存。
+
+        wsl --exec 下 HOME 由 WSL init 按执行用户设置（2026-11-07 实测在案），
+        `sh -c printf` 读取即可。失败/非绝对路径按 "" 缓存（不反复重试）：
+        直接 env 对跳过注入，BASH_ENV 引导文件仍按 $HOME 展开等价兜底，debug
+        留痕。超时 30s：wsl VM 冷启动实测可达 9~15s（_wsl_dir_exists 同教训）。
+        """
+        if self._distro_home is not None:
+            return self._distro_home
+        try:
+            rc, out, _ = await self._popen_run(self._wsl_argv(["--exec", "sh", "-c", 'printf %s "$HOME"']), timeout=30)
+            home = self._decode(out) if rc == 0 else ""
+        except Exception as exc:
+            logger.debug(
+                "[WslNativeProvider] distro home 探测失败（工具链直接 env 对跳过） | error=%s",
+                exc,
+            )
+            home = ""
+        if not home.startswith("/"):
+            home = ""
+        self._distro_home = home
+        return home
+
+    async def _seed_toolchain_env(self, workspace_wsl: str) -> None:
+        """workspace 侧工具链引导种子（create 时一次，被动文件播种）。
+
+        写两个文件，一次 wsl 调用（发行版侧 python3 执行，内容 JSON 传递）：
+        - <workspace>/.task_runtime/toolchain_env.sh：BASH_ENV 引导（PATH 追加等）
+        - $HOME/.cargo/config.toml：cargo 源单源（与镜像 COPY 同一份文件内容；
+          first-write-wins，不覆盖用户自有配置）——agent 后装 rustup 时源配置
+          已在位
+        失败不抛（环境创建继续，工具链 env 退化为直接 env 对），error 留痕。
+        环境层零工具链管理（ADR 2026-11-10 修订二）：本步只做被动文件播种，
+        无探测、无安装，不影响环境可用性。
+        """
+        rt_dir = f"{workspace_wsl.rstrip('/')}/.task_runtime"
+        cargo_cfg = self._load_cargo_source_config()
+        args = self._wsl_argv(
+            [
+                "--exec",
+                "python3",
+                "-c",
+                _SEED_PY_SCRIPT,
+                json.dumps(rt_dir),
+                json.dumps(_TOOLCHAIN_BOOTSTRAP_SH),
+                json.dumps(cargo_cfg),
+            ]
+        )
+        try:
+            rc, _, err = await self._popen_run(args, timeout=30)
+        except Exception as exc:
+            logger.error(
+                "[WslNativeProvider] 工具链种子写入异常（环境继续创建，工具链 env 退化） | error=%s",
+                exc,
+            )
+            return
+        if rc != 0:
+            logger.error(
+                "[WslNativeProvider] 工具链种子写入失败（环境继续创建，工具链 env 退化） | rc=%s | err=%s",
+                rc,
+                self._decode(err),
+            )
+
+    def _load_cargo_source_config(self) -> str:
+        """读 cargo 源单源文件（与 Dockerfile COPY 同一份）；不可达返回空串。
+
+        空串时 distro 侧跳过 cargo 配置播种：单源钉的是官方 crates.io sparse
+        （cargo ≥1.70 默认行为），缺文件语义不变，warning 留痕。
+        """
+        if not self._cargo_source_path:
+            logger.warning("[WslNativeProvider] cargo 源单源未注入（跳过 distro 侧播种） | path=None")
+            return ""
+        try:
+            return self._cargo_source_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "[WslNativeProvider] cargo 源单源文件不可读（跳过 distro 侧播种） | path=%s | error=%s",
+                self._cargo_source_path,
+                exc,
+            )
+            return ""
 
     def _build_kill_argv(self, pid: int, signal: int = 9) -> list[str]:
         """进程杀 argv：环境内 sh -c kill（kill 在沙箱外发——bwrap 默认不隔离
@@ -512,7 +714,7 @@ class WslNativeProvider(IsolationProvider):
         if normalized == "/workspace":
             return self._workspace_wsl
         if normalized.startswith("/workspace/"):
-            return self._workspace_wsl + normalized[len("/workspace"):]
+            return self._workspace_wsl + normalized[len("/workspace") :]
         # WSL 挂载形态归一（与 process_manager._map_wsl_working_dir 同语义，
         # 漂移钉 tests/test_wsl_native_wiring.py）：`\mnt\d\X` / `D:\mnt\d\X`
         # 直透 wsl --cd 会被按盘符相对路径解析为不存在的 D:\mnt\d\X。
@@ -558,9 +760,7 @@ class WslNativeProvider(IsolationProvider):
             except subprocess.TimeoutExpired:
                 failures = kill_process_tree(proc.pid)
                 if failures:
-                    raise TimeoutError(
-                        f"命令执行超时（{timeout}秒）；进程树清理失败: {'; '.join(failures)}"
-                    ) from None
+                    raise TimeoutError(f"命令执行超时（{timeout}秒）；进程树清理失败: {'; '.join(failures)}") from None
                 proc.wait()
                 raise TimeoutError(f"命令执行超时（{timeout}秒）") from None
 
@@ -579,9 +779,7 @@ class WslNativeProvider(IsolationProvider):
         """
         if not data:
             return []
-        text = (
-            data.decode("utf-16-le", errors="replace") if b"\x00" in data else data.decode("utf-8", errors="replace")
-        )
+        text = data.decode("utf-16-le", errors="replace") if b"\x00" in data else data.decode("utf-8", errors="replace")
         return [line.strip() for line in text.replace("\r\n", "\n").split("\n") if line.strip()]
 
     @staticmethod

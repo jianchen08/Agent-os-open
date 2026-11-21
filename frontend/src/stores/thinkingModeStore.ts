@@ -4,7 +4,8 @@
  * - 各对话标签（AgentTab）独立记忆思考选择，localStorage 持久化
  *   （key: thinking-strength-{tabId}）；切换标签时选择随路由自动应用
  * - 选择值 = thinking_strength_params 配置的参数组 JSON 串（选项由
- *   llm_service thinking-levels 端点下发，选中即随消息透传）；本侧只负责
+ *   llm_service thinking-levels 端点下发，选中即随消息透传并落管道持久
+ *   state——重发/回退不重传参数，管道正常跑时自动继承）；本侧只负责
  *   选择与记忆，零思考业务知识
  */
 

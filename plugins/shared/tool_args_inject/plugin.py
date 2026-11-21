@@ -180,6 +180,7 @@ _NATIVE_INJECT_KEYS = frozenset({
     "parent_ws_meta",
     "parent_agent_level",
     "agent_config_id",
+    "llm_vision_max_pixels",
 })
 
 
@@ -229,8 +230,14 @@ class ToolArgsInjectPlugin(IInputPlugin):
             tool_name = injected_tc.get("name", "")
             self._inject_identity_params(ctx, args, tool_name)
             self._inject_workspace_ctx(ctx, args, tool_name)
+            self._inject_vision_max_side(ctx, args, tool_name)
             self._inject_parent_agent_level(ctx, args)
             self._inject_agent_config_id(ctx, args)
+            # 动态目标（call_tool）的嵌套参数：同一套注入作用到目标参数对象，
+            # 壳退化为纯转发（2026-11-18 用户裁定：注入只留注入方一处）。
+            self._inject_dynamic_target(ctx, args, tool_name)
+            self._inject_dynamic_tools(ctx, args, tool_name)
+            self._inject_tool_deny(ctx, args, tool_name)
             self._apply_default_params(args, injected_tc.get("name", ""))
             self._expand_project_root_template(args)
 
@@ -507,6 +514,21 @@ class ToolArgsInjectPlugin(IInputPlugin):
                 parent_ws_meta = None
             args["parent_ws_meta"] = parent_ws_meta
 
+    def _inject_vision_max_side(self, ctx: PluginContext, args: dict[str, Any], tool_name: str) -> None:
+        """注入视觉输入不缩放总像素上限（R21 总像素口径，仅 file_read，服务端权威覆盖）。
+
+        来源 = state.llm_vision_max_pixels（llm_core 按 llm.yaml
+        multimodal.max_pixels 解析，仅支持视觉的模型写值）；消费 =
+        multimodal.split_image 原图+分块一次注入（大图直喂会被模型 API 端
+        视觉编码器缩放丢细节）。覆盖式注入防 LLM 伪造规格绕过切分；非视觉
+        模型 state 无此键 = 不注入 = file_read 行为与既往逐字节一致。
+        """
+        if tool_name != "file_read":
+            return
+        max_pixels = ctx.state.get("llm_vision_max_pixels")
+        if isinstance(max_pixels, int) and not isinstance(max_pixels, bool) and max_pixels > 0:
+            args["llm_vision_max_pixels"] = max_pixels
+
     def _inject_parent_agent_level(self, ctx: PluginContext, args: dict[str, Any]) -> None:
         """注入 parent_agent_level：当前 Agent 层级（task_submit/task_manage
         等工具判断权限和设置子任务层级用）。"""
@@ -526,6 +548,104 @@ class ToolArgsInjectPlugin(IInputPlugin):
         agent_config_id = ctx.state.get("agent_config_id", "")
         if agent_config_id:
             args["agent_config_id"] = agent_config_id
+
+    def _inject_dynamic_target(self, ctx: PluginContext, args: dict[str, Any], tool_name: str) -> None:
+        """把原生注入语义前瞻到 ``call_tool`` 的嵌套目标参数（单一真源）。
+
+        模型调 ``call_tool`` 时，本插件看到 ``args["tool"]``（目标名）与
+        ``args["arguments"]``（目标参数对象）。此前动态目标由壳（call_tool）
+        自行再注入一遍，键表三处手抄已漂移（2026-11-18 矩阵 R2 实证：strict
+        schema 被壳误杀、external MCP 漏剥、工作区覆盖/默认参数语义缺失）。
+        改为注入方直接作用到嵌套对象——身份/工作区/vision/父级/agent_config/
+        默认参数/模板展开全部复用同一组方法，动态调用与原生调用共享一份注入
+        代码，壳退化为纯转发。
+
+        external MCP 目标（``dynamic_tools[target].source == "mcp"``）跳过：
+        标准 MCP server 对未声明参数严格校验，剥离责任在内核
+        ``sanitize_external_mcp_arguments``，注入方从源头不添乱。
+
+        目标参数若是 JSON 字符串先解析为对象再注入（壳只做透传，不替模型
+        解析嵌套参数）；解析失败保持原样，交壳的线形校验报错。
+        """
+        if tool_name != "call_tool":
+            return
+        target = str(args.get("tool") or "").strip()
+        nested = args.get("arguments")
+        if isinstance(nested, str):
+            try:
+                parsed = json.loads(nested)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                nested = parsed
+                args["arguments"] = parsed
+        if not target or not isinstance(nested, dict):
+            return
+        if self._dynamic_target_is_external_mcp(ctx, target):
+            return
+        self._strip_forged_keys(nested)
+        self._inject_identity_params(ctx, nested, target)
+        self._inject_workspace_ctx(ctx, nested, target)
+        self._inject_vision_max_side(ctx, nested, target)
+        self._inject_parent_agent_level(ctx, nested)
+        self._inject_agent_config_id(ctx, nested)
+        self._apply_default_params(nested, target)
+        self._expand_project_root_template(nested)
+
+    def _dynamic_target_is_external_mcp(self, ctx: PluginContext, target: str) -> bool:
+        """动态目标是否 external MCP（``source`` 标记由 resource_search 定义面提供）。
+
+        定义集缺席/未命中 = 不是外部 MCP（按内部工具注入；壳侧门禁会另行拒绝
+        不在动态面的目标）。
+        """
+        defs = ctx.state.get("dynamic_tools")
+        if not isinstance(defs, list):
+            return False
+        for item in defs:
+            if isinstance(item, dict) and str(item.get("name") or "") == target:
+                return str(item.get("source") or "") == "mcp"
+        return False
+
+    def _inject_dynamic_tools(self, ctx: PluginContext, args: dict[str, Any], tool_name: str) -> None:
+        """注入 ``_dynamic_tools``：本次运行已引入的动态工具定义快照（仅 ``call_tool`` 需要）。
+
+        快照内容是 ``tool_schema`` 按 name **累积保留**的整个定义集（引入一次后跨工具
+        迭代持续有效，不做轮次回收），故 ``call_tool`` 侧对已引入工具无需重复搜索。
+
+        为什么必须走入参而不是让 ``call_tool`` 自己读：工具插件经
+        ``pipeline-state.list`` 拿到的是 registry 常驻状态，而 registry 只在
+        **run 收尾**时由 ``stage_exec`` 刷新（``reg.update_state(persisted)``）——
+        run 进行中写入的 ``dynamic_tools`` 不在其中，本轮调用必然读到空快照
+        （批 1 活体验证实证：``introduced=[]`` 恒现）。本插件与 ``tool_schema``
+        同轮执行、经 ``state.reads`` 声明可直接看到活值，故由注入方在**同轮**
+        把快照放进入参，绕开跨轮读面。
+
+        键名带 ``_`` 前缀是安全边界：``_strip_forged_keys`` 已先于本方法剥掉
+        模型产出的全部下划线键，此处注入的是服务端权威值、模型无法伪造；内核
+        ``tool-executor`` 的 ``internal_keys`` 剥离名单不含 ``_dynamic_tools``，
+        故该键能原样到达工具 sidecar。
+
+        **只在声明了该注入键需要时才注入**：仅 ``call_tool``（动态面唯一消费者）
+        需要，其余工具不收——避免给全部工具调用无谓增重（每轮定义集可达数十条）。
+        """
+        if tool_name != "call_tool":
+            return
+        defs = ctx.state.get("dynamic_tools")
+        if isinstance(defs, list):
+            args["_dynamic_tools"] = defs
+
+    def _inject_tool_deny(self, ctx: PluginContext, args: dict[str, Any], tool_name: str) -> None:
+        """注入 ``_tool_deny``：本 agent 动态面否决集（ADR 2026-11-18）。
+
+        消费者 = resource_search（搜索结果过滤）与 call_tool（门禁拒调）——
+        其余工具不收。键名 ``_`` 前缀同 ``_dynamic_tools``：服务端权威值、
+        模型下划线键已被剥离无法伪造。state 无键 = 缺席语义 = 无否决。
+        """
+        if tool_name not in ("resource_search", "call_tool"):
+            return
+        deny = ctx.state.get("tool_deny")
+        if isinstance(deny, list):
+            args["_tool_deny"] = deny
 
     def _apply_default_params(self, args: dict[str, Any], tool_name: str) -> None:
         """注入工具默认参数（仅补缺，不覆盖已有值）。"""

@@ -91,6 +91,18 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 创作方向书必须使用模板中定义的所有必填章节
 - 差异化卖点不得少于3个，且每个必须包含具体执行方向

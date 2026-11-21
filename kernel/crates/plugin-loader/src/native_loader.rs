@@ -387,6 +387,7 @@ mod tests {
             task_id: "task1".to_string(),
             pipeline_id: "p1".to_string(),
             tool_call_json: None,
+            hook_json: None,
         };
         let err = loader.execute("never_loaded", &ctx, None).unwrap_err();
         assert_eq!(err.code.as_deref(), Some("NATIVE_NOT_LOADED"));

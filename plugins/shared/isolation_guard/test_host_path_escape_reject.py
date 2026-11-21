@@ -3,7 +3,7 @@
 """隔离任务宿主路径命令就地拒绝（容器逃逸免审批直出）行为锁。
 
 行为契约（用户裁定 2026-10-10）：
-- 隔离任务 bash_execute 命令/working_dir 含宿主盘符路径 = 容器逃逸企图：
+- 隔离任务 bash 命令/working_dir 含宿主盘符路径 = 容器逃逸企图：
   不路由 host、不弹审批卡，pre_decided_results 直出拒绝话术给模型
   （拦截原因 / 已越位 / 改用相对路径重试），拒绝面只覆盖逃逸调用本身；
 - 非隔离任务的宿主路径命令：维持 host 路由 + security_check 审批（零变化）；
@@ -79,7 +79,7 @@ def _reset_env_caller() -> Any:
 
 def _make_guard(docker_available: bool = True) -> Any:
     """构造守卫：docker 可用性显式钉死（构造期不真实探测），环境服务 caller
-    注入落地成功假身，decider 按策略真值 bash_execute → 容器、其余工具 → host。"""
+    注入落地成功假身，decider 按策略真值 bash → 容器、其余工具 → host。"""
     guard = IsolationGuard(config={
         "docker_available": docker_available,
         "providers": {"wsl_native": {"enabled": False}},
@@ -88,7 +88,7 @@ def _make_guard(docker_available: bool = True) -> Any:
     def _resolve(tool_name: str, category: Any = None) -> Any:
         mock = MagicMock()
         mock.isolation = (
-            IsolationLevel.CONTAINER if tool_name == "bash_execute" else IsolationLevel.HOST
+            IsolationLevel.CONTAINER if tool_name == "bash" else IsolationLevel.HOST
         )
         return mock
 
@@ -147,7 +147,7 @@ class TestIsolatedEscapeDirectReject:
         guard = _make_guard()
         call_id = "call-esc-1"
         result = await guard.execute(
-            _ctx(_task_state([{"name": "bash_execute", "args": tool_args, "id": call_id}]))
+            _ctx(_task_state([{"name": "bash", "args": tool_args, "id": call_id}]))
         )
         contexts = result.state_updates["execution_contexts"]
         assert contexts[0]["provider"] == "denied"
@@ -175,7 +175,7 @@ class TestIsolatedEscapeDirectReject:
         guard = _make_guard()
         cmd = "cd C:\\Users\\jc\\AppData\\Roaming\\agentos\\workspaces\\w1 && cat .probe/a.txt"
         result = await guard.execute(
-            _ctx(_task_state([{"name": "bash_execute", "args": {"command": cmd}, "id": "call-mix"}]))
+            _ctx(_task_state([{"name": "bash", "args": {"command": cmd}, "id": "call-mix"}]))
         )
         contexts = result.state_updates["execution_contexts"]
         assert contexts[0]["provider"] == "denied"
@@ -188,7 +188,7 @@ class TestIsolatedEscapeDirectReject:
         路由（host），两者都不产生预填。"""
         guard = _make_guard()
         result = await guard.execute(
-            _ctx(_task_state([{"name": "bash_execute", "args": {"command": ""}, "id": "call-empty"}]))
+            _ctx(_task_state([{"name": "bash", "args": {"command": ""}, "id": "call-empty"}]))
         )
         contexts = result.state_updates["execution_contexts"]
         assert contexts[0]["provider"] == "docker"
@@ -210,12 +210,12 @@ class TestIsolatedEscapeDirectReject:
 
 class TestMixedBatch:
     async def test_mixed_batch_reject_covers_escape_only(self) -> None:
-        """一批两条 bash_execute（一条逃逸一条正常）：逃逸条预填拒绝，
+        """一批两条 bash（一条逃逸一条正常）：逃逸条预填拒绝，
         正常条照常进容器执行（容器落地/注入不受牵连，不陪葬）。"""
         guard = _make_guard()
         tool_calls = [
-            {"name": "bash_execute", "args": {"command": "cat C:/outside.txt"}, "id": "call-esc"},
-            {"name": "bash_execute", "args": {"command": "cat .probe/a.txt"}, "id": "call-ok"},
+            {"name": "bash", "args": {"command": "cat C:/outside.txt"}, "id": "call-esc"},
+            {"name": "bash", "args": {"command": "cat .probe/a.txt"}, "id": "call-ok"},
         ]
         result = await guard.execute(_ctx(_task_state(tool_calls)))
 
@@ -237,13 +237,13 @@ class TestMixedBatch:
         call_id 一一对应）。"""
         guard = _make_guard()
         tool_calls = [
-            {"name": "bash_execute", "args": {"command": "ls C:/x"}, "id": "call-e1"},
+            {"name": "bash", "args": {"command": "ls C:/x"}, "id": "call-e1"},
             {
-                "name": "bash_execute",
+                "name": "bash",
                 "args": {"command": "cat D:/y", "working_dir": "C:/z"},
                 "id": "call-e2",
             },
-            {"name": "bash_execute", "args": {"command": "pwd"}, "id": "call-ok"},
+            {"name": "bash", "args": {"command": "pwd"}, "id": "call-ok"},
         ]
         result = await guard.execute(_ctx(_task_state(tool_calls)))
         entries = result.state_updates["pre_decided_results"]
@@ -278,7 +278,7 @@ class TestRegressionPins:
                 return_value={"isolation_level": "host"}
             )
         state = _task_state(
-            [{"name": "bash_execute", "args": {"command": "cat C:/x"}, "id": "call-noniso"}],
+            [{"name": "bash", "args": {"command": "cat C:/x"}, "id": "call-noniso"}],
             **overrides,
         )
         result = await guard.execute(_ctx(state))
@@ -293,7 +293,7 @@ class TestRegressionPins:
         （l1_main_agent_host 先于宿主路径检测，走权限档审批，不进逃逸拒绝）。"""
         guard = _make_guard()
         state = _task_state(
-            [{"name": "bash_execute", "args": {"command": "cat C:/x"}, "id": "call-l1"}],
+            [{"name": "bash", "args": {"command": "cat C:/x"}, "id": "call-l1"}],
             **{
                 StateKeys.TASK_ID: "",
                 StateKeys.AGENT_LEVEL: "L1",
@@ -311,7 +311,7 @@ class TestRegressionPins:
         （宿主路径检测不参与，零变化）。"""
         guard = _make_guard()
         state = _task_state(
-            [{"name": "bash_execute", "args": {"command": "cat C:/x"}, "id": "call-l1iso"}],
+            [{"name": "bash", "args": {"command": "cat C:/x"}, "id": "call-l1iso"}],
             **{StateKeys.TASK_ID: "", StateKeys.AGENT_LEVEL: "L1"},
         )
         result = await guard.execute(_ctx(state))
@@ -325,7 +325,7 @@ class TestRegressionPins:
         guard = _make_guard()
         result = await guard.execute(
             _ctx(_task_state([
-                {"name": "bash_execute", "args": {"command": "cat .probe/a.txt"}, "id": "call-rel"},
+                {"name": "bash", "args": {"command": "cat .probe/a.txt"}, "id": "call-rel"},
             ]))
         )
         contexts = result.state_updates["execution_contexts"]

@@ -35,7 +35,7 @@ vi.mock('@/services/shellLocalAuth', () => ({
   shellAutoLoginDisabled: vi.fn(() => false),
 }))
 
-const TARGET = 'http://162.14.69.153'
+const TARGET = 'http://203.0.113.153'
 
 function b64(obj: unknown): string {
   return btoa(unescape(encodeURIComponent(JSON.stringify(obj))))
@@ -43,7 +43,7 @@ function b64(obj: unknown): string {
 
 /** 壳层配对设备凭据线格式（app-mobile/src/sync/credential.ts 契约同款） */
 const SHELL_SYNC_CRED = {
-  relay_url: 'http://162.14.69.153/ext/sync_relay',
+  relay_url: 'http://203.0.113.153/ext/sync_relay',
   device_id: 'dev-1',
   device_token: 'pdtk-1',
   tenant_id: 't1',
@@ -188,7 +188,7 @@ describe('borrowViaShellDevice — 壳层凭据读取降级', () => {
     const r = await borrowViaShellDevice(TARGET)
     expect(r.ok).toBe(true)
     expect(postMock).toHaveBeenCalledWith(
-      'http://162.14.69.153/ext/sync_relay/borrow_auth',
+      'http://203.0.113.153/ext/sync_relay/borrow_auth',
       null,
       { headers: { Authorization: 'Bearer pdtk-1' } },
     )

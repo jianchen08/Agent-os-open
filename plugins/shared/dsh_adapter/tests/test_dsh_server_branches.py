@@ -98,6 +98,8 @@ def srv_with_manifest(
     adapter.mkdir()
     (adapter / "plugin.json").write_text('{"plugin_id": "dsh_adapter"}', encoding="utf-8")
     monkeypatch.setattr(srv, "__file__", str(adapter / "server.py"))
+    # 已装包扫描面隔离（renderers 聚合走桩；单测不触真实用户空间工作区）
+    monkeypatch.setattr(srv, "_installed_package_dirs", lambda: [])
     return adapter / "plugin.json"
 
 
@@ -133,6 +135,25 @@ class TestLifecycleHooks:
         assert srv_with_manifest.read_bytes() == before  # 幂等：现值一致不写回
         assert not any("auto-synced" in r.message for r in caplog.records)
 
+    def test_on_load_syncs_renderers_from_installed_packages(
+        self,
+        srv: Any,
+        srv_with_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """已装 DSH 包的 toolview 渲染声明写回 contributes.renderers（前端消费面）。"""
+        monkeypatch.setattr(translator_mod, "skins_to_plugin_themes", lambda: [])
+        monkeypatch.setattr(
+            translator_mod, "collect_installed_renderers",
+            lambda _dirs: [{"tool": "read", "card": "read"}])
+        monkeypatch.setattr(srv, "_installed_package_dirs", lambda: ["/ws/node_modules/pkg"])
+        with caplog.at_level(logging.INFO):
+            asyncio.run(srv._on_dsh_adapter_load({}))  # noqa: SLF001
+        manifest = json.loads(srv_with_manifest.read_text(encoding="utf-8"))
+        assert manifest["contributes"]["renderers"] == [{"tool": "read", "card": "read"}]
+        assert any("renderers=1" in r.message for r in caplog.records)
+
     def test_on_load_failure_does_not_block(
         self,
         srv: Any,
@@ -146,7 +167,7 @@ class TestLifecycleHooks:
         monkeypatch.setattr(translator_mod, "skins_to_plugin_themes", boom)
         with caplog.at_level(logging.WARNING):
             asyncio.run(srv._on_dsh_adapter_load({}))  # noqa: SLF001 — 不抛
-        assert any("themes auto-sync failed" in r.message for r in caplog.records)
+        assert any("contributes auto-sync failed" in r.message for r in caplog.records)
 
     def test_on_unload_shuts_bridge_down(
         self, srv: Any, monkeypatch: pytest.MonkeyPatch
@@ -409,3 +430,34 @@ class TestServeSkinAsset:
     def test_unknown_path_falls_through_to_404(self, srv_patched: Any) -> None:
         resp = self._serve(srv_patched, "/ext/dsh_adapter/styles/unknown")
         assert resp == {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+
+
+# ── 已装包目录扫描（renderers 聚合来源）──────────────────────────────
+
+
+class TestInstalledPackageDirs:
+    def test_absent_workspace_returns_empty(self, srv: Any, tmp_path: Path,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+        class _M:
+            runtime_root = str(tmp_path / "ws")
+
+        monkeypatch.setattr(srv, "_manager", lambda: _M())
+        assert srv._installed_package_dirs() == []  # noqa: SLF001
+
+    def test_filters_infra_packages(self, srv: Any, tmp_path: Path,
+                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        ws = tmp_path / "ws"
+        for rel, name in (("ok-pkg", "ok-pkg"),
+                          ("@deepseek-ai/dsh-tools", "@deepseek-ai/dsh-tools")):
+            d = ws / "node_modules" / rel
+            d.mkdir(parents=True)
+            (d / "package.json").write_text(
+                json.dumps({"name": name, "version": "1.0.0"}), encoding="utf-8")
+
+        class _M:
+            runtime_root = str(ws)
+
+        monkeypatch.setattr(srv, "_manager", lambda: _M())
+        dirs = srv._installed_package_dirs()  # noqa: SLF001
+        assert len(dirs) == 1
+        assert dirs[0].replace("\\", "/").endswith("node_modules/ok-pkg")

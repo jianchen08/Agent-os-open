@@ -10,7 +10,8 @@
 - build_fallbacks：fallback_chain 按 defaults.<type> 主键合并去重；
 - build_router：代理环境清理、provider→前缀映射、model→provider/name 映射、
   KeyPool 统计池、Router kwargs（timeout/fallbacks）；
-- 单例生命周期：get_or_create_router 复用 + reset_router 全量清空；
+- 单例生命周期：get_or_create_router 复用 + reset_router 丢单例槽位（表保留
+  上一代，读侧无空窗）；
 - get_provider_prefix 懒加载：缺失重建一次，仍未命中 fail-closed 抛错。
 
 配置加载器是外部依赖，测试以替身注入，不打真实上游。
@@ -347,7 +348,7 @@ class TestBuildRouter:
         rf.build_router(FakeLoader({"providers": {}, "models": {}}))
         assert rf.get_fallback_models("anything") == []  # 空配置 → 兜底表空（Router kwargs 断言随 Router 退役）
 
-    def test_get_or_create_is_singleton_and_reset_clears(
+    def test_get_or_create_is_singleton_and_reset_keeps_tables_readable(
         self, rf: Any, stub_router: list[dict[str, Any]]
     ) -> None:
         loader = FakeLoader(_base_llm_data())
@@ -356,7 +357,10 @@ class TestBuildRouter:
         assert r1 is r2
         assert loader.calls == 6  # 构建期配置读取恒定（build/model_list/fallbacks/兜底展平/conf 表等），单例命中零重建
         rf.reset_router()
-        assert rf._key_pools == {} and rf._provider_type_map == {}
+        # 重置只丢单例槽位、表保留上一代完整内容：配置切换窗口内读侧无空窗
+        # （审计 2026-11-12 P2-12，清空式重置会让并发管道命中空表）
+        assert rf._key_pools and rf._provider_type_map
+        assert rf.get_provider_prefix("prov_a") == "openai"
         assert rf._router_instance is None and rf._adapter_instance is None
         r3 = rf.get_or_create_router(loader)
         assert r3 is None and r1 is None  # Router 对象退役：恒 None（重建=池/映射表重灌）

@@ -107,6 +107,8 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   - **架构边界四问（法定）**：散点/分叉点/信息泄漏/变化方向（详见 code_reviewer_rules §0.2）
 
+  - **架构合规审查（法定，仓内架构约束）**：触碰 `kernel/`、`plugins/shared/`、`config/agents/` 的改动必须逐条核对「内核不承载业务逻辑/一切皆插件」（判定方式见 code_reviewer_rules §0.3 首条）、插件即声明（output_schema+render）、评估裁决在插件、内核零 agent 配置知识、任务默认隔离执行等条目，任一 [error] 命中即 Request Changes（详见 code_reviewer_rules §0.3）
+
   - **冗余与质量审查（法定）**：翻译式注释、无效错误处理、死代码、风格不一致（详见 code_reviewer_rules §0.4）
 
   - **接口与内聚（铁律）**：详见 coding_domain_rules §1.3 / §5.2
@@ -159,7 +161,10 @@ tool_ids:
 - file_read
 - file_write
 - enhanced_search
-- bash_execute
+- bash
+- log
+- input
+- kill
 - task_evaluate
 hard_constraints:
 - 必须指出所有潜在问题
@@ -188,19 +193,8 @@ deliverables:
 recommended_metrics:
 - metric_id: file_check
   default_params:
-    action: read
+    check: not_empty
     path: '{{workspace}}/docs/working/{title}_review_report.md'
-- metric_id: semantic_check
-  default_params:
-    criteria:
-      required_sections:
-      - 概述
-      - 静态扫描指标
-      - 发现的问题
-      - 细节清单核对结果
-      - 验收标准核对结果
-      - 改进建议
-      - 总结
 version: 3.0.0
 is_active: true
 status: active

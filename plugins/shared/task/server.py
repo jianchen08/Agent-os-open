@@ -98,7 +98,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
                         'change',
                     ],
                     'default': 'get',
-                    'description': '操作类型（缺省 get）：\n- get：查询任务。不传 task_id 返回列表简表，传 task_id 返回详情\n- continue：继续执行（重试/恢复/注入指令/已完成任务带 message 返工重开，针对非容器任务）\n- stop：停止任务（统一进入 stopped 状态，针对非容器任务）\n- delete：删除任务\n- change：变更容器任务状态（仅L1，仅容器任务）。通过 status 参数指定目标状态，容器只是子任务集合，状态可自由变更（completed/failed/pending/running/stopped/timeout）。status=completed 时会清理子任务 worktree。',
+                    'description': '操作类型（缺省 get）：\n- get：查询任务。不传 task_id 返回列表简表，传 task_id 返回详情\n- continue：继续执行（重试/恢复/注入指令/已完成任务带 message 返工重开，针对非容器任务）。同一任务链续作/回归审查/验证复跑一律用本动作，不新开任务；completed 返工必须带 message，验收标准变更带 acceptance_criteria\n- stop：停止任务（统一进入 stopped 状态，针对非容器任务）\n- delete：删除任务\n- change：变更容器任务状态（仅L1，仅容器任务）。通过 status 参数指定目标状态，容器只是子任务集合，状态可自由变更（completed/failed/pending/running/stopped/timeout）。status=completed 时会清理子任务 worktree。',
                 },
                 'task_scope': {
                     'type': 'string',
@@ -140,6 +140,10 @@ async def _on_load(_params: dict[str, Any]) -> None:
                 'message': {
                     'type': 'string',
                     'description': '注入的指令内容（continue 操作时可选）。\n该消息会以 user 角色注入到子任务的下一轮对话中。\n【内容粒度规则】\n1. 常规检查/提醒：只给方向性提示，不给具体执行步骤\n2. 纠正性注入（下级理解偏了、方向错了）：给出具体的纠正意见\n3. 错误修正（提交参数有误、路径错误）：给出具体修正内容\n4. 用户指令传递（用户有新要求或变更）：给出用户的具体要求\n禁止任何情况下给出工作流程级别的建议，下级 Agent 比你更清楚怎么执行。',
+                },
+                'acceptance_criteria': {
+                    'type': 'object',
+                    'description': '验收指标整组覆盖（仅 continue 时可选）。传入即整体替换 task.acceptance_criteria，同时清零评估进度（task.evaluation/重试计数，防旧判定串联新指标），覆盖留痕 task.acceptance_criteria_overridden（时间+调用方层级）。需要复用同一管道与上下文但目标/验收标准已变时使用；缺省 = 不改动。',
                 },
                 'container_reason': {
                     'type': 'string',

@@ -11,10 +11,13 @@ CI 全绿，装机照样翻车。根因两类：(1) venv/SDK 部署态损坏；(
 三类检查（可组合，全部通过退出 0，任一失败退出 1）：
   --plugins-root <dir>   扫描 Python 插件目录：venv 解释器在位性（缺=警告，
                          --strict-missing-venv 升级为失败）、SDK 可导入、
-                         editable 安装指向越界；
+                         editable 安装指向越界。host_group 合宿插件跳过
+                         （解释器随组宿主 _host，COHOST 行列出）；
   --venv <dir>           检查指定 venv（不要求 plugin.json，如随包 _host）；
   --boot-log <file>      扫启动日志失败签名（缺 SDK / venv 解释器缺失 /
-                         has no attribute——正常启动不应出现）。
+                         has no attribute——正常启动不应出现）；已知设计内
+                         降级警告（KNOWN_DEGRADATION_MARKERS，如 isolation
+                         合宿进程 ConfigCenter 探测必败→文件回退）豁免。
 
 editable 越界判据：site-packages 内 ``__editable__*.pth``（路径行）与
 ``__editable__*finder*.py``（MAPPING 值）解析出的目标路径必须落在
@@ -48,6 +51,10 @@ DEFAULT_SIGNATURES = (
     "venv 解释器缺失",
     "has no attribute ",
 )
+# 已知设计内降级（撞失败签名也豁免）：isolation 合宿进程无仓根，ConfigCenter
+# 探测必败 → 警告后文件回退直读 <安装位>/config 真身（isolation/workspace.py
+# _load_isolation_config 两级降级；「（文件回退）」二级失败才是真问题，不豁免）。
+KNOWN_DEGRADATION_MARKERS = ("读取 isolation 配置失败（config_center）",)
 SDK_CANARY = "import agentos_plugin_sdk"
 
 
@@ -111,7 +118,10 @@ def editable_violations(site_packages: Path, allowed_roots: list[Path]) -> list[
             violations.append(f"editable pth 不可读 {pth.name}: {exc}")
             continue
         for target in parse_pth_targets(text):
-            if not _under(target, allowed_roots):
+            # 相对路径行（relocate 后形态）按 .pth 所在 site-packages 解析——
+            # site.addpackage 同义；按 CWD 解析会对包内合法指向误报越界
+            resolved_target = target if Path(target).is_absolute() else str(site_packages / target)
+            if not _under(resolved_target, allowed_roots):
                 violations.append(f"editable 越界 {pth.name} → {target}")
     for finder in sorted(site_packages.glob("__editable__*finder*.py")):
         try:
@@ -134,13 +144,38 @@ def find_venv_python(plugin_dir: Path) -> Path | None:
     return None
 
 
-def scan_boot_log(log_text: str, signatures: tuple[str, ...] = DEFAULT_SIGNATURES) -> list[str]:
-    """启动日志失败签名扫描：返回「行号: 片段」描述（空=干净）。"""
+def scan_boot_log(
+    log_text: str,
+    signatures: tuple[str, ...] = DEFAULT_SIGNATURES,
+    degradation_markers: tuple[str, ...] = KNOWN_DEGRADATION_MARKERS,
+) -> list[str]:
+    """启动日志失败签名扫描：返回「行号: 片段」描述（空=干净）。
+
+    命中已知设计内降级标记（degradation_markers）的行跳过——这些警告在装机态
+    是常态而非故障，撞上失败签名（如 "No module named "）不作失败计。
+    """
     hits: list[str] = []
     for lineno, line in enumerate(log_text.splitlines(), 1):
+        if any(marker in line for marker in degradation_markers):
+            continue
         if any(sig in line for sig in signatures):
             hits.append(f"行{lineno}: {line.strip()[:200]}")
     return hits
+
+
+def plugin_cohost_group(plugin_dir: Path) -> str | None:
+    """插件声明的合宿组（host_group）；无声明/清单不可解析 → None。
+
+    合宿插件解释器随组宿主 _host（invoker venv.rs 解析链的组键形态），插件
+    目录本身无 .venv 属正常部署态——插件级 venv/SDK/editable 检查不适用
+    （组宿主 venv 由 --venv 车道单独执法，CI 打包冒烟即此配法）。
+    """
+    try:
+        data = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    group = data.get("host_group") if isinstance(data, dict) else None
+    return group if isinstance(group, str) and group else None
 
 
 def run_checks(
@@ -157,10 +192,16 @@ def run_checks(
     runner = runner or _default_runner
     failures: list[str] = []
     warnings: list[str] = []
-    checked = {"venvs": 0, "plugins": 0, "boot_logs": 0}
+    cohosted: list[str] = []
+    checked = {"venvs": 0, "plugins": 0, "boot_logs": 0, "cohosted": 0}
 
     if plugins_root is not None:
         for plugin_dir in _iter_plugin_dirs(plugins_root):
+            group = plugin_cohost_group(plugin_dir)
+            if group is not None:
+                checked["cohosted"] += 1
+                cohosted.append(f"{plugin_dir.name}（组 {group}）")
+                continue
             checked["plugins"] += 1
             venv_python = find_venv_python(plugin_dir)
             if venv_python is None:
@@ -202,7 +243,13 @@ def run_checks(
         for hit in scan_boot_log(text, signatures):
             failures.append(f"boot 日志失败签名 {log_path.name} {hit}")
 
-    return {"ok": not failures, "failures": failures, "warnings": warnings, "checked": checked}
+    return {
+        "ok": not failures,
+        "failures": failures,
+        "warnings": warnings,
+        "cohosted": cohosted,
+        "checked": checked,
+    }
 
 
 def _site_packages(venv_dir: Path) -> Path:
@@ -302,8 +349,11 @@ def main() -> int:
     else:
         print(
             f"[plugin-runtime-health] 检查 venv={report['checked']['venvs']} "
-            f"plugins={report['checked']['plugins']} boot_logs={report['checked']['boot_logs']}"
+            f"plugins={report['checked']['plugins']} boot_logs={report['checked']['boot_logs']} "
+            f"cohosted={report['checked']['cohosted']}"
         )
+        for item in report["cohosted"]:
+            print(f"  COHOST {item}")
         for warning in report["warnings"]:
             print(f"  WARN {warning}")
         for failure in report["failures"]:

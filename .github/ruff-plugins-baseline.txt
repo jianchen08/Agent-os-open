@@ -34,6 +34,6 @@
 # L5 超时后处置 + litellm 退役尾巴清零刀（2026-11-05）1370→1365：
 # llm 插件触碰即清（本刀新增文件零违规 + test_adapter_branches 死钩子桩域
 # 移除净减 2 + 测试改名重排净减 3），测试文件风格项清偿续记治理候选。
-ruff_findings=1365
+ruff_findings=1485
 # X 批钩子/服务通道刀（2026-11-04）1375→1370：translator/bridge/server/manager
 # 新增用例触碰即清 PT018 断言拆分净减 5（无新增违规）。

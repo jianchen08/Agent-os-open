@@ -1,6 +1,8 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "project": ["src/**/*.{ts,tsx}"],
+  "project": [
+    "src/**/*.{ts,tsx}"
+  ],
   "entry": [
     "src/main.tsx",
     "src/**/*.test.{ts,tsx}",
@@ -9,11 +11,10 @@
     "scripts/**/*.mjs"
   ],
   "ignore": [
-    "dist/**",
-    "coverage/**",
-    "test-results/**",
-    "probe-out/**",
     "src/services/api/endpoints.generated.ts"
   ],
-  "ignoreExportsUsedInFile": true
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "data"
+  ]
 }

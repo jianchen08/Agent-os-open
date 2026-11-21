@@ -1,0 +1,24 @@
+# AgentOS cargo registry 源单源（ADR 2026-11-07 决策 5：工具链持久层 · 源配置单源）。
+#
+# 消费方（同源两处分发，禁在别处另写源配置）：
+# - docker/agentos/Dockerfile：COPY 进 $CARGO_HOME/config.toml（随工具链种子层
+#   进入 agentos-cargo-home 卷，跨任务持久）；
+# - plugins/shared/isolation/providers/wsl_native_provider.py：环境创建时播种写
+#   发行版 $HOME/.cargo/config.toml（与容器同一份内容语义）。
+#
+# 源选择 = 官方 crates.io（sparse 协议），理由：
+# 1. ustc 镜像在本环境有超时实证（WSL 侧拉取超时，da6e0bb9b1df 任务 traces 在案），
+#   可用性不稳；
+# 2. 「源替换与缓存目录不匹配」实证坑：replace-with 换镜像会改 index URL →
+#   改缓存目录名（index.crates.io-<hash>），既有缓存失效、--offline 拉空。
+#   本文件钉死官方 sparse 源（等价 cargo ≥1.70 默认行为，显式写出防环境里
+#   任何 ambient 镜像配置漂移），缓存目录跨后端一致；
+# 3. 跨后端一致性是一等约束（ADR 决策 6）：环境差异只允许影响速度，不允许影响
+#   正确性——官方源 + sparse 是「无镜像、无替换」的最小语义，任何镜像加速都
+#   应改本文件单点生效，不得在任务/镜像/发行版侧散写。
+#
+# 注意：本文件只承载 registry 源语义；工具链版本钉版在 rust-toolchain.toml，
+# 安装与种子在 Dockerfile。
+
+[source.crates-io]
+registry = "sparse+https://index.crates.io/"

@@ -11,7 +11,9 @@
  * 另覆盖：
  * - 流式 → 停止的翻转（live 孤儿：结果事件永不到达，流结束后卡转终态）；
  * - 真实冷路径集成：mapBackendMessageToMessage + mergeConsecutiveAssistantMessages
- *   的历史孤儿（无 tool 结果消息）→ interrupted。
+ *   的历史孤儿（无 tool 结果消息）→ interrupted；
+ * - 流式上下文内的跨轮幽灵卡（退化/重试轮遗留的声明卡，结果永不到达）：
+ *   其后再无模型推送才可算在途，已有新一轮推送 → interrupted（不再永动转圈）。
  */
 import { renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -19,12 +21,12 @@ import {
   buildFragmentsFromParts,
   useMessageRender,
 } from '@/components/chat/hooks/useMessageRender'
-import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import {
   mapBackendMessageToMessage,
   mergeConsecutiveAssistantMessages,
   type BackendMessageResponse,
 } from '@/services/api/session'
+import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import type { ToolCallPart } from '@/types/messageParts'
 import type { Message, MessagePart } from '@/types/models'
 
@@ -56,8 +58,8 @@ function orphanPart(overrides?: Partial<ToolCallPart>): ToolCallPart {
 }
 
 function expectToolFragment(fragments: ReturnType<typeof buildFragmentsFromParts>) {
-  const frag = fragments[0]
-  if (frag.type !== 'tool_call') throw new Error(`expected tool_call fragment, got ${frag.type}`)
+  const frag = fragments.find((f) => f.type === 'tool_call')
+  if (!frag || frag.type !== 'tool_call') throw new Error('expected tool_call fragment')
   return frag
 }
 
@@ -171,5 +173,93 @@ describe('useMessageRender isStreaming 判定上下文（工具卡终态判定�
     )
     expect(result.current.isStreaming).toBe(false)
     expect(expectToolFragment(result.current.fragments).activity.status).toBe('interrupted')
+  })
+})
+
+describe('流式上下文内的跨轮幽灵工具卡（结果永不到达）', () => {
+  /** 一轮的输出形态：正文 + 声明卡（无结果） */
+  function roundWithCard(seqBase: number): MessagePart[] {
+    return [
+      { type: 'text', content: '我先看一下', state: 'done', sequence: seqBase } as MessagePart,
+      orphanPart({ sequence: seqBase + 1 }),
+    ]
+  }
+
+  it('卡之后已有新一轮模型推送 → 仍 running（2026-11-18 裁定：流式期间不误判中断）', () => {
+    const parts: MessagePart[] = [
+      ...roundWithCard(0),
+      // 下一轮推送（block_start 即建空 part，与 ToolTailActivity 的
+      // 「模型新一轮推送到达」判据同源）
+      { type: 'thinking', content: '新的一轮思考', state: 'streaming', sequence: 2 } as MessagePart,
+      { type: 'text', content: '新的一轮正文', state: 'streaming', sequence: 3 } as MessagePart,
+    ]
+    const frag = expectToolFragment(
+      buildFragmentsFromParts(makeMessage(parts), undefined, { streaming: true }),
+    )
+    // 裁定原文：工具仍在执行、下一轮思考已开始时，把执行中的卡误判为中断
+    // 会让「结果还没到转圈就没了」。流式上下文内恒 running，终态只认
+    // tool_result 到达或 run 结束（非流式上下文才收口 interrupted）。
+    expect(frag.activity.status).toBe('running')
+    expect(frag.activity.statusText).toBeUndefined()
+  })
+
+  it('真实合并路径：两轮 assistant 合泡后，上一轮幽灵卡与本轮尾卡都在途（流式期间不收口）', () => {
+    const round1: Message = {
+      ...BASE_MSG,
+      id: 'a_round1',
+      status: 'completed',
+      parts: roundWithCard(0),
+    }
+    const round2: Message = {
+      ...BASE_MSG,
+      id: 'a_round2',
+      status: 'streaming',
+      parts: [
+        { type: 'text', content: '第二轮正文', state: 'streaming', sequence: 0 } as MessagePart,
+        {
+          type: 'tool_call',
+          callId: 'call_live',
+          name: 'bash',
+          args: {},
+          state: 'calling',
+          sequence: 1,
+        } as ToolCallPart,
+      ],
+    }
+    const merged = mergeConsecutiveAssistantMessages([round1, round2])
+    expect(merged).toHaveLength(1)
+    const { result } = renderHook(() =>
+      useMessageRender({ message: merged[0], isGenerating: true, isLast: true }),
+    )
+    const statuses = result.current.fragments
+      .filter((f) => f.type === 'tool_call')
+      .map((f) => (f.type === 'tool_call' ? f.activity.status : null))
+    // 2026-11-18 裁定同前：上一轮无结果的卡在流式期间同样保持 running，
+    // 不因「其后有新一轮推送」的旧启发式收口 interrupted。
+    expect(statuses).toEqual(['running', 'running'])
+  })
+
+  it('卡之后无任何模型推送（真在途尾卡）→ running 现状不回归', () => {
+    const parts: MessagePart[] = [
+      { type: 'text', content: '正文', state: 'streaming', sequence: 0 } as MessagePart,
+      orphanPart({ state: 'calling', sequence: 1 }),
+    ]
+    const frag = expectToolFragment(
+      buildFragmentsFromParts(makeMessage(parts), undefined, { streaming: true }),
+    )
+    expect(frag.activity.status).toBe('running')
+    expect(frag.activity.statusText).toBeUndefined()
+  })
+
+  it('早期卡已有结果 → completed 优先于「其后有推送」判定', () => {
+    const parts: MessagePart[] = [
+      orphanPart({ state: 'done', result: '完成', sequence: 0 }),
+      { type: 'text', content: '新一轮正文', state: 'streaming', sequence: 1 } as MessagePart,
+    ]
+    const frag = expectToolFragment(
+      buildFragmentsFromParts(makeMessage(parts), undefined, { streaming: true }),
+    )
+    expect(frag.activity.status).toBe('completed')
+    expect(frag.activity.statusText).toBeUndefined()
   })
 })

@@ -6,14 +6,19 @@
 - editable 越界：简单路径 pth 与 finder MAPPING 两种形态，指向允许根内
   =过、指向外=红（装机 venv SDK editable 指向开发仓第三犯的执法回归）；
 - venv 解释器发现：Scripts/python.exe 优先，bin/python 兜底，双缺=None；
-- boot 日志签名：命中报「行号: 片段」，干净日志=空；
+- boot 日志签名：命中报「行号: 片段」，干净日志=空；已知设计内降级
+  （isolation 合宿进程 ConfigCenter 探测必败→文件回退）豁免，「（文件回退）」
+  二级失败仍命中；
 - run_checks 汇总：导入金丝雀失败/editable 越界/日志签名 → failures，
-  缺 venv 默认警告、--strict 升失败，runner 注入不触真解释器。
+  缺 venv 默认警告、--strict 升失败，runner 注入不触真解释器；
+- 合宿插件（host_group 声明）跳过插件级 venv 检查（解释器随组宿主 _host），
+  计入 checked.cohosted，非合宿缺 venv 仍警告。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -68,10 +73,24 @@ class TestEditableViolations:
     def test_inside_target_passes(self, tmp_path: Path):
         inside = tmp_path / "resources" / "sdk"
         inside.mkdir(parents=True)
-        site = self._make_site(
-            tmp_path, {"__editable__.sdk-1.0.pth": f"{inside}\n"}
-        )
+        site = self._make_site(tmp_path, {"__editable__.sdk-1.0.pth": f"{inside}\n"})
         assert mod.editable_violations(site, [tmp_path / "resources"]) == []
+
+    def test_relative_line_resolved_against_site_packages(self, tmp_path: Path):
+        """相对路径行（relocate 后形态）按 site-packages 解析：指向允许根内=过，
+        指向根外=红——不得按 CWD 解析误报。"""
+        inside = tmp_path / "resources" / "plugins" / "sdk" / "src"
+        inside.mkdir(parents=True)
+        relative = os.path.relpath(inside, tmp_path / "site-packages")
+        site = self._make_site(tmp_path, {"__editable__.sdk-1.0.pth": f"{relative}\n"})
+        assert mod.editable_violations(site, [tmp_path / "resources"]) == []
+
+        site2 = tmp_path / "site2" / "site-packages"
+        site2.mkdir(parents=True)
+        escapee = os.path.relpath(tmp_path / "outside" / "src", site2)
+        (site2 / "__editable__.esc-1.0.pth").write_text(f"{escapee}\n", encoding="utf-8")
+        violations = mod.editable_violations(site2, [tmp_path / "resources"])
+        assert len(violations) == 1
 
     def test_finder_mapping_target_flagged(self, tmp_path: Path):
         inside = tmp_path / "resources" / "sdk"
@@ -123,14 +142,23 @@ class TestScanBootLog:
         assert "agentos_plugin_sdk" in hits[0]
 
     def test_all_default_signatures_hit(self):
-        log = (
-            "x has no attribute 'Router'\n"
-            "插件 venv 解释器缺失（.venv 不存在）\n"
-        )
+        log = "x has no attribute 'Router'\n插件 venv 解释器缺失（.venv 不存在）\n"
         assert len(mod.scan_boot_log(log)) == 2
 
     def test_clean_log_empty(self):
         assert mod.scan_boot_log("INFO plugin loaded\nINFO boot done\n") == []
+
+    def test_known_degradation_config_center_exempted(self):
+        log = (
+            "WARNING | isolation.workspace | 读取 isolation 配置失败（config_center）| error=No module named 'config'\n"
+        )
+        assert mod.scan_boot_log(log) == []
+
+    def test_file_fallback_failure_still_hits(self):
+        log = "WARNING | isolation.workspace | 读取 isolation 配置失败（文件回退）| error=No module named 'yaml'\n"
+        hits = mod.scan_boot_log(log)
+        assert len(hits) == 1
+        assert "文件回退" in hits[0]
 
 
 class TestRunChecks:
@@ -169,18 +197,14 @@ class TestRunChecks:
             assert canaries == ["import agentos_plugin_sdk", "import litellm"]
             return True, ""
 
-        report = mod.run_checks(
-            root, [], [], [root], {"llm": "litellm"}, False, runner=runner
-        )
+        report = mod.run_checks(root, [], [], [root], {"llm": "litellm"}, False, runner=runner)
         assert report["ok"] is True
 
     def test_editable_violation_in_plugin_venv(self, tmp_path: Path):
         root = self._plugins_root(tmp_path)
         site = root / "llm" / ".venv" / "Lib" / "site-packages"
         site.mkdir(parents=True)
-        (site / "__editable__.sdk-1.0.pth").write_text(
-            "D:\\myproject\\elsewhere\\src\n", encoding="utf-8"
-        )
+        (site / "__editable__.sdk-1.0.pth").write_text("D:\\myproject\\elsewhere\\src\n", encoding="utf-8")
 
         def runner(python, canaries, timeout_s=120):
             return True, ""
@@ -210,8 +234,32 @@ class TestRunChecks:
         (venv / "Scripts").mkdir(parents=True)
         (venv / "Scripts" / "python.exe").write_bytes(b"")
         (venv / "Lib" / "site-packages").mkdir(parents=True)
-        report = mod.run_checks(
-            None, [venv.parent], [], [tmp_path], {}, False, runner=self._runner_ok
-        )
+        report = mod.run_checks(None, [venv.parent], [], [tmp_path], {}, False, runner=self._runner_ok)
         assert report["ok"] is True
         assert report["checked"]["venvs"] == 1
+
+    def test_cohost_plugin_exempt_from_venv_checks(self, tmp_path: Path):
+        root = tmp_path / "plugins"
+        plugin = root / "workspace"
+        plugin.mkdir(parents=True)
+        (plugin / "plugin.json").write_text('{"id": "workspace_service", "host_group": "light"}', encoding="utf-8")
+        report = mod.run_checks(root, [], [], [root], {}, False, runner=self._runner_ok)
+        assert report["ok"] is True
+        assert report["warnings"] == [], "合宿插件缺 .venv 不应告警"
+        assert report["failures"] == []
+        assert report["checked"]["cohosted"] == 1
+        assert report["cohosted"] == ["workspace（组 light）"]
+
+    def test_non_cohost_missing_venv_still_warns(self, tmp_path: Path):
+        root = self._plugins_root(tmp_path, name="llm", with_venv=False)
+        report = mod.run_checks(root, [], [], [root], {}, False, runner=self._runner_ok)
+        assert report["warnings"], "非合宿缺 venv 保持警告"
+        assert report["checked"]["cohosted"] == 0
+
+    def test_corrupt_manifest_treated_as_non_cohost(self, tmp_path: Path):
+        root = tmp_path / "plugins"
+        plugin = root / "broken"
+        plugin.mkdir(parents=True)
+        (plugin / "plugin.json").write_text("{not json", encoding="utf-8")
+        report = mod.run_checks(root, [], [], [root], {}, False, runner=self._runner_ok)
+        assert report["warnings"], "清单不可解析按非合宿走原检查路径"

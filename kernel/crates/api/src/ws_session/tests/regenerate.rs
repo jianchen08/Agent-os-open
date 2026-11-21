@@ -1,4 +1,5 @@
 use super::*;
+use crate::ws_session::{resolve_regenerate_target, RegenTarget};
 
 // ── dispatch_regenerate：截断 ops + rollback trace + messages_truncated 事件
 //    + skip_user_append 重跑（批次 D 原语）──
@@ -263,6 +264,18 @@ async fn regenerate_edit_resend_rewrites_content() {
             .and_then(|v| v.as_str()),
         Some("cmid-1"),
         "改写保留原 metadata（cmid 幂等键）"
+    );
+    assert_eq!(
+        rows[0].run_id, "run-reg4",
+        "编辑重发必须保留 run 审计锚（写丢后缺省重新生成会被永久拒绝）"
+    );
+    // run 锚保留 → 后续缺省重新生成仍解析为 Live，不被审计门禁拒绝
+    let resolved = resolve_regenerate_target(&store, "reg4", "default", &rows, "")
+        .await
+        .expect("槽位在场且 run 锚有效");
+    assert!(
+        matches!(resolved, RegenTarget::Live { .. }),
+        "缺省目标应命中 Live 路径"
     );
 }
 
@@ -811,4 +824,262 @@ async fn regenerate_rejected_while_chain_busy() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "放行后目标之后的槽位截断");
+}
+
+#[tokio::test]
+async fn regenerate_default_target_recovers_missing_run_anchor_via_rollback_ledger() {
+    // 2026-11-09 装机实证回归钉：编辑重发的改写 op 未携 _run_id 会把目标
+    // user 槽位 run 锚写空；rollback trace 的 set op 也只有 seq+msg（无
+    // message_id/blob_id）。缺省重新生成（user_message_id 空）须以活槽
+    // 指纹锚定账本、按 msg 推导内容寻址完成回溯，不得被「无有效 run_id」
+    // 永久拒绝（用户侧表现为编辑重发后重新生成一直失败）。
+    let store =
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap()) as Arc<dyn StorageBackend>;
+    let rewritten = json!({"role": "user", "content": "改写后的问题",
+                           "metadata": {"client_message_id": "cmid-null"}});
+    store
+        .apply_messages_ops_to_table(
+            "regNull",
+            "default",
+            &[
+                // 损坏行现场：改写后的 user 槽位 run_id 为空（写 op 无 _run_id）
+                json!({"op": "set", "seq": 0, "msg": rewritten}),
+                json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"},
+                       "_run_id": "run-null"}),
+            ],
+        )
+        .await
+        .unwrap();
+    // 同现场 rollback trace：改写 op 只有 seq+msg，无 message_id/blob_id
+    store
+        .append_trace(TraceEntry {
+            trace_id: "t_regen_null".to_string(),
+            pipeline_id: "regNull".to_string(),
+            seq: 0,
+            plugin_id: "chat_regenerate".to_string(),
+            patch_type: agentos_core::types::PatchType::Rollback,
+            patch_data: json!({"messages": {"_ops": [
+                {"op": "set", "seq": 0, "msg": rewritten},
+            ]}}),
+            created_at: "2026-11-09T01:11:11Z".to_string(),
+        })
+        .await
+        .unwrap();
+    store
+        .record_run_start(
+            "regNull",
+            "default",
+            "regNull",
+            "cfg",
+            "2026-10-15T00:00:00+00:00",
+        )
+        .await
+        .unwrap();
+    store
+        .create_session(&session_record(Some("regNull")))
+        .await
+        .unwrap();
+    store
+        .link_pipeline_session("regNull", "T1", "default")
+        .await
+        .unwrap();
+
+    let mut state = crate::routes::AppState::new();
+    state.store = Some(store.clone());
+    seed_default_user(&*store, "u1").await;
+    let dispatcher = EngineDispatcher::new(state);
+    dispatcher
+        .dispatch_regenerate("u1", "T1", "", "", None)
+        .await
+        .expect("run 锚缺失的遗留行应经账本回溯自愈");
+
+    let rows = store
+        .get_messages_by_pipeline("regNull", MessageQueryOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "目标之后的 assistant 槽位截断");
+    assert_eq!(rows[0].content_preview.as_deref(), Some("改写后的问题"));
+}
+
+#[tokio::test]
+async fn regenerate_rolls_pipeline_state_back_to_target_step_baseline() {
+    // 重发状态回退（2026-11-09 裁定）：目标 user 消息（seq 2）所属轮次开始前
+    // 的 checkpoint 基线（ckpt_max_seq=1）写回 registry + pipeline_state——
+    // 业务状态回到目标 step、目标之后新增的键消失；用户选择键
+    // （thinking_strength/model_id）保留当前值；回退 trace 记录基线锚点。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    store
+        .apply_messages_ops_to_table(
+            "regRollback",
+            "default",
+            &[
+                json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "第一问"}, "_run_id": "run-old"}),
+                json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"}, "_run_id": "run-old"}),
+                json!({"op": "set", "seq": 2, "msg": {"role": "user", "content": "第二问"}, "_run_id": "run-old"}),
+                json!({"op": "set", "seq": 3, "msg": {"role": "assistant", "content": "旧回复二"}, "_run_id": "run-old"}),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .record_run_start(
+            "regRollback",
+            "default",
+            "run-old",
+            "cfg",
+            "2026-10-15T00:00:00+00:00",
+        )
+        .await
+        .unwrap();
+    store
+        .create_session(&session_record(Some("regRollback")))
+        .await
+        .unwrap();
+    store
+        .link_pipeline_session("regRollback", "T1", "default")
+        .await
+        .unwrap();
+
+    // 目标轮次开始前的状态基线：水位 1（< 目标 user seq 2）。基线里带**旧**
+    // 的选择值——证明选择键随状态一起回退，之后再由用户设置写回操作覆盖。
+    sqlite
+        .save_checkpoint(
+            "regRollback",
+            "default",
+            7,
+            &json!({
+                "pipeline_id": "regRollback",
+                "business": "before",
+                "thinking_strength": "{\"reasoning_effort\":\"max\"}",
+                "model_id": "old-model",
+                "messages": [
+                    {"seq": 0, "role": "user", "content": "第一问"},
+                    {"seq": 1, "role": "assistant", "content": "旧回复"},
+                ],
+            }),
+        )
+        .unwrap();
+    // 当前运行态：后续轮次产生的业务键 + 当前用户设置（声明面 = widget
+    // frame_field；写回应是普遍操作，当前值应实时生效）。
+    let registry = agentos_session::pipeline_state_registry::global_registry();
+    registry.get_or_init(
+        "default",
+        "regRollback",
+        "T1",
+        "agent-x",
+        json!({
+            "pipeline_id": "regRollback",
+            "business": "after",
+            "thinking_strength": "{\"thinking\":{\"type\":\"disabled\"}}",
+            "model_id": "glm-5.3-flash",
+        }),
+    );
+    store
+        .upsert_state_field("regRollback", "default", "business", &json!("after"))
+        .await
+        .unwrap();
+    store
+        .upsert_state_field("regRollback", "default", "stale", &json!("later"))
+        .await
+        .unwrap();
+    store
+        .upsert_state_field(
+            "regRollback",
+            "default",
+            "thinking_strength",
+            &json!("{\"thinking\":{\"type\":\"disabled\"}}"),
+        )
+        .await
+        .unwrap();
+
+    let target = store
+        .get_messages_by_pipeline("regRollback", MessageQueryOpts::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.seq_in_branch == 2)
+        .map(|m| m.message_id)
+        .expect("目标 user 消息");
+
+    let coordinator = Arc::new(agentos_session::SessionCoordinator::new());
+    coordinator.register_thread("T1", "u1");
+    let mut state = crate::routes::AppState::new();
+    state.store = Some(store.clone());
+    state.session = Some(coordinator);
+    // 用户设置名单的通用声明面：启用插件的 widget `frame_field`。
+    state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_with_ui_schema(
+        "pipeline_llm_core",
+        Some(json!({"widgets": [
+            {"id": "model_id", "type": "model_select", "space": "chat-input", "frame_field": "model_id"},
+            {"id": "thinking_strength", "type": "form", "space": "chat-input", "frame_field": "thinking_strength"},
+        ]})),
+    )]));
+    state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(
+        ["pipeline_llm_core".to_string()].into_iter().collect(),
+    ));
+    seed_default_user(&*store, "u1").await;
+    let dispatcher = EngineDispatcher::new(state);
+    dispatcher
+        .dispatch_regenerate("u1", "T1", "regRollback", &target, None)
+        .await
+        .unwrap();
+
+    // 热路径：业务状态回退到基线；选择键先随状态回退，再由用户设置写回
+    // 操作覆盖为当前值（实时生效）；消息为截断后前缀。
+    let entry = registry
+        .get("default", "regRollback")
+        .expect("registry 条目应存在");
+    let restored = entry.read().state.clone();
+    assert_eq!(restored["business"], "before", "业务状态回到目标 step");
+    assert_eq!(
+        restored["thinking_strength"], "{\"thinking\":{\"type\":\"disabled\"}}",
+        "当前思考设置经普遍写回操作实时生效"
+    );
+    assert_eq!(
+        restored["model_id"], "glm-5.3-flash",
+        "当前模型设置同样经普遍写回操作实时生效"
+    );
+    assert_eq!(
+        restored["messages"].as_array().map(Vec::len),
+        Some(3),
+        "registry 消息 = 截断后前缀（seq 0..=2）"
+    );
+
+    // 冷路径：pipeline_state 业务键回退，目标 step 之后新增的键删除。
+    let persisted = store
+        .load_pipeline_state("regRollback", "default")
+        .await
+        .unwrap();
+    assert_eq!(persisted.get("business"), Some(&json!("before")));
+    assert!(!persisted.contains_key("stale"), "后续轮次新增键必须消失");
+
+    // 回退 trace 记录基线锚点（哪份 checkpoint、水位、写回了哪些用户设置键）。
+    let traces = store
+        .get_step_traces_by_thread("T1", "default")
+        .await
+        .unwrap();
+    let rollback = traces
+        .iter()
+        .find(|t| t.patch_type == agentos_core::types::PatchType::Rollback)
+        .expect("rollback trace 应存在");
+    assert_eq!(
+        rollback.patch_data["state_rollback"]["checkpoint_step_no"],
+        7
+    );
+    assert_eq!(
+        rollback.patch_data["state_rollback"]["checkpoint_max_seq"],
+        1
+    );
+    let restored_settings: Vec<&str> = rollback.patch_data["state_rollback"]
+        ["restored_user_settings"]
+        .as_array()
+        .expect("restored_user_settings 数组")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(restored_settings.contains(&"thinking_strength"));
+    assert!(restored_settings.contains(&"model_id"));
+
+    registry.remove("default", "regRollback");
 }

@@ -3,18 +3,21 @@
 
 覆盖评审 H-issue（仅 0.2 代码：plugins/shared/bash + plugins/sdk）：
 1. 状态生命周期：MCP 调用间复用同一 BashTool/ProcessManager 单例——
-   execute → input → continue → terminate 全链路跨调用可用（原 bug：
+   bash → input → log → kill 全链路跨调用可用（原 bug：
    server.py 每次调用新建 BashTool 导致进程状态丢失）。
 2. 真实调用方式：子进程 e2e（spawn `python server.py` + JSON-RPC 多轮），
    验证 sidecar 自包含（不再依赖 0.1 src 树——原 bug：No module named
    'src.config'）且状态跨调用保持。
-3. 越权防护：跨会话 owner 的 terminate/continue/read_log 被拒
-   （PROCESS_FORBIDDEN）；无身份调用方操作有主进程被拒。
+3. 越权防护：跨会话 owner 的 kill/log/input 被拒（PROCESS_FORBIDDEN）；
+   无身份调用方操作有主进程被拒。
 4. 日志安全：命令/输入敏感信息掩码（Authorization/Bearer/API key/密码）。
-5. 大日志摘要 tail 读取：summary 只喂尾部窗口，read_log 完整输出。
+5. 大日志摘要 tail 读取：summary 只喂尾部窗口，log 完整输出。
 
 环境说明：命令经 ProcessManager 的 shell 选择（WSL > Git Bash > CMD），
 长任务/交互测试依赖 bash 语法（echo/read/sleep/seq），无 bash/wsl 时跳过。
+
+2026-11-07 四工具重构（ADR T2）：bash_execute 5-action 退役 →
+bash/log/input/kill 四工具；pid 参数退役 → handle。
 """
 
 from __future__ import annotations
@@ -45,9 +48,9 @@ _NEEDS_BASH = pytest.mark.skipif(
 def _prewarm_wsl_vm():
     """WSL VM 预热：本机 wsl.exe 在 PATH 时 ProcessManager 优先 `wsl -e bash -c`，
     VM 冷启动实测 9~15s（闲置自动终止 + 大套件内存重压），会吃光用例的
-    execute/continue 等待窗口——2026-09-26 全量车道实锤：continue(timeout=10)
-    在 elapsed 13.3s 返回 running 且 output 为空（bash 尚未起跑），单跑 VM
-    半暖则恒绿。模块首个用例前把 VM 拉热，等待窗口只度量命令本身；
+    bash/log 等待窗口——2026-09-26 全量车道实锤：log(block=true) 在 elapsed
+    13.3s 返回 running 且 output 为空（bash 尚未起跑），单跑 VM 半暖则恒绿。
+    模块首个用例前把 VM 拉热，等待窗口只度量命令本身；
     预热超时按异常传播（VM 起不来时后续用例必然全红，不如在此给出清晰错误）。"""
     if not shutil.which("wsl"):
         return
@@ -107,26 +110,42 @@ def bash_server_module():
         pass
 
 
+class _ToolHandlers:
+    """四工具 handler 门面：handler 名与工具名一一对应（等价独立 MCP tools/call）。"""
+
+    def __init__(self, module, ws: str):
+        self._module = module
+        self._ws = ws
+
+    def _handler(self, tool_name: str):
+        return self._module.plugin._tools[tool_name].handler
+
+    async def bash(self, **kwargs):
+        kwargs.setdefault("workspace", self._ws)
+        return await self._handler("bash")(**kwargs)
+
+    async def log(self, **kwargs):
+        kwargs.setdefault("workspace", self._ws)
+        return await self._handler("log")(**kwargs)
+
+    async def input(self, **kwargs):
+        kwargs.setdefault("workspace", self._ws)
+        return await self._handler("input")(**kwargs)
+
+    async def kill(self, **kwargs):
+        kwargs.setdefault("workspace", self._ws)
+        return await self._handler("kill")(**kwargs)
+
+
 @pytest.fixture(scope="module")
 def bash_handler(bash_server_module, tmp_path_factory):
-    """工具 handler 包装：默认注入 workspace。
+    """四工具 handler 门面：默认注入 workspace。
 
-    bash_execute 已 fail-closed 锚定（缺 workspace 拒执行）；进程内直调
+    bash 工具已 fail-closed 锚定（缺 workspace 拒执行）；进程内直调
     无内核注入链，须显式给锚定目录才等价一次真实 MCP 调用。
     """
     ws = str(tmp_path_factory.mktemp("bash_ws"))
-    handler = bash_server_module.plugin._tools["bash_execute"].handler
-
-    async def _call(**kwargs):
-        kwargs.setdefault("workspace", ws)
-        return await handler(**kwargs)
-
-    return _call
-
-
-def _call(handler, **kwargs):
-    """调用 handler 并返回其 data（server.py 成功时返回 result.output）。"""
-    return handler(**kwargs)
+    return _ToolHandlers(bash_server_module, ws)
 
 
 # ============================================================================
@@ -142,54 +161,58 @@ class TestStateLifecycle:
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
-    async def test_cross_call_execute_input_continue_terminate(self, bash_handler):
-        """跨调用全链路：execute(长任务) → input → continue → terminate。
+    async def test_cross_call_bash_input_log_kill(self, bash_handler):
+        """跨调用全链路：bash(长任务) → input → log(block) → log 读。
 
         每次调用都走 handler（等价独立的 MCP tools/call），进程必须
-        由共享单例的 ProcessManager 命中——否则 input/continue 会报
+        由共享单例的 ProcessManager 命中——否则 input/log 会报
         "进程不存在"。
         """
-        result = await bash_handler(
-            action="execute",
+        result = await bash_handler.bash(
             command="echo START; read line; echo GOT:$line",
             timeout=3,
             _owner="sess-1",
         )
         assert result["status"] == "running", result
-        pid = result["pid"]
-        assert isinstance(pid, int) and pid > 0
+        handle = result["handle"]
+        assert isinstance(handle, str) and handle
 
         # 跨调用 input（MCP call #2）
-        result = await bash_handler(action="input", pid=pid, input_text="hello", _owner="sess-1")
+        result = await bash_handler.input(handle=handle, text="hello", _owner="sess-1")
         assert result["status"] == "running", result
 
-        # 跨调用 continue（MCP call #3）——必须拿到已输入的内容
-        result = await bash_handler(action="continue", pid=pid, timeout=10, _owner="sess-1")
+        # 跨调用 log(block=true)（MCP call #3）——必须拿到已输入的内容
+        result = await bash_handler.log(handle=handle, block=True, _owner="sess-1")
         assert result["status"] == "completed", result
         assert "GOT:hello" in result.get("output", ""), result
 
-        # 跨调用 read_log（MCP call #4，进程已结束→磁盘降级路径）
-        result = await bash_handler(action="read_log", pid=pid, _owner="sess-1")
+        # 跨调用 log（MCP call #4，进程已结束→磁盘降级路径）
+        result = await bash_handler.log(handle=handle, _owner="sess-1")
         assert result["status"] == "completed", result
         assert "GOT:hello" in result.get("output", ""), result
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
-    async def test_execute_completed_short_command(self, bash_handler):
+    async def test_bash_completed_short_command(self, bash_handler):
         """快命令直接 completed（不经过 running 分支）。"""
-        result = await bash_handler(
-            action="execute", command="echo quick-42", timeout=10, _owner="sess-2"
-        )
+        result = await bash_handler.bash(command="echo quick-42", timeout=10, _owner="sess-2")
         assert result["status"] == "completed", result
         assert "quick-42" in result.get("output", "")
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
-    async def test_unknown_pid_returns_not_found(self, bash_handler):
-        """未知 pid 的 continue/terminate 报 PROCESS_NOT_FOUND。"""
-        result = await bash_handler(action="continue", pid=999999, _owner="sess-1")
+    async def test_unknown_handle_returns_not_found(self, bash_handler):
+        """无主 handle 的 log(block=true)/kill 报 PROCESS_NOT_FOUND。
+
+        handle 归属与调用方一致（sess-1）——身份链放行后落「进程不存在」，
+        与越权拒绝（FORBIDDEN）语义分开验证。
+        """
+        import tool as tool_mod  # noqa: PLC0415  与 server.py 同一裸名模块实例
+
+        handle = tool_mod.encode_handle(999999, "sess-1")
+        result = await bash_handler.log(handle=handle, block=True, _owner="sess-1")
         assert result.get("error_code") == "PROCESS_NOT_FOUND", result
-        result = await bash_handler(action="terminate", pid=999999, _owner="sess-1")
+        result = await bash_handler.kill(handle=handle, _owner="sess-1")
         assert result.get("error_code") == "PROCESS_NOT_FOUND", result
 
 
@@ -198,61 +221,59 @@ class TestStateLifecycle:
 # ============================================================================
 
 class TestOwnerEnforcement:
-    """跨会话 pid 级操作拒绝（评审：仅 PID 查找的越权风险）。"""
+    """跨会话 handle 级操作拒绝（评审：仅 pid 查找的越权风险）。"""
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
-    async def test_cross_session_terminate_rejected(self, bash_handler):
-        """A 会话启动的进程，B 会话 terminate 必须被拒。"""
-        result = await bash_handler(action="execute", command="sleep 30", timeout=2, _owner="sess-A")
+    async def test_cross_session_kill_rejected(self, bash_handler):
+        """A 会话启动的进程，B 会话 kill 必须被拒。"""
+        result = await bash_handler.bash(command="sleep 30", timeout=2, _owner="sess-A")
         assert result["status"] == "running", result
-        pid = result["pid"]
+        handle = result["handle"]
 
         try:
-            # 跨会话 terminate → 拒绝
-            result = await bash_handler(action="terminate", pid=pid, _owner="sess-B")
+            # 跨会话 kill → 拒绝
+            result = await bash_handler.kill(handle=handle, _owner="sess-B")
             assert "PROCESS_FORBIDDEN" in result.get("error", ""), result
             # 无身份调用方操作有主进程 → 拒绝（防劫持）
-            result = await bash_handler(action="terminate", pid=pid)
+            result = await bash_handler.kill(handle=handle)
             assert "PROCESS_FORBIDDEN" in result.get("error", ""), result
-            # 跨会话 read_log → 拒绝
-            result = await bash_handler(action="read_log", pid=pid, _owner="sess-B")
+            # 跨会话 log → 拒绝
+            result = await bash_handler.log(handle=handle, _owner="sess-B")
             assert "PROCESS_FORBIDDEN" in result.get("error", ""), result
-            # 本会话 terminate → 成功
-            result = await bash_handler(action="terminate", pid=pid, _owner="sess-A")
+            # 本会话 kill → 成功
+            result = await bash_handler.kill(handle=handle, _owner="sess-A")
             assert result["status"] == "terminated", result
         finally:
-            # 兜底清理（防失败残留）
-            result = await bash_handler(action="terminate", pid=pid, _owner="sess-A", force=True)
+            # 兜底清理（防失败残留；已终止时进程不存在 → error 信封）
+            result = await bash_handler.kill(handle=handle, _owner="sess-A")
             assert result.get("status") in ("terminated", None)
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
-    async def test_cross_session_continue_rejected_while_running(self, bash_handler):
-        """运行中的进程，跨会话 continue 必须被拒。"""
-        result = await bash_handler(action="execute", command="sleep 30", timeout=2, _owner="sess-A")
+    async def test_cross_session_log_block_rejected_while_running(self, bash_handler):
+        """运行中的进程，跨会话 log(block=true) 必须被拒。"""
+        result = await bash_handler.bash(command="sleep 30", timeout=2, _owner="sess-A")
         assert result["status"] == "running", result
-        pid = result["pid"]
+        handle = result["handle"]
         try:
-            result = await bash_handler(action="continue", pid=pid, timeout=1, _owner="sess-B")
+            result = await bash_handler.log(handle=handle, block=True, _owner="sess-B")
             assert "PROCESS_FORBIDDEN" in result.get("error", ""), result
         finally:
-            await bash_handler(action="terminate", pid=pid, _owner="sess-A", force=True)
+            await bash_handler.kill(handle=handle, _owner="sess-A")
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
     async def test_ownerless_process_disk_fallback(self, bash_handler):
-        """无身份（owner=None）调用的进程，后续有身份调用方不可操作。"""
-        result = await bash_handler(
-            action="execute", command="echo ownerless", timeout=10
-        )
+        """无显式身份（owner 派生自 workspace）调用的进程，他有身份调用方不可操作。"""
+        result = await bash_handler.bash(command="echo ownerless", timeout=10)
         assert result["status"] == "completed", result
-        pid = result["pid"]
-        # 有身份调用方操作无主进程 → 拒绝（防劫持）
-        result = await bash_handler(action="read_log", pid=pid, _owner="sess-X")
+        handle = result["handle"]
+        # 他会话身份调用方操作 → 拒绝（防劫持）
+        result = await bash_handler.log(handle=handle, _owner="sess-X")
         assert "PROCESS_FORBIDDEN" in result.get("error", ""), result
-        # 双无身份 → 放行（兼容路径）
-        result = await bash_handler(action="read_log", pid=pid)
+        # 同身份（workspace 派生）→ 放行
+        result = await bash_handler.log(handle=handle)
         assert result["status"] == "completed", result
 
 
@@ -281,16 +302,22 @@ class TestLogSecurity:
         """日志头 # Command: 落盘的是掩码后的命令，输出不受影响。"""
         tool = bash_server_module._get_tool()
         secret = "sk-abcdef1234567890"
-        result = await bash_handler(
-            action="execute",
+        result = await bash_handler.bash(
             command=f"echo API_KEY={secret}",
             timeout=10,
             _owner="sess-1",
         )
         assert result["status"] == "completed", result
-        pid = result["pid"]
+        import tool as tool_mod  # noqa: PLC0415
 
-        log_file = tool.process_manager.log_dir / f"bash_{pid}.log"
+        pid = tool_mod.decode_handle(result["handle"])[0]
+
+        # 日志按会话键子目录组织（ADR 2026-11-07 捕获契约）：_owner="sess-1"
+        # → <根>/sess-1/bash_<pid>.log，经 manager 同款解析函数定位
+        log_file = (
+            tool.process_manager._session_log_dir(tool.process_manager.log_dir, "sess-1")
+            / f"bash_{pid}.log"
+        )
         assert log_file.exists(), f"日志文件缺失: {log_file}"
         lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
         # 只检查日志头部 # 开头的注释行（# Command: 等元信息行）。
@@ -309,23 +336,28 @@ class TestLogSecurity:
     async def test_input_masked_in_log(self, bash_server_module, bash_handler):
         """发送给进程的敏感输入（含 password）在日志中被掩码。"""
         tool = bash_server_module._get_tool()
-        result = await bash_handler(
-            action="execute",
+        result = await bash_handler.bash(
             command="echo GO; read line; echo DONE",
             timeout=3,
             _owner="sess-1",
         )
         assert result["status"] == "running", result
-        pid = result["pid"]
-        await bash_handler(action="input", pid=pid, input_text="my-password-123", _owner="sess-1")
+        import tool as tool_mod  # noqa: PLC0415
+
+        pid = tool_mod.decode_handle(result["handle"])[0]
+        await bash_handler.input(handle=result["handle"], text="my-password-123", _owner="sess-1")
         # 等输入处理落盘
         time.sleep(0.5)
-        log_file = tool.process_manager.log_dir / f"bash_{pid}.log"
+        # 会话键子目录解析（ADR 2026-11-07 捕获契约），同上
+        log_file = (
+            tool.process_manager._session_log_dir(tool.process_manager.log_dir, "sess-1")
+            / f"bash_{pid}.log"
+        )
         content = log_file.read_text(encoding="utf-8", errors="replace")
         assert "my-password-123" not in content, "敏感输入明文落盘"
         assert "# [INPUT]" in content
         # 清理
-        await bash_handler(action="terminate", pid=pid, _owner="sess-1", force=True)
+        await bash_handler.kill(handle=result["handle"], _owner="sess-1")
 
 
 # ============================================================================
@@ -338,16 +370,17 @@ class TestTailSummary:
     @_NEEDS_BASH
     @pytest.mark.asyncio
     async def test_summary_tail_window_and_full_read_log(self, bash_server_module, bash_handler):
-        """>5000 行输出：get_summary 窗口封顶，read_log 完整。"""
+        """>5000 行输出：get_summary 窗口封顶，log 完整。"""
         tool = bash_server_module._get_tool()
-        result = await bash_handler(
-            action="execute",
+        result = await bash_handler.bash(
             command="seq 1 6000",
             timeout=30,
             _owner="sess-1",
         )
         assert result["status"] == "completed", result
-        pid = result["pid"]
+        import tool as tool_mod  # noqa: PLC0415
+
+        pid = tool_mod.decode_handle(result["handle"])[0]
         assert result["exit_code"] == 0
 
         # 进程已结束被清理 → 磁盘降级路径
@@ -355,16 +388,17 @@ class TestTailSummary:
         assert file_data is not None
         # total_lines 是完整行数（seq 6000 + 可能的 WSL stderr 噪音行）
         assert file_data["total_lines"] >= 6000, file_data["total_lines"]
-        # 完整输出可读（read_log 契约不变：至少含 6000 个 seq 行）
-        full = await bash_handler(action="read_log", pid=pid, _owner="sess-1")
+        # 完整输出可读（log 契约不变：至少含 6000 个 seq 行）
+        full = await bash_handler.log(handle=result["handle"], _owner="sess-1")
         assert full["status"] == "completed"
         assert len(full["output"].splitlines()) >= 6000
         assert full["output"].count("6000") >= 1  # seq 末行在输出中
 
         # 摘要窗口封顶：直接构造超过 TAIL_SUMMARY_LINES 的日志验证
-        # _read_tail_lines 返回 ≤ 窗口行数
+        # _read_tail_lines 返回 ≤ 窗口行数（会话键子目录定位，同捕获契约）
         tail_lines = tool.process_manager._read_tail_lines(
-            tool.process_manager.log_dir / f"bash_{pid}.log",
+            tool.process_manager._session_log_dir(tool.process_manager.log_dir, "sess-1")
+            / f"bash_{pid}.log",
             max_lines=5000,
         )
         assert len(tail_lines) <= 5000
@@ -400,13 +434,13 @@ class _JsonRpcClient:
             return None
         return json.loads(result["line"])
 
-    def call_tool(self, req_id: int, arguments: dict) -> dict | None:
+    def call_tool(self, req_id: int, tool_name: str, arguments: dict) -> dict | None:
         self.send(
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "method": "tools/call",
-                "params": {"name": "bash_execute", "arguments": arguments},
+                "params": {"name": tool_name, "arguments": arguments},
             }
         )
         resp = self.recv()
@@ -458,7 +492,7 @@ def sidecar_proc():
 
 @_NEEDS_BASH
 def test_subprocess_e2e_lifecycle(sidecar_proc, tmp_path):
-    """真实调用方式：MCP call #1 execute → #2 input → #3 continue → #4 terminate。
+    """真实调用方式：MCP call #1 bash → #2 input → #3 log(block) → #4 kill。
 
     原 bug 双验证：
     - sidecar 自包含（不再报 No module named 'src.config'）
@@ -466,38 +500,38 @@ def test_subprocess_e2e_lifecycle(sidecar_proc, tmp_path):
     """
     client = sidecar_proc
 
-    # call #1: execute 长任务（等待 stdin 输入）
+    # call #1: bash 长任务（等待 stdin 输入）
     ws = str(tmp_path / "ws")
-    r = client.call_tool(2, {"action": "execute", "command": "echo READY; read line; echo GOT:$line",
-                             "timeout": 3, "_owner": "sess-1", "workspace": ws})
+    r = client.call_tool(2, "bash", {"command": "echo READY; read line; echo GOT:$line",
+                                     "timeout": 3, "_owner": "sess-1", "workspace": ws})
     assert r["status"] == "running", r
-    pid = r["pid"]
+    handle = r["handle"]
 
     # call #2: input
-    r = client.call_tool(3, {"action": "input", "pid": pid, "input_text": "hello", "_owner": "sess-1"})
+    r = client.call_tool(3, "input", {"handle": handle, "text": "hello", "_owner": "sess-1"})
     assert r["status"] == "running", r
 
-    # call #3: continue（跨调用必须命中同一进程）
-    r = client.call_tool(4, {"action": "continue", "pid": pid, "timeout": 10, "_owner": "sess-1"})
+    # call #3: log(block=true)（跨调用必须命中同一进程）
+    r = client.call_tool(4, "log", {"handle": handle, "block": True, "_owner": "sess-1"})
     assert r["status"] == "completed", r
     assert "GOT:hello" in r.get("output", ""), r
 
-    # call #4: terminate（进程已结束 → 报不存在；验证可正常响应不崩溃）
-    r = client.call_tool(5, {"action": "terminate", "pid": pid, "_owner": "sess-1"})
+    # call #4: kill（进程已结束 → 报不存在；验证可正常响应不崩溃）
+    r = client.call_tool(5, "kill", {"handle": handle, "_owner": "sess-1"})
     assert r.get("error_code") == "PROCESS_NOT_FOUND", r
 
 
 @_NEEDS_BASH
 def test_subprocess_e2e_cross_session_rejected(sidecar_proc, tmp_path):
-    """真实调用方式下跨会话 terminate 被拒（PROCESS_FORBIDDEN）。"""
+    """真实调用方式下跨会话 kill 被拒（PROCESS_FORBIDDEN）。"""
     client = sidecar_proc
-    r = client.call_tool(6, {"action": "execute", "command": "sleep 30", "timeout": 2, "_owner": "sess-A",
-                             "workspace": str(tmp_path / "ws")})
+    r = client.call_tool(6, "bash", {"command": "sleep 30", "timeout": 2, "_owner": "sess-A",
+                                     "workspace": str(tmp_path / "ws")})
     assert r["status"] == "running", r
-    pid = r["pid"]
+    handle = r["handle"]
     try:
-        r = client.call_tool(7, {"action": "terminate", "pid": pid, "_owner": "sess-B"})
+        r = client.call_tool(7, "kill", {"handle": handle, "_owner": "sess-B"})
         assert "PROCESS_FORBIDDEN" in r.get("error", ""), r
     finally:
-        r = client.call_tool(8, {"action": "terminate", "pid": pid, "_owner": "sess-A", "force": True})
+        r = client.call_tool(8, "kill", {"handle": handle, "_owner": "sess-A"})
         assert r.get("status") == "terminated", r

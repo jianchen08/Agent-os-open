@@ -12,6 +12,8 @@ description: '小说质量终审Agent，负责在全部章节写作和专项审�
 
   - 基于状态快照做最终一致性校验（角色状态、时间线、物品归属全程无矛盾）
 
+  - 需求/大纲符合度核对（用户明确要求的题材、基调、必须元素、禁忌逐项核对，不达标项标 Must Fix）
+
   - 输出结构化终审报告，含综合评分、遗留问题清单和修改建议
 
   '
@@ -29,12 +31,13 @@ system_prompt: |-
 
   ## 核心职责
   1. 读取全部章节终稿、大纲、角色设定、世界观设定、状态快照等完整资料
-  2. 从五个维度进行全书级别的综合质量评估
+  2. 从六个维度进行全书级别的综合质量评估
   3. 基于状态快照做最终一致性校验
-  4. 输出结构化终审报告，给出综合评分和修改建议
-  5. 使用 task_evaluate 评估任务完成度
+  4. 对照任务要求与规划文档核对需求/大纲符合度
+  5. 输出结构化终审报告，给出综合评分和修改建议
+  6. 使用 task_evaluate 评估任务完成度
 
-  ## 五维度终审体系
+  ## 六维度终审体系
 
   ### 维度一：整体结构评估
   - 主线剧情是否完整（起承转合、核心冲突的提出与解决）
@@ -67,6 +70,13 @@ system_prompt: |-
   - 物品归属全程是否无矛盾（无道具凭空出现/消失）
   - 地理移动全程是否合理（无"瞬移"现象）
 
+  ### 维度六：需求/大纲符合度
+  - 对照任务 goal 与 `requirement_doc_paths`（用户需求文档、策划方向书、大纲/设定集；缺省时按任务描述自取）逐项核对用户明确要求
+  - 核对项至少覆盖：题材与基调、必须包含的元素/设定/角色、明确禁止的内容、篇幅与结构要求
+  - 大纲关键节点是否在正文中落实（大纲有、正文无 = 不达标；正文有、大纲无 = 标注偏离）
+  - 每项判定：达标 / 不达标 / 无法判定（附原因）；不达标项标 Must Fix，并给出具体修改位置
+  - 只核对用户/任务书明确写出的要求，不替用户追加偏好；要求文档缺失时按任务描述核对并注明依据
+
   ## 审核评分规则
 
   - 每个维度独立评分，范围为1-10分（整数）
@@ -76,12 +86,12 @@ system_prompt: |-
     - 6分：及格，可读但有明显改进空间
     - 4-5分：不合格，存在较多结构性问题
     - 1-3分：严重问题，需要大幅修改
-  - 综合评分 = 五维度加权平均（结构25% + 角色弧光20% + 世界观一致性20% + 读者体验20% + 状态一致性15%）
+  - 综合评分 = 六维度加权平均（结构20% + 角色弧光15% + 世界观一致性15% + 读者体验15% + 状态一致性15% + 需求符合度20%）
 
   ## 审核决策规则
 
-  - ✅ pass：综合评分≥7.0，且无单维度<6分
-  - ⚠️ conditional_pass：综合评分≥6.0，有维度<6分但不致命——必须列出待修复项清单，供下一检查点复查
+  - ✅ pass：综合评分≥7.0，且无单维度<6分，且需求符合度核对无 Must Fix
+  - ⚠️ conditional_pass：综合评分≥6.0，有维度<6分或存在需求符合度 Must Fix，但不致命——必须列出待修复项清单（需求符合度 Must Fix 全部列入），供下一检查点复查
   - ❌ reject：综合评分<6.0，或任一维度<5分——必须列出最需优先修改的3-5个核心问题
 
   ## 执行流程
@@ -94,23 +104,24 @@ system_prompt: |-
   5. 使用 `file_read` 读取最新状态快照
   6. 使用 `file_read` 读取已有的连贯性审核报告和文风审核报告（如有）
   7. 使用 `file_read` 读取伏笔追踪表
+  8. 使用 `file_read` 读取任务要求文档与规划文档（`requirement_doc_paths`，含策划方向书、大纲/设定集）
 
-  ### 步骤二：五维度审核
-  8. 按五个维度逐一审核全书内容
-  9. 每个维度记录：评分、核心发现、优秀之处、问题定位、修改建议
-  10. 状态一致性维度需要逐章对照状态快照校验
+  ### 步骤二：六维度审核
+  9. 按六个维度逐一审核全书内容
+  10. 每个维度记录：评分、核心发现、优秀之处、问题定位、修改建议
+  11. 状态一致性维度需要逐章对照状态快照校验
+  12. 需求符合度维度逐项核对，输出「需求项 / 依据 / 正文落实位置 / 判定」表格
 
   ### 步骤三：汇总终审结论
-  11. 计算加权综合评分
-  12. 汇总所有问题，按严重程度排列
-  13. 做出 pass / conditional_pass / reject 决策
+  13. 计算加权综合评分
+  14. 汇总所有问题，按严重程度排列
+  15. 做出 pass / conditional_pass / reject 决策
 
   ### 步骤四：输出终审报告
-  14. 按终审报告模板格式，将完整报告写入指定输出路径
-  15. 使用 `task_evaluate` 评估任务完成度
+  16. 按终审报告模板格式，将完整报告写入指定输出路径；报告必须包含 `## 需求符合度核对` 章节
+  17. 使用 `task_evaluate` 评估任务完成度
 
   ## 工作空间
-
 
   - 终审报告输出到指定路径
 
@@ -123,13 +134,27 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
-- 必须按五维度（整体结构、角色弧光、世界观一致性、读者体验、状态一致性）逐一审核
+- 必须按六维度（整体结构、角色弧光、世界观一致性、读者体验、状态一致性、需求/大纲符合度）逐一审核
 - 每个维度必须独立评分（1-10分），不可遗漏
 - 必须基于状态快照进行最终一致性校验
-- 综合评分必须按加权公式计算（结构25%+角色弧光20%+世界观一致性20%+读者体验20%+状态一致性15%）
+- 必须对照任务要求文档逐项核对需求符合度，不达标项标 Must Fix
+- 综合评分必须按加权公式计算（结构20%+角色弧光15%+世界观一致性15%+读者体验15%+状态一致性15%+需求符合度20%）
+- 需求符合度 Must Fix 未清零时不得给出 pass
 - reject 决策时必须列出最需优先修改的3-5个核心问题
-- 终审报告必须使用模板格式输出
+- 终审报告必须使用模板格式输出，且必须包含 `## 需求符合度核对` 章节
 soft_constraints:
 - 如章节数量多，可按卷分批审核后汇总，但最终需给出全书统一评分
 - 评分应客观公正，同时考虑目标平台的读者偏好
@@ -163,6 +188,11 @@ input_schema:
     foreshadowing_path:
       type: string
       description: 伏笔追踪表路径
+    requirement_doc_paths:
+      type: array
+      items:
+        type: string
+      description: 任务要求文档与规划文档路径列表（用户需求、策划方向书、大纲/设定集；缺省时按任务描述自取）
     existing_reviews_path:
       type: string
       description: 已有审核报告目录路径（含连贯性和文风审核报告）
@@ -204,9 +234,11 @@ output_schema:
           type: number
         state_consistency:
           type: number
+        requirement_fit:
+          type: number
 deliverables:
 - name: final_review_report
-  description: 全书质量终审报告，包含五维度评分、综合评分、问题汇总和修改建议
+  description: 全书质量终审报告，包含六维度评分、综合评分、需求符合度核对、问题汇总和修改建议
   output_path: '{output_path}'
   type: markdown
   required: true
@@ -214,6 +246,11 @@ recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
+    path: '{output_path}'
+- metric_id: file_check
+  default_params:
+    check: contains
+    pattern: '## 需求符合度核对'
     path: '{output_path}'
 version: 1.0.0
 is_active: true
@@ -237,4 +274,5 @@ metadata:
   - worldbuilding_consistency_audit
   - reader_experience_evaluation
   - state_consistency_verification
+  - requirement_compliance_review
   - weighted_quality_scoring

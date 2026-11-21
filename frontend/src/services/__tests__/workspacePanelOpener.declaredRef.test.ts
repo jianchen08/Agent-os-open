@@ -10,8 +10,8 @@
  * 样例声明为机制验证用合成数据。
  */
 import { beforeEach, describe, expect, it } from 'vitest'
-import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { PLUGIN_DECLARED_PAGES } from '@/services/schema/pluginPages.generated'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { openDeclaredPluginPage } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'

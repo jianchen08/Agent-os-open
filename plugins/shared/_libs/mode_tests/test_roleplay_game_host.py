@@ -636,9 +636,9 @@ def test_game_state_route_post_method_404(rp: Any) -> None:
     assert _status_of(result) == 404
 
 
-def test_game_page_read_failure_500(rp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_game_page_read_failure_500(rp: Any, patch_shared: Any) -> None:
     """游戏页 HTML 读失败 = success=False + 500（面板页同款降级形态）。"""
-    monkeypatch.setattr(rp, "_GAME_PAGE_HTML_PATH", "Z:/不存在/game_host.html")
+    patch_shared("_GAME_PAGE_HTML_PATH", "Z:/不存在/game_host.html")  # 消费点在 rp_game 自持绑定
 
     result = _call(rp, f"{_PANEL_EP}/page/game-host")
 

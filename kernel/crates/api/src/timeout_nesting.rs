@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 超时体系 L2 嵌套校验 | @ci: rust-test
 //! L2 嵌套不变量装载期校验器（ADR 2026-11-05-timeout-taxonomy-and-merge；
 //! 设计真值 docs/working/超时体系分类设计_20261105.md §5.2）。
 //!
@@ -256,6 +257,7 @@ mod tests {
             enabled: None,
             activation: None,
             provides: None,
+            visibility: Default::default(),
             persistent_fields: vec![],
             aux_venvs: Vec::new(),
             export_fields: vec![],

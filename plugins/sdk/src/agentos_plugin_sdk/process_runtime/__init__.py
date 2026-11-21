@@ -19,7 +19,12 @@ from agentos_plugin_sdk.process_runtime.backends import (
 from agentos_plugin_sdk.process_runtime.encoding import EncodingHandler
 from agentos_plugin_sdk.process_runtime.input_handler import InputHandler
 from agentos_plugin_sdk.process_runtime.log_compressor import LogCompressor
-from agentos_plugin_sdk.process_runtime.manager import ProcessLogReadError, ProcessManager
+from agentos_plugin_sdk.process_runtime.manager import (
+    BackendUnhealthyError,
+    ProcessLogReadError,
+    ProcessManager,
+    SpawnFirstLineTimeoutError,
+)
 from agentos_plugin_sdk.process_runtime.runtime import (
     TERMINAL_TASK_STATUSES,
     EnvProcessRuntime,
@@ -42,6 +47,7 @@ from agentos_plugin_sdk.process_runtime.types import (
 )
 
 __all__ = [
+    "BackendUnhealthyError",
     "BashAction",
     "ContainerProcessBackend",
     "EncodingHandler",
@@ -57,6 +63,7 @@ __all__ = [
     "ProcessInfo",
     "ProcessLogReadError",
     "ProcessManager",
+    "SpawnFirstLineTimeoutError",
     "TaskStateError",
     "TaskStatus",
     "TERMINAL_TASK_STATUSES",

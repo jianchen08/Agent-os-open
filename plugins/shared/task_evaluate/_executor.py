@@ -1,13 +1,14 @@
 """评估执行器（0.2 生产版）：按指标类型真实执行评估。
 
-- **tool 型指标**（evaluator_type=tool，如 file_check）：本地执行——按指标
-  input_schema 语义（exists/not_empty/contains/is_directory），相对路径以
-  任务 workspace 为根解析（_get_input_params 已注入 workspace）。
+- **tool 型指标**（evaluator_type=tool）：外部 I/O 全部经内核 tool-executor
+  异步执行——命令类走 bash 工具，路径元数据类 file_read 直读优先（bash 兜底），内容读取（contains/
+  matches_schema）走 file_read 工具；执行器宿主只做纯计算。未注入服务时
+  回退本地线程池（单测/独立运行）。
 - **agent 型指标**（evaluator_type=agent，如 semantic_check）：经 chat
   capability 派发**评估子管道**（evaluator_agent）——出生 state 带
   被评估任务的 workspace/ws_meta（workspace_lifecycle 幂等跳过 → 评估者在
   被评估任务的工作区里跑，执行环境一致）；lineage 有父（挂被评估任务下）；
-  plugin_configs.task_reminder.evaluation_mode=true（评估者模式：催
+  state.evaluation.mode="evaluator" / evaluation.metric_id（评估者模式：催
   evaluation_result JSON，不催 task_evaluate，防递归）。结论回收：轮询
   pipeline-state（同源白名单）evaluation.detected_result（task_reminder
   评估模式写入）+ task.status 终态，超时诚实失败。
@@ -23,7 +24,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,11 @@ _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
 from _libs.evaluation_metrics_path import probe_metrics_config_path  # noqa: E402
+from _libs.evaluation_result import (  # noqa: E402
+    extract_evaluation_result,
+    normalize_passed,
+    normalize_score,
+)
 from _root_api import state_fields  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,8 @@ logger = logging.getLogger(__name__)
 #   state_rows: async () -> list[dict]                —— pipeline-state.list 能力
 ChatSend = Callable[[dict[str, Any]], Any]
 StateRows = Callable[[], Any]
+#: 内核工具执行服务 caller：(tool_name, args) -> tool-executor.invoke 结果（awaitable）。
+ToolCall = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 # agent 型指标回收轮询间隔与内部回收上限（调用方 _get_eval_timeout 另有
 # asyncio.wait_for 包裹，两者取先到）。语义评估 = 等整个评估子管道跑完
@@ -124,6 +132,11 @@ def _collect_schema_violations(data: Any, schema: dict[str, Any]) -> list[str]:
     return violations
 
 
+def _sh_quote(value: str) -> str:
+    """POSIX 单引号转义（bash 工具固定 bash 语法）。"""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 def _parse_porcelain_paths(stdout: str) -> list[str]:
     """解析 git status --porcelain -uall 输出的改动路径清单（/ 分隔）。
 
@@ -168,17 +181,25 @@ def load_metric_definitions(config_path: str | None = None) -> dict[str, dict[st
 
 
 class PipelineEvaluationExecutor:
-    """0.2 评估执行器：tool 型本地跑，agent 型派评估子管道（R2 工作区继承）。"""
+    """0.2 评估执行器：tool 型执行，agent 型派评估子管道（R2 工作区继承）。
+
+    bash_check 优先经注入的 ``tool_call``（内核 tool-executor → bash 工具）
+    异步执行：命令在 bash 插件的进程管理器里跑，评估器所在合宿宿主事件
+    循环全程可打点。未注入（单测/独立运行）回退本地线程池执行。
+    """
 
     def __init__(
         self,
         chat_send: ChatSend,
         state_rows: StateRows,
         metrics_config_path: str | None = None,
+        tool_call: ToolCall | None = None,
     ) -> None:
         self._chat_send = chat_send
         self._state_rows = state_rows
         self._metrics_config_path = metrics_config_path or self._default_metrics_path()
+        # 内核工具执行服务 caller：(tool_name, args) -> tool-executor.invoke 结果。
+        self._tool_call = tool_call
         # mtime 校验读穿缓存（mtime → 指标表）：执行器常驻 sidecar，装载一次
         # 的进程内缓存会让指标 yaml 编辑永不生效（respawn 才可见）。
         self._metrics_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
@@ -233,7 +254,7 @@ class PipelineEvaluationExecutor:
         metric_id: str,
         params: dict[str, Any],
     ) -> MetricResult:
-        metrics = self._load_metrics()
+        metrics = await asyncio.to_thread(self._load_metrics)
         definition = metrics.get(metric_id)
         if definition is None and "::" in metric_id:
             # 白话展开多实例键（file_check::<路径>，task_submit 生成）：首段即定义 ID，
@@ -248,7 +269,289 @@ class PipelineEvaluationExecutor:
         evaluator_type = str(definition.get("evaluator_type") or "tool")
         if evaluator_type == "agent":
             return await self._evaluate_via_pipeline(task_id, metric_id, params)
-        return self._evaluate_tool_local(metric_id, params)
+        return await self._evaluate_tool_metric(metric_id, params)
+
+    async def _evaluate_tool_metric(self, metric_id: str, params: dict[str, Any]) -> MetricResult:
+        """tool 型指标执行路由：全部 I/O 经内核工具执行服务，异步等待。
+
+        - 命令类（bash_check）→ bash 工具；
+        - 改动面一致性（scope_consistency）→ bash 工具跑 git status；
+        - 路径元数据（exists/is_directory/not_empty）→ file_read 直读优先，bash [[ ]] 兜底；
+        - 文件内容（contains/matches_schema）→ file_read 工具。
+        未注入工具执行服务（单测/独立运行）回退本地线程池，行为等价。
+        """
+        tool_call = self._tool_call
+        if tool_call is None:
+            return await asyncio.to_thread(self._evaluate_tool_local, metric_id, params)
+
+        command = str(params.get("command") or "")
+        is_bash_check = metric_id == "bash_check" or "command" in params
+        if is_bash_check:
+            if not command:
+                return MetricResult(metric_id=metric_id, passed=False, error="command 参数缺失")
+            return await self._run_bash_via_tool_executor(metric_id, command, params)
+
+        if metric_id == "scope_consistency" or "allowed_paths" in params:
+            return await self._run_scope_via_tool_executor(metric_id, params)
+
+        return await self._run_file_metric_via_tool_executor(metric_id, params)
+
+    @staticmethod
+    def _tool_result_data(response: Any) -> tuple[bool, dict[str, Any], str | None]:
+        """解 tool-executor 信封：成功取 data（工具输出），失败取 error。"""
+        if not isinstance(response, dict):
+            return False, {}, f"工具执行返回非对象: {response!r}"
+        if response.get("success") is False:
+            return False, {}, str(response.get("error") or "工具执行失败")
+        data = response.get("data")
+        if isinstance(data, dict):
+            return True, data, None
+        return True, response, None
+
+    async def _bash_exec(
+        self,
+        command: str,
+        *,
+        workspace: str,
+        timeout: int,
+    ) -> tuple[bool, str, str | None, int | None]:
+        """经 tool-executor 调 bash 工具，返回 (是否通过, 全量输出, 错误, 退出码)。"""
+        tool_call = self._tool_call
+        if tool_call is None:
+            return False, "", "工具执行服务未注入", None
+        timeout = max(1, min(timeout, 600))
+        args: dict[str, Any] = {"command": command, "timeout": timeout, "background": False}
+        if workspace:
+            args["working_dir"] = workspace
+        try:
+            response = await tool_call("bash", args)
+        except Exception as exc:  # noqa: BLE001 — 服务不可用诚实失败，不吞异常
+            return False, "", f"工具执行服务调用失败: {exc}", None
+        ok, data, error = self._tool_result_data(response)
+        if not ok:
+            return False, "", error, None
+        status = str(data.get("status") or "")
+        if status == "running":
+            handle = str(data.get("handle") or "")
+            if handle:
+                try:
+                    await tool_call("kill", {"handle": handle})
+                except Exception as exc:  # noqa: BLE001 — 超时清理失败只告警，结论仍为超时
+                    logger.warning("[EvalExecutor] bash 超时进程 kill 失败 | handle=%s err=%s", handle, exc)
+            return False, str(data.get("output") or ""), f"命令超时（>{timeout}s）", None
+        exit_code = data.get("exit_code")
+        output = str(data.get("output") or "")
+        return status == "completed" and exit_code == 0, output, None, exit_code
+
+    async def _run_bash_via_tool_executor(
+        self,
+        metric_id: str,
+        command: str,
+        params: dict[str, Any],
+    ) -> MetricResult:
+        """bash_check：经内核 bash 工具执行命令（异步，不占事件循环）。"""
+        timeout = int(params.get("timeout_seconds") or 600)
+        passed, output, error, exit_code = await self._bash_exec(
+            command,
+            workspace=str(params.get("workspace") or ""),
+            timeout=timeout,
+        )
+        if error is not None:
+            return MetricResult(metric_id=metric_id, passed=False, error=error)
+        tail = output[-600:].strip()
+        message = f"exit={exit_code}" + (f"\n{tail}" if tail else "")
+        return MetricResult(metric_id=metric_id, passed=passed, message=message)
+
+    async def _run_scope_via_tool_executor(self, metric_id: str, params: dict[str, Any]) -> MetricResult:
+        """scope 一致性：经内核 bash 工具跑 git status 后比对改动面绑定表。"""
+        allowed_raw = params.get("allowed_paths")
+        if not isinstance(allowed_raw, list) or not allowed_raw:
+            return MetricResult(
+                metric_id=metric_id, passed=False,
+                error="allowed_paths 参数缺失（改动面绑定表为空 = 无改动授权，不放行）",
+            )
+        workspace = str(params.get("workspace") or "")
+        if not workspace:
+            return MetricResult(metric_id=metric_id, passed=False, error="workspace 参数缺失")
+        passed, output, error, _exit_code = await self._bash_exec(
+            "git status --porcelain -uall", workspace=workspace, timeout=60
+        )
+        if error is not None:
+            return MetricResult(metric_id=metric_id, passed=False, error=error)
+        if not passed:
+            return MetricResult(
+                metric_id=metric_id, passed=False,
+                error=f"git status 失败（非 git 仓库或仓库损坏）: {output[-200:]}",
+            )
+        changed = _parse_porcelain_paths(output)
+        normalized_allowed = [
+            str(a).replace("\\", "/").rstrip("/")
+            for a in allowed_raw
+            if str(a).strip()
+        ]
+
+        def _allowed(path: str) -> bool:
+            return any(path == a or path.startswith(a + "/") for a in normalized_allowed)
+
+        outside = sorted(p for p in changed if not _allowed(p))
+        if outside:
+            return MetricResult(
+                metric_id=metric_id, passed=False,
+                message="越界改动文件: " + ", ".join(outside[:20]),
+            )
+        return MetricResult(
+            metric_id=metric_id, passed=True,
+            message=f"改动 {len(changed)} 个文件全部在改动面绑定表内",
+        )
+
+    async def _run_path_check_via_tool_executor(
+        self, metric_id: str, check: str, params: dict[str, Any]
+    ) -> MetricResult:
+        """exists/is_directory/not_empty：file_read 直读优先，bash ``[[ ]]`` 兜底。
+
+        直读走 fs_tools 直接文件 I/O（不经 bash/WSL 命令通道——2026-11-17
+        装机实证高载下 WSL 通道单次 37-90s，not_empty 硬编码 30s 超时七连误判
+        `eval_retry_exhausted`）。file_read 成功即定论（文本字节长度 / 目录
+        items 语义）；读不动（二进制产物 file_read 模态拒绝、非常规 data）
+        回退 bash ``[[ ]]`` 保持原 stat 语义，超时 30→120s（WSL 冷态/高载
+        下 30s 不够一次命令往返）。
+        """
+        raw_path = str(params.get("path") or "")
+        if not raw_path:
+            return MetricResult(metric_id=metric_id, passed=False, error="path 参数缺失")
+        min_size = int(params.get("min_size") or 1) if check == "not_empty" else 1
+        tool_call = self._tool_call
+        if tool_call is not None:
+            read_args: dict[str, Any] = {"path": raw_path}
+            workspace = str(params.get("workspace") or "")
+            if workspace:
+                read_args["workspace"] = workspace
+            try:
+                response = await tool_call("file_read", read_args)
+            except Exception as exc:  # noqa: BLE001 — 直读失败回退 bash，不终止
+                logger.warning(
+                    "[EvalExecutor] file_read 直读失败回退 bash | path=%s err=%s", raw_path, exc
+                )
+                response = None
+            if isinstance(response, dict):
+                ok, data, _err = self._tool_result_data(response)
+                if ok:
+                    is_dir_listing = "items" in data and "content" not in data
+                    content = data.get("content")
+                    if is_dir_listing or isinstance(content, str):
+                        if check == "exists":
+                            return MetricResult(
+                                metric_id=metric_id, passed=True, message=f"存在: {raw_path}"
+                            )
+                        if check == "is_directory":
+                            return MetricResult(
+                                metric_id=metric_id,
+                                passed=is_dir_listing,
+                                message=(
+                                    f"是目录: {raw_path}" if is_dir_listing else f"不是目录或不存在: {raw_path}"
+                                ),
+                            )
+                        size = len(content.encode("utf-8")) if isinstance(content, str) else -1
+                        passed = size >= min_size
+                        return MetricResult(
+                            metric_id=metric_id,
+                            passed=passed,
+                            message=(
+                                f"非空（≥{min_size}B）: {raw_path}"
+                                if passed
+                                else f"为空/过小/不存在: {raw_path}"
+                            ),
+                        )
+                # 不可读（二进制/模态拒绝/非常规 data）→ 落 bash 兜底
+        quoted = _sh_quote(raw_path)
+        if check == "exists":
+            command = f"[[ -e {quoted} ]]"
+        elif check == "is_directory":
+            command = f"[[ -d {quoted} ]]"
+        else:
+            command = f"[[ -f {quoted} ]] && (( $(wc -c < {quoted}) >= {min_size} ))"
+        workspace = str(params.get("workspace") or "")
+        passed, output, error, exit_code = await self._bash_exec(
+            command, workspace=workspace, timeout=120
+        )
+        if error is not None:
+            return MetricResult(metric_id=metric_id, passed=False, error=error)
+        if not passed and exit_code not in (1,):
+            return MetricResult(
+                metric_id=metric_id, passed=False,
+                error=f"路径检查失败（exit={exit_code}）: {output[-200:]}",
+            )
+        if check == "exists":
+            message = f"存在: {raw_path}" if passed else f"不存在: {raw_path}"
+        elif check == "is_directory":
+            message = f"目录存在: {raw_path}" if passed else f"不是目录或不存在: {raw_path}"
+        else:
+            min_size = int(params.get("min_size") or 1)
+            message = (
+                f"非空（≥{min_size}B）: {raw_path}" if passed else f"为空/过小/不存在: {raw_path}"
+            )
+        return MetricResult(metric_id=metric_id, passed=passed, message=message)
+
+    async def _run_file_metric_via_tool_executor(
+        self, metric_id: str, params: dict[str, Any]
+    ) -> MetricResult:
+        """file_check 族 / matches_schema：经内核工具服务读取后本地判定。
+
+        元数据类（exists/is_directory/not_empty）走 bash 路径判定（二进制
+        产物安全）；内容类（contains/matches_schema）走 file_read 取文本，
+        本宿主只做纯计算（子串/结构校验），无文件 I/O 等待。
+        """
+        check = str(params.get("check") or "exists")
+        if check in ("exists", "is_directory", "not_empty"):
+            return await self._run_path_check_via_tool_executor(metric_id, check, params)
+        raw_path = str(params.get("path") or "")
+        if not raw_path:
+            return MetricResult(metric_id=metric_id, passed=False, error="path 参数缺失")
+        tool_call = self._tool_call
+        if tool_call is None:
+            return MetricResult(metric_id=metric_id, passed=False, error="工具执行服务未注入")
+        args: dict[str, Any] = {"path": raw_path}
+        workspace = str(params.get("workspace") or "")
+        if workspace:
+            args["workspace"] = workspace
+        try:
+            response = await tool_call("file_read", args)
+        except Exception as exc:  # noqa: BLE001 — 服务不可用诚实失败
+            return MetricResult(metric_id=metric_id, passed=False, error=f"工具执行服务调用失败: {exc}")
+        ok, data, error = self._tool_result_data(response)
+        if not ok:
+            return MetricResult(metric_id=metric_id, passed=False, error=error or "读取失败")
+        is_dir = "items" in data and "content" not in data
+        content = data.get("content")
+        if check == "contains":
+            pattern = str(params.get("pattern") or "")
+            if is_dir or not isinstance(content, str):
+                return MetricResult(metric_id=metric_id, passed=False, error=f"读取失败: 非文本文件或目录 {raw_path}")
+            passed = bool(pattern) and pattern in content
+            return MetricResult(
+                metric_id=metric_id, passed=passed,
+                message=(f"包含模式: {raw_path}" if passed else f"未包含模式 {pattern!r}: {raw_path}"),
+            )
+        if check == "matches_schema":
+            if is_dir or not isinstance(content, str):
+                return MetricResult(metric_id=metric_id, passed=False, error=f"产物文件不存在: {raw_path}")
+            schema = params.get("schema")
+            if not isinstance(schema, dict):
+                return MetricResult(metric_id=metric_id, passed=False, error="schema 参数缺失（须为对象）")
+            import yaml  # noqa: PLC0415 — 与 load_metric_definitions 同一依赖面
+
+            try:
+                parsed = yaml.safe_load(content)
+            except yaml.YAMLError as exc:
+                return MetricResult(metric_id=metric_id, passed=False, error=f"产物解析失败: {exc}")
+            violations = _collect_schema_violations(parsed, schema)
+            if violations:
+                return MetricResult(
+                    metric_id=metric_id, passed=False,
+                    message="结构不合规: " + "; ".join(violations),
+                )
+            return MetricResult(metric_id=metric_id, passed=True, message=f"结构合规: {raw_path}")
+        return MetricResult(metric_id=metric_id, passed=False, error=f"未知检查类型: {check}")
 
     # ── tool 型：本地执行 ──────────────────────────────────────
 
@@ -509,8 +812,10 @@ class PipelineEvaluationExecutor:
                 # workspace_lifecycle 见 state.workspace 已有幂等跳过 → 同目录跑）
                 "workspace": str(ws_meta["path"]),
                 "ws_meta": ws_meta,
-                # 防递归：评估者模式（催 evaluation_result JSON，不催 task_evaluate）
-                "plugin_configs": {"task_reminder": {"evaluation_mode": True}},
+                # 防递归：评估者模式按管道身份字段路由（task_reminder 读
+                # evaluation.mode/metric_id，不读插件实例配置——同 sidecar
+                # 并发 execute 会覆盖实例字段，2026-11-12 提醒误判实证）
+                "evaluation.mode": "evaluator",
                 # 评估域登记（ADR 2026-08-24-eval-pipeline-state-keys 出口）
                 "evaluation.of_task": task_id,
                 "evaluation.metric_id": metric_id,
@@ -542,36 +847,117 @@ class PipelineEvaluationExecutor:
         return await self._recover_result(eval_pid, metric_id)
 
     async def _recover_result(self, eval_pid: str, metric_id: str) -> MetricResult:
-        """轮询回收 evaluation.detected_result / 失败终态 / 超时（诚实失败）。"""
-        deadline = asyncio.get_running_loop().time() + _AGENT_RECOVER_TIMEOUT_S
-        while asyncio.get_running_loop().time() < deadline:
+        """轮询回收 evaluation.detected_result / 失败终态 / 超时（诚实失败）。
+
+        临界结果不丢：循环到点后再做一次 state 行读取——结论恰在最后一次
+        轮询与截止时刻之间落库时不判超时。仍无结论时按可用数据面做最终
+        回退：``raw_result``（state 摘要行内）里的 evaluation_result JSON 与
+        task_reminder 检测面同源解析（``_libs.evaluation_result``）；两处皆无
+        结论则不臆造——按实际终态给明确失败原因。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _AGENT_RECOVER_TIMEOUT_S
+        while loop.time() < deadline:
             row = await self._find_state_row(eval_pid)
-            if row:
-                detected = row.get("evaluation.detected_result")
-                if isinstance(detected, dict):
-                    passed = bool(detected.get("passed"))
-                    score = detected.get("score")
-                    return MetricResult(
-                        metric_id=metric_id,
-                        passed=passed,
-                        score=float(score) if isinstance(score, (int, float)) else -1.0,
-                        message=str(detected.get("feedback") or ""),
-                        evaluator_output=detected,
-                        pipeline_run_id=eval_pid,
-                    )
-                status = str(row.get("task.status") or "")
-                if status in _FAILED_STATUSES:
-                    return MetricResult(
-                        metric_id=metric_id,
-                        passed=False,
-                        error=f"评估子管道终态 {status}",
-                        pipeline_run_id=eval_pid,
-                    )
+            decided = self._decided_result_from_row(row, eval_pid, metric_id)
+            if decided is not None:
+                return decided
             await asyncio.sleep(_POLL_INTERVAL_S)
+
+        # 截止前最后一次读取（临界结果不丢）
+        row = await self._find_state_row(eval_pid)
+        decided = self._decided_result_from_row(row, eval_pid, metric_id)
+        if decided is not None:
+            logger.info(
+                "[EvalExecutor] 评估结论在回收截止时读取命中 | eval_pipe=%s metric=%s",
+                eval_pid,
+                metric_id,
+            )
+            return decided
+
+        # 最终回退：检测面未落 detected_result，但结论已在 raw_result 文本里
+        fallback = self._raw_result_fallback(row, eval_pid, metric_id)
+        if fallback is not None:
+            logger.info(
+                "[EvalExecutor] 评估结论走 raw_result 兜底解析 | eval_pipe=%s metric=%s",
+                eval_pid,
+                metric_id,
+            )
+            return fallback
+
+        reason = (
+            "评估子管道 state 行不可读"
+            if row is None
+            else f"子管道终态 {str(row.get('task.status') or '未知')} 且无结论证据"
+        )
         return MetricResult(
             metric_id=metric_id,
             passed=False,
-            error=f"评估回收超时（{_AGENT_RECOVER_TIMEOUT_S:.0f}s）",
+            error=f"评估回收超时（{_AGENT_RECOVER_TIMEOUT_S:.0f}s）：{reason}",
+            pipeline_run_id=eval_pid,
+        )
+
+    @staticmethod
+    def _decided_result_from_row(
+        row: dict[str, Any] | None,
+        eval_pid: str,
+        metric_id: str,
+    ) -> MetricResult | None:
+        """state 行里的已决结论（detected_result / 失败终态）；未决返回 None。
+
+        detected_result 的 passed/score 经共享归一函数复核：历史行可能由旧
+        解析器写入 ``"passed": "false"`` 之类的宽形态，不得再被真值化判通过。
+        """
+        if not isinstance(row, dict):
+            return None
+        detected = row.get("evaluation.detected_result")
+        if isinstance(detected, dict):
+            passed = normalize_passed(detected.get("passed"))
+            if passed is None:
+                logger.warning(
+                    "[EvalExecutor] detected_result.passed 形态非法，按未决处理 | eval_pipe=%s | value=%r",
+                    eval_pid,
+                    detected.get("passed"),
+                )
+                return None
+            score = normalize_score(detected.get("score"))
+            return MetricResult(
+                metric_id=metric_id,
+                passed=passed,
+                score=score if score is not None else -1.0,
+                message=str(detected.get("feedback") or ""),
+                evaluator_output=detected,
+                pipeline_run_id=eval_pid,
+            )
+        status = str(row.get("task.status") or "")
+        if status in _FAILED_STATUSES:
+            return MetricResult(
+                metric_id=metric_id,
+                passed=False,
+                error=f"评估子管道终态 {status}",
+                pipeline_run_id=eval_pid,
+            )
+        return None
+
+    @staticmethod
+    def _raw_result_fallback(
+        row: dict[str, Any] | None,
+        eval_pid: str,
+        metric_id: str,
+    ) -> MetricResult | None:
+        """最终回退：从 state 行 ``raw_result`` 文本提取结论 JSON（无则 None）。"""
+        if not isinstance(row, dict):
+            return None
+        detected = extract_evaluation_result(row.get("raw_result"))
+        if detected is None:
+            return None
+        score = normalize_score(detected.get("score"))
+        return MetricResult(
+            metric_id=metric_id,
+            passed=bool(detected.get("passed")),
+            score=score if score is not None else -1.0,
+            message=str(detected.get("feedback") or ""),
+            evaluator_output=detected,
             pipeline_run_id=eval_pid,
         )
 

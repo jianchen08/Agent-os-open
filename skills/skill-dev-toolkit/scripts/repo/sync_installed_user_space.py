@@ -4,8 +4,9 @@
 背景（ADR 2026-09-24-host-context-generic-connection 落地日）：插件更新此前只有
 两条路——launcher 启动期同步（只服务 dev user_root）或整机重打包（132MB，且
 装机包内文件被改动即破坏升级链）。本脚本补第三条：**显式把仓内插件/配置/
-宿主 addon 增量带到装机版的用户空间**，内核经用户插件根递归发现（同 id 用户
-赢）与用户 config 覆盖（config/pipelines/*）天然消费，装机包一个字节不动。
+宿主 addon 增量带到装机版的用户空间**，内核经实例启动配置的 Tier2 根发现
+（分级单副本，ADR 2026-11-07-plugin-tiered-single-copy-model）与用户 config
+覆盖（config/pipelines/*）天然消费，装机包一个字节不动。
 
 写目标必须显式（与 sync_user_root.py 同一纪律）：``--user-root`` 是唯一入口，
 不给拒绝执行——OS 默认数据目录（%APPDATA%\\agentos）是装机版用户空间，静默
@@ -13,13 +14,22 @@
 一律拒绝（检测 %LOCALAPPDATA%\\Programs\\agent-os 等安装位）。
 
 动作（至少给一个）：
-- ``--plugin <repo相对路径>``：镜像同步插件目录到 ``<user_root>/plugins/<名>/``
-  （镜像=删除源里已消失的文件，改名类更新必须；``data/`` 用户数据子目录
-  保留不删；排 ``__pycache__``）。venv 供给：源侧有 ``.venv`` 直接整树复制
-  （同机可迁移，editable SDK 绝对路径仍有效）；无则按内核报错同款配方
-  ``uv venv + uv pip install -e plugins/sdk + 清单依赖`` 现建。
-  版本生效检查（D4）：BuiltinFirst 下源版本须严格大于装机包内置副本
-  （宽容 strip ``v`` 前缀），否则该 id 进汇总的「未生效 id 清单」。
+- ``--plugin <repo相对路径>``：更新装机用户目录的 **Tier2 副本**（ADR 决策
+  2.1 覆盖规则，与安装器 plugin-tier2-provision 同款基线 diff）：
+  - 清单内 Tier1 id（安全级/共享件）→ **拒动**（Tier1 只随包升级，绝不落
+    用户目录副本）；
+  - 副本与基线（``<user_root>/plugin-baseline.json``）一致（用户未改）→
+    覆盖 + 基线条目翻新为仓内版本；
+  - 副本偏离基线（用户改过/无基线证据）→ **保留用户版** + 冲突记录写
+    ``<user_root>/plugin-upgrade-conflicts.json``（本轮有冲突才全量刷新该
+    文件——避免抹掉安装轮告警，也无陈旧残留）；
+  - 双源版本闸（BuiltinFirst「严格大于内置」）已随双源仲裁退役（ADR
+    §2.5）——版本语义移交基线对账，本脚本不再比较内置副本版本。
+  镜像语义不变：删除源里已消失的文件、``data/`` 用户数据子目录保留、排
+  ``__pycache__``；venv 供给（源 ``.venv`` 整树复制 / uv 现建）不变。
+  复制后回读（ADR 2026-11-10-deploy-freshness-verification）：覆盖/首装、
+  ``--config``、``--skills`` 三类复制结束都重算目标树哈希与源比对，不一致即
+  ``[VERIFY-FAIL]`` + exit 1——「动作打印了」不等于「文件真的到位」。
 - ``--config <config/下相对路径>``：整文件覆盖到 ``<user_root>/config/<同路径>``
   （用户空间配置惯例=文件级整体替换；如 pipelines/autonomous.yaml 改挂
   pipeline_host_context）。
@@ -30,10 +40,10 @@
 - ``--addon <Godot项目根>``：把 hosts/godot-addons/agentos 镜像到
   ``<项目>/addons/agentos``——修旧项目播种副本推死端点（插件改名后旧端点
   404）的存量问题。
-- ``--prune-stale``：存量归一：用户空间里 manifest id 命中内置副本且版本
-  ``<=`` 内置版本的目录永不被装载（BuiltinFirst 持平/更旧内置赢），移入
-  ``<user_root>/_quarantine_<日期>/plugins/`` 并记 prune-manifest.json
-  （可整体回滚）；内置无同名 id 的用户自有插件只报告不动。
+- ``--prune-stale``：存量归一：隔离「内置已下架（种子无同名 id）且 import
+  冒烟失败」的失效孤儿副本到 ``<user_root>/_quarantine_<日期>/plugins/``
+  （记 prune-manifest.json，可整体回滚）；种子仍有同名 id 的副本是运行期
+  真值副本（单副本模型，无「影子」概念）一律不动；用户自有健康插件只报告。
 
 契约提醒：涉及端点/WS 事件名等**前端契约**的插件更新，装机版内嵌前端（asar）
 要随应用升级才能消费——本脚本只更新 Python 侧，届时 --config 换挂需与
@@ -53,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import re
@@ -61,6 +72,8 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,6 +91,28 @@ EXCLUDED_DIR_NAMES = ("__pycache__", ".venv")
 
 #: 插件内用户数据子目录名：镜像删除时保留（用户活跃数据，非仓从属物）。
 PRESERVED_USER_DATA_DIRS = ("data",)
+
+#: Tier1 分级清单（仓内真源，与 kernel/安装器消费同一份）。
+_TIER1_MANIFEST_REL = Path("config") / "kernel" / "plugin_tiers.yaml"
+
+#: 基线/冲突记录文件名与 schema（ADR 决策 2.1 钉死格式；与安装器
+#: electron/plugin-tier2-provision.ts 同款——基线条目可跨两侧互换 diff）。
+BASELINE_FILENAME = "plugin-baseline.json"
+CONFLICTS_FILENAME = "plugin-upgrade-conflicts.json"
+_BASELINE_SCHEMA = 1
+_CONFLICTS_SCHEMA = 1
+
+#: 基线哈希排除规则（与安装器 hashPluginTree 逐项同口径——两侧写出的基线
+#: 条目必须可互换 diff；差异会让「未改」误判「改过」触发假冲突）。
+_BASELINE_EXCLUDED_DIRS = (
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "target",
+)
+_BASELINE_EXCLUDED_FILE_SUFFIX = ".pyc"
 
 #: 开发机绝对路径指纹：随 sync 进用户空间即复现“提示词锚定 dev 路径 →
 #: 隔离挂载悬空”链（2026-09-27 R295 装机实证）。检测优先于替换：替换规则
@@ -352,27 +387,20 @@ def check_import_closure(
         return None
     roots = [Path(r) for r in install_roots] if install_roots is not None else _existing_install_dirs()
     for dep_name, symbols in sorted(dep_syms.items()):
-        dep_dir: Path | None = None
         builtin_dir: Path | None = None
-        builtin_version: str | None = None
         for root in roots:
             cand = root / "resources" / "plugins" / "shared" / dep_name
             # 共享裸模块（_root_api/_libs 等）无 plugin.json 也是合法内置副本；
             # 只认 manifest 会让闭包闸对「server.py from _root_api import …」
-            # 恒报不满足（trace_exporter 2026-10-23 实证）。无 manifest →
-            # version=None，用户副本 semver 可解析即赢（与 parse 容 None 口径一致）。
+            # 恒报不满足（trace_exporter 2026-10-23 实证）。
             if cand.is_dir():
                 builtin_dir = cand
-                builtin_version = _read_manifest_version(cand)
                 break
+        # 生效副本判定（分级单副本，ADR 2026-11-07）：用户目录有副本即运行期
+        # 真值（Tier2 根），探测它；否则探测安装目录种子副本（Tier1 共享件）。
+        # 双源版本仲裁已退役，不再比较版本。
         user_dir = user_plugins / dep_name
-        user_version = _read_manifest_version(user_dir) if (user_dir / "plugin.json").is_file() else None
-        if user_dir.is_dir() and user_version:
-            user_key = parse_semver_lenient(user_version)
-            builtin_key = parse_semver_lenient(builtin_version) if builtin_version else None
-            if user_key is not None and (builtin_key is None or user_key > builtin_key):
-                dep_dir = user_dir
-        dep_dir = dep_dir or builtin_dir
+        dep_dir = user_dir if user_dir.is_dir() else builtin_dir
         probe_exe = sys.executable
         probe_cwd: Path | None
         if dep_dir is None:
@@ -429,61 +457,155 @@ def check_import_closure(
     return None
 
 
-def sync_plugin(repo_rel: str, user_root: Path, dry_run: bool) -> str | None:
-    """插件目录镜像到 <user_root>/plugins/<名>/ + venv 供给。
+def _tier1_entries(repo_root: Path) -> set[str]:
+    """读仓内 Tier1 分级清单 → 条目名集合（安全插件 + 共享件）。
 
-    返回未生效原因（str）或 None（生效/无法判定）——BuiltinFirst 裁决口径下
-    用户副本不严格大于内置（或版本不可解析）时，本轮 sync 不会生效（D4/
-    审查总册 P1-15：失效必须显式可见，不再静默）。
+    清单缺失/不可解析 → 拒绝执行（fail-closed：Tier1 不可辨别时绝不写用户
+    目录副本——把 approval/_host 落到用户目录 = 分级模型被破坏，与安装器
+    parseTier1Entries 同语义）。
     """
-    src = _REPO_ROOT / "plugins" / repo_rel.replace("\\", "/")
-    if not (src / "plugin.json").exists():
-        raise SystemExit(f"[REFUSE] {src} 不含 plugin.json——--plugin 传仓内插件目录相对路径")
-    dst = user_root / "plugins" / src.name
-    print(f"[plugin] {src.name}: {src} -> {dst}")
-    if not dry_run:
-        actions = _mirror_tree(src, dst)
-        for act, rel in actions:
-            print(f"    {act}: {rel}")
-        # venv 子树在镜像之外单独供给（排除名单使其不参与 mirror）
-        print(f"    {_provision_venv(src, dst, dry_run)}")
-    else:
-        print("    [dry-run] 镜像 + venv 供给（详见源侧文件树）")
-    reason = check_version_effective(src)
-    if reason:
-        print(f"    [WARN] 未生效: {reason}")
-    closure = check_import_closure(src, user_root / "plugins")
-    if closure:
-        print(f"    [WARN] 依赖闭包: {closure}")
-        reason = reason or closure
-    print(
-        "    [NOTE] 契约提醒：若本次更新改了端点/WS 事件名等前端契约，"
-        "装机版内嵌前端需随应用升级才能消费；--config 换挂须与升级同批评估。"
-    )
-    return reason
+    manifest = repo_root / _TIER1_MANIFEST_REL
+    if not manifest.is_file():
+        raise SystemExit(
+            f"[REFUSE] Tier1 分级清单缺失: {manifest}——Tier1 不可辨别，拒绝任何插件写入。"
+        )
+    try:
+        doc = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"[REFUSE] Tier1 分级清单解析失败（{manifest}）: {e}") from e
+    tier1 = doc.get("tier1") if isinstance(doc, dict) else None
+    if not isinstance(tier1, dict):
+        raise SystemExit(f"[REFUSE] Tier1 分级清单结构非法（缺 tier1 映射）: {manifest}")
+    entries: set[str] = set()
+    for key in ("safety_plugins", "shared_modules"):
+        items = tier1.get(key)
+        if items is None:
+            continue
+        if not isinstance(items, list):
+            raise SystemExit(f"[REFUSE] Tier1 清单 tier1.{key} 非列表: {manifest}")
+        entries.update(x.strip() for x in items if isinstance(x, str) and x.strip())
+    return entries
 
 
-#: 宽容 semver 形状：MAJOR.MINOR.PATCH[-预发布][+构建]（构建元数据不参与比较）。
-_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+def _baseline_excluded(name: str, is_dir: bool) -> bool:
+    """基线哈希排除判定（与安装器 hashPluginTree 逐项同口径）。"""
+    if is_dir:
+        return name in _BASELINE_EXCLUDED_DIRS or name == ".venv" or name.startswith(".venv-")
+    return name.endswith(_BASELINE_EXCLUDED_FILE_SUFFIX)
 
 
-def parse_semver_lenient(raw: str) -> tuple[int, int, int, int, tuple] | None:
-    """宽容 semver 解析（与内核 D4 口径同源）：strip 空白与单个前导 ``v``/``V``
-    前缀，``v1.2.3`` 不再静默判旧；返回可比较键（正式版优先于一切预发布），
-    失败 None。"""
-    s = raw.strip()
-    if s[:1] in ("v", "V"):
-        s = s[1:]
-    m = _SEMVER_RE.fullmatch(s)
-    if not m:
+def _hash_plugin_tree(plugin_dir: Path) -> dict[str, str]:
+    """全树 sha256：插件目录 → {posix 相对路径: hex 哈希}（键排序稳定）。
+
+    与安装器 hashPluginTree 同规则（排除面/键序），两侧写出的基线条目可
+    互换 diff；目录不可读 → OSError 上浮（调用方按各自语义处置）。
+    """
+    files: dict[str, str] = {}
+
+    def walk(cur: Path, rel: str) -> None:
+        for child in sorted(cur.iterdir()):
+            child_rel = child.name if rel == "" else f"{rel}/{child.name}"
+            if child.is_dir():
+                if not _baseline_excluded(child.name, is_dir=True):
+                    walk(child, child_rel)
+            elif child.is_file():
+                if not _baseline_excluded(child.name, is_dir=False):
+                    files[child_rel] = hashlib.sha256(child.read_bytes()).hexdigest()
+
+    walk(plugin_dir, "")
+    return dict(sorted(files.items()))
+
+
+def _diff_against_baseline(
+    current_files: dict[str, str], baseline_files: dict[str, str]
+) -> list[str]:
+    """用户目录当前哈希 vs 基线：改动文件清单（posix 相对路径，排序稳定）。
+
+    空列表 = 与基线一致（用户未改）。与安装器 diffAgainstBaseline 同语义：
+    修改 / 基线有而现缺 / 基线无而新增都计为改动。
+    """
+    keys = sorted(set(baseline_files) | set(current_files))
+    return [k for k in keys if baseline_files.get(k) != current_files.get(k)]
+
+
+def _load_baseline(user_root: Path) -> dict | None:
+    """读 ``<user_root>/plugin-baseline.json``；缺失 → None。
+
+    损坏 / 结构不符 schema → 拒绝执行（不可读证据不做覆盖性动作，与安装器
+    readBaselineFile 同语义——绝不带着坏基线静默覆盖用户内容）。
+    """
+    path = user_root / BASELINE_FILENAME
+    if not path.is_file():
         return None
-    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    pre_raw = m.group(4)
-    if pre_raw is None:
-        return (major, minor, patch, 1, ())
-    # semver 预发布优先级：数字标识符 < 字母数字标识符（编码 0/1 保证）
-    pre_key = tuple((0, int(p)) if p.isdigit() else (1, p) for p in pre_raw.split("."))
-    return (major, minor, patch, 0, pre_key)
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(
+            f"[REFUSE] {BASELINE_FILENAME} 损坏（不可解析）——拒绝任何覆盖性动作"
+            f"（不可读证据不删），请重装以重建基线: {e}"
+        ) from e
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("schema") != _BASELINE_SCHEMA
+        or not isinstance(parsed.get("package_version"), str)
+        or not isinstance(parsed.get("plugins"), dict)
+    ):
+        raise SystemExit(
+            f"[REFUSE] {BASELINE_FILENAME} 结构不符合 schema {_BASELINE_SCHEMA}"
+            "——拒绝任何覆盖性动作（不可读证据不删），请重装以重建基线"
+        )
+    return parsed
+
+
+def _upsert_baseline_entry(
+    user_root: Path, baseline: dict | None, plugin_id: str, entry: dict, now_iso: str
+) -> None:
+    """把 sync 后的插件条目写入基线。
+
+    已存在基线 → 原位更新该条目（其余条目与 package_version 原样保留）；
+    无基线 → 新建，package_version 留空串 = 非包轮基线（下次包轮 provision
+    按其 package_version 重新裁决，包内种子权威）。
+    """
+    if baseline is None:
+        baseline = {
+            "schema": _BASELINE_SCHEMA,
+            "package_version": "",
+            "written_at": now_iso,
+            "plugins": {},
+        }
+    baseline["plugins"][plugin_id] = entry
+    baseline["written_at"] = now_iso
+    target = user_root / BASELINE_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(baseline, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_conflicts(user_root: Path, conflicts: list[dict], now_iso: str) -> None:
+    """写本轮冲突记录（全量刷新语义，与安装器一致：陈旧告警不残留）。
+
+    仅在本轮确有冲突时写——sync 是定向工具，无冲突不刷新告警面（避免抹掉
+    安装轮 provision 留下的未消费告警）。
+    """
+    if not conflicts:
+        return
+    payload = {
+        "schema": _CONFLICTS_SCHEMA,
+        "generated_at": now_iso,
+        "conflicts": sorted(conflicts, key=lambda c: c["plugin_id"]),
+    }
+    target = user_root / CONFLICTS_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_manifest_id(plugin_dir: Path) -> str | None:
+    """读 plugin.json 的 ``id``；缺失/损坏 → None（调用方回落目录名）。"""
+    try:
+        data = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    plugin_id = data.get("id") if isinstance(data, dict) else None
+    return plugin_id if isinstance(plugin_id, str) and plugin_id else None
 
 
 def _read_manifest_version(plugin_dir: Path) -> str | None:
@@ -496,42 +618,170 @@ def _read_manifest_version(plugin_dir: Path) -> str | None:
     return version if isinstance(version, str) else None
 
 
-def _builtin_plugin_version(plugin_name: str) -> str | None:
-    """定位装机包内置副本版本（``<安装位>/resources/plugins/shared/<名>/``，
-    与 electron kernelResourcePaths 的 builtin 布局同源）；找不到 → None。"""
-    for install_dir in _existing_install_dirs():
-        manifest = install_dir / "resources" / "plugins" / "shared" / plugin_name
-        if (manifest / "plugin.json").is_file():
-            return _read_manifest_version(manifest)
-    return None
+def _apply_seed_update(src: Path, dst: Path) -> None:
+    """覆盖/首装执行面：镜像 + venv 供给（dry-run 不进入本函数）。"""
+    actions = _mirror_tree(src, dst)
+    for act, rel in actions:
+        print(f"    {act}: {rel}")
+    # venv 子树在镜像之外单独供给（排除名单使其不参与 mirror）
+    print(f"    {_provision_venv(src, dst, dry_run=False)}")
 
 
-def check_version_effective(src: Path) -> str | None:
-    """用户副本按 BuiltinFirst 口径能否生效：返回未生效原因或 None。
+def _verify_mirror(
+    src: Path, dst: Path, *, skip_suffixes: tuple[str, ...] = ()
+) -> tuple[int, list[str]]:
+    """复制后回读（ADR 2026-11-10-deploy-freshness-verification）。
 
-    ``src`` 为源侧插件目录（目录名承载插件名）。判据与内核仲裁逐位同源
-    （``parse_version`` 宽容 strip v 前缀 + 严格大于内置）：源版本不可解析 /
-    内置版本不可解析 / 不严格大于内置 → 未生效。装机包未安装（找不到内置
-    副本）→ 无法判定，不入清单。
+    目标树逐文件 sha256 必须与源一致——回答「这次同步的改动是否真的落到了
+    装机用户空间」，而不是只看 copy 动作打印。排除面与基线哈希同口径
+    （.venv/缓存），故 venv 供给不在比对面内（_provision_venv 单独负责）；
+    skip_suffixes 与 _mirror_tree 的剔除面一致（.bak/.tmp 不复制也不算差异）。
+
+    返回 (源侧文件数, 差异相对路径列表)；空列表 = 一致。
     """
-    src_version = _read_manifest_version(src)
-    if src_version is None:
-        return f"{src.name}: 源 plugin.json 无可读 version"
-    src_key = parse_semver_lenient(src_version)
-    if src_key is None:
-        return f"{src.name}: 源版本 {src_version!r} 非 semver（宽容 strip v 前缀后仍不可解析）——仲裁保守判内置赢"
-    builtin_version = _builtin_plugin_version(src.name)
-    if builtin_version is None:
-        return None  # 装机包未装/布局外 → 无法判定
-    builtin_key = parse_semver_lenient(builtin_version)
-    if builtin_key is None:
-        return f"{src.name}: 内置版本 {builtin_version!r} 不可解析——仲裁保守判内置赢（请修装机包副本）"
-    if src_key <= builtin_key:
-        return (
-            f"{src.name}: 源版本 {src_version} 不严格大于内置 {builtin_version}"
-            "（BuiltinFirst 持平/更旧内置赢）——bump 版本后重试"
+    kept = lambda files: {  # noqa: E731 - 两行过滤，lambda 比嵌套 def 更贴上下文
+        rel: digest for rel, digest in files.items() if not rel.lower().endswith(skip_suffixes)
+    }
+    src_files = kept(_hash_plugin_tree(src))
+    dst_files = kept(_hash_plugin_tree(dst)) if dst.exists() else {}
+    problems = [
+        rel for rel in sorted(set(src_files) | set(dst_files)) if src_files.get(rel) != dst_files.get(rel)
+    ]
+    return len(src_files), problems
+
+
+def _assert_mirror_verified(
+    src: Path, dst: Path, label: str, *, skip_suffixes: tuple[str, ...] = ()
+) -> None:
+    """回读不一致即红（fail-closed）：同步动作打印 ≠ 文件真的到位。"""
+    checked, problems = _verify_mirror(src, dst, skip_suffixes=skip_suffixes)
+    if problems:
+        preview = ", ".join(problems[:10]) + (" …" if len(problems) > 10 else "")
+        raise SystemExit(
+            f"[VERIFY-FAIL] {label} 复制后回读不一致（{len(problems)}/{checked} 件）：{preview}"
         )
-    return None
+    print(f"    [verify] 回读一致（{checked} 件）")
+
+
+def sync_plugin(repo_rel: str, user_root: Path, dry_run: bool) -> list[str]:
+    """更新装机用户目录的 Tier2 副本（ADR 2026-11-07 决策 2.1 覆盖规则）。
+
+    四态（与安装器 plugin-tier2-provision 同款基线 diff）：
+    - Tier1 清单命中 → 拒动（Tier1 只随包升级，绝不落用户目录副本）；
+    - 无基线条目且副本缺席 → 首装：镜像 + venv + 基线立目；
+    - 副本与基线一致（用户未改）→ 覆盖（镜像 + venv）+ 基线条目翻新；
+    - 副本偏离基线 / 无基线证据而副本在 / 基线在而副本整缺 → 保留 +
+      冲突记录（seed_version = 本轮仓内版本，user_version = 副本版本）。
+
+    返回告警列表（依赖闭包不满足等；四态结论打印在本函数内）。双源版本闸
+    （BuiltinFirst「严格大于内置」）已随双源仲裁退役（ADR §2.5），版本语义
+    移交基线对账，不再比较内置副本版本。
+    """
+    src = _REPO_ROOT / "plugins" / repo_rel.replace("\\", "/")
+    if not (src / "plugin.json").exists():
+        raise SystemExit(f"[REFUSE] {src} 不含 plugin.json——--plugin 传仓内插件目录相对路径")
+    plugin_id = _read_manifest_id(src) or src.name
+    tier1 = _tier1_entries(_REPO_ROOT)
+    if plugin_id in tier1 or src.name in tier1:
+        raise SystemExit(
+            f"[REFUSE] {plugin_id} 是 Tier1（安全级/共享件，清单 {_TIER1_MANIFEST_REL} 内）——"
+            "Tier1 只随包升级（改仓 → 打包 → 重装），绝不写入用户目录副本。"
+        )
+    dst = user_root / "plugins" / src.name
+    baseline = _load_baseline(user_root)
+    prior = baseline["plugins"].get(plugin_id) if baseline else None
+    seed_version = _read_manifest_version(src) or ""
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+    conflicts: list[dict] = []
+    print(f"[plugin] {plugin_id} ({repo_rel}): {src} -> {dst}")
+
+    if prior is None and not dst.exists():
+        # 首装：解包 + 基线立目
+        print("    决策: 首装（无基线条目、用户目录缺席）→ 解包 + 基线立目")
+        if not dry_run:
+            _apply_seed_update(src, dst)
+            _assert_mirror_verified(src, dst, f"插件 {plugin_id}")
+            _upsert_baseline_entry(
+                user_root,
+                baseline,
+                plugin_id,
+                {"tier": 2, "version": seed_version, "files": _hash_plugin_tree(src)},
+                now_iso,
+            )
+        else:
+            print("    [dry-run] 镜像 + venv 供给 + 基线立目")
+    elif prior is None:
+        # 无基线证据而副本在（前代安装残留/用户自放）：保留 + 冲突留痕
+        user_version = _read_manifest_version(dst) or ""
+        conflicts.append(
+            {
+                "plugin_id": plugin_id,
+                "seed_version": seed_version,
+                "user_version": user_version,
+                "changed_files": [],
+            }
+        )
+        print(
+            "    决策: 保留（副本在而无基线证据，不覆盖用户内容）——"
+            f"冲突记录 seed={seed_version or '∅'} user={user_version or '∅'}"
+        )
+    elif not dst.exists():
+        # 基线在而副本整缺：机械规则下全部基线文件计为改动（不复活）
+        changed = sorted(prior.get("files", {}))
+        conflicts.append(
+            {
+                "plugin_id": plugin_id,
+                "seed_version": seed_version,
+                "user_version": prior.get("version", ""),
+                "changed_files": changed,
+            }
+        )
+        print(f"    决策: 保留（基线在而用户目录整缺，不复活）——冲突记录 {len(changed)} 件改动")
+    else:
+        changed = _diff_against_baseline(_hash_plugin_tree(dst), prior.get("files", {}))
+        if changed:
+            user_version = _read_manifest_version(dst) or ""
+            conflicts.append(
+                {
+                    "plugin_id": plugin_id,
+                    "seed_version": seed_version,
+                    "user_version": user_version,
+                    "changed_files": changed,
+                }
+            )
+            preview = ", ".join(changed[:5]) + (" …" if len(changed) > 5 else "")
+            print(
+                f"    决策: 保留用户版（偏离基线 {len(changed)} 件：{preview}）——"
+                f"冲突记录 seed={seed_version or '∅'} user={user_version or '∅'}"
+            )
+        else:
+            print("    决策: 覆盖（副本与基线一致，用户未改）+ 基线翻新")
+            if not dry_run:
+                _apply_seed_update(src, dst)
+                _assert_mirror_verified(src, dst, f"插件 {plugin_id}")
+                _upsert_baseline_entry(
+                    user_root,
+                    baseline,
+                    plugin_id,
+                    {"tier": 2, "version": seed_version, "files": _hash_plugin_tree(src)},
+                    now_iso,
+                )
+            else:
+                print("    [dry-run] 镜像 + venv 供给 + 基线翻新")
+
+    if not dry_run:
+        _write_conflicts(user_root, conflicts, now_iso)
+
+    warnings: list[str] = []
+    closure = check_import_closure(src, user_root / "plugins")
+    if closure:
+        print(f"    [WARN] 依赖闭包: {closure}")
+        warnings.append(closure)
+    print(
+        "    [NOTE] 契约提醒：若本次更新改了端点/WS 事件名等前端契约，"
+        "装机版内嵌前端需随应用升级才能消费；--config 换挂须与升级同批评估。"
+    )
+    return warnings
 
 
 def _assert_no_dev_paths(src: Path) -> None:
@@ -562,6 +812,9 @@ def sync_config(repo_rel: str, user_root: Path, dry_run: bool) -> None:
     if not dry_run:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+        if dst.read_bytes() != src.read_bytes():
+            raise SystemExit(f"[VERIFY-FAIL] config 复制后回读不一致: {dst}")
+        print(f"    [verify] 回读一致（{dst.stat().st_size} bytes）")
 
 
 #: 技能镜像剔除的文件后缀（prompt 注入物料不留编辑残渣；.bak 历史副本
@@ -592,6 +845,7 @@ def sync_skills(repo_rel: str, user_root: Path, dry_run: bool) -> None:
     if not dry_run:
         for act, rel in _mirror_tree(src, dst, skip_suffixes=SKILLS_SKIP_SUFFIXES):
             print(f"    {act}: {rel}")
+        _assert_mirror_verified(src, dst, "skills", skip_suffixes=SKILLS_SKIP_SUFFIXES)
 
 
 def sync_addon(project_root: str, dry_run: bool) -> None:
@@ -644,14 +898,15 @@ def _iter_plugin_manifests(root: Path, *, max_depth: int = 2, skip_modes: bool =
                 stack.append((child, depth + 1))
 
 
-def _builtin_manifest_index(install_roots: list[Path] | None) -> dict[str, tuple[str | None, Path]]:
-    """内置副本索引：插件 id → (版本, 目录)。
+def _builtin_manifest_index(install_roots: list[Path] | None) -> dict[str, Path]:
+    """种子副本索引：插件 id → 目录（仅判「种子有无同名 id」，不比版本）。
 
-    id 取 manifest 的 ``id``（缺省回落目录名）——内核仲裁按 manifest id
-    比版本，目录名仅作兜底。
+    id 取 manifest 的 ``id``（缺省回落目录名）。分级单副本模型下种子副本
+    （``<安装位>/resources/plugins/shared``）只是安装源不参与运行，版本比较
+    无消费面（双源仲裁已退役，ADR 2026-11-07 §2.5）。
     """
     roots = install_roots if install_roots is not None else _existing_install_dirs()
-    index: dict[str, tuple[str | None, Path]] = {}
+    index: dict[str, Path] = {}
     for install_dir in roots:
         shared = install_dir / "resources" / "plugins" / "shared"
         for manifest_dir in _iter_plugin_manifests(shared):
@@ -662,10 +917,8 @@ def _builtin_manifest_index(install_roots: list[Path] | None) -> dict[str, tuple
             if not isinstance(data, dict):
                 continue
             raw_id = data.get("id")
-            raw_version = data.get("version")
             pid = raw_id if isinstance(raw_id, str) else manifest_dir.name
-            version = raw_version if isinstance(raw_version, str) else None
-            index.setdefault(pid, (version, manifest_dir))
+            index.setdefault(pid, manifest_dir)
     return index
 
 
@@ -698,29 +951,30 @@ def prune_stale_plugins(
     dry_run: bool = False,
     install_roots: list[Path] | None = None,
 ) -> list[dict[str, str]]:
-    """隔离用户空间里永远赢不了的旧插件副本（BuiltinFirst 影子）与失效孤儿。
+    """隔离用户空间里的失效孤儿副本（种子已下架且 import 冒烟失败）。
 
-    判据（与内核仲裁同源）：用户副本 manifest id 命中内置副本，且版本
-    ``<=`` 内置版本（持平=内置赢）→ 该副本永不被装载，属存量垃圾；内置
-    无同名 id 的孤儿若 import 冒烟失败（内置已下架后 BuiltinFirst 下孤儿
-    即唯一活跃候选，装载必炸——2026-11-05 装机现场判据回填），同样隔离。
-    两类副本移入 ``<user_root>/_quarantine_<日期>/plugins/`` 并记
-    prune-manifest.json，可整体回滚。内置无同名且 import 健康的目录**不删**
-    （用户自有插件，仅报告）；版本不可解析 / 冒烟判不了（无 venv / 无入口）
-    的副本也不删（判不了，交人工）。modes 子树恒用户赢（ADR 2026-09-20），
-    不进任何处置。
+    分级单副本模型（ADR 2026-11-07 §2.5 双源仲裁退役）下用户目录副本就是
+    运行期真值，不存在「版本 <= 种子 = 永不装载的影子」——原 BuiltinFirst
+    版本影子判据随之退役：种子仍有同名 id 的副本一律不动（版本无关）。
+    保留的处置面：种子无同名 id 的孤儿若 import 冒烟失败（副本即唯一候选，
+    装载必炸——2026-11-05 装机现场判据），移入
+    ``<user_root>/_quarantine_<日期>/plugins/`` 并记 prune-manifest.json
+    （可整体回滚）；种子无同名且 import 健康的目录**不删**（用户自有插件，
+    仅报告）；冒烟判不了（无 venv / 无入口）的副本也不删（判不了，交人工）。
+    modes 子树不进任何处置（模式副本自持账本对账，按版本比较隔离是数据
+    丢失风险路径）。
 
     返回本轮处置清单（id/version/dir/why），dry-run 时为空列表但打印计划。
     """
     plugins_dir = user_root / "plugins"
-    builtin = _builtin_manifest_index(install_roots)
+    seeds = _builtin_manifest_index(install_roots)
     if not plugins_dir.is_dir():
         print(f"[prune] 用户插件根不存在，跳过: {plugins_dir}")
         return []
-    if not builtin:
+    if not seeds:
         print(
             "[prune] 找不到装机安装位（默认候选 + AGENTOS_INSTALL_DIR 均无）——"
-            "无法判定影子，跳过（设 AGENTOS_INSTALL_DIR=<安装目录> 后重试）"
+            "无法判孤儿，跳过（设 AGENTOS_INSTALL_DIR=<安装目录> 后重试）"
         )
         return []
 
@@ -737,35 +991,27 @@ def prune_stale_plugins(
         raw_version = data.get("version")
         pid = raw_id if isinstance(raw_id, str) else manifest_dir.name
         version = raw_version if isinstance(raw_version, str) else None
-        if pid not in builtin:
-            failure = _import_smoke_failure(manifest_dir)
-            if failure is not None:
-                stale.append(
-                    (
-                        pid,
-                        version or "",
-                        f"内置已下架且 import 失败: {failure}",
-                        manifest_dir,
-                    )
+        if pid in seeds:
+            continue  # 运行期真值副本（单副本模型），版本无关，一律不动
+        failure = _import_smoke_failure(manifest_dir)
+        if failure is not None:
+            stale.append(
+                (
+                    pid,
+                    version or "",
+                    f"种子已下架且 import 失败: {failure}",
+                    manifest_dir,
                 )
-            else:
-                orphans.append(f"{manifest_dir.name}（id={pid}）")
-            continue
-        builtin_version = builtin[pid][0]
-        user_key = parse_semver_lenient(version) if version else None
-        builtin_key = parse_semver_lenient(builtin_version) if builtin_version else None
-        if user_key is None or builtin_key is None:
-            print(f"  [skip] {manifest_dir.name}: 版本不可解析（用户 {version!r} / 内置 {builtin_version!r}）")
-            continue
-        if user_key <= builtin_key:
-            stale.append((pid, version or "", f"版本 {version} <= 内置 {builtin_version}", manifest_dir))
+            )
+        else:
+            orphans.append(f"{manifest_dir.name}（id={pid}）")
 
     if orphans:
-        print(f"[prune] 保留内置无同名插件 {len(orphans)} 个（用户自有）: {', '.join(orphans[:6])}")
+        print(f"[prune] 保留种子无同名插件 {len(orphans)} 个（用户自有）: {', '.join(orphans[:6])}")
     if not stale:
-        print("[prune] 无过期影子副本或失效孤儿")
+        print("[prune] 无失效孤儿副本")
         return []
-    print(f"[prune] 判死副本 {len(stale)} 个（影子旧版 / 孤儿 import 失败，BuiltinFirst 永不装载）:")
+    print(f"[prune] 判死副本 {len(stale)} 个（种子已下架且 import 失败，装载必炸）:")
     for pid, version, why, manifest_dir in stale:
         print(f"  - {manifest_dir.name}（{pid} {version}）：{why}")
     if dry_run:
@@ -815,7 +1061,13 @@ def main(argv: list[str] | None = None) -> int:
         description="开发侧一键更新装机版用户空间（插件/配置/宿主addon），不动装机包",
     )
     parser.add_argument("--user-root", help="装机版用户空间根（必填才可写，如 %%APPDATA%%\\agentos）")
-    parser.add_argument("--plugin", action="append", default=[], help="仓内插件目录（plugins/ 下相对路径），可多次")
+    parser.add_argument(
+        "--plugin",
+        action="append",
+        default=[],
+        help="仓内插件目录（plugins/ 下相对路径），可多次；Tier2 覆盖规则："
+        "基线 diff 未改覆盖/改过保留+冲突记录，Tier1 清单命中拒动",
+    )
     parser.add_argument("--config", action="append", default=[], help="config/ 下相对路径单文件，可多次")
     parser.add_argument(
         "--skills",
@@ -834,8 +1086,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--prune-stale",
         action="store_true",
-        help="存量归一：隔离用户空间里版本 <= 内置副本的旧插件影子（BuiltinFirst 永不装载），"
-        "移入 <user-root>/_quarantine_<日期>/ 可回滚；内置无同名 id 的用户自有插件不动",
+        help="存量归一：隔离「种子已下架且 import 冒烟失败」的失效孤儿副本，"
+        "移入 <user-root>/_quarantine_<日期>/ 可回滚；种子仍有同名 id 的副本与"
+        "用户自有健康插件不动（单副本模型无影子概念）",
     )
     parser.add_argument("--dry-run", action="store_true", help="只列计划不落盘")
     args = parser.parse_args(argv)
@@ -865,11 +1118,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 skipped += 1
         print(f"[heal-sdk] editable 归一 {healed} 个（无 editable 跳过 {skipped} 个）")
-    ineffective: list[str] = []
+    closure_warnings: list[str] = []
     for rel in args.plugin:
-        reason = sync_plugin(rel, user_root, args.dry_run)
-        if reason:
-            ineffective.append(reason)
+        closure_warnings.extend(sync_plugin(rel, user_root, args.dry_run))
     for rel in args.config:
         sync_config(rel, user_root, args.dry_run)
     if args.skills is not None:
@@ -878,15 +1129,12 @@ def main(argv: list[str] | None = None) -> int:
         sync_addon(args.addon, args.dry_run)
     if args.prune_stale:
         prune_stale_plugins(user_root, dry_run=args.dry_run)
-    # D4（审查总册 P1-15）：sync 汇总落「未生效 id 清单」——BuiltinFirst 下
-    # 写坏版本号静默失效的显式告警面（装机侧结构化清单另见
-    # GET /api/v1/plugins/source-arbitration）。
-    if ineffective:
-        print("[WARN] 未生效 id 清单（本轮 sync 这些插件不会生效）:")
-        for reason in ineffective:
-            print(f"  - {reason}")
+    if closure_warnings:
+        print("[WARN] 依赖闭包告警清单（本轮 sync 这些插件存在跨插件依赖缺口）:")
+        for warning in closure_warnings:
+            print(f"  - {warning}")
     else:
-        print("[OK] 未生效 id 清单: 空")
+        print("[OK] 依赖闭包告警清单: 空")
     print("[OK] 完成。内核重启或插件热发现后生效（配置覆盖需重启内核的步骤以装机版形态为准）。")
     return 0
 

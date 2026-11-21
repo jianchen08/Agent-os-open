@@ -14,7 +14,7 @@ import { useMemo } from 'react'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { contributionRegistry, isImageIcon } from '@/services/schema/ContributionRegistry'
 import { SchemaDriver } from '@/services/schema/SchemaDriver'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { windowManager } from '@/services/window/WindowManager'
@@ -142,8 +142,17 @@ function PagePlaceholder({
       data-fallback={fallbackType}
       className="text-muted-foreground flex h-full min-h-[60px] flex-col items-center justify-center gap-1 p-4 text-center text-xs"
     >
-      <span>
-        {page.icon ? `${page.icon} ` : ''}
+      <span className="inline-flex items-center gap-1">
+        {isImageIcon(page.icon) ? (
+          <img
+            src={page.icon}
+            alt=""
+            draggable={false}
+            className="inline-block h-[1em] w-[1em] object-contain"
+          />
+        ) : (
+          page.icon && `${page.icon} `
+        )}
         {page.title ?? page.id}
       </span>
       <span>{reason ?? '该页面暂无可渲染内容'}</span>

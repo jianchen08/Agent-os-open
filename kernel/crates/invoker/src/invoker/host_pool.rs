@@ -44,7 +44,7 @@ pub(super) struct PoolCandidate {
 
 /// 解析 `AGENTOS_HOST_POOL_KEEPWARM`（纯函数，单测面）：未设/空/0/非法 → 0
 /// （池关闭=旧行为）；正整数 → 保活数。
-pub fn resolve_pool_keepwarm(raw: Option<&str>) -> u64 {
+fn resolve_pool_keepwarm(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&v| v >= 1)
         .unwrap_or(0)
@@ -52,7 +52,7 @@ pub fn resolve_pool_keepwarm(raw: Option<&str>) -> u64 {
 
 /// 解析 `AGENTOS_HOST_POOL_TTL_SECS`（纯函数，单测面）：未设 → 900（默认
 /// 启用）；0/非法 → 900（硬顶不提供关闭语义）；正整数 → 秒。
-pub fn resolve_pool_ttl_secs(raw: Option<&str>) -> u64 {
+fn resolve_pool_ttl_secs(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&v| v >= 1)
         .unwrap_or(900)
@@ -60,7 +60,7 @@ pub fn resolve_pool_ttl_secs(raw: Option<&str>) -> u64 {
 
 /// 解析 `AGENTOS_HOST_POOL_MAX_REQUESTS`（纯函数，单测面）：未设/空/0/非法
 /// → 0（轮换关闭）；正整数 → 上限。
-pub fn resolve_pool_max_requests(raw: Option<&str>) -> u64 {
+fn resolve_pool_max_requests(raw: Option<&str>) -> u64 {
     raw.and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&v| v >= 1)
         .unwrap_or(0)

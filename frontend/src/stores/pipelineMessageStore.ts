@@ -1,3 +1,26 @@
+/**
+ * 中断收尾的 part 状态映射（单一出口）：消息被标 interrupted 时，残留的在途
+ * part 必须同刀收口，否则 `isStreamingMessage` 仍因 'streaming'/'calling' 返回真
+ * （思考卡永续转圈 / Stop 后卡在"思考中"）。语义与 handleStreamError 对齐：
+ *   text/thinking 'streaming' → 'done'（半截内容定格为已输出）
+ *   tool_call 'calling'/'streaming' → 'error'（中断后未返回的工具调用视为失败）
+ *
+ * 消费方：stopStreaming（用户停止/run 级终止）与 lifecycleHandlers 的 F2 宽限
+ * 复查（重连未能恢复的真·丢失）。两处共用本函数——分叉实现曾是重复漂移温床。
+ */
+export function finalizePartsForInterrupt(parts: MessagePart[]): MessagePart[] {
+  return parts.map((p) => {
+    const partState = (p as { state?: string }).state
+    if ((p.type === 'text' || p.type === 'thinking') && partState === 'streaming') {
+      return { ...p, state: 'done' as const } as MessagePart
+    }
+    if (p.type === 'tool_call' && (partState === 'calling' || partState === 'streaming')) {
+      return { ...p, state: 'error' as const } as MessagePart
+    }
+    return p
+  })
+}
+
 /** 统一管道消息状态管理 Store 将 sessionStore.messages（主管道）和 agentTabStore.tabMessages（子管道）统一为 */
 
 import { create } from 'zustand'
@@ -14,7 +37,7 @@ import {
 import { buildPersistedSnapshot } from '@/stores/pipelineMessagePersistence'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import { decideClaim } from '@/streaming/claim'
-import { indexedDbStorage } from '@/utils/indexedDbStorage'
+import { createDeferredIndexedDbStorage } from '@/utils/indexedDbStorage'
 import { loggers } from '@/utils/logger'
 import { markMessageHydrated, waitForMessageHydration } from './pipelineMessageHydration'
 import {
@@ -27,9 +50,15 @@ import {
   mergeIncrementalApiWithLocal,
   mergeSorted,
   mutateMessageParts,
+  preserveExistingToolResults,
 } from './pipelineMessageMerge'
 import { reconcileFromAPI } from './pipelineMessageReconcile'
-import { PIPELINE_MESSAGE_ACCOUNT_RESET, setInitialLoadingFlag } from './pipelineMessageState'
+import {
+  clearAwaitingReplyFlag,
+  PIPELINE_MESSAGE_ACCOUNT_RESET,
+  markAwaitingReplyFlag,
+  setInitialLoadingFlag,
+} from './pipelineMessageState'
 import type { PipelineMessageState, PipelineMeta } from './pipelineMessageState'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import type { Message } from '@/types/models'
@@ -57,7 +86,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   registerPipeline: (meta: PipelineMeta) => {
     set((state) => {
       const existingMeta = state.pipelines[meta.pipelineId]
-      // 如果已存在相同 pipelineId，保留已有消息和未读计数
       return {
         pipelines: {
           ...state.pipelines,
@@ -141,7 +169,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
-          // 内存封顶：超量时丢弃最老消息，防止长会话撑爆内存（OOM）
           [pipelineId]: capMessagesForMemory(updatedMessages),
         },
         pipelines: newPipelines,
@@ -179,6 +206,10 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     // consumed_messages）在此单点收敛，按 client_message_id 撤发送态——发送态
     // 终点 = 气泡上屏。未知 cmid（注入消息等非本端发送）在 store 内幂等零动作。
     useChatInputStore.getState().landSendByCmid(cmid)
+    // 等待 AI 响应壳同事务置位（ADR 2026-11-17-awaiting-reply-render-shell）：
+    // 气泡上屏与壳点亮同一 tick——直跑落定 → stream_start 窗口 AI 侧即时反馈；
+    // 流式中（new_message 认领回传链，真气泡已在场）内部幂等零动作。
+    markAwaitingReplyFlag(set, get, pipelineId)
 
     set((stateInner) => {
       const msgs = stateInner.messagesByPipeline[pipelineId] || []
@@ -456,6 +487,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
 
   /** 开始流式传输，记录正在流式传输的消息 ID */
   startStreaming: (pipelineId: string, messageId: string) => {
+    // stream_start 真气泡接管 → 等待 AI 响应壳撤下（同 tick：ensureStreamingPlaceholder
+    // 同步调 addMessage + startStreaming，壳消失与真气泡出现同一次 commit，零跳变）
+    clearAwaitingReplyFlag(set, get, pipelineId)
     set((state) => ({
       streamingState: {
         ...state.streamingState,
@@ -473,6 +507,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   /** 停止流式传输，同时将 assistant 消息状态标记为 interrupted（与 DB 一致：
    *  内核停止后半截消息落库 status="interrupted"，前端不显示"已完成"终态） */
   stopStreaming: (pipelineId: string) => {
+    // 轮终态漏斗清口：stream_end/stream_error/terminatePipeline 全经此——
+    // 等待 AI 响应壳不得在轮终态后残留
+    clearAwaitingReplyFlag(set, get, pipelineId)
     set((state) => {
       const streamStatus = state.streamingState[pipelineId]
       const newStreamingState = { ...state.streamingState }
@@ -491,21 +528,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           // （发送失败标 failed 后 stopStreaming 不得把它覆盖成 completed——
           // 单一消息数组：失败语义由调用方显式设置）。
           if (stoppedMsg.role === 'assistant') {
-            // 收尾 part 状态：仅设置 message.status='interrupted' 会让 isStreamingMessage
-            // 仍因残留的 'streaming'/'calling' part 返回 true（数据不一致，Stop 后再发新
-            // 消息会卡在"思考中"）。与 handleStreamError 对齐：
-            //   text/thinking 'streaming' -> 'done'
-            //   tool_call 'calling'/'streaming' -> 'error'（abort 后未返回的工具调用视为失败）
-            const finalizedParts = (stoppedMsg.parts || []).map((p) => {
-              const partState = (p as { state?: string }).state
-              if ((p.type === 'text' || p.type === 'thinking') && partState === 'streaming') {
-                return { ...p, state: 'done' as const } as MessagePart
-              }
-              if (p.type === 'tool_call' && (partState === 'calling' || partState === 'streaming')) {
-                return { ...p, state: 'error' as const } as MessagePart
-              }
-              return p
-            })
+            // 收尾 part 状态（单一出口 finalizePartsForInterrupt，与 F2 中断路径共用）
+            const finalizedParts = finalizePartsForInterrupt(stoppedMsg.parts || [])
             updatedMessages[messageIndex] = {
               ...stoppedMsg,
               parts: finalizedParts,
@@ -569,7 +593,8 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     }))
   },
 
-  /** 停止受理中标记：点停止即置位，run 级终止事件/新 stream_start 清除 */
+  /** 停止受理中标记：点停止即置位，run 级终止事件/新 stream_start 清除；
+   *  护栏 TTL 过期仍无终态事件时由 streaming handlers utils 定时翻转解除 */
   setStopping: (pipelineId: string, stopping: boolean) => {
     if (!pipelineId) return
     set((state) => {
@@ -582,6 +607,16 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       }
       return { stoppingByPipeline: next }
     })
+  },
+
+  /** 等待 AI 响应壳置位/清除（行为挂 pipelineMessageState 契约文件同源，
+   *  ADR 2026-11-17-awaiting-reply-render-shell） */
+  markAwaitingReply: (pipelineId: string) => {
+    markAwaitingReplyFlag(set, get, pipelineId)
+  },
+
+  clearAwaitingReply: (pipelineId: string) => {
+    clearAwaitingReplyFlag(set, get, pipelineId)
   },
 
   /** 标记/清除指定管道的消息加载失败态（X1-F1）。设置点=调用方通知策略
@@ -641,8 +676,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         }),
       )
 
-      // API 权威基底（空白过滤 + 内存封顶；游标只按它计算）
-      const apiFinal = capMessagesForMemory(filterBlankMessages(sorted))
+      // API 权威基底（空白过滤 + 内存封顶；游标只按它计算）。
+      // 降级守卫：对账不得降级已有工具结果（压缩/清理移走结果行后，新映射
+      // part 无结果 → 卡头翻「已中断（无结果）」；状态只能由后端消息权威
+      // 证据决定，渲染数据可得性只影响展开区内容）。
+      const guarded = preserveExistingToolResults(sorted, existing || [])
+      const apiFinal = capMessagesForMemory(filterBlankMessages(guarded))
       const finalMessages = inflight.length > 0
         ? capMessagesForMemory(mergeSorted(apiFinal, [...inflight].sort(compareMessages)))
         : apiFinal
@@ -817,7 +856,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     const noCursor = options?.before_sequence === undefined && options?.after_sequence === undefined
 
     const fetchPromise = (async () => {
-      // 加载更早消息时设置 loading 状态（显示加载指示器）
       if (options?.before_sequence !== undefined) {
         set((state) => ({
           isLoadingOlderByPipeline: {
@@ -1013,10 +1051,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         const part = parts[partIndex]
         // 只有 text 和 thinking 类型支持追加
         if (part.type !== 'text' && part.type !== 'thinking') return null
+        // 内容到达 = 仍在流式（2026-11-18 用户裁定：活动指示必须如实反映实时
+        // 状态，终态事件到达前不得变完成态）。重连清理等路径若已把该 part 置
+        // done，迟到增量仍会经 RAF 落到这里——不把状态翻回 streaming 就会出现
+        // 「内容继续增长 + 卡片显示已完成」（用户实测缺陷①）。真终态后不会再有
+        // 增量（block_end 有 closedBlocks 防护），故翻回无害。
+        const revived = part.state !== 'streaming' ? ({ state: 'streaming' } as const) : {}
         return [
           ...parts.slice(0, partIndex),
           {
             ...part,
+            ...revived,
             content: (part as { content: string }).content + content,
           } as MessagePart,
           ...parts.slice(partIndex + 1),
@@ -1039,6 +1084,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           return { ...p, state: 'done' as const } as MessagePart
         }
         if (p.type === 'tool_call') {
+          // 无结果的工具卡不得在此收口（2026-11-18 用户裁定：终态事件到达前不得
+          // 变完成态）。工具通常在下一轮迭代才执行，本轮 stream_end 时连 tool_start
+          // 都没到——强制置 done 会让卡片提前显示完成、转圈消失（用户实测缺陷②）。
+          // 终态由 tool_result 写入；真跑丢的由 run 结束后的非流式上下文收口 interrupted。
+          const hasTerminal =
+            p.result !== undefined || p.resultData !== undefined || p.error !== undefined
+          if (!hasTerminal) return p
           return {
             ...p,
             state: (p.state === 'error' ? 'error' : 'done') as ('done' | 'error'),
@@ -1111,11 +1163,18 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   {
     name: 'pipeline-messages',
     version: 1,
-    // IndexedDB storage：GB 级容量、异步不阻塞 UI；不可用时自动降级内存（见 indexedDbStorage）
-    storage: indexedDbStorage,
-    // 仅持久化核心数据，排除运行时状态。
-    // 先按条数 + 总体积 LRU 裁剪出保留的管道集合，再统一应用于消息/元数据/游标，保证一致性。
-    partialize: buildPersistedSnapshot,
+    // 延迟序列化 storage（2026-11-12 内存修复）：旧路径（createJSONStorage）在
+    // 每次 setState 都全量序列化两遍（partialize 内体积估算 + 落盘序列化），
+    // 流式期间每秒数十次，GB 级短命字符串分配是渲染进程内存突刺主因。
+    // 现改为 setItem 只登记最新 state 引用，节流 flush 时才裁剪 + 序列化 + 落盘。
+    // IndexedDB 容错降级语义不变（见 indexedDbStorage）。
+    storage: createDeferredIndexedDbStorage<PipelineMessageState>((value) => ({
+      state: buildPersistedSnapshot(value.state) as unknown as PipelineMessageState,
+      version: value.version,
+    })),
+    // partialize 恒等（引用登记，零拷贝）：真正的快照裁剪（条数 + 总体积 LRU、
+    // 排除运行时状态）在 storage 的 finalize（flush 时）经 buildPersistedSnapshot 执行。
+    partialize: (state) => state,
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}

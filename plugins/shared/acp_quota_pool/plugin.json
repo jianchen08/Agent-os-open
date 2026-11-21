@@ -1,8 +1,8 @@
 {
   "id": "acp_quota_pool",
   "name": "ACP Quota Pool",
-  "description": "ACP 额度池——外部编码 agent 统一派发（技能包载荷形态）：载荷 = SKILL.md 路由口径（任务分级 S0/S1/S2、性能基础线、选型优先序）+ providers.toml 注册表 + scripts/acp_pool.py 派发与记账 CLI（双后端：acp=官方 agent-client-protocol SDK 原生握手，现役 opencode；oneshot=一次性 CLI spawn 如 zcode -p，无会话）。on_load 把载荷镜像到 <USER_ROOT>/skills/acp-quota-pool/（播种机制只认仓根/mode_* 包/用户根三类源，插件载荷经此入链）。额度账本 v0 落用户空间 JSON（被动记账：派发计数/最近会话/撞墙归类）。on_load 同刀托管 CPA 网关生命周期（健康检查→不在则静默拉起 start-gateway.bat→复验记日志，bat 端口守卫幂等）；插件页 acp_gateway_console = webview 直嵌网关管理页（网关不在时提供拉起按钮，登录由用户在页内完成，管理密钥不入仓不入前端）。网关参数单源 config_files[gateway]。",
-  "version": "0.2.0",
+  "description": "ACP 额度池——外部编码 agent 统一派发（技能包载荷形态）：载荷 = SKILL.md 路由口径（任务分级 S0/S1/S2、性能基础线、选型优先序）+ providers.toml 注册表 + scripts/acp_pool.py 派发与记账 CLI（双后端：acp=官方 agent-client-protocol SDK 原生握手，现役 opencode；oneshot=一次性 CLI spawn 如 zcode -p，无会话）。on_load 把载荷镜像到 <USER_ROOT>/skills/acp-quota-pool/（播种机制只认仓根/mode_* 包/用户根三类源，插件载荷经此入链）。额度账本 v0 落用户空间 JSON（被动记账：派发计数/最近会话/撞墙归类）。on_load 同刀探活 CPA 网关（2026-11-21 拉起面单点化：拉起职责移交 llm_provider_gateway provider 插件——捆绑网关自包含拉起 + via=plugin 出口，本插件仅探活与控制台页）；插件页 acp_gateway_console = webview 直嵌网关管理页（网关不在时显示移交提示，登录由用户在页内完成，管理密钥不入仓不入前端）。网关参数单源 config_files[gateway]。",
+  "version": "0.2.3",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
@@ -19,9 +19,9 @@
           "label": "网关 base_url"
         },
         {
-          "name": "start_command",
-          "type": "string",
-          "label": "拉起命令"
+          "name": "health_timeout_secs",
+          "type": "number",
+          "label": "探活超时（秒）"
         }
       ]
     }
@@ -52,7 +52,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 15000,
       "max_concurrency": 2,
-      "description": "拉起网关（与 on_load 同一段 ensure 逻辑：探活→不在则拉起 start_command→复验一次，幂等）"
+      "description": "网关探活（原拉起语义 2026-11-21 移交 llm_provider_gateway：命中返回 running，不在返回 handoff 并指向新拉起面）"
     },
     {
       "route_id": "acp_console_page",
@@ -62,7 +62,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
-      "description": "Webview HTML 页：网关控制台（状态检查→自导航嵌管理页/拉起按钮，零数据渲染）"
+      "description": "Webview HTML 页：网关控制台（状态检查→运行态显式卡片+新窗口打开管理页/未运行移交提示，零数据渲染，不自导航嵌页）"
     }
   ],
   "contributes": {
@@ -81,17 +81,24 @@
           "htmlPath": "/page/console",
           "widgetId": "acp_gateway_console"
         },
-        "description": "CPA 网关管理控制台（webview 直嵌网关管理页；网关未运行时提供拉起按钮）"
+        "description": "CPA 网关管理控制台（webview 卡片；网关运行时新窗口打开管理页，未运行时显示移交提示——拉起由 llm_provider_gateway 承接，不自导航嵌页）"
       }
     ]
   },
   "permissions": {
     "filesystem": {
-      "read_paths": ["*"],
-      "write_paths": ["*"]
+      "read_paths": [
+        "*"
+      ],
+      "write_paths": [
+        "*"
+      ]
     },
     "network": {
-      "allowed_hosts": ["127.0.0.1", "localhost"]
+      "allowed_hosts": [
+        "127.0.0.1",
+        "localhost"
+      ]
     },
     "env_vars": [
       "PATH",
@@ -102,10 +109,13 @@
       "USERPROFILE",
       "AGENTOS_USER_ROOT",
       "AGENTOS_DATA_DIR",
-      "ACP_GATEWAY_BASE_URL",
-      "ACP_GATEWAY_START_COMMAND"
+      "ACP_GATEWAY_BASE_URL"
     ],
-    "system_calls": ["opencode", "node", "cmd"]
+    "system_calls": [
+      "opencode",
+      "node",
+      "cmd"
+    ]
   },
   "priority": 50
 }

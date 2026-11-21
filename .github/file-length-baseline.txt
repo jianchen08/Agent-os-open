@@ -2,8 +2,7 @@
 # 格式：「路径 行数」每件一行；# 开头为注释。
 # 成员资格 = adoption（2026-10-12）时超存量线的冻结件，新文件无基线可入；
 # 天花板 = 入册行数；文件降到线内 = 红并须删除条目；超天花板 = 红。
+# 2026-11-17 推送轮：ws_session.rs/store.rs/context_window_guard 三冻结件越顶增长（372 未推送提交期无全量闸面），
+# 移行 file-length-exemptions.txt 挂账（拆分/缩回后回基线），见豁免件归因。
 # 收紧：--generate（不回松不扩员）或手工删行；放宽：不允许。
-kernel/crates/api/src/ws_session.rs 6824
-kernel/crates/engine/src/store.rs 7129
-kernel/crates/mcp/src/client.rs 5275
-plugins/shared/context_window_guard/plugin.py 2631
+kernel/crates/mcp/src/client.rs 4913

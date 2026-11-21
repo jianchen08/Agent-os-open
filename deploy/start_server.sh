@@ -55,6 +55,25 @@ if [ ! -x "$KERNEL_BIN" ]; then
     exit 1
 fi
 
+# ========== 部署回读校验（ADR 2026-11-10-deploy-freshness-verification）==========
+# 与 Windows 首启同口径：关键项（plugin.json / frontend index / config 内核配置）
+# 缺失或哈希不符 → 拒绝启动（非关键差异只告警）；旧包无清单 → 跳过。
+# 手工维护后的预期偏离：AGENTOS_DEPLOY_VERIFY=warn 放行 / =off 完全跳过。
+VERIFY_MODE="${AGENTOS_DEPLOY_VERIFY:-normal}"
+if [ "$VERIFY_MODE" = "off" ]; then
+    echo "[start_server] 部署回读校验已禁用（AGENTOS_DEPLOY_VERIFY=off）"
+elif [ -f "$REPO_ROOT/deploy/deploy-manifest.json" ] && [ -f "$REPO_ROOT/deploy/verify_deploy.sh" ]; then
+    verify_args=()
+    if [ "$VERIFY_MODE" = "warn" ]; then
+        verify_args+=(--warn)
+    fi
+    if ! bash "$REPO_ROOT/deploy/verify_deploy.sh" "${verify_args[@]}"; then
+        echo "[ERROR] 部署回读校验红：部署位与发版清单不一致（详见上）。" >&2
+        echo "        修复=重新部署；如为手工维护后的预期偏离，设 AGENTOS_DEPLOY_VERIFY=warn 临时放行。" >&2
+        exit 1
+    fi
+fi
+
 cd "$REPO_ROOT"
 echo "[start_server] 内核启动中: bind=$AGENTOS_BIND port=$AGENTOS_KERNEL_PORT repo=$REPO_ROOT"
 

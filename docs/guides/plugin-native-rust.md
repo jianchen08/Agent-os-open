@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-plugin-native-rust
+type: standard
+status: active
+---
+
 # Native 插件开发（Rust cdylib）
 
 > 返回 [开发指南索引](README.md)。前置阅读：[插件协议规则](plugin-protocol.md)。
@@ -8,7 +14,7 @@
 
 ## 2. 工程骨架与构建
 
-Cargo.toml（参考 `plugins/shared/pipeline/core/tool_core/Cargo.toml`）：
+Cargo.toml（参考 `plugins/shared/tool_core/Cargo.toml`——2026-10-13 拍平后路径；原 `plugins/shared/pipeline/core/tool_core/` 已不存在）：
 
 ```toml
 [package]

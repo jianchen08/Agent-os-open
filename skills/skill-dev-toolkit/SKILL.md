@@ -17,7 +17,7 @@ description: 新建插件、更改插件、跑测试与门禁、内核联调、�
 > 兜底 = resource_search 按名检索（开发工具箱）。
 
 > **技能 vs LLM 工具判据（扩展本箱/进化提案先过这道）**：调用点由任务书或流程节点
-> 决定、`bash_execute` 就能跑的，一律做成技能自带脚本或指挥仓内 `scripts/`；只有
+> 决定、`bash` 就能跑的，一律做成技能自带脚本或指挥仓内 `scripts/`；只有
 > 需要**模型在运行时自主决策调用**、必须上 LLM 工具面（tool_ids 白名单）、要
 > output_schema/render 卡片或权限审批面的能力，才立项做工具。本箱全部资产为技能
 > 形态、零工具化（机械核查 2026-10-19：19 技能包 plugin.json=0，本箱 tool_ids
@@ -144,6 +144,10 @@ python skills/skill-dev-toolkit/scripts/spawn_test_kernel.py stop      # 杀实�
 
 - 三隔离：端口≠9100（dev）/9101（装机）；DB 落 `.test_kernel/run_*/kernel.db`；
   口令环境变量注入本实例——不读不改主仓 `.env`/`config/`，scratch 外零文件写。
+- 插件根（分级单副本，ADR 2026-11-07）：内核只认 instance.yaml 三根，spawn 具名
+  信道 `--instance-config` / `--config-root` / `--user-root`；插件装载验证后端用
+  `skills/plugin-dev/scripts/verify_plugin.py`，后端+前端浏览器车道用同技能的
+  `verify_host.py --frontend`；WSL 隔离任务经 `verify_host.sh` 走 interop 转发到宿主。
 - 前置：内核二进制已构建（`kernel/target/release/agentos-kernel`；WSL 构建**必须**
   挂 rust:1.88 容器）。缺失时脚本报错带构建提示。
 - 联调完成后插件走正常合并/同步进主流，scratch 实例用完即 stop。

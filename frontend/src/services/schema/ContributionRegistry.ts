@@ -42,6 +42,17 @@ export type ContributionType =
 /** 页面目标空间（contributes.pages[].space；debug_center 为调试中心 hub 专属组台空间） */
 export type PageSpace = 'settings' | 'workspace' | 'chat' | 'floating' | 'dock' | 'fullscreen' | 'debug_center'
 
+/**
+ * 页面图标是否为图片资源（data:URI / http(s) 直链 / 图片扩展名）。
+ *
+ * 插件可用品牌 logo（如 dsh_adapter 的 DeepSeek 鲸标 data URI）而非 emoji；
+ * 渲染面（导航卡/页头）据此决定 <img> 或文本。
+ */
+export function isImageIcon(icon: string | undefined): boolean {
+  if (!icon) return false
+  return /^(data:image\/|https?:\/\/)/i.test(icon) || /\.(svg|png|webp|gif)$/i.test(icon)
+}
+
 /** 页面栏位（contributes.pages[].slot；activity-bar 为旧 viewsContainers 归一化专用） */
 export type PageSlot =
   | 'nav'

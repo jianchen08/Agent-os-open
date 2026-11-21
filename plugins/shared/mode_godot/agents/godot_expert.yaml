@@ -24,7 +24,10 @@ dynamic_vars:
 tool_ids:
 - file_read
 - file_write
-- bash_execute
+- bash
+- log
+- input
+- kill
 - enhanced_search
 - godot_run
 - project

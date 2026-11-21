@@ -176,40 +176,48 @@ class BackupService:
         """一次触发 = db commit + workspace commit（各部分独立可跳过）。
 
         导出先于任何提交：内核读失败 = 零 commit + 暂存区复位（半备份不存在）。
+        git 子进程与整树复制是同步阻塞体，一律 ``asyncio.to_thread`` 出事件循环
+        （宿主 watchdog 判心跳停滞即整组退出）；``self._lock`` 是协程侧
+        ``asyncio.Lock``，只包 await，不随同步体进线程。
         """
         effective_reads = reads if reads is not None else self._reads
         if effective_reads is None:
             raise BackupError("内核读端口未注入（备份导出面不可用）", 500)
         specs = self._validate_workspaces(workspaces)
-        if not self.probe():
-            raise BackupError(
-                f"备份能力停用：git 可执行 {self._cfg.git_exe!r} 不可用（装机 git 依赖，"
-                "T2 先例同律）",
-                503,
-            )
-        try:
-            ensure_bare_repo(self.git_dir, BACKUP_REF, "agentos", RUNTIME_EXCLUDES)
-        except GitCommandError as exc:
-            raise BackupError(f"备份仓库初始化失败: {exc}", 500) from exc
         async with self._lock:
+            # 仓库探测/初始化与 commit 段同锁：同步体下放线程后多触发会真并发，
+            # 裸仓初始化须串行（同实例串行是既有语义）。
+            if not await asyncio.to_thread(self.probe):
+                raise BackupError(
+                    f"备份能力停用：git 可执行 {self._cfg.git_exe!r} 不可用（装机 git 依赖，"
+                    "T2 先例同律）",
+                    503,
+                )
             try:
-                self.staging.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(
+                    ensure_bare_repo, self.git_dir, BACKUP_REF, "agentos", RUNTIME_EXCLUDES
+                )
+            except GitCommandError as exc:
+                raise BackupError(f"备份仓库初始化失败: {exc}", 500) from exc
+            try:
+                await asyncio.to_thread(self.staging.mkdir, parents=True, exist_ok=True)
                 records = await self._export_records(effective_reads)
-                db_result = self._commit_db_part(records)
-                ws_result = self._commit_workspace_part(specs)
+                db_result = await asyncio.to_thread(self._commit_db_part, records)
+                ws_result = await asyncio.to_thread(self._commit_workspace_part, specs)
             except BackupError:
-                self._cleanup_staging()
+                await asyncio.to_thread(self._cleanup_staging)
                 raise
             except Exception as exc:
-                self._cleanup_staging()
+                await asyncio.to_thread(self._cleanup_staging)
                 raise BackupError(
                     f"备份失败（导出/暂存面）: {type(exc).__name__}: {exc}", 500
                 ) from exc
+        head = await asyncio.to_thread(self._head_sha)
         return {
             "ok": True,
             "db": db_result,
             "workspace": ws_result,
-            "head": (self._head_sha() or "")[:12],
+            "head": (head or "")[:12],
             "repo_root": str(self._cfg.repo_root),
         }
 
@@ -224,7 +232,23 @@ class BackupService:
         name: str = "",
     ) -> dict[str, Any]:
         """备份点内容检出（workspace 部分 = 真恢复路径；db 部分 = JSONL 物化，
-        回灌内核的导入面为后续刀候选，本刀登记）。目标目录必须不存在或为空。"""
+        回灌内核的导入面为后续刀候选，本刀登记）。目标目录必须不存在或为空。
+
+        检出全链（git read-tree/checkout-index + 全树计数）是同步阻塞体，
+        ``asyncio.to_thread`` 出事件循环，返回/异常语义不变。
+        """
+        return await asyncio.to_thread(
+            self._restore_sync, commit=commit, part=part, dest=dest, name=name
+        )
+
+    def _restore_sync(
+        self,
+        *,
+        commit: str | None,
+        part: str,
+        dest: str | Path,
+        name: str = "",
+    ) -> dict[str, Any]:
         if not self.probe():
             raise BackupError(
                 f"备份能力停用：git 可执行 {self._cfg.git_exe!r} 不可用", 503

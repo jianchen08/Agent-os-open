@@ -35,6 +35,7 @@ State 命名空间:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -801,6 +802,45 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 # ═══════════════════════════════════════════════════════════
 
 
+def freeze_segment_op(
+    batch: list[dict[str, Any]],
+    segment_id: str,
+) -> dict[str, Any]:
+    """构造 freeze_segment op（消息段模型 §4：被删区间冻结为段）。
+
+    与 set/insert 同批同事务，内核据此落段表。members = 本批被删原消息
+    数组原文（引用列表落库语义由内核承载）；base_len = 成员数；preview 取
+    首条 content 截断 200 字符（‹i/n› 代际预览免解 blob）；visible_to=
+    "user" = 仅用户界面可渲染，模型永不消费（§2.6）。
+
+    两个生产消费点（模块级供两处复用，禁止裸删绕过）：
+    - 压缩成功批次（CompressionService._do_compress_round）：被压原文冻结；
+    - 重启裁剪（ContextWindowGuardPlugin._trim_covered_messages 的删除
+      ops 组装）：被裁原文同批冻结——只 set(null) 不冻结 = 原文退出活引用
+      集后可被 blob GC 物理清除（2026-11-16 装机事故根因之二）。
+
+    Args:
+        batch: 本批被删的原消息（升序，非空）
+        segment_id: 段 id（seg_<uuid>，与同批次块消息 compression_ref 一致；
+            裁剪无块消息时仅作段标识）
+
+    Returns:
+        freeze_segment op 字典（无 seq 键——段冻结不是槽位编辑）
+    """
+    seqs = [m["seq"] for m in batch if isinstance(m.get("seq"), int)]
+    return {
+        "op": "freeze_segment",
+        "id": segment_id,
+        # 引擎分配 seq 是被删区间坐标；批次全无 seq（异常形态）时 0 占位，
+        # members 原文仍完整保全（段是数据保全面，不因坐标缺失丢内容）
+        "base_seq": min(seqs, default=0),
+        "base_len": len(batch),
+        "visible_to": "user",
+        "preview": str(batch[0].get("content", ""))[:200],
+        "members": list(batch),
+    }
+
+
 class CompressionService:
     """压缩服务：在 ContextCompressor 之上叠加预算切分、多轮、落库。
 
@@ -1073,6 +1113,18 @@ class CompressionService:
         any_compressed = False
         block_msgs: list[dict[str, Any]] = []
         compressed_slot_seqs: list[int] = []
+        # 并行落库面（task + 批次配对）：每批压缩 LLM 产出后立即后台落库，
+        # 不阻塞下一批的压缩 LLM 调用；全部批次 LLM 循环结束后统一 gather
+        # 收割再建块。正确性不依赖落库成败——裁剪证据源是历史已应用块而非
+        # 记忆库 chunk（见 _trim_covered_messages），孤儿 chunk 无害化
+        pending_saves: list[asyncio.Task[list[dict[str, str]]]] = []
+        save_pairs: list[
+            tuple[
+                list[dict[str, Any]],
+                dict[str, Any],
+                asyncio.Task[list[dict[str, str]]],
+            ]
+        ] = []
 
         for batch_idx in range(num_batches):
             start = batch_idx * len(old_msgs) // num_batches
@@ -1090,16 +1142,26 @@ class CompressionService:
                 logger.warning("[CompressionService] 第 %d 批压缩失败", batch_idx + 1)
                 continue
 
-            # 落记忆库（默认存储放置）；写失败由 save 层逐工件降级
-            # （引用留空 + warning），块消息以内联摘要照常产出（fail-open）
-            refs = await self.save_compression_result(
-                old_msgs=batch,
-                comp_result=comp_result,
-                pipeline_id=self._pipeline_id,
-                session_id=self._session_id,
-                context_window=context_window,
+            # 落记忆库（默认存储放置）后台并行化；写失败由 save 层逐工件
+            # 降级（引用留空 + warning），块消息以内联摘要照常产出（fail-open）
+            save_task = asyncio.create_task(
+                self._save_batch_refs(batch, comp_result, context_window)
             )
+            save_pairs.append((batch, comp_result, save_task))
+            pending_saves.append(save_task)
+            compressed_slot_seqs.extend(
+                m["seq"] for m in batch if isinstance(m.get("seq"), int)
+            )
+            any_compressed = True
 
+        if not any_compressed:
+            return None
+
+        # 收割全部落库 task（本方法返回前不留悬挂 task）后统一建块：
+        # refs 用各自 save 的返回；save 失败批次引用留空、块消息照常产出
+        save_results = await asyncio.gather(*pending_saves, return_exceptions=True)
+        for (batch, comp_result, _task), save_outcome in zip(save_pairs, save_results):
+            refs = CompressionService._save_outcome_refs(save_outcome)
             batch_blocks = self._build_batch_blocks(batch, comp_result, refs)
             # 段冻结（消息段模型 §5 写路径 2）：每成功批次一个段——被压原文以
             # members 原文数组冻结为 [user] 段（visible_to="user"，模型永不消费）；
@@ -1110,14 +1172,7 @@ class CompressionService:
                 block["metadata"]["compression_ref"]["segment_id"] = segment_id
                 block["metadata"]["message_style"] = COMPRESSION_CARD_STYLE
             block_msgs.extend(batch_blocks)
-            self._last_freeze_ops.append(self._freeze_segment_op(batch, segment_id))
-            compressed_slot_seqs.extend(
-                m["seq"] for m in batch if isinstance(m.get("seq"), int)
-            )
-            any_compressed = True
-
-        if not any_compressed:
-            return None
+            self._last_freeze_ops.append(freeze_segment_op(batch, segment_id))
 
         # 留 gap 的被删 seq = 被压批次槽位 - 块消息占用的槽位；遗留 old_blocks
         # （旧格式摘要 system 消息）一并删除。
@@ -1222,38 +1277,6 @@ class CompressionService:
                 )
         return blocks
 
-    @staticmethod
-    def _freeze_segment_op(
-        batch: list[dict[str, Any]],
-        segment_id: str,
-    ) -> dict[str, Any]:
-        """构造 freeze_segment op（消息段模型 §4：被压区间冻结为段）。
-
-        与 set/insert 同批同事务，内核据此落段表。members = 本批被压原消息
-        数组原文（引用列表落库语义由内核承载）；base_len = 成员数；preview 取
-        首条 content 截断 200 字符（‹i/n› 代际预览免解 blob）；visible_to=
-        "user" = 仅用户界面可渲染，模型永不消费（§2.6）。
-
-        Args:
-            batch: 本批被压缩的原消息（升序，非空）
-            segment_id: 段 id（seg_<uuid>，与同批次块消息 compression_ref 一致）
-
-        Returns:
-            freeze_segment op 字典（无 seq 键——段冻结不是槽位编辑）
-        """
-        seqs = [m["seq"] for m in batch if isinstance(m.get("seq"), int)]
-        return {
-            "op": "freeze_segment",
-            "id": segment_id,
-            # 引擎分配 seq 是被压区间坐标；批次全无 seq（异常形态）时 0 占位，
-            # members 原文仍完整保全（段是数据保全面，不因坐标缺失丢内容）
-            "base_seq": min(seqs, default=0),
-            "base_len": len(batch),
-            "visible_to": "user",
-            "preview": str(batch[0].get("content", ""))[:200],
-            "members": list(batch),
-        }
-
     async def _build_compression_content(
         self,
         old_msgs: list[dict[str, Any]],
@@ -1341,8 +1364,8 @@ class CompressionService:
         state_snapshot = comp_result.get("state_snapshot", {})
         memory_items = comp_result.get("memory_items", {})
 
-        # sequence 范围（用于 _trim_covered_messages / _estimate_assembled_tokens）。
-        # 零兼容：统一用引擎分配的消息自带 seq 字段（_record_sequence 已退役）。
+        # sequence 范围（打 tags 供 _estimate_assembled_tokens / clean_if_window_changed
+        # 检索消费）。零兼容：统一用引擎分配的消息自带 seq 字段（_record_sequence 已退役）。
         sequences = [
             m["seq"] for m in old_msgs if isinstance(m.get("seq"), int)
         ]
@@ -1436,6 +1459,64 @@ class CompressionService:
 
         return refs
 
+    async def _save_batch_refs(
+        self,
+        batch: list[dict[str, Any]],
+        comp_result: dict[str, Any],
+        context_window: int,
+    ) -> list[dict[str, str]]:
+        """单批落库 task 入口：save_compression_result 外再包一层防泄漏。
+
+        save_compression_result 内部已逐工件 fail-open（工件失败引用留空 +
+        warning，不抛）；本层兜住其外的非预期异常（如产物序列化失败），失败
+        按既有语义返回空引用——块退化为纯内联摘要，流程不阻塞。
+
+        Args:
+            batch: 本批被压缩的原消息（算 sequence 范围用）
+            comp_result: compress_all 产出的 5 部分字典
+            context_window: 当前模型上下文窗口
+
+        Returns:
+            成功落库工件的引用清单；异常路径返回 []
+        """
+        try:
+            return await self.save_compression_result(
+                old_msgs=batch,
+                comp_result=comp_result,
+                pipeline_id=self._pipeline_id,
+                session_id=self._session_id,
+                context_window=context_window,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[CompressionService] 批次落库异常（引用留空，块内联摘要不受影响）: %s",
+                exc,
+            )
+            return []
+
+    @staticmethod
+    def _save_outcome_refs(outcome: Any) -> list[dict[str, str]]:
+        """gather(return_exceptions=True) 收割结果 → 引用清单（防御性归一）。
+
+        task 已在 _save_batch_refs 内自兜异常，正常路径 outcome 就是引用
+        清单；本层兜 gather 面上残余的异常形态（fail-open 归空 + warning），
+        保证建块消费端永远拿到 list。
+
+        Args:
+            outcome: 单个 save task 的收割结果（refs 或 BaseException）
+
+        Returns:
+            引用清单；异常形态返回 []
+        """
+        if isinstance(outcome, BaseException):
+            logger.warning(
+                "[CompressionService] 批次落库 task 异常（引用留空，块内联摘要"
+                "不受影响）: %s",
+                outcome,
+            )
+            return []
+        return outcome
+
     @staticmethod
     def _find_split_by_budget(
         messages: list[dict[str, Any]],
@@ -1496,6 +1577,15 @@ class CompressionService:
         return old_msgs, recent_msgs
 
 
+@dataclass(frozen=True)
+class _TokenEstimate:
+    """一次上下文估算结果（值 + 诊断来源；per-execute 局部值，不落实例字段）。"""
+
+    tokens: int
+    basis: str
+    prev_input: int
+
+
 # ═══════════════════════════════════════════════════════════
 # ContextWindowGuardPlugin（保持 execute / name / priority / __init__ 签名不变）
 # ═══════════════════════════════════════════════════════════
@@ -1514,15 +1604,18 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
     Attributes:
         _config: 插件配置字典
-        _trigger_ratio: 触发压缩的阈值比例（默认 0.55）
+        _trigger_ratio: 构造默认触发比例（运行时解析值不落实例字段）
     """
+
+    # 追踪计数进程内缓存的管道数上限（超限按插入序淘汰；state 真值不受影响）
+    _tracked_cache_max = 64
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化上下文窗口守卫插件。
 
         配置优先级（高→低）：
           ① Agent YAML plugins.enabled.context_window_guard.trigger_ratio
-             （由 plugin_resolver 合并进 config，或由 _apply_runtime_config 从 ctx.state 读）
+             （由 plugin_resolver 合并进 config，或由 _resolve_runtime_config 从 ctx.state 读）
           ② Pipeline YAML plugins.context_window_guard.config.trigger_ratio
              （即本 __init__ 收到的 config 参数）
           ③ manifest 内联注入 context_window.compress_trigger_ratio
@@ -1539,18 +1632,25 @@ class ContextWindowGuardPlugin(IInputPlugin):
         """
         self._config = config or {}
         window_cfg = self._config.get("context_window")
+        # 构造缺省 = manifest 握手注入的命名空间；运行时覆盖一律由
+        # _resolve_runtime_config 解析成 execute 局部值。同 sidecar 实例被多
+        # 管道复用，per-pipeline 配置写实例字段会在 await 处被其他管道覆盖
+        # （task_reminder 197d 竞态同范式）。
         self._window_cfg = (
             window_cfg if isinstance(window_cfg, dict) else {}
         )
         self._trigger_ratio = self._resolve_trigger_ratio(
             self._config.get("trigger_ratio"), self._window_cfg
         )
-        # 压缩失败已透传前端的去重标记：连续失败只推一次 compression_failed
-        # 事件（同一故障周期不刷屏），压缩成功后复位。
-        self._compress_fail_notified = False
-        # 实例级追踪：插件可能被重复实例化，state 不一定跨迭代持久化
-        # 用实例变量做主存储，ctx.state 做辅助（重启恢复场景）
-        self._tracked_msg_count: int = 0
+        # 压缩失败已透传前端的去重面：按 pipeline_id 记录——连续失败只推一次
+        # compression_failed（同一故障周期不刷屏），压缩成功后复位。布尔实例
+        # 字段会被并发管道串台（一管道的失败静音另一管道的首次失败）；dict
+        # 按插入序淘汰超限键（同 _tracked_cache_max，防长期 sidecar 无界增长）。
+        self._compress_fail_notified: dict[str, None] = {}
+        # 消息数追踪缓存：state["_tracked_msg_count"] 是本管道持久真值，本 dict
+        # 只承载「同进程内该管道跨 run 继承」，按 pipeline_id 隔离（原标量实例
+        # 字段会被并发管道覆盖，估算档位与裁剪阈值串台）。
+        self._tracked_by_pipeline: dict[str, int] = {}
 
     @staticmethod
     def _resolve_trigger_ratio(
@@ -1597,8 +1697,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # Agent 级运行时配置覆盖
     # ------------------------------------------------------------------
 
-    def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从每调用注入与 Agent 配置覆盖运行时参数。
+    def _resolve_runtime_config(
+        self, ctx: PluginContext
+    ) -> tuple[dict[str, Any], float]:
+        """解析本次 execute 的窗口配置与触发比例（局部值，不写实例字段）。
 
         覆盖链（高→低）：
           ① ctx.state["context_guard.trigger_ratio"]（agent YAML 运行时覆盖，
@@ -1611,19 +1713,53 @@ class ContextWindowGuardPlugin(IInputPlugin):
           ④ 构造时的 _config/_window_cfg（initialize 握手注入；合宿宿主按
              首触发成员的 manifest 注入后同份扇给全员，本插件可能拿到空值）
 
+        返回值是每管道局部值：同 sidecar 实例的并发 execute 各自解析，不共享
+        可变槽位（await 之后读实例字段必串道）。
+
         Args:
             ctx: 插件执行上下文
+
+        Returns:
+            (window_cfg, trigger_ratio)：本管道生效的窗口命名空间与触发比例
         """
         config = ctx.config if isinstance(ctx.config, dict) else {}
         window_ns = config.get("context_window")
         if isinstance(window_ns, dict) and window_ns:
-            self._window_cfg = window_ns
-            self._trigger_ratio = self._resolve_trigger_ratio(
-                self._config.get("trigger_ratio"), self._window_cfg
+            window_cfg = window_ns
+            trigger_ratio = self._resolve_trigger_ratio(
+                self._config.get("trigger_ratio"), window_cfg
             )
+        else:
+            window_cfg = self._window_cfg
+            trigger_ratio = self._trigger_ratio
         state_ratio = ctx.state.get("context_guard.trigger_ratio")
         if state_ratio is not None:
-            self._trigger_ratio = state_ratio
+            trigger_ratio = state_ratio
+        return window_cfg, trigger_ratio
+
+    @staticmethod
+    def _pipeline_key(state: dict[str, Any]) -> str:
+        """管道身份键（实例级 per-pipeline 缓存的键）。"""
+        return str(state.get(StateKeys.PIPELINE_ID) or "")
+
+    def _tracked_message_count(self, ctx: PluginContext) -> int:
+        """本管道已追踪的非 system 消息数（state 真值 ∪ 同进程跨 run 缓存）。"""
+        state_count = ctx.state.get("_tracked_msg_count", 0)
+        if not isinstance(state_count, int) or isinstance(state_count, bool):
+            state_count = 0
+        return max(
+            self._tracked_by_pipeline.get(self._pipeline_key(ctx.state), 0),
+            state_count,
+        )
+
+    def _set_tracked_message_count(self, ctx: PluginContext, count: int) -> None:
+        """记录本管道追踪计数（按 pipeline_id 隔离的进程内缓存，有界）。"""
+        pipeline_key = self._pipeline_key(ctx.state)
+        # 重插到末尾 = 最近使用（超出上限按插入序淘汰，防长期 sidecar 无界增长）
+        self._tracked_by_pipeline.pop(pipeline_key, None)
+        self._tracked_by_pipeline[pipeline_key] = count
+        while len(self._tracked_by_pipeline) > self._tracked_cache_max:
+            self._tracked_by_pipeline.pop(next(iter(self._tracked_by_pipeline)))
 
     # ------------------------------------------------------------------
     # Token 估算（统一算法：len//2，口径真源 = 模块级 estimate_message_tokens）
@@ -1666,17 +1802,55 @@ class ContextWindowGuardPlugin(IInputPlugin):
             for seq in ContextWindowGuardPlugin._deleted_seq_list(before, after)
         ]
 
+    @staticmethod
+    def _trim_freeze_op(
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """构造裁剪删除的 freeze_segment op（禁止裸删的保全面）。
+
+        members = before 中被删原消息（按 before 序 = seq 升序），与同批
+        set(seq, null) ops 同一 messages._ops 批次落账（§2.6 不变量 2 同款）。
+        被删集合为空（异常形态）返回 None——不发空 members 的冻结 op。
+
+        Args:
+            before: 裁剪前消息列表
+            after: 裁剪后消息列表
+
+        Returns:
+            freeze_segment op；无被删原文时 None
+        """
+        deleted_seqs = set(ContextWindowGuardPlugin._deleted_seq_list(before, after))
+        members = [
+            m
+            for m in before
+            if isinstance(m.get("seq"), int) and m["seq"] in deleted_seqs
+        ]
+        if not members:
+            return None
+        return freeze_segment_op(members, f"seg_{uuid.uuid4()}")
+
     async def _estimate_effective_tokens(
         self,
         messages: list[dict[str, Any]],
         ctx: PluginContext,
-    ) -> int:
+        tracked_msg_count: int,
+    ) -> _TokenEstimate:
         """估算有效上下文大小。
 
         三级估算策略：
         1. prev_input + delta：用上一轮 LLM 真实 input_tokens + 新增消息增量
         2. 压缩块拼接估算：L1 块 tokens + recent 消息 tokens（重启/llm_usage 丢失时）
         3. 全量字符估算：最后手段
+
+        Args:
+            messages: 当前消息列表
+            ctx: 插件执行上下文
+            tracked_msg_count: 本管道已追踪的非 system 消息数（调用方按管道
+                解析后传入——await 之后不得再读共享实例字段）
+
+        Returns:
+            估算值 + 来源（prev_no_delta/prev_delta/assembled/chars）+ 读取基线
         """
         llm_usage = ctx.state.get("llm_usage", {})
         prev_input = llm_usage.get("input_tokens", 0)
@@ -1702,7 +1876,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 )
 
         # 策略 1：prev_input + delta（仅同进程连续迭代有效）
-        tracked = max(self._tracked_msg_count, ctx.state.get("_tracked_msg_count", 0))
+        tracked = tracked_msg_count
         current_non_sys = sum(1 for m in messages if m.get("role") != "system")
         restart_signature = tracked == 0 and current_non_sys > 50
         logger.debug(
@@ -1716,8 +1890,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
         )
         if prev_input > 0 and not restart_signature:
             if current_non_sys <= tracked:
-                self._estimate_basis = "prev_no_delta"
-                self._estimate_prev_input = prev_input
                 logger.debug(
                     "[%s] 估算(无增量): %d tokens (prev_input=%d, tracked=%d, current=%d)",
                     self.name,
@@ -1726,15 +1898,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
                     tracked,
                     current_non_sys,
                 )
-                return prev_input
+                return _TokenEstimate(prev_input, "prev_no_delta", prev_input)
 
             non_sys_msgs = [m for m in messages if m.get("role") != "system"]
             delta_msgs = non_sys_msgs[tracked:]
             delta_tokens = sum(self._estimate_msg_tokens(m) for m in delta_msgs)
 
             effective = prev_input + delta_tokens
-            self._estimate_basis = "prev_delta"
-            self._estimate_prev_input = prev_input
             logger.debug(
                 "[%s] 估算(增量): %d tokens (prev_input=%d + delta=%d, tracked=%d, current=%d, delta_count=%d)",
                 self.name,
@@ -1745,7 +1915,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 current_non_sys,
                 len(delta_msgs),
             )
-            return effective
+            return _TokenEstimate(effective, "prev_delta", prev_input)
 
         # 策略 2：压缩块拼接估算
         assembled = await self._estimate_assembled_tokens(ctx, messages)
@@ -1756,14 +1926,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
             len(messages),
         )
         if assembled >= 0:
-            self._estimate_basis = "assembled"
-            self._estimate_prev_input = prev_input
-            return assembled
+            return _TokenEstimate(assembled, "assembled", prev_input)
 
         # 策略 3：全量字符估算（最后手段）
         estimated = sum(self._estimate_msg_tokens(m) for m in messages)
-        self._estimate_basis = "chars"
-        self._estimate_prev_input = prev_input
         logger.warning(  # 落到策略3说明前两个都失败了，值得告警
             "[%s] 估算(策略3/全量字符 兜底): estimated=%d, msg_count=%d, prev_input=%d, tracked=%d",
             self.name,
@@ -1772,7 +1938,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             prev_input,
             tracked,
         )
-        return estimated
+        return _TokenEstimate(estimated, "chars", prev_input)
 
     async def _estimate_assembled_tokens(
         self,
@@ -1890,24 +2056,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
         return l1_chunks, snapshot_chunks
 
     @staticmethod
-    def _extract_pipeline_tags(results: list[Any]) -> list[str]:
-        """从 backend 检索结果中收集 pipeline:<id> 标签（去重，保序）。
-
-        供裁剪防护告警取证：召回面混入旧代 pipeline 块时，告警直接给出
-        召回块的管道归属，便于定位 tags 过滤失守或服务端过滤缺口。
-        """
-        tags: list[str] = []
-        for item in results or []:
-            if not isinstance(item, dict):
-                continue
-            meta = item.get("metadata") or {}
-            chunk_tags = meta.get("tags") if isinstance(meta, dict) else []
-            for t in chunk_tags or []:
-                if isinstance(t, str) and t.startswith("pipeline:") and t not in tags:
-                    tags.append(t)
-        return tags
-
-    @staticmethod
     def _parse_seq_from_tags(tags: list[Any]) -> tuple[int, int]:
         """从 tags 中解析 ``seq:start-end`` / ``seq_end:N`` 标签。
 
@@ -1960,12 +2108,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
         Returns:
             包含压缩后 messages 的插件执行结果
         """
-        # Agent 级覆盖：从 ctx.state 读 agent YAML 中 plugins.enabled.context_window_guard 的配置
-        self._apply_runtime_config(ctx)
+        # Agent 级覆盖：每次 execute 从注入命名空间 / ctx.state 解析本管道配置，
+        # 一律用局部值（不写实例字段——同 sidecar 多管道并发会串台）
+        window_cfg, trigger_ratio = self._resolve_runtime_config(ctx)
+        tracked_msg_count = self._tracked_message_count(ctx)
 
         # 压缩总开关：manifest 内联 compression.enabled=false 时整个守卫不工作
         # （不触发压缩也不做压缩块清理——关闭语义即上下文守卫停摆）
-        if not self._window_cfg.get("compression", {}).get("enabled", True):
+        if not window_cfg.get("compression", {}).get("enabled", True):
             return PluginResult()
 
         context_window = ctx.state.get("context_window")
@@ -1985,7 +2135,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return PluginResult()
 
         # 获取压缩服务（基于模块级 backend + capability 注入；无依赖返回 None 早退）
-        service = self._get_memory_service(ctx, self._window_cfg)
+        service = self._get_memory_service(ctx, window_cfg)
         if not service:
             return PluginResult()
 
@@ -1993,25 +2143,33 @@ class ContextWindowGuardPlugin(IInputPlugin):
         self._setup_service(ctx, service, context_window)
 
         # 窗口变更检测（无 backend 时 clean_if_window_changed 直接返回 None）
-        # delete_ops 收集 clean/trim 两条纯删除路径的 set(seq, null) ops
+        # delete_ops 收集 clean/trim 两条纯删除路径的 ops（clean 删派生物不
+        # 冻结；trim 删原文必须同批冻结，见下方 _trim_freeze_op）
         delete_ops: list[dict[str, Any]] = []
         cleaned = await self.clean_if_window_changed(messages, context_window, ctx)
         if cleaned is not None:
             delete_ops.extend(self._deleted_seq_ops(messages, cleaned))
             messages = cleaned
 
-        # 重启场景裁剪：从存储全量恢复后，已被压缩块覆盖的旧消息需先剔除。
+        # 重启场景裁剪：从存储全量恢复后，已被压缩块覆盖的旧消息需先剔除
+        # （证据源 = 历史已应用压缩块，不查记忆库）。被裁原文与 set(seq, null)
+        # 同批冻结（消息段模型 §2.6 不变量 2 同款：只删不冻结 = 原文退出活
+        # 引用集后可被 blob GC 物理清除，2026-11-16 装机事故根因）。
         trimmed = False
-        if len(messages) > self._tracked_msg_count + 50:
-            new_messages = await self._trim_covered_messages(ctx, messages)
+        if len(messages) > tracked_msg_count + 50:
+            new_messages = await self._trim_covered_messages(messages)
             trimmed = new_messages is not messages
             if trimmed:
+                trim_freeze_op = self._trim_freeze_op(messages, new_messages)
+                if trim_freeze_op is not None:
+                    delete_ops.append(trim_freeze_op)
                 delete_ops.extend(self._deleted_seq_ops(messages, new_messages))
                 messages = new_messages
 
         # 阈值检查
-        estimated_tokens = await self._estimate_effective_tokens(messages, ctx)
-        trigger_tokens = int(context_window * self._trigger_ratio)
+        estimate = await self._estimate_effective_tokens(messages, ctx, tracked_msg_count)
+        estimated_tokens = estimate.tokens
+        trigger_tokens = int(context_window * trigger_ratio)
         # info 级（原 debug）：压缩决策是长会话延迟的唯一开关，生产侧必须可见
         # 「为什么没压」——估算来源（prev/assembled/chars）与读取基线一并输出。
         logger.info(
@@ -2021,16 +2179,16 @@ class ContextWindowGuardPlugin(IInputPlugin):
             estimated_tokens,
             trigger_tokens,
             context_window,
-            self._trigger_ratio,
+            trigger_ratio,
             len(messages),
-            getattr(self, "_estimate_basis", "?"),
-            getattr(self, "_estimate_prev_input", 0),
+            estimate.basis,
+            estimate.prev_input,
             type(service).__name__,
         )
         if estimated_tokens < trigger_tokens:
             # 不压缩，仅更新追踪计数；messages 已在上方裁剪过
             current_non_sys = sum(1 for m in messages if m.get("role") != "system")
-            self._tracked_msg_count = current_non_sys
+            self._set_tracked_message_count(ctx, current_non_sys)
             updates: dict[str, Any] = {"_tracked_msg_count": current_non_sys}
             # clean/trim 产生的删除以增量 ops 上报（无删除则不写 messages key）
             if delete_ops:
@@ -2044,7 +2202,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             estimated_tokens,
             trigger_tokens,
             context_window,
-            self._trigger_ratio,
+            trigger_ratio,
             len(messages),
         )
 
@@ -2062,7 +2220,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             compressed = await service.compress_messages(
                 messages=messages,
                 context_window=context_window,
-                trigger_ratio=self._trigger_ratio,
+                trigger_ratio=trigger_ratio,
                 system_message=ctx.state.get("system_message"),
             )
         except Exception as exc:
@@ -2093,12 +2251,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 original_tokens,
                 compressed_tokens,
             )
-            self._compress_fail_notified = False
+            self._compress_fail_notified.pop(self._pipeline_key(ctx.state), None)
             # 压缩写回不再做 tool_calls 标准化：raw 格式经压缩原样落 state，
             # 由 llm_service 在 llm.complete_stream 入口的标准化唯一关卡
             # 统一修复（2026-09-06 T7 裁定，调用侧不复制判定语义）。
             post_compress_count = sum(1 for m in compressed if m.get("role") != "system")
-            self._tracked_msg_count = post_compress_count
+            self._set_tracked_message_count(ctx, post_compress_count)
             ctx.state["_tracked_msg_count"] = post_compress_count
 
             # 构造增量 ops（零兼容：不再回写全量数组）
@@ -2164,7 +2322,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             compressed_tokens,
         )
         current_non_sys = sum(1 for m in messages if m.get("role") != "system")
-        self._tracked_msg_count = current_non_sys
+        self._set_tracked_message_count(ctx, current_non_sys)
         degrade_updates: dict[str, Any] = {"_tracked_msg_count": current_non_sys}
         if delete_ops:
             degrade_updates["messages"] = {"_ops": delete_ops}
@@ -2225,12 +2383,16 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
         「重试到上限透传」语义：走到这里的失败已是本轮压缩的最终失败
         （压缩失败不阻塞管线，fail-open 降级继续）。连续失败只在首个失败
-        轮推送一次（同一故障周期不刷屏），压缩成功后复位。通道未注入或
-        发射失败均只留日志，绝不反噬管线降级路径。
+        轮推送一次（同一故障周期不刷屏），压缩成功后复位；去重按管道记
+        （同 sidecar 实例多管道并发，共享标记会静音其他管道的首次失败）。
+        通道未注入或发射失败均只留日志，绝不反噬管线降级路径。
         """
-        if self._compress_fail_notified:
+        pipeline_key = self._pipeline_key(ctx.state)
+        if pipeline_key in self._compress_fail_notified:
             return
-        self._compress_fail_notified = True
+        self._compress_fail_notified[pipeline_key] = None
+        while len(self._compress_fail_notified) > self._tracked_cache_max:
+            self._compress_fail_notified.pop(next(iter(self._compress_fail_notified)))
         emit = _frontend_emit
         if emit is None:
             logger.debug(
@@ -2324,54 +2486,68 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 辅助方法
     # ------------------------------------------------------------------
 
-    async def _trim_covered_messages(  # noqa: PLR0911
-        self,
-        ctx: PluginContext,
-        messages: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """裁剪被已有压缩块覆盖的旧消息（重启场景）。
+    @staticmethod
+    def _applied_block_max_end(messages: list[dict[str, Any]]) -> int:
+        """从历史中解析已应用压缩块的最大覆盖端 seq（裁剪证据源，fail-closed）。
 
-        压缩块经模块级 _memory_backend 读取（capability 注入），
-        无 backend 时原样返回。
-
-        裁剪逻辑：逐条按消息自带 seq 过滤，保留 system 消息 + 非系统消息
-        中 seq > max_end 的部分。max_end 取自压缩块的 sequence_end。
-        （零兼容：_record_sequence 已退役，统一用引擎分配的 seq 字段。）
+        已应用块消息判据（生产码只有本插件 _build_batch_blocks 产此形态）：
+        ``role == "system"`` 且 ``metadata.compression_ref`` 为 dict 且
+        ``compression_ref.seq_range`` 为 ``[int, int]``（两个 int 且
+        start ≤ end）。缺失/形状错/start>end 的块不作为证据（fail-closed：
+        宁可不裁，不可凭坏证据删原文）。
 
         Args:
-            ctx: 插件执行上下文
             messages: 当前消息列表
 
         Returns:
-            裁剪后的消息列表（如果没有压缩块则原样返回）
+            所有已应用块 seq_range[1] 的最大值；无有效块返回 0
         """
-        pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
-        if not pipeline_id or not _memory_backend:
-            return messages
+        max_end = 0
+        for m in messages:
+            if m.get("role") != "system":
+                continue
+            meta = m.get("metadata")
+            if not isinstance(meta, dict):
+                continue
+            ref = meta.get("compression_ref")
+            if not isinstance(ref, dict):
+                continue
+            seq_range = ref.get("seq_range")
+            if (
+                isinstance(seq_range, list)
+                and len(seq_range) == 2
+                and isinstance(seq_range[0], int)
+                and isinstance(seq_range[1], int)
+                and seq_range[0] <= seq_range[1]
+            ):
+                max_end = max(max_end, seq_range[1])
+        return max_end
 
-        user_id = ctx.state.get("user_id", "") or pipeline_id
-        try:
-            results = await _memory_backend.search(
-                query=f"pipeline:{pipeline_id}",
-                user_id=user_id,
-                top_k=20,
-                memory_type="chunk",
-                tags=[f"pipeline:{pipeline_id}"],
-                tags_match="any",
-            )
-        except Exception as e:
-            logger.warning(
-                "[context_window_guard] 记忆后端检索失败（跳过压缩消息注入）| pipeline_id=%s | error=%s",
-                pipeline_id,
-                e,
-            )
-            return messages
+    async def _trim_covered_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """裁剪被历史已应用压缩块覆盖的旧消息（重启场景全量恢复后）。
 
-        l1_chunks, _ = self._filter_chunks(results)
-        if not l1_chunks:
-            return messages
+        裁剪证据源 = 当前历史里实际存在的已应用压缩块消息（见
+        _applied_block_max_end），不查记忆库：落库后、回写前被打断的孤儿
+        chunk（从未真正应用的覆盖声明）不再驱动删除（2026-11-16 装机事故：
+        297 条头部消息被孤儿声明裸删且未冻结，blob GC 后不可恢复）；
+        _memory_backend 为 None 时裁剪照常工作（记忆库降级不再连坐裁剪）。
 
-        max_end = max((c["sequence_end"] for c in l1_chunks if c["sequence_end"]), default=0)
+        裁剪逻辑：max_end = 已应用块 seq_range[1] 最大值，无块不裁剪；逐条
+        按消息自带 seq 过滤，保留 system 消息 + 非 system 中 seq > max_end
+        的部分（零兼容：_record_sequence 已退役，统一用引擎分配的 seq 字段）。
+        <10% 防护保留：裁剪后非 system 不足原 10% 视为证据与序列错位，
+        放弃裁剪保留原消息。被删原文由调用方与删除 ops 同批冻结（禁止裸删）。
+
+        Args:
+            messages: 当前消息列表
+
+        Returns:
+            裁剪后的消息列表（无已应用块或无被删消息时原样返回）
+        """
+        max_end = self._applied_block_max_end(messages)
         if max_end <= 0:
             return messages
 
@@ -2395,13 +2571,12 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 防护：裁剪后非 system 消息不足原 10% 说明边界异常，保留原消息避免把上下文裁空。
         if orig_non_sys > 0 and trimmed_non_sys < orig_non_sys * 0.1:
             logger.error(
-                "[%s] 裁剪后非 system 消息仅剩 %d/%d（<10%%），疑似 max_end=%d 与消息"
-                " sequence 范围错位，放弃裁剪保留原消息 | 召回块 pipeline tags=%s",
+                "[%s] 裁剪后非 system 消息仅剩 %d/%d（<10%%），已应用块 max_end=%d 与消息"
+                " sequence 范围错位，放弃裁剪保留原消息",
                 self.name,
                 trimmed_non_sys,
                 orig_non_sys,
                 max_end,
-                self._extract_pipeline_tags(results),
             )
             return messages
 

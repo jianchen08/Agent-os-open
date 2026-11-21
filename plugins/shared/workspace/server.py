@@ -22,6 +22,7 @@ agent_manager/monitoring 同款），plugin.json ``http_endpoints`` 声明
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -292,6 +293,18 @@ async def get_file_tree(
     return await service.get_file_tree(container_task_id, base_path=workspace_path, sub_path=path)
 
 
+def _read_to_end(full_path: Path, start: int) -> str:
+    """自 start 字节位读到文件尾并解码（纯同步体，由 ``to_thread`` 承载）。
+
+    与整文件读同属无上限读（打开面不限大小），多语句读体独立成函数以便整体
+    出事件循环。
+    """
+    with open(full_path, "rb") as f:  # noqa: PTH123
+        f.seek(start)
+        chunk = f.read()
+    return chunk.decode("utf-8", errors="replace")
+
+
 async def get_file_content(
     container_task_id: str,
     path: str,
@@ -348,12 +361,14 @@ async def get_file_content(
     try:
         if limit is None:
             if start == 0:
-                content = full_path.read_text(encoding="utf-8", errors="replace")
+                # 整文件读无上限（打开面不限大小），大文件解码秒级——出事件循环
+                # 免饿死合宿宿主（审计 P2-2）；异常语义由同层 except 原样承接。
+                content = await asyncio.to_thread(
+                    full_path.read_text, encoding="utf-8", errors="replace"
+                )
             else:
-                with open(full_path, "rb") as f:  # noqa: PTH123
-                    f.seek(start)
-                    chunk = f.read()
-                content = chunk.decode("utf-8", errors="replace")
+                # 同属无上限读（自 offset 读到文件尾），同样出事件循环。
+                content = await asyncio.to_thread(_read_to_end, full_path, start)
             loaded = file_size
         else:
             with open(full_path, "rb") as f:  # noqa: PTH123
@@ -491,7 +506,9 @@ async def delete_entry(
         if full_path.is_dir():
             import shutil  # noqa: PLC0415
 
-            shutil.rmtree(full_path)
+            # 删大目录（node_modules/构建产物）十秒~分钟级，必须出事件循环
+            # 免饿死合宿宿主（审计 A-7）；异常语义由同层 except 原样承接。
+            await asyncio.to_thread(shutil.rmtree, full_path)
         else:
             full_path.unlink()
 
@@ -603,7 +620,9 @@ async def move_entry(
     try:
         import shutil  # noqa: PLC0415
 
-        shutil.move(str(full_source), str(dest_full_path))
+        # 目录移动跨卷时是「整树复制 + 删除」（分钟级，与 A-9 move 同族），
+        # 出事件循环免饿死合宿宿主。
+        await asyncio.to_thread(shutil.move, str(full_source), str(dest_full_path))
         return {
             "success": True,
             "message": f"移动成功: {source_path} -> {new_rel_path}",

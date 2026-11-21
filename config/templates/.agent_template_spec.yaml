@@ -158,8 +158,8 @@ model_name: {model_name}
 #       下级 Agent 有自己的完整工作流，你只需告诉它目标和上下文，它会自行决定具体步骤。
 #       | 阶段 | Agent | 说明 | Goal 应包含 | 产出物路径 | 推荐指标 |
 #       |------|-------|------|------------|-----------|----------|
-#       | 调研 | research_agent | ... | 调研目标 + 调研范围 | docs/{title}_research_report.md | file_check, semantic_check(可选) |
-#       | 生成 | agent_maker | ... | 操作目标 + 能力需求描述 | 视资源类型而定 | file_check, semantic_check |
+#       | 调研 | research_agent | ... | 调研目标 + 调研范围 | docs/{title}_research_report.md | file_check |
+#       | 生成 | agent_maker | ... | 操作目标 + 能力需求描述 | 视资源类型而定 | file_check |
 #
 #
 # ===== L3 (specialized/atomic) Prompt 结构 =====
@@ -348,7 +348,8 @@ system_prompt: |
 #   通过 content 字段直接注入工具简短描述列表，让 Agent 知道有哪些工具可按需加载。
 #   【必须放在 static_vars.items 中】，因为工具索引是会话级不变的，可缓存。
 #   只需列出"当前未绑定但可能需要"的工具，已绑定的工具不需要重复列出。
-#   Agent 可根据任务需要，通过 resource_search 搜索后自动加载对应工具。
+#   Agent 可根据任务需要，经 resource_search 拿到目标工具的定义（tool_defs）后用 call_tool 转发调用
+#   （resource_search 只返回定义，不会把工具加载进工具面；引入一次即在本次运行内持续可用）。
 #   格式：每行一个工具，`- 工具名: 一句话说明`，简洁即可。
 #
 #   全量内置工具清单（根据 Agent 已绑定的工具，从中筛选未绑定的填入）：
@@ -357,7 +358,7 @@ system_prompt: |
 #   | file_read | 读取文件内容 |
 #   | （列目录已并入 file_read：路径指向目录即返回条目列表） |
 #   | file_write | 创建、写入、编辑文件内容 |
-#   | bash_execute | 执行Shell命令 |
+#   | bash | 执行Shell命令（log/input/kill 管理长任务进程） |
 #   | enhanced_search | 在文件中搜索文本、代码或文件名 |
 #   | web_search | 搜索互联网信息 |
 #   | fetch | 执行HTTP请求和网页抓取 |
@@ -371,14 +372,14 @@ system_prompt: |
 #   | trigger_setup | 设置触发器（延迟/定时/事件/条件） |
 #   | schema_evaluator | 验证JSON/YAML格式或正则模式校验 |
 #
-#   示例（假设该 Agent 已绑定 file_read, file_write, bash_execute, resource_search）：
+#   示例（假设该 Agent 已绑定 file_read, file_write, bash, resource_search）：
 #   static_vars:
 #     enabled: true
 #     items:
 #       - name: "可扩展工具索引"
 #         content: |
 #           ## 可扩展工具索引
-#           以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+#           以下工具未直接加载：经 resource_search(mode="detailed") 拿定义后，用 call_tool 转发调用。
 #           - enhanced_search: 在文件中搜索文本、代码或文件名
 #           - web_search: 搜索互联网信息
 #           - fetch: 执行HTTP请求和网页抓取
@@ -394,7 +395,8 @@ system_prompt: |
 #
 #   content 末尾必须附带使用说明，告知 Agent 如何加载这些工具：
 #     如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，
-#     工具将自动加载到当前会话，下一轮即可直接调用。
+#     拿到 tool_defs 后用 call_tool(tool="<工具名>", arguments={...}) 转发调用——工具不会自动进入你的工具面，
+#     引入一次即在本次运行内持续有效，不必重复搜索。
 
 static_vars:
   enabled: true
@@ -550,7 +552,7 @@ tool_ids:
 #   |---|---|---|
 #   | "file_read" | 读取文件 | 需要读取文件内容的 Agent |
 #   | "file_write" | 写入/修改文件 | 需要创建或修改文件的 Agent |
-#   | "bash_execute" | 执行 Shell 命令 | 需要执行系统命令的 Agent |
+#   | "bash" | 执行 Shell 命令 | 需要执行系统命令的 Agent |
 #   | "web_search" | 网络搜索 | 需要搜索网络信息的 Agent |
 #   | "fetch" | 获取网页内容 | 需要获取网页详细内容的 Agent |
 #   | "memory" | 记忆检索 | 需要检索历史经验的 Agent（L1/L2 推荐，L3 视情况：需要长上下文或记忆增强时配备）|
@@ -739,8 +741,8 @@ context_variables:
       #       - isolated（默认）：不指定 isolation_level，产出物自动在工作空间中
       #       - non_isolated：必须指定 isolation_level="non_isolated"，Agent 直接操作项目路径
 #       ### 评估规则
-#       - Agent 评估器（semantic_check）会调用 LLM，有较高 token 成本
-#       - 重要任务（核心功能、影响项目质量、用户强调质量）→ 可用 semantic_check
+#       - 只用确定性指标：file_check（exists/not_empty/contains）、bash_check、format_valid
+#       - 语义质量由下游审查/验证 Agent 承担（代码：code_reviewer/function_verifier；写作：review/coherence/style reviewer）
 #       - 一般任务（例行操作、低风险变更、简单执行）→ 仅用 tool 类指标（file_check、format_valid、bash_check 等）
 #       - 调研/通用执行/编排类：一般仅用 file_check
 #       - 代码编写环节本身只需 file_check + format_valid，质量由下游 Agent 层层把关
@@ -798,12 +800,11 @@ recommended_metrics:
 # - 常用评估指标:
 #   | metric_id | 作用 | 参数 | 使用场景 |
 #   |---|---|---|---|
-#   | "file_check" | 检查文件是否存在/可读 | action: "read"/"exists", path: 文件路径 | 验证文件产出（必选，低成本） |
-#   | "semantic_check" | 检查内容质量（结构、格式、语义） | criteria: {required_sections} | 验证内容质量（可选，调用 LLM 有成本） |
+#   | "file_check" | 检查文件是否存在/非空/内容匹配 | check: exists/not_empty/contains, path: 文件路径, pattern: 匹配串 | 验证文件产出（必选，低成本） |
 #   | "bash_check" | 命令执行检查 | command: 要执行的命令 | 验证命令是否执行成功（低成本） |
 #   | "format_valid" | 格式验证 | path: 文件路径 | 验证文件格式是否正确 |
 # - 评估规则:
-#   - Agent 评估器（semantic_check）会调用 LLM，有较高 token 成本，仅用于重要任务
+#   - 只用确定性指标；语义质量由下游审查/验证 Agent 承担
 #   - 重要任务判断：涉及核心功能、影响项目质量、用户明确强调质量要求
 #   - 一般任务（例行操作、低风险变更、简单执行）仅用 tool 类指标（file_check、format_valid、bash_check 等）
 #   - 调研/通用执行/编排类：一般仅用 file_check

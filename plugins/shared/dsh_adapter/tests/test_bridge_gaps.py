@@ -242,7 +242,10 @@ class TestBootPlanWire:
         tools, stdin = asyncio.run(scenario())
         assert tools == _INIT_TOOLS
         params = stdin.frames[0]["params"]
-        assert params["bootPlan"] == {"chain": True, "packages": []}  # 协议级缺省=最小链
+        assert params["bootPlan"] == {
+            "source": "profile",
+            "fallback": {"chain": True, "packages": []},
+        }  # 协议级缺省=profile composition + 最小链回退
 
     def test_explicit_boot_plan_overrides_constructor_default(
         self, bmod: Any, tmp_path: Path, spawn: SpawnStub
@@ -577,6 +580,15 @@ class TestModuleSingleton:
         assert isinstance(first, bmod.DshRuntimeBridge)
         assert first is second
 
+    def test_get_bridge_injects_manager_config_into_existing_singleton(
+        self, bmod: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(bmod, "_bridge", None)
+        first = bmod.get_bridge()
+        again = bmod.get_bridge(manager_config={"registry": "https://r.example/"})
+        assert again is first
+        assert first._manager_config == {"registry": "https://r.example/"}  # noqa: SLF001 — 单例注入面断言
+
     def test_first_create_carries_runtime_root(
         self, bmod: Any, monkeypatch: Any, tmp_path: Path, spawn: SpawnStub
     ) -> None:
@@ -752,3 +764,459 @@ class TestExtendedProtocol:
         out = asyncio.run(scenario())
         assert out["ok"] is False
         assert "non-object" in out["error"]
+
+
+# ── 官方 plugin-manager RPC（2026-11-09）────────────────────────────
+
+
+class TestManagerRPC:
+    """manager_* 方法线格式与 ``{ok, data, error}`` 信封。"""
+
+    def _boot(self, bmod: Any, tmp_path: Path, spawn: SpawnStub,
+              server_info: dict[str, Any] | None = None,
+              manager: dict[str, Any] | None = None) -> tuple[Any, FakeStdin, asyncio.StreamReader]:
+        reader = asyncio.StreamReader()
+        stdin = FakeStdin()
+        spawn.make(stdin=stdin, stdout=reader, stderr=None)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path), manager_config=manager)
+        reader.feed_data(_wire_line(_response_frame(
+            1, {"tools": _INIT_TOOLS, "serverInfo": server_info or {}})))
+        return bridge, stdin, reader
+
+    def test_initialize_carries_manager_config(self, bmod: Any, tmp_path: Path,
+                                               spawn: SpawnStub) -> None:
+        async def scenario() -> FakeStdin:
+            bridge, stdin, _reader = self._boot(
+                bmod, tmp_path, spawn, manager={"pnpmCommand": "pnpm", "registry": "https://r"})
+            await bridge.initialize()
+            return stdin
+
+        stdin = asyncio.run(scenario())
+        assert stdin.frames[0]["params"]["manager"] == {
+            "pnpmCommand": "pnpm", "registry": "https://r"}
+
+    def test_manager_ready_and_error_from_server_info(self, bmod: Any, tmp_path: Path,
+                                                      spawn: SpawnStub) -> None:
+        async def scenario() -> Any:
+            bridge, _stdin, _reader = self._boot(
+                bmod, tmp_path, spawn,
+                {"managerReady": True, "managerError": None})
+            await bridge.initialize()
+            return bridge
+
+        bridge = asyncio.run(scenario())
+        assert bridge.manager_ready is True
+        assert bridge.manager_error is None
+
+    def test_manager_list_wire_and_envelope(self, bmod: Any, tmp_path: Path,
+                                            spawn: SpawnStub) -> None:
+        async def scenario() -> tuple[dict[str, Any], FakeStdin]:
+            bridge, stdin, reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            payload = {"ok": True, "data": {"bundles": [], "plugins": [], "registries": None},
+                       "error": None}
+            reader.feed_data(_wire_line(_response_frame(2, payload)))
+            return await bridge.manager_list(), stdin
+
+        out, stdin = asyncio.run(scenario())
+        assert out["ok"] is True
+        assert out["data"]["bundles"] == []
+        assert stdin.frames[1]["method"] == "plugin/manager/list"
+
+    def test_manager_inspect_install_cancel_remove_enable_registries_wire(
+        self, bmod: Any, tmp_path: Path, spawn: SpawnStub
+    ) -> None:
+        async def scenario() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            bridge, stdin, reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            results = []
+            calls = [
+                (bridge.manager_inspect("spec-a"), {"ok": True, "data": {"status": "accepted"}}),
+                (bridge.manager_install("spec-a", "req-1", {"saveExact": True}),
+                 {"ok": True, "data": {"application": "restart-required"}}),
+                (bridge.manager_cancel("req-1"), {"ok": True, "data": {"status": "cancelled"}}),
+                (bridge.manager_remove("bundle-a"), {"ok": True, "data": {"application": "restart-required"}}),
+                (bridge.manager_set_enabled("bundle-a", True), {"ok": True, "data": {"changed": True}}),
+                (bridge.manager_set_enabled("bundle-a", False), {"ok": True, "data": {"changed": True}}),
+                (bridge.manager_registries(), {"ok": True, "data": {"registry": None}}),
+            ]
+            for idx, (coro, payload) in enumerate(calls, start=2):
+                reader.feed_data(_wire_line(_response_frame(idx, payload)))
+                results.append(await coro)
+            return results, stdin.frames
+
+        results, frames = asyncio.run(scenario())
+        methods = [frame["method"] for frame in frames[1:]]
+        assert methods == [
+            "plugin/manager/inspect", "plugin/manager/install", "plugin/manager/cancel",
+            "plugin/manager/remove", "plugin/manager/enable", "plugin/manager/disable",
+            "plugin/manager/registries",
+        ]
+        assert frames[2]["params"] == {"spec": "spec-a", "requestId": "req-1",
+                                        "options": {"saveExact": True}}
+        assert results[0]["data"]["status"] == "accepted"
+        assert results[1]["data"]["application"] == "restart-required"
+
+    def test_manager_bridge_error_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                                  spawn: SpawnStub) -> None:
+        async def scenario() -> dict[str, Any]:
+            bridge, _stdin, reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            reader.feed_data(_wire_line({
+                "jsonrpc": "2.0", "id": 2,
+                "error": {"code": -32000, "message": "boom"},
+            }))
+            return await bridge.manager_list()
+
+        out = asyncio.run(scenario())
+        assert out["ok"] is False
+        assert "boom" in out["error"]
+
+    def test_manager_non_object_result_fail_visible(self, bmod: Any, tmp_path: Path,
+                                                   spawn: SpawnStub) -> None:
+        async def scenario() -> dict[str, Any]:
+            bridge, _stdin, reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            reader.feed_data(_wire_line(_response_frame(2, ["not", "object"])))
+            return await bridge.manager_list()
+
+        out = asyncio.run(scenario())
+        assert out["ok"] is False
+        assert "non-object" in out["error"]
+
+    def test_manager_timeout_fail_visible(self, bmod: Any, tmp_path: Path,
+                                          spawn: SpawnStub) -> None:
+        async def scenario() -> dict[str, Any]:
+            bridge, _stdin, _reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            return await bridge.manager_call("list", {}, timeout_s=0.01)
+
+        out = asyncio.run(scenario())
+        assert out["ok"] is False
+        assert "Timeout" in out["error"] or "timeout" in out["error"].lower()
+
+    def test_manager_boot_failure_fail_visible(self, bmod: Any, tmp_path: Path) -> None:
+        gone = tmp_path / "gone"
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(gone))
+        out = asyncio.run(bridge.manager_list())
+        assert out["ok"] is False
+        assert "boot failed" in out["error"]
+
+    def test_node_missing_maps_to_bridge_unavailable(self, bmod: Any, tmp_path: Path,
+                                                     monkeypatch: Any) -> None:
+        async def missing(*_a: Any, **_k: Any) -> Any:
+            raise FileNotFoundError("node")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_list())
+        assert out["ok"] is False
+        assert "node_missing" in out["error"]
+
+    def test_restart_bridge_shuts_down_and_resets(self, bmod: Any, monkeypatch: Any) -> None:
+        stopped: list[bool] = []
+
+        class _Stub:
+            async def shutdown(self) -> None:
+                stopped.append(True)
+
+        monkeypatch.setattr(bmod, "_bridge", _Stub())
+        asyncio.run(bmod.restart_bridge())
+        assert stopped == [True]
+        assert bmod._bridge is None
+
+
+# ── 宿主依赖补装 RPC（2026-11-09 翻译面接通）────────────────────────
+
+
+class TestHostDepRPC:
+    """``manager_add_host_deps``：空清单短路 + 线格式 + 失败信封。"""
+
+    def _boot(self, bmod: Any, tmp_path: Path,
+              spawn: SpawnStub) -> tuple[Any, FakeStdin, asyncio.StreamReader]:
+        reader = asyncio.StreamReader()
+        stdin = FakeStdin()
+        spawn.make(stdin=stdin, stdout=reader, stderr=None)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        reader.feed_data(_wire_line(_response_frame(1, {"tools": _INIT_TOOLS, "serverInfo": {}})))
+        return bridge, stdin, reader
+
+    def test_empty_specs_short_circuit_without_rpc(self, bmod: Any, tmp_path: Path,
+                                                   spawn: SpawnStub) -> None:
+        async def scenario() -> tuple[dict[str, Any], FakeStdin]:
+            bridge, stdin, _reader = self._boot(bmod, tmp_path, spawn)
+            return await bridge.manager_add_host_deps([]), stdin
+
+        out, stdin = asyncio.run(scenario())
+        assert out == {"ok": True, "data": {"skipped": True, "exitCode": 0}, "error": None}
+        assert stdin.frames == []  # 未 boot、未发帧
+
+    def test_wire_sends_specs_and_returns_envelope(self, bmod: Any, tmp_path: Path,
+                                                   spawn: SpawnStub) -> None:
+        async def scenario() -> tuple[dict[str, Any], FakeStdin]:
+            bridge, stdin, reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            payload = {"ok": True, "data": {"exitCode": 0, "output": ""}, "error": None}
+            reader.feed_data(_wire_line(_response_frame(2, payload)))
+            return await bridge.manager_add_host_deps(["@deepseek-ai/dsh-settings@0.2.1-rc.5"]), stdin
+
+        out, stdin = asyncio.run(scenario())
+        assert out["ok"] is True
+        assert out["data"]["exitCode"] == 0
+        assert stdin.frames[1]["method"] == "plugin/host-dep/add"
+        assert stdin.frames[1]["params"] == {
+            "specs": ["@deepseek-ai/dsh-settings@0.2.1-rc.5"]}
+
+    def test_timeout_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                     spawn: SpawnStub) -> None:
+        async def scenario() -> dict[str, Any]:
+            bridge, _stdin, _reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            return await bridge.manager_add_host_deps(["@deepseek-ai/dsh-settings@1"], timeout_s=0.01)
+
+        out = asyncio.run(scenario())
+        assert out["ok"] is False
+        assert "timeout" in out["error"].lower()
+
+    def test_boot_failure_is_fail_visible(self, bmod: Any, tmp_path: Path) -> None:
+        gone = tmp_path / "gone"
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(gone))
+        out = asyncio.run(bridge.manager_add_host_deps(["@deepseek-ai/dsh-settings@1"]))
+        assert out["ok"] is False
+        assert "boot failed" in out["error"]
+
+    def test_non_object_result_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                               spawn: SpawnStub) -> None:
+        async def scenario() -> dict[str, Any]:
+            bridge, _stdin, reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            reader.feed_data(_wire_line(_response_frame(2, ["not", "object"])))
+            return await bridge.manager_add_host_deps(["@deepseek-ai/dsh-settings@1"])
+
+        out = asyncio.run(scenario())
+        assert out["ok"] is False
+        assert "non-object" in out["error"]
+
+    def test_request_error_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                          spawn: SpawnStub) -> None:
+        """初始化成功后 RPC 通道故障（管道断）→ 信封化失败，不向上抛。"""
+
+        async def scenario() -> dict[str, Any]:
+            bridge, _stdin, _reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+
+            async def boom(method: str, params: dict[str, Any],
+                           timeout_s: float | None = None) -> dict[str, Any]:
+                raise RuntimeError("pipe broken")
+
+            bridge._request = boom  # type: ignore[method-assign]
+            return await bridge.manager_add_host_deps(["@deepseek-ai/dsh-settings@1"])
+
+        out = asyncio.run(scenario())
+        assert out["ok"] is False
+        assert "pipe broken" in out["error"]
+
+    def test_initialize_exposes_bundle_states(self, bmod: Any, tmp_path: Path,
+                                              spawn: SpawnStub) -> None:
+        """serverInfo.bundleStates → bridge.bundle_states（管理页运行态来源）。"""
+
+        async def scenario() -> Any:
+            reader = asyncio.StreamReader()
+            stdin = FakeStdin()
+            spawn.make(stdin=stdin, stdout=reader, stderr=None)
+            bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+            reader.feed_data(_wire_line(_response_frame(1, {
+                "tools": _INIT_TOOLS,
+                "serverInfo": {"bundleStates": [
+                    {"id": "dsh-context", "name": "dsh-context",
+                     "state": 0, "label": "pending", "injects": ["sessions"]},
+                ]},
+            })))
+            await bridge.initialize()
+            return bridge
+
+        bridge = asyncio.run(scenario())
+        assert bridge.bundle_states == [{
+            "id": "dsh-context", "name": "dsh-context", "state": 0,
+            "label": "pending", "injects": ["sessions"]}]
+
+    def test_initialize_bundle_states_defaults_empty(self, bmod: Any, tmp_path: Path,
+                                                     spawn: SpawnStub) -> None:
+        async def scenario() -> Any:
+            bridge, _stdin, _reader = self._boot(bmod, tmp_path, spawn)
+            await bridge.initialize()
+            return bridge
+
+        assert asyncio.run(scenario()).bundle_states == []
+
+    def test_initialize_exposes_provider_states(self, bmod: Any, tmp_path: Path,
+                                                spawn: SpawnStub) -> None:
+        """serverInfo.providerStates → bridge.provider_states（宿主服务提供包挂载态）。"""
+
+        async def scenario() -> Any:
+            reader = asyncio.StreamReader()
+            stdin = FakeStdin()
+            spawn.make(stdin=stdin, stdout=reader, stderr=None)
+            bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+            reader.feed_data(_wire_line(_response_frame(1, {
+                "tools": _INIT_TOOLS,
+                "serverInfo": {"providerStates": [
+                    {"name": "@deepseek-ai/cordis-plugin-timer", "state": 2,
+                     "label": "active", "injects": []},
+                ]},
+            })))
+            await bridge.initialize()
+            return bridge
+
+        bridge = asyncio.run(scenario())
+        assert bridge.provider_states == [{
+            "name": "@deepseek-ai/cordis-plugin-timer", "state": 2,
+            "label": "active", "injects": []}]
+
+
+# ── 一次性 manager 进程（停桥后装/卸，防 pnpm EPERM；2026-11-09 dev 实测）──
+
+
+class _OnceProc:
+    """communicate() 形态的一次性子进程替身。"""
+
+    def __init__(self, stdout: bytes, stderr: bytes = b"", returncode: int = 0,
+                 hang: bool = False) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.killed = False
+        self._hang = hang
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self._hang:
+            await asyncio.sleep(30)
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+class TestManagerOneshot:
+    def _patch_spawn(self, monkeypatch: pytest.MonkeyPatch, proc: Any,
+                     captured: dict[str, Any] | None = None) -> None:
+        async def fake_spawn(program: str, *args: str, **kwargs: Any) -> Any:
+            if captured is not None:
+                captured["program"] = program
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+                request_path = Path(args[2])
+                captured["request"] = json.loads(request_path.read_text(encoding="utf-8"))
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+
+    def test_success_parses_envelope_and_passes_request(self, bmod: Any, tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b'{"ok": true, "data": {"application": "restart-required"}, "error": null}\n')
+        captured: dict[str, Any] = {}
+        self._patch_spawn(monkeypatch, proc, captured)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path), manager_config={"registry": "r"})
+        out = asyncio.run(bridge.manager_call_oneshot(
+            "install", {"spec": "pkg@1.0.0", "options": {"saveExact": True}}))
+        assert out["ok"] is True
+        assert out["data"]["application"] == "restart-required"
+        assert captured["program"] == "node"
+        assert captured["args"][1] == "--manager-once"
+        assert captured["request"]["method"] == "plugin/manager/install"
+        assert captured["request"]["params"]["spec"] == "pkg@1.0.0"
+        assert captured["request"]["manager"] == {"registry": "r"}
+
+    def test_missing_runtime_root_fails_before_spawn(self, bmod: Any,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        called: list[str] = []
+
+        async def fake_spawn(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001
+            called.append("spawn")
+            return _OnceProc(b"")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+        bridge = bmod.DshRuntimeBridge(runtime_root="")
+        out = asyncio.run(bridge.manager_call_oneshot("install", {}))
+        assert out["ok"] is False
+        assert "AGENTOS_DSH_RUNTIME_ROOT" in out["error"]
+        assert called == []
+
+    def test_node_missing_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fake_spawn(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001
+            raise FileNotFoundError("node")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_call_oneshot("install", {}))
+        assert out["ok"] is False
+        assert "node_missing" in out["error"]
+
+    def test_timeout_kills_process(self, bmod: Any, tmp_path: Path,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b"", hang=True)
+        self._patch_spawn(monkeypatch, proc)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_call_oneshot("install", {}, timeout_s=0.01))
+        assert out["ok"] is False
+        assert "timeout" in out["error"]
+        assert proc.killed is True
+
+    def test_empty_output_and_stderr_tail(self, bmod: Any, tmp_path: Path,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b"", b"boom\n", returncode=3)
+        self._patch_spawn(monkeypatch, proc)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_call_oneshot("remove", {"name": "x"}))
+        assert out["ok"] is False
+        assert "no result" in out["error"]
+        assert "boom" in out["error"]
+
+    def test_bad_json_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b"not-json\n")
+        self._patch_spawn(monkeypatch, proc)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_call_oneshot("install", {}))
+        assert out["ok"] is False
+        assert "bad result" in out["error"]
+
+    def test_non_object_result_is_fail_visible(self, bmod: Any, tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b"[1,2,3]\n")
+        self._patch_spawn(monkeypatch, proc)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_call_oneshot("install", {}))
+        assert out["ok"] is False
+        assert "non-object" in out["error"]
+
+    def test_isolated_helpers_delegate(self, bmod: Any, tmp_path: Path,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b'{"ok": true, "data": {}, "error": null}\n')
+        captured: dict[str, Any] = {}
+        self._patch_spawn(monkeypatch, proc, captured)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        asyncio.run(bridge.manager_install_isolated("pkg@1.0.0", "req-1", {"saveExact": True}))
+        assert captured["request"]["method"] == "plugin/manager/install"
+        assert captured["request"]["params"]["requestId"] == "req-1"
+        asyncio.run(bridge.manager_remove_isolated("pkg"))
+        assert captured["request"]["method"] == "plugin/manager/remove"
+        assert captured["request"]["params"] == {"name": "pkg"}
+
+    def test_unlink_failure_does_not_break_result(self, bmod: Any, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _OnceProc(b'{"ok": true, "data": {}, "error": null}\n')
+        self._patch_spawn(monkeypatch, proc)
+
+        def boom(_path: str) -> None:
+            raise OSError("locked")
+
+        monkeypatch.setattr(bmod.os, "unlink", boom)
+        bridge = bmod.DshRuntimeBridge(runtime_root=str(tmp_path))
+        out = asyncio.run(bridge.manager_call_oneshot("install", {}))
+        assert out["ok"] is True

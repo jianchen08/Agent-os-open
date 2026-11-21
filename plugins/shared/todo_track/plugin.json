@@ -6,12 +6,21 @@
   "entry": "python server.py",
   "invoke_entry": "todo.fold",
   "name": "Todo Track",
-  "description": "todo 清单双步骤插件（③级步骤服务消费者）：todo.extract（输出阶段）把本轮 assistant 回复里的 checkbox 行按增量协议（[x] 勾选匹配/[ ] 新增查重）并入 context.todo_text，同批写内存 latest 载荷；todo.fold（输入阶段，挂 prompt_build 之后）把说明常量与当前清单并入 prompt.dynamic_vars 消息 content 尾部（系统提示词零触碰——缓存前缀契约，2026-10-23）。context.todo_text 经 persistent_fields 落 pipeline_state（1.2.26 修：此前未声明，内核每轮终态注销热缓存、冷恢复只认声明键——每轮 merge 基座被丢，清单只剩最新一轮增量）；1.2.26 起 extract 另带一次性自愈（状态缺失/旧版本时从近轮 assistant 消息重放增量协议重建）。capabilities.steps 为唯一挂载面（按步骤名跨阶段引用），无默认 execute 入口；无块=状态停更零写入，任何异常 warning 直通不阻断。",
-  "version": "1.2.26",
+  "description": "todo 清单双步骤插件（③级步骤服务消费者）：todo.extract（输出阶段）把本轮 assistant 回复里的 checkbox 行按增量协议（[x] 勾选匹配/[ ] 新增查重）并入 context.todo_text，同批写内存 latest 载荷；todo.fold（输入阶段，挂 prompt_build 之后）把说明常量与当前清单并入 prompt.dynamic_vars 消息 content 尾部（系统提示词零触碰——缓存前缀契约，2026-10-23）。context.todo_text 经 persistent_fields 落 pipeline_state（1.2.26 修：此前未声明，内核每轮终态注销热缓存、冷恢复只认声明键——每轮 merge 基座被丢，清单只剩最新一轮增量）；1.2.26 起 extract 另带一次性自愈（状态缺失/旧版本时从近轮 assistant 消息重放增量协议重建）。capabilities.steps 为唯一挂载面（按步骤名跨阶段引用），无默认 execute 入口；无块=状态停更零写入，任何异常 warning 直通不阻断。1.2.28 修：注入面清单块头「变更时整表重发」为整表替换时代遗留，与 2026-10-24 增量协议裁定及 TODO_INSTRUCTIONS「无需重发全表」直接冲突——贴数据每轮出现的指令面赢，模型逐轮重发整表，措辞漂移绕过新增精确查重，近重复条目累积（实测症状：清单里很多重复文本又不一样）；改为「已随每轮注入，无需重发整表，变更只写有变化的单行」。1.2.29 修：勾选/新增匹配归一化（NFKC、空白、箭头尾注）+ 相似度唯一最优兜底（≥0.86 且与次优差 ≥0.05）；不做聚类（匹配无法可靠聚类）。 1.2.30 修（用户实测：深色主题下待办圆钮与展开面板四角出现实色方块底，圆角外侧本应透出宿主）：宿主深色而 webview 文档未声明 color-scheme 时 Chromium 把 iframe 画布涂成近白实色（实测角部残留近白画布底）；本页在 theme.sync 时按 --ag-bg 亮度兜底声明 color-scheme（宿主新 bootstrap 已注入则让位，不覆盖权威值）。同批修尺寸报小：webview.resize 量测避开入场动画 pop 的 scale 窗口（260 宽面板曾按 247/255 报出，宿主按此收缩 iframe 后右缘被裁、右侧圆角被切平），改为 animationend + document.fonts.ready 再补报终值。1.2.31 修（提取面行为变更 + 审查实证缺陷修复）：提取面只扫正文最终输出——跳过 thinking/reasoning 段（剥 content 内嵌 think 标签段与流中断未闭合尾段；标签族扩 canonical 口径：带属性/无 > 变体，与 llm/adapter_minimax 同族实现对齐防漂移——MiniMax 变体形态此前整段漏进提取面）；纯思考兜底轮（llm/adapter 非流式把 reasoning_content 回填正文）按剥离前 raw 对 raw 同文判定跳过（归一化不对称会漏判+误判双向错）；context.todo_state_v 状态版本升至 2——旧基座作废、从近轮 assistant 正文重放重建（幽灵条目一次性自愈），空基座显式清空注入源并同步置空面板 latest 载荷（状态面=面板不变量）。 1.2.32 修（用户实测 7fb38fe89e82：同条待办存 2~3 份副本——模型按「标题 — `任务ID`（状态）」派发汇报惯例重述待办，新增查重面只做归一化精确键判不住：尾注不剥则键不同即追加）：匹配归一化尾注剥离扩破折号族（—/–，与 → 同族；ASCII 连字符不剥防 video-shotcraft 类正文截键）+ 新增查重收拢 _is_known_item 兜底（相似唯一最优与勾选面同参 ratio ≥0.86 且与次优差 ≥0.05 双侧 ≥8 字；双向包含短侧 ≥6 字防 3 字短行误吞真新条目）；context.todo_state_v 升 3——v2 基座固化的重述副本按修复后口径从近轮正文重放重建（同 v2 一次性自愈通道）。 1.2.33（规则面，2026-11-16，用户口径）：TODO_INSTRUCTIONS 追加两条硬规则 + 全域适用——①用户每提一项需求（改什么/做什么/修什么）即建 `- [ ] ` 待办，不得只在对话里口头应承，提出即建不等方案，方案→实施走同一条待办推进；②用户没说通过不得勾选：待办只能因用户明确批准/确认，或实施完成且证据到位并经用户认可关闭，agent（含 L1）不得自行勾掉；③L1 调度方/L2 编排者/L3 执行者皆适用，各自承接的需求与遗留项/验收缺口同样记待办。 1.2.34 修（规则面，2026-11-16，用户口径「同样的待办只输出两遍」）：TODO_INSTRUCTIONS 建卡/勾选段改写为生命周期契约——每条待办全生命周期只输出两行（①首次建卡 `- [ ] `，②完成勾销 `- [x] `），清单里已有的条目不重写、不重述；进度汇报、后台任务状态汇报一律用普通文字（不带 `- [ ]`/`- [x]` 语法）——指令面治「汇报行复述待办」的输出面根因（数据面 1.2.32 判重兜底已就位，双层防御）。 1.2.35（规则面，2026-11-18，用户口径四轮收敛）：TODO_INSTRUCTIONS 精简定稿——生命周期改「每条待办只写两次」（建卡/勾销，删「其余时刻普通文字」句）；勾销门槛分两类（原始需求须用户确认、中间步骤证据到位即勾，取代「用户没说通过不得勾选」一刀切）；决策分流（要问/要拍→第一优先级 human_interaction 交互工具，删「禁止正文问句」）；GFM 任务行约束扩「禁止把清单输出成文件」；删「全域适用」段。",
+  "version": "1.2.35",
   "persistent_fields": [
     "context.todo_text",
     "context.todo_state_v"
   ],
+  "state": {
+    "reads": [
+      "context.todo_state_v",
+      "context.todo_text",
+      "messages",
+      "pipeline_id",
+      "prompt.dynamic_vars"
+    ]
+  },
   "capabilities": {
     "tools": [],
     "route_signals": [],

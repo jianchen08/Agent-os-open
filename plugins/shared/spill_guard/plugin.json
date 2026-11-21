@@ -1,8 +1,8 @@
 {
   "id": "pipeline_spill_guard",
   "name": "Spill Guard",
-  "description": "大输出兜底输出插件：对工具的大结果统一处理（原文存文件 + UTF-8 安全提取 + 定位符返回）。配置上与 tool_core 同 step 组合（排在其后），引擎 step 末尾落轨迹机制保证大结果不污染轨迹/messages。",
-  "version": "1.0.0",
+  "description": "大输出兜底输出插件：对工具的大结果统一处理（原文存文件 + UTF-8 安全提取 + 存档路径引导，agent 经 file_read/enhanced_search 直读）。配置上与 tool_core 同 step 组合（排在其后），引擎 step 末尾落轨迹机制保证大结果不污染轨迹/messages。on_pipeline_end 钩子清理本管道存档目录（ADR 2026-11-18-spill-file-face-direct-read）。",
+  "version": "1.1.0",
   "plugin_type": "pipeline",
   "language": "rust",
   "host_type": "in_process",
@@ -15,7 +15,9 @@
   "capabilities": {
     "tools": [],
     "route_signals": [],
-    "lifecycle_hooks": []
+    "lifecycle_hooks": [
+      "on_pipeline_end"
+    ]
   },
   "permissions": {},
   "priority": 50,
@@ -26,10 +28,12 @@
       "label": "spill_guard 兜底策略与存储配置"
     }
   ],
-  "force_include_tools": [
-    "spill_retrieve"
-  ],
   "state": {
-    "reads": []
+    "reads": [
+      "_full_tool_results",
+      "messages",
+      "pipeline_id",
+      "tool_results"
+    ]
   }
 }

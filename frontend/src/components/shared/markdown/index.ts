@@ -4,3 +4,4 @@
 
 export { CodeBlock, type CodeBlockProps } from './CodeBlock'
 export { MarkdownRenderer, type MarkdownRendererProps } from './MarkdownRenderer'
+export { BacklinksPanel, type BacklinksPanelProps } from './BacklinksPanel'

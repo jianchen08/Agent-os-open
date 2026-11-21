@@ -211,6 +211,22 @@ describe('MessageContentRenderer — system 片段', () => {
     // 级别图标为 svg 元素
     expect(container.querySelector('.message-content-renderer svg')).toBeInTheDocument()
   })
+
+  // 后端 notification_level 任意字符串直通（as any），现役值域含 success/critical/warn：
+  // 未知 level 曾抛 undefined.container 使切会话整页崩死（2026-11-13 用户实证），
+  // 此处断言兜底回退 info 样式且渲染不炸（含 level 缺失形态）。
+  it.each(['success', 'critical', 'warn', undefined])(
+    '未知 level=%s 兜底回退 info 样式，渲染不崩',
+    (level) => {
+      const { container } = renderAt([
+        systemFragment('系统消息', level as SystemLevel),
+      ])
+      const span = container.querySelector('.message-content-renderer span')
+      expect(span).toHaveTextContent('系统消息')
+      expect(span?.className).toContain('text-status-info')
+      expect(container.querySelector('.message-content-renderer svg')).toBeInTheDocument()
+    },
+  )
 })
 
 describe('MessageContentRenderer — memo 比较器', () => {
@@ -257,6 +273,16 @@ describe('MessageContentRenderer — memo 比较器', () => {
     const view = renderAt(fragments, { isStreaming: true })
     expect(probes.childRenders).toBe(1)
     view.rerender(<MessageContentRenderer fragments={fragments} isStreaming={true} />)
+    expect(probes.childRenders).toBe(2)
+  })
+
+  it('streamAnchorMs 变化 → 重渲染；不变 → memo 命中（思考卡片总耗时锚点）', () => {
+    const fragments = [textFragment('正文', 't1', false)]
+    const view = renderAt(fragments, { streamAnchorMs: null })
+    expect(probes.childRenders).toBe(1)
+    view.rerender(<MessageContentRenderer fragments={fragments} streamAnchorMs={1234} />)
+    expect(probes.childRenders).toBe(2)
+    view.rerender(<MessageContentRenderer fragments={fragments} streamAnchorMs={1234} />)
     expect(probes.childRenders).toBe(2)
   })
 

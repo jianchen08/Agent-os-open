@@ -2,10 +2,12 @@
  * 发送态生命周期重定义（落定语义）store 契约测试
  *
  * 用户裁定（2026-11-04，设计真值 docs/working/聊天消息流权威化重设计_20261027.md
- * 不变量 2 零乐观气泡不变）：
+ * 不变量 2 零乐观气泡不变；2026-11-18 并发抢占修订——超时不自动停 run、
+ * ack 受理放宽落定计时）：
  *   - 发送态终点 = 消息落进消息流（气泡认领/队列条出现），不是前端受理；
- *   - 发送态期间输入锁定；5s 未落定 → 判死（撤锁+timeout outcome+宿主停止链），
- *     判死即终局：迟到落定/20s 看门狗对同一 cmid 零动作；
+ *   - 发送态期间输入锁定；5s 未落定 → 判死出口（撤锁+timeout outcome，**不驱动
+ *     停止链**），判死即终局：迟到落定/20s 看门狗对同一 cmid 零动作；
+ *   - ack ok:true 到达 = 受理对账：落定计时放宽到宽限窗口（markSendAcked）；
  *   - 失败（ack ok:false / 20s ack 看门狗）= 另一判死出口（撤发送态+failed）；
  *   - 在途记录带输入快照：落定清空仅当当前文本 == 快照（不吞新输入）。
  */
@@ -161,5 +163,64 @@ describe('chatInputStore - 发送落定语义', () => {
     store.getState().endSendByCmid('never-registered', 'x')
     expect(store.getState().sendOutcomes).toEqual([])
     expect(store.getState().sendInFlightByPipeline).toEqual({})
+  })
+
+  // ── ack 受理对账宽限（2026-11-18 并发抢占修订）──
+
+  it('ack 到达放宽落定计时：5s 点不判死，宽限耗尽才判死且 outcome 带 acked reason', () => {
+    store.getState().beginSend('pipe-1', 'cmid-ack', '受理慢消息', 'tab-ack')
+
+    // ack 受理（内核已收货）→ 落定计时放宽
+    store.getState().markSendAcked('cmid-ack')
+
+    // 5s 原判死点：已受理消息不得判死（闸门等待/抢占腾槽启动延迟窗口）
+    vi.advanceTimersByTime(5000)
+    expect(store.getState().sendOutcomes).toEqual([])
+    expect(store.getState().sendInFlightByPipeline['pipe-1']).toHaveLength(1)
+
+    // 宽限（+25s）耗尽仍无落定 → 判死，outcome 带 acked 专属 reason（不诱导重发）
+    vi.advanceTimersByTime(25_000)
+    const outcome = lastOutcome()
+    expect(outcome).toMatchObject({ clientMessageId: 'cmid-ack', kind: 'timeout' })
+    expect(outcome?.reason).toContain('已受理')
+    // acked 文案不得诱导重发（无「重新发送」式指引）
+    expect(outcome?.reason).not.toContain('重新发送')
+    // 判死后在途撤下
+    expect(store.getState().sendInFlightByPipeline['pipe-1']).toEqual([])
+  })
+
+  it('宽限期内落定照常成功（landed 终局，无超时 outcome）', () => {
+    store.getState().saveDraft('tab-grace', '慢但活')
+    store.getState().beginSend('pipe-1', 'cmid-grace', '慢但活', 'tab-grace')
+    store.getState().markSendAcked('cmid-grace')
+
+    vi.advanceTimersByTime(5000 + 10_000)
+    store.getState().landSendByCmid('cmid-grace')
+
+    expect(lastOutcome()).toMatchObject({ clientMessageId: 'cmid-grace', kind: 'landed' })
+    expect(store.getState().sendOutcomes.some((o) => o.kind === 'timeout')).toBe(false)
+    expect(store.getState().drafts['tab-grace']).toBeUndefined()
+  })
+
+  it('markSendAcked 幂等：重复登记不二次放宽；已终局条目到达只记账零动作', () => {
+    store.getState().beginSend('pipe-1', 'cmid-idem', '幂等消息')
+    store.getState().markSendAcked('cmid-idem')
+    store.getState().markSendAcked('cmid-idem')
+
+    // 二次登记后仍按第一次宽限点判死（首次 +25s）
+    vi.advanceTimersByTime(5000 + 25_000)
+    expect(lastOutcome()?.kind).toBe('timeout')
+
+    // 已终局条目再来 ack：只记账，不产生新 outcome
+    store.getState().markSendAcked('cmid-idem')
+    expect(store.getState().sendOutcomes).toHaveLength(1)
+  })
+
+  it('未受理消息超时 outcome 不带 reason（走默认超时文案，可重试）', () => {
+    store.getState().beginSend('pipe-1', 'cmid-noack', '未受理消息')
+    vi.advanceTimersByTime(5000)
+    const outcome = lastOutcome()
+    expect(outcome).toMatchObject({ clientMessageId: 'cmid-noack', kind: 'timeout' })
+    expect(outcome?.reason).toBeUndefined()
   })
 })

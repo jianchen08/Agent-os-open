@@ -78,7 +78,7 @@ def test_metrics_config_path_hits_each_layout(
     expected = root.joinpath(*_PROBE_PARTS)
     expected.parent.mkdir(parents=True)
     expected.write_text("metrics: []\n", encoding="utf-8")
-    monkeypatch.setattr(tool_module, "__file__", str(plugin_file))
+    monkeypatch.setattr(sys.modules["acceptance"], "__file__", str(plugin_file))
 
     resolved = tool_module._metrics_config_path()
 
@@ -93,7 +93,7 @@ def test_metrics_config_path_falls_back_to_three_up_when_all_miss(
     （与 task_evaluate 侧同契约，_libs 单源；探测起点 = 插件目录）。"""
     plugin_file = tmp_path / "deep" / "nest" / "alone" / "tool.py"
     plugin_file.parent.mkdir(parents=True)
-    monkeypatch.setattr(tool_module, "__file__", str(plugin_file))
+    monkeypatch.setattr(sys.modules["acceptance"], "__file__", str(plugin_file))
 
     resolved = Path(tool_module._metrics_config_path())
 

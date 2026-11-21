@@ -242,14 +242,14 @@ class TestForceHostPolicy:
     @pytest.fixture
     def guard(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         g = _guard(docker_available=True, force_host=True)
-        # 策略真值：bash_execute 要求容器、file_read 走 host
+        # 策略真值：bash 要求容器、file_read 走 host
         class _Policy:
             def __init__(self, isolation: Any) -> None:
                 self.isolation = isolation
 
         def _resolve(tool_name: str, category: Any = None) -> Any:
             return _Policy(
-                IsolationLevel.CONTAINER if tool_name == "bash_execute" else IsolationLevel.HOST
+                IsolationLevel.CONTAINER if tool_name == "bash" else IsolationLevel.HOST
             )
 
         monkeypatch.setattr(g._decider, "resolve", _resolve)
@@ -258,7 +258,7 @@ class TestForceHostPolicy:
     async def test_container_tool_denied_not_downgraded(self, guard: Any) -> None:
         """要求容器的工具在 force_host 下拒绝执行（blocked），绝不降级宿主裸跑。"""
         result = await guard.execute(
-            PluginContext(state=_tool_state("bash_execute"), config={})
+            PluginContext(state=_tool_state("bash"), config={})
         )
 
         ctx0 = (result.state_updates or {}).get("execution_contexts", [{}])[0]
@@ -281,14 +281,14 @@ class TestForceHostPolicy:
     async def test_denied_context_is_observable_state(self, guard: Any) -> None:
         """denied 是显式 state（blocked + provider），供下游路由拦截（非日志级信号）。"""
         result = await guard.execute(
-            PluginContext(state=_tool_state("bash_execute"), config={})
+            PluginContext(state=_tool_state("bash"), config={})
         )
 
         updates = result.state_updates or {}
         contexts = updates.get("execution_contexts")
         assert isinstance(contexts, list) and contexts
         assert contexts[0]["blocked"] is True
-        assert contexts[0]["tool_name"] == "bash_execute"
+        assert contexts[0]["tool_name"] == "bash"
 
 
 # ═══════════════ decider.resolve ═══════════════
@@ -301,8 +301,8 @@ class TestDeciderResolve:
 
         d = decider_mod.IsolationDecider()
 
-        from_short = d.resolve("bash_execute")
-        from_none = d.resolve("bash_execute", None)
+        from_short = d.resolve("bash")
+        from_none = d.resolve("bash", None)
 
         assert from_short.isolation == from_none.isolation
         assert from_short == from_none, "缺省 category 与显式 None 走同一解析路径"
@@ -314,4 +314,4 @@ class TestDeciderResolve:
         d = decider_mod.IsolationDecider()
 
         assert d.policy_loader is d.policy_loader
-        assert d.policy_loader.resolve("bash_execute").isolation == d.resolve("bash_execute").isolation
+        assert d.policy_loader.resolve("bash").isolation == d.resolve("bash").isolation

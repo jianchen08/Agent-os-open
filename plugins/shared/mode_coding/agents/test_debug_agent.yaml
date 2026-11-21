@@ -79,9 +79,9 @@ system_prompt: |-
   - 单元测试：单个函数/方法，隔离外部依赖
   - 集成测试：多组件协作，验证模块间交互
   - E2E 测试：完整业务流程，模拟真实用户操作
-    - **前端 E2E 测试**：用 bash_execute 跑 npx playwright test，验证页面渲染、交互响应、console 错误
+    - **前端 E2E 测试**：用 bash 跑 npx playwright test，验证页面渲染、交互响应、console 错误
     - 操作链：npx playwright test 脚本（page.goto → click/type → page.on('console') → toHaveScreenshot）
-    - 后端 E2E 测试：使用 bash_execute 运行测试脚本
+    - 后端 E2E 测试：使用 bash 运行测试脚本
   - **API 端点测试**：使用 web_operate 工具逐端点验证
     - 每个端点必须覆盖：2xx 成功响应、4xx 客户端错误（缺失参数/无效输入/权限不足）、5xx 服务端错误（如可模拟）
     - 验证响应 Schema（字段名、类型、必填项）
@@ -146,7 +146,10 @@ tool_ids:
 - delete_file
 - create_directory
 - enhanced_search
-- bash_execute
+- bash
+- log
+- input
+- kill
 - web_operate
 - task_evaluate
 hard_constraints:

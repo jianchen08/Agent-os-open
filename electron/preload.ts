@@ -7,6 +7,12 @@
 
 import { contextBridge, ipcRenderer } from "electron";
 
+// R3 preload 最小面：禁 import 本地兄弟模块——通道名与主进程
+// connection-self-heal.ts 的 SELF_HEAL_REQUEST_CHANNEL / SELF_HEAL_REBUILT_CHANNEL
+// 共享常量靠注释锚定（改任一侧必须同步另一侧）。
+const SELF_HEAL_REQUEST_CHANNEL = "net:self-heal:request";
+const SELF_HEAL_REBUILT_CHANNEL = "net:self-heal:rebuilt";
+
 /** 通过 contextBridge 暴露给渲染进程的 API 接口 */
 /** WS 中继 URL 请求参数（目标基址 + 握手票据 + 协议版本 + 补漏游标） */
 export interface WsRelayUrlParams {
@@ -128,6 +134,22 @@ export interface ElectronAPI {
     /** 订阅新版本可用推送（主进程 update:available）；返回取消订阅函数 */
     onAvailable(
       callback: (info: { latestVersion: string; downloadUrl: string }) => void,
+    ): () => void;
+  };
+
+  /**
+   * 连接池毒化自愈子 API（2026-11-18 装机事故批次 2）：渲染进程 WS 重连达
+   * 阈值时请求主进程探活+重建 Electron 网络连接池；限频（5 分钟冷却）与
+   * 内核健康门控（内核真挂不重建）都在主进程侧。
+   */
+  connectionSelfHeal: {
+    /** 请求自愈（载荷 reconnectAttempts = 渲染侧累计重连失败次数）；返回是否重建 */
+    request(payload: {
+      reconnectAttempts: number;
+    }): Promise<{ rebuilt: boolean; reason?: string }>;
+    /** 订阅连接池已重建广播（net:self-heal:rebuilt）；返回取消订阅函数 */
+    onRebuilt(
+      callback: (payload: { rebuiltAt: string }) => void,
     ): () => void;
   };
 }
@@ -356,6 +378,36 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
       return () => {
         ipcRenderer.removeListener("update:available", handler);
+      };
+    },
+  },
+
+  /**
+   * 连接池毒化自愈子 API（2026-11-18 装机事故批次 2）。invoke 通道为
+   * net:self-heal:request（载荷 { reconnectAttempts }），主进程探活内核
+   * 健康后才 session.closeAllConnections() 并广播 net:self-heal:rebuilt
+   * （载荷 { rebuiltAt }）；冷却限频与健康门控都在主进程侧。
+   */
+  connectionSelfHeal: {
+    request: (payload: { reconnectAttempts: number }) => {
+      return ipcRenderer.invoke(
+        SELF_HEAL_REQUEST_CHANNEL,
+        payload,
+      ) as Promise<{ rebuilt: boolean; reason?: string }>;
+    },
+    onRebuilt: (
+      callback: (payload: { rebuiltAt: string }) => void,
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        payload: { rebuiltAt: string },
+      ): void => {
+        callback(payload);
+      };
+      ipcRenderer.on(SELF_HEAL_REBUILT_CHANNEL, handler);
+
+      return () => {
+        ipcRenderer.removeListener(SELF_HEAL_REBUILT_CHANNEL, handler);
       };
     },
   },

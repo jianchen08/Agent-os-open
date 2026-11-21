@@ -31,7 +31,8 @@ def _load_server() -> Any:
     sys.modules.pop("plugin", None)
     mod_name = "todo_track_server_test"
     spec = importlib.util.spec_from_file_location(mod_name, str(_DIR / "server.py"))
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
@@ -73,7 +74,11 @@ async def test_todo_extract_handler_degrades_on_error(monkeypatch: Any) -> None:
             raise RuntimeError("boom")
 
     srv = _load_server()
-    monkeypatch.setattr(srv, "get_instance", lambda: Boom())
+
+    def _boom_get_instance() -> Boom:
+        return Boom()
+
+    monkeypatch.setattr(srv, "get_instance", _boom_get_instance)
     assert await srv.todo_extract({"messages": []}, None) == {"state_updates": {}}
 
 
@@ -83,7 +88,11 @@ async def test_todo_fold_handler_degrades_on_error(monkeypatch: Any) -> None:
             raise RuntimeError("boom")
 
     srv = _load_server()
-    monkeypatch.setattr(srv, "get_instance", lambda: Boom())
+
+    def _boom_get_instance() -> Boom:
+        return Boom()
+
+    monkeypatch.setattr(srv, "get_instance", _boom_get_instance)
     assert await srv.todo_fold({}, None) == {"state_updates": {}}
 
 

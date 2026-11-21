@@ -94,10 +94,15 @@ class ProcessInfo:
     metadata: dict[str, Any] = field(default_factory=dict)
     output_task: asyncio.Task[None] | None = None  # 输出读取任务引用，防止垃圾回收
     # 最近一次被外部访问的时间（任何 get/send_input/terminate 调用都更新）。
-    # 看门狗据此判定进程是否已被 Agent 遗弃：内存紧张时按 idle(=now-last_access)
-    # 排序，杀最久没访问的；idle>30min 无条件兜底杀。活跃进程(agent 一直访问)
-    # idle≈0，永不被杀。
+    # 看门狗内存压力判据据此按 idle(=now-last_access) 排序，杀最久没访问的；
+    # 活跃进程(agent 一直访问) idle≈0，排最后。
     last_access_time: float = 0.0
+    # 最近一次产出输出的时刻（_read_output 每读到一个输出块即刷新；注册时
+    # 初始化为注册时刻，从未产出为 0.0 → 看门狗退化用 start_time 起算）。
+    # 孤儿兜底判据看「无输出时长」（ADR 2026-11-07：只杀真失控）——有持续
+    # 输出的长任务（cargo build）不被孤儿杀；无输出挂死（即使 agent 还在
+    # 轮询访问）仍按 _orphan_timeout 无条件杀。
+    last_output_time: float = 0.0
     # 该工作单元所属的进程后端（看门狗杀进程时调 backend.kill）。
     # 本地 bash 用 LocalProcessBackend，容器隔离用 ContainerProcessBackend。
     backend: ProcessBackend | None = None
@@ -158,3 +163,70 @@ class ProcessBackend(ABC):
         返回 None 表示采样不可用。
         """
         return None
+
+    async def probe_health(self) -> bool | None:
+        """探测后端传输通道是否可用（供 spawn 失败后的重试决策）。
+
+        返回 True=通道健康（可重试）、False=不可用（快速失败+熔断）、
+        None=该后端不支持探测（不做重试决策，按不可用处理）。默认 None。
+        """
+        return None
+
+    async def kill_host_tree(self, host_pid: int) -> None:
+        """宿主级杀 spawn 客户端进程树——**不依赖后端传输通道**。
+
+        spawn 阶段失败（如 ``wsl.exe`` 阻塞在服务连接、``docker.exe`` 卡在
+        daemon 握手）时，后端自身的 kill 实现要再走一遍同一通道（wsl/docker
+        exec），通道已坏时必然失败——2026-11-17 事故中 348 个挂死 wsl.exe
+        客户端正是由此堆积。故 spawn 失败收尾必须走宿主机进程树杀。
+        """
+        try:
+            import psutil  # noqa: PLC0415
+        except ImportError:
+            await self._kill_host_tree_os_fallback(host_pid)
+            return
+        try:
+            parent = psutil.Process(host_pid)
+        except psutil.NoSuchProcess:
+            return
+        try:
+            descendants = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            descendants = []
+        for proc in descendants:
+            try:
+                proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        try:
+            parent.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    @staticmethod
+    async def _kill_host_tree_os_fallback(host_pid: int) -> None:
+        """psutil 缺失时的 OS 级兜底。
+
+        psutil 可用时不走此兜底（``kill_host_tree`` 主路径 psutil 递归杀全树）；
+        此处 Windows 走 taskkill /T /F 杀整树，POSIX 无 psutil 场景仅
+        ``os.kill`` 杀父进程（不保证后代——后代成孤儿为已知取舍）。
+        """
+        import os  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
+
+        if os.name == "nt":
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,  # noqa: S603,S607
+                    ["taskkill", "/T", "/F", "/PID", str(host_pid)],  # noqa: S607
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return
+            return
+        try:
+            os.kill(host_pid, 9)  # SIGKILL
+        except (ProcessLookupError, PermissionError):
+            return

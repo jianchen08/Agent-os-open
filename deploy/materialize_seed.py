@@ -9,8 +9,9 @@
 - venv 装配原为设备端 mobile_init.sh 运行期动作（真机 17 个 ≈1-2min）→ 设计
   公理「能在打包期做好的就在打包期做好」：本脚本在种子内直接产出装配后布局
   opt/agentos/plugin-venvs/<plugin_id>/{bin/python,bin/python3 符号链接,
-  pyvenv.cfg,lib/python3.12/site-packages}，设备端零装配；opt/agentos/venvs
-  原快照保留（回滚兼容）。登记键 = plugin.json id（缺失回退目录名），与
+  pyvenv.cfg,lib/python3.12/site-packages}，设备端零装配；快照（opt/agentos/venvs）
+  是烘焙输入，--drop-snapshots 在烘焙发射后丢弃（17 个 venv 双份 = 种子内最大
+  冗余项，实测 1,009,689,711 字节 / 占 APK 前置压缩体 42%）。登记键 = plugin.json id（缺失回退目录名），与
   mobile_init.sh 同律；bin 符号链接与 pyvenv.cfg 内容与 mobile_init.sh 逐字
   同构（home/executable 指向种子内 PBS cpython 基座）。
 - 插件发现缓存（T4/R-2 层 2，--bake-discovery-cache）：survey 已扫全部
@@ -57,19 +58,28 @@ MANIFEST_BASENAMES = ("plugin.json", "plugin.yaml")
 
 # 注册键 = plugin.json id（缺失/损坏回退目录名，与 mobile_init.sh 同律）。
 
-# 可派生 Python 工件（T4 设备轮实证排除，两侧同律）：解释器运行期在插件面内
-# 写 __pycache__/*.pyc，boot 间即新于缓存——非漂移，不入摘要不比对。除此类外
-# 暂不扩其他运行期写入类别（.log/.lock 等，需求第一；台账留观察项）。
+# 运行期/开发期写入面排除（T4 设备轮实证 + 2026-11-20 启动优化 A 口径扩展，
+# 两侧同律）：__pycache__/*.pyc（解释器运行期写入）与 .venv*（venv 供给）、
+# .audit_tmp（运行期审计暂存）、data（插件运行数据，gitignore data/ 全域覆盖
+# 且全仓零 tracked 文件）、tests（开发面）目录整棵子树——均非插件运行语义
+# 载体，装机面可达数十万文件，不入摘要不比对；真实源码（plugin.json/*.py）
+# 照常入摘要，变更照常打穿缓存。kernel 侧 walk_face/is_runtime_dir_name 同规则。
 PYCACHE_DIRNAME = "__pycache__"
 PYC_SUFFIX = ".pyc"
+VENV_DIR_PREFIX = ".venv"
+RUNTIME_FACE_DIRS = ("__pycache__", ".audit_tmp", "data", "tests")
 
 
-def is_pycache_artifact(entry_name: str) -> bool:
-    """条目是否为可派生 Python 工件（路径任一段为 __pycache__，或 basename
-    以 .pyc 结尾——kernel 侧 walk_face 同规则）。"""
+def is_runtime_face_artifact(entry_name: str) -> bool:
+    """条目是否在插件发现摘要面外（路径任一段为运行期/开发期写入目录
+    __pycache__/.venv*/.audit_tmp/data/tests，或 basename 以 .pyc 结尾——
+    kernel 侧 walk_face 同规则）。"""
     if entry_name.rpartition("/")[2].endswith(PYC_SUFFIX):
         return True
-    return any(seg == PYCACHE_DIRNAME for seg in entry_name.split("/"))
+    return any(
+        seg in RUNTIME_FACE_DIRS or seg.startswith(VENV_DIR_PREFIX)
+        for seg in entry_name.split("/")
+    )
 
 
 def pyvenv_cfg() -> bytes:
@@ -136,7 +146,7 @@ def survey(path):
                 base = name.rpartition("/")[2]
                 if base in MANIFEST_BASENAMES:
                     manifest_dirs.setdefault(name.rpartition("/")[0], base)
-            if name.startswith(PLUGIN_FACE_PREFIX) and name != CACHE_ENTRY and not is_pycache_artifact(name):
+            if name.startswith(PLUGIN_FACE_PREFIX) and name != CACHE_ENTRY and not is_runtime_face_artifact(name):
                 face_regulars[name] = (member.offset_data, member.size)
             if name.startswith(MANIFEST_PREFIX) and name != CACHE_ENTRY:
                 rest = name[len(MANIFEST_PREFIX) :]
@@ -145,7 +155,7 @@ def survey(path):
                     plugin_ids[d] = manifest_id(tf.extractfile(member).read())
             regulars[name] = (member.offset_data, member.size)
         elif member.type == b"2":
-            if name.startswith(PLUGIN_FACE_PREFIX) and name != CACHE_ENTRY and not is_pycache_artifact(name):
+            if name.startswith(PLUGIN_FACE_PREFIX) and name != CACHE_ENTRY and not is_runtime_face_artifact(name):
                 face_links[name] = member.linkname
         if name.startswith(VENV_PREFIX):
             rest = name[len(VENV_PREFIX) :]
@@ -221,6 +231,20 @@ def build_discovery_cache(face_regulars, face_links, face_hardlinks, manifest_di
     }
     text = json.dumps(cache, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return (text + "\n").encode("utf-8"), None
+
+
+def _compressor(level, threads=0):
+    """种子压缩器：级别/多线程可配，多线程不可用时回退单线程（同一级别）。
+
+    种子内 17 个 venv 的 site-packages 高度同构，压缩级别对体积影响远大于
+    对解压速度的影响（zstd 解压耗时与压缩级别基本无关，仅解码窗口随级别涨：
+    level 19 窗口 8MB，移动端 proot 内 seedx 流式解压无压力）。"""
+    if threads and threads > 1:
+        try:
+            return zstd.ZstdCompressor(level=level, threads=threads)
+        except Exception:  # 无 multithread 支持的构建：回退单线程，不静默降级级别
+            print(f"[materialize] WARN zstd threads={threads} 不可用，回退单线程（level={level}）", file=sys.stderr)
+    return zstd.ZstdCompressor(level=level)
 
 
 def _renamed(member, new_name):
@@ -304,7 +328,18 @@ def _emit_baked(out, member, baked_name, seek_fh, index, stats):
 
 
 def rewrite(
-    raw, dst, index, dns_nameservers, plugin_ids, venv_dirs, replaces, baked_ok, drop_snapshots, cache_bytes=None
+    raw,
+    dst,
+    index,
+    dns_nameservers,
+    plugin_ids,
+    venv_dirs,
+    replaces,
+    baked_ok,
+    drop_snapshots,
+    cache_bytes=None,
+    zstd_level=3,
+    zstd_threads=0,
 ):
     resolv_new = "".join("nameserver " + s + chr(10) for s in dns_nameservers).encode()
     stats = {
@@ -321,20 +356,29 @@ def rewrite(
     # 烘焙发射位记账：每 venv 骨架只发一次（键=venv 目录名；键序随首条目，确定性）
     # baked_ok（输入已含烘焙位）= 视为发射齐全（烘焙条目走通用透传，快照按需丢弃）
     baked_emitted = set(venv_dirs) if baked_ok else set()
+    # 快照丢弃判据 = 「装配面在位」而非「输入已烤过」：本遍在烘焙发射（bake_now）
+    # 或输入已烤（baked_ok）二者任一成立即丢——只认 baked_ok 会让干净种子首建
+    # 永不丢快照（survey 读的是重写前的裸 tar，烘焙位此刻必然缺席），--drop-snapshots
+    # 沦为死开关。安全性由循环末尾 `venv_dirs - baked_emitted` 断言兜底：
+    # 有快照而无对应烘焙发射即 SystemExit，不存在「丢了却没烤」的窗口。
+    bake_now = bool(venv_dirs)
+    drop_snapshot = drop_snapshots and (baked_ok or bake_now)
     # 发现缓存发射记账：输入在位条目=原位换血（防重名残留），缺席=尾追加
     cache_emitted = False
     # 首见优先去重：重名条目只保留首个（历史脏种子实测重复份字节级一致；
     # 本发射面（骨架/烘焙位）各键只发一次，与透传去重互不干扰）
     emitted = set()
     with open(raw, "rb") as seek_fh, open(dst + ".tmp", "wb") as out_f:
-        cctx = zstd.ZstdCompressor(level=3)
+        cctx = _compressor(zstd_level, zstd_threads)
         with cctx.stream_writer(out_f) as comp, tarfile.open(fileobj=comp, mode="w|", format=tarfile.GNU_FORMAT) as out:
             for member, _ in stream_entries_raw(raw):
                 name = member.name
-                if baked_ok and drop_snapshots and name.startswith(VENV_PREFIX):
+                # 快照条目只丢「快照副本」这一面：循环末尾的烘焙块仍要跑（装配面
+                # 内容由它发射），故此处不用 continue，只把透传写入面关掉。
+                skip_write = drop_snapshot and name.startswith(VENV_PREFIX)
+                if skip_write:
                     stats["snapshots_dropped"] += 1
-                    continue
-                if cache_bytes is not None and name == CACHE_ENTRY:
+                elif cache_bytes is not None and name == CACHE_ENTRY:
                     if not cache_emitted:
                         info = tarfile.TarInfo(CACHE_ENTRY)
                         info.type = tarfile.REGTYPE
@@ -345,50 +389,51 @@ def rewrite(
                         stats["cache_baked"] += 1
                         cache_emitted = True
                     continue
-                if name in emitted:
-                    stats["deduped"] += 1
-                    continue
-                emitted.add(name)
-                if member.type == b"1":
-                    off, size = index[member.linkname]
-                    info = tarfile.TarInfo(member.name)
-                    info.type = tarfile.REGTYPE
-                    info.size = size
-                    info.mode = member.mode
-                    info.mtime = member.mtime
-                    info.uid = member.uid
-                    info.gid = member.gid
-                    info.uname = member.uname
-                    info.gname = member.gname
-                    seek_fh.seek(off)
-                    out.addfile(info, seek_fh)
-                    stats["materialized"] += 1
-                elif member.type == b"0" and member.name == RESOLV_ENTRY:
-                    info = tarfile.TarInfo(member.name)
-                    info.type = tarfile.REGTYPE
-                    info.size = len(resolv_new)
-                    info.mode = member.mode
-                    info.mtime = member.mtime
-                    out.addfile(info, io.BytesIO(resolv_new))
-                    stats["resolv_rewritten"] += 1
-                elif member.type == b"0" and member.name in replaces:
-                    # 条目替换（如内核换刀）：内容来自宿主文件，元数据随原条目
-                    host_path = replaces[member.name]
-                    info = tarfile.TarInfo(member.name)
-                    info.type = tarfile.REGTYPE
-                    info.size = Path(host_path).stat().st_size
-                    info.mode = member.mode
-                    info.mtime = member.mtime
-                    with open(host_path, "rb") as hf:
-                        out.addfile(info, hf)
-                    stats["replaced"] += 1
-                elif member.type == b"0":
-                    # 数据经 seek_fh 按 offset_data 定位（tf.fileobj 留给流式
-                    # next() 自行相对跳过——同一成员的数据烘焙位还要再读一次）
-                    seek_fh.seek(member.offset_data)
-                    out.addfile(member, seek_fh)
-                else:
-                    out.addfile(member)
+                if not skip_write:
+                    if name in emitted:
+                        stats["deduped"] += 1
+                        continue
+                    emitted.add(name)
+                    if member.type == b"1":
+                        off, size = index[member.linkname]
+                        info = tarfile.TarInfo(member.name)
+                        info.type = tarfile.REGTYPE
+                        info.size = size
+                        info.mode = member.mode
+                        info.mtime = member.mtime
+                        info.uid = member.uid
+                        info.gid = member.gid
+                        info.uname = member.uname
+                        info.gname = member.gname
+                        seek_fh.seek(off)
+                        out.addfile(info, seek_fh)
+                        stats["materialized"] += 1
+                    elif member.type == b"0" and member.name == RESOLV_ENTRY:
+                        info = tarfile.TarInfo(member.name)
+                        info.type = tarfile.REGTYPE
+                        info.size = len(resolv_new)
+                        info.mode = member.mode
+                        info.mtime = member.mtime
+                        out.addfile(info, io.BytesIO(resolv_new))
+                        stats["resolv_rewritten"] += 1
+                    elif member.type == b"0" and member.name in replaces:
+                        # 条目替换（如内核换刀）：内容来自宿主文件，元数据随原条目
+                        host_path = replaces[member.name]
+                        info = tarfile.TarInfo(member.name)
+                        info.type = tarfile.REGTYPE
+                        info.size = Path(host_path).stat().st_size
+                        info.mode = member.mode
+                        info.mtime = member.mtime
+                        with open(host_path, "rb") as hf:
+                            out.addfile(info, hf)
+                        stats["replaced"] += 1
+                    elif member.type == b"0":
+                        # 数据经 seek_fh 按 offset_data 定位（tf.fileobj 留给流式
+                        # next() 自行相对跳过——同一成员的数据烘焙位还要再读一次）
+                        seek_fh.seek(member.offset_data)
+                        out.addfile(member, seek_fh)
+                    else:
+                        out.addfile(member)
                 # 烘焙（正交于上方面位）：venv 快照 site-packages → 装配后布局
                 # （输入已含烘焙位=baked_ok 时跳过发射，防重复条目）
                 name = member.name
@@ -437,7 +482,16 @@ def main():
     )
     ap.add_argument("--check", action="store_true")
     ap.add_argument(
-        "--drop-snapshots", action="store_true", help="预烤在位时丢弃 venv 快照条目（体积减半；仅 baked_ok 时生效）"
+        "--drop-snapshots",
+        action="store_true",
+        help="丢弃 venv 快照条目（体积减半）：本遍发射烘焙位或输入已含烘焙位时生效，"
+        "由「快照有而烘焙缺」断言兜底",
+    )
+    ap.add_argument(
+        "--zstd-level", type=int, default=19, help="种子 zstd 压缩级别（默认 19；解压耗时基本不随级别变）"
+    )
+    ap.add_argument(
+        "--zstd-threads", type=int, default=4, help="种子 zstd 压缩线程数（默认 4；构建无多线程支持时回退 1）"
     )
     ap.add_argument(
         "--bake-discovery-cache",
@@ -514,8 +568,8 @@ def main():
     ):
         print("[materialize] already-materialized+baked, zero rewrite")
         return 0
-    if drop_snapshots and not baked_ok:
-        print("[materialize] WARN --drop-snapshots 需预烤在位（baked_ok=false），本轮忽略")
+    if drop_snapshots and not (baked_ok or venv_dirs):
+        print("[materialize] WARN --drop-snapshots 无可丢快照（venv_dirs 空且输入无烘焙位），本轮忽略")
     if args.check:
         print("[materialize] CHECK: pending, not rewritten")
         return 0
@@ -531,6 +585,8 @@ def main():
         baked_ok,
         drop_snapshots,
         cache_bytes if bake_cache else None,
+        args.zstd_level,
+        args.zstd_threads,
     )
     os.unlink(raw)
     print(

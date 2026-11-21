@@ -36,9 +36,10 @@ use serde_json::{json, Value};
 /// A 区 LRU 上限（键数/进程）。超限逐出 `updated_at` 最老键。
 pub const MAX_KEYS_PER_PROCESS: usize = 1000;
 
-/// A 区字节预算（进程级，近似值）：chunk 键的 blocks.content 携带流式累积
-/// 全文（单值可达百 KB 级），键数上限挡不住"少键大值"。超限按 `updated_at`
-/// 全局最老逐出（与键数 LRU 同序）。2026-09-09 内存驻留归因后补。
+/// A 区字节预算（进程级，近似值）：2026-11-16 分配流量修复后 chunk 键只存
+/// 轻量元数据（text_len/reasoning_len，全文驻留 chunk 累积档、消费时物化），
+/// 键数上限挡不住的"少键大值"只剩插件经 transient.set 自写的大值键。
+/// 超限按 `updated_at` 全局最老逐出（与键数 LRU 同序）。2026-09-09 驻留归因后补。
 pub const MAX_KEY_BYTES_PER_PROCESS: usize = 64 * 1024 * 1024;
 
 /// chunk 累积缓冲字节预算（进程级，近似值）：每 (tenant,pipeline,message) 一档
@@ -52,6 +53,9 @@ pub const CHUNK_FLUSH_EVERY: u64 = 10;
 
 /// chunk 累积节流时间窗（毫秒）。
 pub const CHUNK_FLUSH_INTERVAL_MS: u64 = 500;
+
+/// chunk 累积落 A 区的键前缀（`chunk:<message_id>`，与 message_slots 主键隔离）。
+const CHUNK_KEY_PREFIX: &str = "chunk:";
 
 /// 全局单例：进程级唯一 TransientStateRegistry。
 ///
@@ -96,6 +100,20 @@ pub fn approx_value_bytes(v: &Value) -> usize {
     }
 }
 
+/// chunk 快照全文形态单源（消费时物化用）：`{ text_len, reasoning_len,
+/// blocks: [{type: "text", content: <累计全文>}] }`。A 区拍存的是轻量元数据
+/// （[`ChunkAccumulator`] 旁注释），全文只在该函数被消费面调用时克隆一次。
+fn chunk_snapshot_value(text: &str, thinking: &str) -> Value {
+    json!({
+        "text_len": text.len(),
+        "reasoning_len": thinking.len(),
+        "blocks": [{
+            "type": "text",
+            "content": text,
+        }],
+    })
+}
+
 /// A 区单管道键集合：key → 条目（按 key 插入序 + updated_at 维护 LRU）。
 type PipelineKeyMap = HashMap<String, TransientEntry>;
 
@@ -106,8 +124,11 @@ pub struct MessageBinding {
 }
 
 /// chunk 累积节流档（方案 §2.4）：每 (tenant,pipeline,message) 一档，跨 chunk
-/// 持有增量拼接缓冲，达 [`CHUNK_FLUSH_EVERY`] 个或距上次落盘
-/// ≥ [`CHUNK_FLUSH_INTERVAL_MS`] 时把**累计快照**写进 A 区一次。
+/// 持有增量拼接缓冲（原地 `push_str` 复用同一缓冲，不每拍重建），达
+/// [`CHUNK_FLUSH_EVERY`] 个或距上次落盘 ≥ [`CHUNK_FLUSH_INTERVAL_MS`] 时把
+/// **轻量元数据**写进 A 区一次（2026-11-16 分配流量修复，用户裁定
+/// 「每一次的消息复用相同的内存页即可，不需要反复申请」）：
+/// [来源: docs/working/a695d2c7_llm轮内存放大点审计报告.md §5 修复1]
 struct ChunkAccumulator {
     count: u64,
     last_flush: Instant,
@@ -240,18 +261,22 @@ impl TransientStateRegistry {
         }
     }
 
-    /// 读一个中间态键。
+    /// 读一个中间态键。chunk 键命中活累积档时物化全文（消费时一次性克隆）。
     pub fn get(&self, tenant_id: &str, pipeline_id: &str, key: &str) -> Option<Value> {
-        self.keys
+        let stored = self
+            .keys
             .read()
             .get(&(tenant_id.to_string(), pipeline_id.to_string()))
             .and_then(|pipe| pipe.get(key))
-            .map(|e| e.value.clone())
+            .map(|e| e.value.clone())?;
+        Some(self.materialize_chunk_if_backed(tenant_id, pipeline_id, key, stored))
     }
 
     /// 枚举一个管道的全部存活键（key/value/updated_at），前端刷新恢复用。
+    /// chunk 键命中活累积档时物化全文（消费时一次性克隆）。
     pub fn list(&self, tenant_id: &str, pipeline_id: &str) -> Vec<(String, Value, Instant)> {
-        self.keys
+        let rows: Vec<(String, Value, Instant)> = self
+            .keys
             .read()
             .get(&(tenant_id.to_string(), pipeline_id.to_string()))
             .map(|pipe| {
@@ -259,7 +284,39 @@ impl TransientStateRegistry {
                     .map(|(k, e)| (k.clone(), e.value.clone(), e.updated_at))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|(k, v, at)| {
+                let v = self.materialize_chunk_if_backed(tenant_id, pipeline_id, &k, v);
+                (k, v, at)
+            })
+            .collect()
+    }
+
+    /// chunk 键消费面物化：键带 [`CHUNK_KEY_PREFIX`] 前缀且同名累积档仍存活时，
+    /// 从累积缓冲一次性物化全文形态（[`chunk_snapshot_value`]），否则退回存量
+    /// 条目（非 chunk 键 / 累积档已被 clear_chunk 或字节预算逐出 → 存量即
+    /// 轻量元数据，text_len 仍是轻量恢复锚）。锁序 keys 读（调用方已释放）→
+    /// chunk_accum 短锁，与 `memory_stats` 的 keys → accum 同序、绝不反向嵌套。
+    fn materialize_chunk_if_backed(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        key: &str,
+        stored: Value,
+    ) -> Value {
+        let Some(message_id) = key.strip_prefix(CHUNK_KEY_PREFIX) else {
+            return stored;
+        };
+        let accum_key = (
+            tenant_id.to_string(),
+            pipeline_id.to_string(),
+            message_id.to_string(),
+        );
+        match self.chunk_accum.lock().get(&accum_key) {
+            Some(entry) => chunk_snapshot_value(&entry.text, &entry.thinking),
+            None => stored,
+        }
     }
 
     /// 显式清一个键。
@@ -336,9 +393,11 @@ impl TransientStateRegistry {
     /// 每 N 个 chunk 或距上次落盘 ≥ 500ms 才写一次（节流语义在寄存器模块内部，
     /// 调用方零感知）。`content` 累加到 text 快照，`thinking` 累加到
     /// reasoning 快照（thinking_chunk 事件带 thinking 字段时走这里）。
-    /// 快照结构（方案 §2.4）：`{ text_len, blocks_摘要 }`——text_len = 累计
-    /// 文本长度（轻量恢复占位）；reasoning_len 同理；不携带全文（节流粒度
-    /// 快照，逐字重建需另立事件订阅能力）。
+    /// A 区拍存轻量元数据 `{ text_len, reasoning_len, blocks: [] }`——text_len
+    /// = 累计文本长度（轻量恢复占位）；reasoning_len 同理；**不克隆全文**
+    /// （全文只在消费时由 [`Self::materialize_chunk_if_backed`] 物化，
+    /// 2026-11-16 分配流量修复）。
+    /// [来源: docs/working/a695d2c7_llm轮内存放大点审计报告.md §5 修复1]
     pub fn accumulate_chunk(
         &self,
         tenant_id: &str,
@@ -398,15 +457,18 @@ impl TransientStateRegistry {
             return false;
         }
         // 落 A 区：chunk:<message_id> 键（键空间与 message_slots 主键隔离）。
-        // 快照在 chunk 锁内构造、计数与时间戳就地复位，锁外写 A 区——
+        // 每拍只落轻量元数据（text_len/reasoning_len + 空 blocks 占位），**不
+        // 克隆累计全文**——全文消费面（前端 F5 恢复 / transient.get）在读取时
+        // 由 [`Self::materialize_chunk_if_backed`] 从本累积档一次性物化，物化
+        // 次数从 O(ticks) 降为 O(消费次数)；分配流量从 O(拍 × 累计全文) 降为
+        // O(拍 × 元数据)。修复前每拍 `json!` 整段克隆累计全文（4MB 响应
+        // ×120s 流 ≈19GB 即弃分配流量，审计报告 §4 top1）。
+        // 轻量快照在 chunk 锁内构造、计数与时间戳就地复位，锁外写 A 区——
         // 与 clear_pipeline（keys → chunk_accum 顺序）锁序相反，绝不跨锁嵌套。
         let snapshot = json!({
             "text_len": entry.text.len(),
             "reasoning_len": entry.thinking.len(),
-            "blocks": [{
-                "type": "text",
-                "content": entry.text,
-            }],
+            "blocks": [],
         });
         entry.count = 0;
         entry.last_flush = now;
@@ -417,7 +479,7 @@ impl TransientStateRegistry {
         self.set(
             tenant_id,
             pipeline_id,
-            &format!("chunk:{message_id}"),
+            &format!("{CHUNK_KEY_PREFIX}{message_id}"),
             snapshot,
         );
         true
@@ -437,7 +499,11 @@ impl TransientStateRegistry {
                 Ordering::Relaxed,
             );
         }
-        self.clear(tenant_id, pipeline_id, &format!("chunk:{message_id}"));
+        self.clear(
+            tenant_id,
+            pipeline_id,
+            &format!("{CHUNK_KEY_PREFIX}{message_id}"),
+        );
     }
 
     /// chunk 累积缓冲字节预算逐出：按 `last_flush` 最旧移除直至预算内
@@ -465,6 +531,7 @@ impl TransientStateRegistry {
     }
 
     /// 取该 message 的 chunk 累积快照（中断合并落库的数据源；None = 无累积）。
+    /// 消费时从累积缓冲一次性物化全文（调用频度 = 中断合并次数，非热路径）。
     pub fn take_chunk_snapshot(
         &self,
         tenant_id: &str,
@@ -476,16 +543,10 @@ impl TransientStateRegistry {
             pipeline_id.to_string(),
             message_id.to_string(),
         );
-        self.chunk_accum.lock().get(&key).map(|e| {
-            json!({
-                "text_len": e.text.len(),
-                "reasoning_len": e.thinking.len(),
-                "blocks": [{
-                    "type": "text",
-                    "content": e.text,
-                }],
-            })
-        })
+        self.chunk_accum
+            .lock()
+            .get(&key)
+            .map(|e| chunk_snapshot_value(&e.text, &e.thinking))
     }
 
     // ── 两区共用生命周期 ──────────────────────────────────────
@@ -827,6 +888,67 @@ mod tests {
             "节流档已随管道清除"
         );
     }
+
+    // ── 分配流量修复（审计报告 §5 修复1）：拍存轻量元数据 + 消费时物化 ──
+
+    /// A 区拍只落轻量元数据（不存全文），消费面（get/list 命中活累积档）物化
+    /// 全文形态——观测语义与修复前等价（blocks[0].content = 累计全文），
+    /// 分配形态从 O(拍 × 全文) 降为 O(拍 × 元数据) + O(消费次数 × 全文)。
+    #[test]
+    fn chunk_flush_stores_light_metadata_and_materializes_full_text_on_consumption() {
+        let reg = TransientStateRegistry::new();
+        let delta = "x".repeat(10_000);
+        for _ in 0..CHUNK_FLUSH_EVERY {
+            reg.accumulate_chunk(TENANT, "pipe_light", "m1", &delta, "");
+        }
+        // 第 N 个 chunk 已触发落盘：全文物化形态与修复前逐字段等价
+        let snap = reg
+            .get(TENANT, "pipe_light", "chunk:m1")
+            .expect("落盘后可读");
+        assert_eq!(snap["text_len"], json!(10_000 * CHUNK_FLUSH_EVERY as usize));
+        assert_eq!(
+            snap["blocks"][0]["content"].as_str().unwrap().len(),
+            10_000 * CHUNK_FLUSH_EVERY as usize,
+            "消费面物化累计全文"
+        );
+        // list 同物化（前端 F5 恢复走 list 面）
+        let rows = reg.list(TENANT, "pipe_light");
+        let (_, v, _) = rows.iter().find(|(k, _, _)| k == "chunk:m1").unwrap();
+        assert_eq!(v["blocks"][0]["content"].as_str().unwrap().len(), 100_000);
+        // 轻量存储锁：A 区记账字节 ≪ 累计全文（修复前存量全文 ≈100KB，
+        // 修复后元数据 < 1KB）——证明全文不再驻留 A 区。
+        let key_bytes = reg.memory_stats().key_bytes;
+        assert!(
+            key_bytes < 1_000,
+            "A 区 chunk 键应只存轻量元数据（实际 {key_bytes} B，全文 100KB）"
+        );
+        // 累积档原地复用：多次消费读数一致（不因消费而清空/漂移）
+        let again = reg.get(TENANT, "pipe_light", "chunk:m1").unwrap();
+        assert_eq!(again["text_len"], snap["text_len"]);
+        reg.clear_pipeline(TENANT, "pipe_light");
+    }
+
+    /// 累积档被字节预算逐出（中断/强杀流的兜底路径）后，chunk 键退回存量
+    /// 轻量元数据：text_len 仍是恢复锚，blocks 空（前端占位内容为空串，
+    /// 崩溃恢复降级路径锁形）。
+    #[test]
+    fn chunk_snapshot_falls_back_to_stored_metadata_after_accum_evicted() {
+        let reg = TransientStateRegistry::new();
+        for _ in 0..CHUNK_FLUSH_EVERY {
+            reg.accumulate_chunk(TENANT, "pipe_fallback", "m1", "hello", "");
+        }
+        // 预算 0 → 全部累积档逐出（A 区 chunk 键保留）
+        reg.evict_accum_over_budget(0);
+        let snap = reg
+            .get(TENANT, "pipe_fallback", "chunk:m1")
+            .expect("键仍在");
+        assert_eq!(snap["text_len"], json!(5 * CHUNK_FLUSH_EVERY as usize));
+        assert!(
+            snap["blocks"].as_array().unwrap().is_empty(),
+            "累积档不在 → 退回存量轻量元数据（空 blocks）"
+        );
+        reg.clear_pipeline(TENANT, "pipe_fallback");
+    }
 }
 
 #[cfg(test)]
@@ -896,5 +1018,96 @@ mod byte_budget_tests {
             "最新档存活"
         );
         assert_eq!(reg.accum_bytes.load(Ordering::Relaxed), 600, "记账同步扣减");
+    }
+}
+
+/// 分配流量断言车道（审计报告 §4 top1 回归锁，2026-11-16 分配流量修复）。
+/// 计数分配器按线程在测量窗内累计分配字节——libtest 默认每测试独立线程，
+/// 并行测试互不污染；仅编进本 crate 单测二进制（cfg(test)），生产零影响。
+#[cfg(test)]
+mod alloc_traffic_tests {
+    use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    const TENANT: &str = "default";
+
+    thread_local! {
+        /// 测量窗开关。
+        static MEASURING: Cell<bool> = const { Cell::new(false) };
+        /// 窗内累计分配字节（流量口径：只加不减，realloc 计入新分配）。
+        static ALLOCATED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// 计数分配器：System 透传 + 测量窗内按线程累计分配字节。
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // try_with：线程退出期 TLS 析构中的分配静默跳过（防递归/panic）
+            if MEASURING.try_with(|m| m.get()).unwrap_or(false) {
+                let _ = ALLOCATED.try_with(|b| b.set(b.get().wrapping_add(layout.size() as u64)));
+            }
+            System.alloc(layout)
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout)
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: CountingAllocator = CountingAllocator;
+
+    /// 在分配计数测量窗内运行 `f`，返回窗内分配字节数（f 返回值在窗外丢弃）。
+    fn measured_bytes<T>(f: impl FnOnce() -> T) -> u64 {
+        MEASURING.with(|m| m.set(true));
+        let before = ALLOCATED.with(|b| b.get());
+        let out = f();
+        let after = ALLOCATED.with(|b| b.get());
+        MEASURING.with(|m| m.set(false));
+        drop(out);
+        after.wrapping_sub(before)
+    }
+
+    /// 同一轮模拟下快照拍路径的分配流量与拍数无关地有界（轻量元数据形态），
+    /// 而非随累计全文线性放大——修复前每拍 `json!` 整段克隆累计全文
+    /// （O(拍 × 平均全文)，4MB 响应 ×120s 流 ≈19GB 即弃分配流量的元凶）。
+    ///
+    /// 形态：测量窗外先把缓冲建到 3MB 并撑出容量余量（4MB cap，测量窗内
+    /// 零 realloc 噪声），窗内跑 10 个计数拍（每拍 10 个 10B chunk）。
+    /// 修复后每拍只分配轻量元数据 ≈ 数 KB；修复前每拍克隆 ~3MB 全文
+    /// ≈30MB——断言上界 200KB 与两形态相差两个数量级，判定无歧义。
+    #[test]
+    fn chunk_flush_allocation_traffic_bounded_by_metadata_not_full_text() {
+        let reg = TransientStateRegistry::new();
+        let t0 = Instant::now();
+        // Phase A（未测量）：首 chunk 2MB 定容 + 9×100KB 触发首个计数拍 +
+        // 收尾 100KB——缓冲容量 ≥4MB，Phase B 追加 1KB 不触发 realloc。
+        reg.accumulate_chunk_at(TENANT, "pipe_alloc", "m1", &"a".repeat(2_000_000), "", t0);
+        for _ in 0..9 {
+            reg.accumulate_chunk_at(TENANT, "pipe_alloc", "m1", &"a".repeat(100_000), "", t0);
+        }
+        reg.accumulate_chunk_at(TENANT, "pipe_alloc", "m1", &"a".repeat(100_000), "", t0);
+        // Phase B（测量）：10 个计数拍 × 10 chunk × 10B 增量（全文 3,001,000 B）
+        let flush_bytes = measured_bytes(|| {
+            for _ in 0..10 {
+                for _ in 0..10 {
+                    reg.accumulate_chunk_at(TENANT, "pipe_alloc", "m1", &"b".repeat(10), "", t0);
+                }
+            }
+        });
+        assert!(
+            flush_bytes < 200_000,
+            "10 个快照拍的分配流量应与累计全文（~3MB/拍）无关地有界，实际 {flush_bytes} B（修复前形态 ≈30MB）"
+        );
+        // 快照可回读不变：全文形态等价（Phase A 全部 + Phase B 增量）
+        let snap = reg.get(TENANT, "pipe_alloc", "chunk:m1").unwrap();
+        assert_eq!(snap["text_len"], json!(3_001_000));
+        assert_eq!(
+            snap["blocks"][0]["content"].as_str().unwrap().len(),
+            3_001_000
+        );
+        reg.clear_pipeline(TENANT, "pipe_alloc");
     }
 }

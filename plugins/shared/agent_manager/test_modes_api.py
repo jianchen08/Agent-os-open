@@ -44,7 +44,8 @@ _MODULE_NAME = "agent_manager_modes_api"
 
 def _load_module() -> Any:
     spec = importlib.util.spec_from_file_location(_MODULE_NAME, str(_PLUGIN_DIR / "server.py"))
-    assert spec and spec.loader
+    assert spec
+    assert spec.loader
     mod = importlib.util.module_from_spec(spec)
     sys.modules[_MODULE_NAME] = mod
     spec.loader.exec_module(mod)
@@ -107,7 +108,9 @@ def test_aggregate_real_factory_packages() -> None:
 def test_validate_rejects_unknown_field() -> None:
     mod = _load_module()
     decl, err = mod.validate_mode_declaration({"mode": "x", "name": "X", "levors": {}})
-    assert decl is None and "未知字段" in err and "levors" in err
+    assert decl is None
+    assert "未知字段" in err
+    assert "levors" in err
 
 
 # ── 2b. foreground_selectable（R10③ 补充裁定：前台可选声明） ─────────────
@@ -120,14 +123,40 @@ def test_validate_foreground_selectable_bool_forms() -> None:
         decl, err = mod.validate_mode_declaration(
             {"mode": "x", "name": "X", "foreground_selectable": value}
         )
-        assert decl is not None and err == ""
+        assert decl is not None
+        assert err == ""
         assert decl["foreground_selectable"] is value
     decl, err = mod.validate_mode_declaration(
         {"mode": "x", "name": "X", "foreground_selectable": "no"}
     )
-    assert decl is None and "foreground_selectable" in err
+    assert decl is None
+    assert "foreground_selectable" in err
     minimal, _ = mod.validate_mode_declaration({"mode": "x", "name": "X"})
-    assert minimal is not None and "foreground_selectable" not in minimal
+    assert minimal is not None
+    assert "foreground_selectable" not in minimal
+
+
+# ── 2c. inject_tool_ids（2026-11-11 模式标签注入声明） ────────────────────
+
+
+def test_validate_inject_tool_ids_forms() -> None:
+    """非空工具 id 列表收；空列表/非列表/非法条目拒；缺省不写键。"""
+    mod = _load_module()
+    decl, err = mod.validate_mode_declaration(
+        {"mode": "x", "name": "X", "inject_tool_ids": ["plugin_verify", "eval.screen"]}
+    )
+    assert decl is not None
+    assert err == ""
+    assert decl["inject_tool_ids"] == ["plugin_verify", "eval.screen"]
+    for bad in ([], "plugin_verify", ["bad name"], [3]):
+        decl, err = mod.validate_mode_declaration(
+            {"mode": "x", "name": "X", "inject_tool_ids": bad}
+        )
+        assert decl is None
+        assert "inject_tool_ids" in err
+    minimal, _ = mod.validate_mode_declaration({"mode": "x", "name": "X"})
+    assert minimal is not None
+    assert "inject_tool_ids" not in minimal
 
 
 def test_aggregate_foreground_selectable_default_true_when_absent(
@@ -151,7 +180,7 @@ def test_aggregate_foreground_selectable_default_true_when_absent(
 
 
 @pytest.mark.parametrize(
-    "decl,fragment",
+    ("decl", "fragment"),
     [
         ({"mode": "x", "name": "X", "tool_card": "fold"}, "tool_card"),
         ({"mode": "x", "name": "X", "presenter": {"source": "cards"}}, "presenter"),
@@ -181,7 +210,8 @@ def test_aggregate_foreground_selectable_default_true_when_absent(
 def test_validate_rejects(decl: dict[str, Any], fragment: str) -> None:
     mod = _load_module()
     got, err = mod.validate_mode_declaration(decl)
-    assert got is None and fragment in err
+    assert got is None
+    assert fragment in err
 
 
 def test_validate_rejects_package_source_with_pending_verdict() -> None:
@@ -193,13 +223,15 @@ def test_validate_rejects_package_source_with_pending_verdict() -> None:
         "pipelines": [{"name": "p", "context": "conversation", "source": "package"}],
     })
     assert got is None
-    assert "包内自持待拍板" in err and "registry" in err
+    assert "包内自持待拍板" in err
+    assert "registry" in err
 
 
 def test_validate_accepts_minimal_and_full() -> None:
     mod = _load_module()
     minimal, err = mod.validate_mode_declaration({"mode": "x", "name": "X"})
-    assert minimal is not None and err == ""
+    assert minimal is not None
+    assert err == ""
     full, err = mod.validate_mode_declaration({
         "mode": "x", "name": "X", "pipelines": [
             {"name": "x_pipe", "context": "conversation"},
@@ -211,7 +243,8 @@ def test_validate_accepts_minimal_and_full() -> None:
         "theme": "ocean_dark", "icon": "🌊",
         "plan_spec": "skill-solution-x",
     })
-    assert full is not None and err == ""
+    assert full is not None
+    assert err == ""
 
 
 @pytest.mark.parametrize(
@@ -284,7 +317,8 @@ def test_validate_accepts_declared_planning_executors() -> None:
         "mode": "x", "name": "X",
         "planning_executors": ["mode_x/planner_agent", "research_agent"],
     })
-    assert got is not None and err == ""
+    assert got is not None
+    assert err == ""
 
 
 # ── 3. 单包坏不拖垮好包 ──────────────────────────────────────────────────
@@ -366,7 +400,8 @@ def test_list_modes_real_factory_packages() -> None:
         "default": False,  # M1 并入刀：出生默认绑定标志（仅 personal 声明 true）
     }
     coding = next(e for e in entries if e["mode"] == "coding")
-    assert coding["pipelines"] == [] and coding["chain"] == {"entry": "main"}
+    assert coding["pipelines"] == []
+    assert coding["chain"] == {"entry": "main"}
     assert coding["icon"] == "🔨"
     # 全七包 icon 声明齐全（选择器选项图标，D1 registry 驱动声明面）
     assert {e["icon"] for e in entries} == {
@@ -398,7 +433,8 @@ def test_list_modes_descriptions_carry_routing_knowledge() -> None:
     entries = {e["mode"]: e for e in mod.list_modes()}
     for mode_key, entry in entries.items():
         desc = entry["description"]
-        assert isinstance(desc, str) and desc.strip(), f"{mode_key} description 缺失/为空"
+        assert isinstance(desc, str)
+        assert desc.strip(), f"{mode_key} description 缺失/为空"
         assert "。" in desc, f"{mode_key} description 未成句（路由知识不可过薄）: {desc!r}"
     # 路由键逐包在场（与其 chain 声明同源：直派快道 / 编排链执行者）。
     # coding 自 2026-10-23 用户裁定起一律派执行型编排 L2，不再直派 L3 执行者
@@ -412,7 +448,8 @@ def test_list_modes_descriptions_carry_routing_knowledge() -> None:
     assert "mode_godot/godot_orchestrator_agent" in godot
     assert "novel_orchestrator_agent" in entries["writing"]["description"]
     research = entries["research"]["description"]
-    assert "research_agent" in research and "research_orchestrator_agent" in research
+    assert "research_agent" in research
+    assert "research_orchestrator_agent" in research
     assert "main 即执行者" in entries["roleplay"]["description"]
     assert "mode_evolution/evolution" in entries["evolution"]["description"]
 

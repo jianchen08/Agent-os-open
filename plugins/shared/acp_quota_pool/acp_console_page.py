@@ -1,12 +1,18 @@
 """acp_quota_pool 网关控制台 webview 页（独名模块，server 薄引用）。
 
-形态（2026-10-16 用户裁定）：不自渲染任何额度数据——页面只做三件事：
-① 探网关状态（经宿主桥 fetch 本插件端点），在运行即整页自导航到网关管理页
-  （location.replace 走 iframe 自身导航，不受宿主注入 CSP 的 frame-src 约束，
-  管理页即嵌在本面板内；沙箱 opaque origin 下管理页自身 XHR 可用性属上游
-  行为 [未验证]，页面保留「新窗口打开」兜底链接）；
-② 未运行 → 显式「网关未运行」态 + 「拉起网关」按钮（POST 本插件 start 端点，
-  后端与 on_load 消费同一段拉起逻辑）；
+形态（2026-10-16 用户裁定：不自渲染任何额度数据；2026-11-12 修订：不自导航嵌页；
+2026-11-21 修订：拉起按钮语义移交——拉起职责在 llm_provider_gateway 插件，
+本页只探活与展示移交提示）。
+页面只做三件事：
+① 探网关状态（经宿主桥 fetch 本插件端点），在运行 → 显式「网关运行中」卡片 +
+  「新窗口打开管理页」按钮（window.open 走沙箱 allow-popups，新窗口是真实
+  origin，网关管理页 SPA 可正常运行）。**不自导航嵌页**：网关管理页是 React
+  SPA（强依赖 localStorage/sessionStorage，实证 management.html 含 localStorage
+  引用 34 处），iframe 自导航后沙箱旗标随浏览上下文继承、SPA 仍在 opaque
+  origin 内运行，访问 storage 抛 SecurityError 初始化崩溃 → 整页空白
+  （2026-11-12 用户实测装机白屏根因）；
+② 未运行 → 显式「网关未运行」态 + 移交提示（拉起由 llm_provider_gateway 插件
+  承接——捆绑网关自持拉起）+「重新检查」按钮（重探本插件 status 端点）；
 ③ 零自定义数据渲染、不碰管理密钥（登录与「记住密码」由用户在网关页内完成）。
 
 样式走宿主主题令牌：WebviewWidget 经 theme.sync 下行 ``--ag-*`` token map
@@ -90,39 +96,28 @@ function escapeHtml(s) {
 }
 function setHtml(id, html) { document.getElementById(id).innerHTML = html; }
 function renderRunning(url) {
-  setHtml('state', '<span class="dot ok"></span>网关运行中，正在打开管理页...');
+  setHtml('state', '<span class="dot ok"></span>网关运行中');
   setHtml('detail', '');
   var actions = document.getElementById('actions');
   actions.innerHTML = '';
-  var link = document.createElement('a');
-  link.href = url;
-  link.textContent = '未自动跳转？新窗口打开';
-  link.addEventListener('click', function(ev) { ev.preventDefault(); window.open(url); });
-  actions.appendChild(link);
+  var btn = document.createElement('button');
+  btn.id = 'btn_open';
+  btn.textContent = '新窗口打开管理页';
+  btn.addEventListener('click', function() { window.open(url); });
+  actions.appendChild(btn);
 }
 function renderStopped(detail) {
   setHtml('state', '<span class="dot err"></span>网关未运行');
   setHtml('detail', escapeHtml(detail || ''));
-  setHtml('actions', '<button id="btn_start">拉起网关</button>');
-  document.getElementById('btn_start').addEventListener('click', startGateway);
-}
-async function startGateway() {
-  var btn = document.getElementById('btn_start');
-  if (btn) { btn.disabled = true; btn.textContent = '拉起中...'; }
-  try {
-    var data = unwrap(await agentosFetch('/ext/acp_quota_pool/gateway/start', {}));
-    if (data.management_url && data.running) { renderRunning(data.management_url); location.replace(data.management_url); return; }
-    renderStopped(data.detail || '拉起后复验仍未就绪');
-  } catch(e) {
-    renderStopped('拉起失败: ' + String(e));
-  }
+  setHtml('actions', '<div class="detail">拉起由 llm_provider_gateway 插件托管（捆绑网关自持拉起）</div>'
+    + '<button id="btn_recheck">重新检查</button>');
+  document.getElementById('btn_recheck').addEventListener('click', boot);
 }
 async function boot() {
   try {
     var data = unwrap(await agentosFetch('/ext/acp_quota_pool/gateway/status'));
     if (data.management_url && data.running) {
       renderRunning(data.management_url);
-      location.replace(data.management_url);
     } else {
       renderStopped(data.detail);
     }

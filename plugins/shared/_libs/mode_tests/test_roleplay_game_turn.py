@@ -64,7 +64,7 @@ class _StubPlugin:
 
 
 @pytest.fixture
-def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, patch_shared: Any) -> Any:
     """server 模块 + 通道清空 + pipeline-state provider 注入 + chat capability 捕获桩。
 
     captured / fail 标志挂在 module 上（captured_chat / chat_raises），测试直读。
@@ -83,6 +83,7 @@ def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             return {"status": "dispatched", "pipeline_id": params.get("pipeline_id")}
 
     module.plugin = _StubPlugin(_FakeChat())
+    patch_shared("plugin", module.plugin)  # 拆分后 rp_* 各持绑定，传播到消费点
     module.captured_chat = captured
     module.chat_raises = False
 
@@ -285,7 +286,7 @@ def test_turn_capability_failure_502(rp: Any) -> None:
     assert "turn 派发失败" in _body_json(result)["error"]
 
 
-def test_turn_unexpected_status_502(rp: Any) -> None:
+def test_turn_unexpected_status_502(rp: Any, patch_shared: Any) -> None:
     """回执非 dispatched（如内核拒绝注入坐标）= 502，不吞。"""
     _post(rp, f"{_PANEL_EP}/game/session/attach", {"session_id": "pipe-1", "host_id": "factory_web"})
 
@@ -295,6 +296,7 @@ def test_turn_unexpected_status_502(rp: Any) -> None:
 
     module = rp
     module.plugin = _StubPlugin(_Odd())
+    patch_shared("plugin", module.plugin)  # 拆分后 rp_* 各持绑定，传播到消费点
     result = _post(module, _TURN, _turn_body(), headers=_AUTH)
 
     assert _status_of(result) == 502

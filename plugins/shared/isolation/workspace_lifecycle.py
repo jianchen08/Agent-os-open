@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -27,6 +28,7 @@ __all__ = [
 def skill_source_dirs(
     base_path: Path,
     injected: list[Path] | None = None,
+    mode_packages: list[Path] | None = None,
 ) -> list[tuple[Path, str]]:
     """技能源目录四源并集（升优先序，附来源标注；快照复制与 skill 注册表共用单点）。
 
@@ -48,6 +50,10 @@ def skill_source_dirs(
     injected 非 None = 测试/隔离环境的注入面（替换两处包根推导与用户根
     推导，不叠加；注入语义是"替换推导"；条目标注 ``injected``，无来源语义）。
 
+    mode_packages 非 None = 按模式收窄（调用方传入当前生效模式包目录，
+    替换出厂/用户两处 ``mode_*`` 全量枚举；仓根与用户根源仍保留）。
+    None = 现状全量并集（无模式标签的会话/任务回退语义）。
+
     消费方：WorkspaceLifecycleManager._skill_sources（快照复制，只取目录）
     与 skill_manager 注册表（skill.list / skill.get，目录+标注同源消费）
     ——两侧禁止另写目录推导，防再漂移（X11-F1）。
@@ -55,26 +61,35 @@ def skill_source_dirs(
     sources: list[tuple[Path, str]] = [(base_path / "skills", "repo_root")]
     if injected is not None:
         return sources + [(p, "injected") for p in injected]
-    factory_shared = Path(__file__).resolve().parents[1]
-    sources.extend(
-        (pkg / "skills", f"mode:{pkg.name}")
-        for pkg in sorted(factory_shared.glob("mode_*"))
-        if (pkg / "skills").is_dir()
-    )
-    user_modes = None
-    try:
-        from _root_api import user_space  # noqa: PLC0415
-
-        user_plugins = user_space.user_plugins_dir()
-        user_modes = Path(user_plugins) / "modes" if user_plugins else None
-    except Exception as exc:  # user_space 不可得 → 无用户源（与 mode_keys 同口径）
-        logger.debug("[WorkspaceLifecycle] user_space 不可得（仅仓根+出厂包源）| err=%s", exc)
-    if user_modes is not None:
+    if mode_packages is not None:
         sources.extend(
             (pkg / "skills", f"mode:{pkg.name}")
-            for pkg in sorted(user_modes.glob("mode_*"))
+            for pkg in mode_packages
             if (pkg / "skills").is_dir()
         )
+    else:
+        factory_shared = Path(__file__).resolve().parents[1]
+        sources.extend(
+            (pkg / "skills", f"mode:{pkg.name}")
+            for pkg in sorted(factory_shared.glob("mode_*"))
+            if (pkg / "skills").is_dir()
+        )
+        user_modes = None
+        try:
+            from _root_api import user_space  # noqa: PLC0415
+
+            user_plugins = user_space.user_plugins_dir()
+            user_modes = Path(user_plugins) / "modes" if user_plugins else None
+        except Exception as exc:  # user_space 不可得 → 无用户源（与 mode_keys 同口径）
+            logger.debug(
+                "[WorkspaceLifecycle] user_space 不可得（仅仓根+出厂包源）| err=%s", exc
+            )
+        if user_modes is not None:
+            sources.extend(
+                (pkg / "skills", f"mode:{pkg.name}")
+                for pkg in sorted(user_modes.glob("mode_*"))
+                if (pkg / "skills").is_dir()
+            )
     try:
         from _root_api import user_space  # noqa: PLC0415
 
@@ -124,8 +139,18 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
 
     # ── 任务启动 ──────────────────────────────────────────────
 
-    def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
-        """任务启动时的生命周期钩子，根据 is_root 分发到子任务或根任务处理"""
+    def on_task_start(
+        self,
+        task_id: str,
+        workspace: str,
+        task_data: dict,
+        mode_packages: list[Path] | None = None,
+    ) -> dict:
+        """任务启动时的生命周期钩子，根据 is_root 分发到子任务或根任务处理
+
+        mode_packages：当前生效模式包目录（按调用传入，不钉在 manager 上
+        ——manager 跨任务缓存；None = 全量模式包并集，见 skill_source_dirs）。
+        """
         self._record_main_branch()
         self.restore_ws_meta(task_id)
         existing = self._ws_meta_store.get(task_id)
@@ -138,7 +163,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
                     existing.get("mode"),
                     ws_path,
                 )
-                self._copy_skills_to_workspace(ws_path)
+                self._copy_skills_to_workspace(ws_path, mode_packages=mode_packages)
                 return existing
             logger.debug(
                 "[WorkspaceLifecycle] 已有 ws_meta 但路径不存在，重新创建: task_id=%s, path=%s",
@@ -149,19 +174,22 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
             meta = self._start_subtask(task_id, workspace, task_data)
         else:
             meta = self._start_root_task(task_id, workspace, task_data)
-        self._copy_skills_to_workspace(meta["path"])
+        self._copy_skills_to_workspace(meta["path"], mode_packages=mode_packages)
         return meta
 
-    def on_session_start(self, workspace: str) -> None:
+    def on_session_start(
+        self, workspace: str, mode_packages: list[Path] | None = None
+    ) -> None:
         """主会话（无任务身份）工作区就绪：确保目录存在并同步 skills 快照。
 
         主会话工作区 = 配置的工作空间根（workspace.root，任务工作区的父目录），
         仓库根不得作为会话工作区（agent 读写面不得触及项目源码树）。
         skills 同源同机制：文件工具与提示词引用的 skills/... 相对路径在此
         目录内解析（与任务管道 _copy_skills_to_workspace 同一复制例程）。
+        mode_packages 语义同 on_task_start（会话模式标签收窄技能源）。
         """
         Path(workspace).mkdir(parents=True, exist_ok=True)
-        self._copy_skills_to_workspace(workspace)
+        self._copy_skills_to_workspace(workspace, mode_packages=mode_packages)
 
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """子任务启动：共享父工作空间。
@@ -204,8 +232,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
             root_path = Path(workspace)
             if not root_path.exists():
                 root_path.mkdir(parents=True, exist_ok=True)
-            self._prepare_root_repo(root_path, task_id)
-            meta = self._create_worktree_root(ws_base, root_path, task_id)
+            meta = self._prepare_workspace_for_worktree(root_path, ws_base, task_id)
             self._ws_meta_store[task_id] = meta
             logger.info(
                 "[WorkspaceLifecycle] worktree 拓扑(子任务): 源目录建隔离副本 "
@@ -268,22 +295,29 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
 
     # ── 技能文件复制 ──────────────────────────────────────────────
 
-    def _skill_sources(self) -> list[Path]:
-        """技能同步源目录清单（升优先序：仓根 → 出厂模式包 → 用户根模式包 → 用户根 skills/）。
+    def _skill_sources(self, mode_packages: list[Path] | None = None) -> list[Path]:
+        """技能同步源目录清单（升优先序：仓根 → 模式包 → 用户根 skills/）。
 
         目录解析抽公共函数 skill_source_dirs（快照复制与 skill_manager 注册
         表同源消费，X11-F1），本方法只做快照面适配（丢弃来源标注）；
         mode_skill_sources 注入与用户根推导语义见其 docstring。
+        mode_packages 非 None = 按模式收窄模式包来源（按调用传入）。
         """
         return [
-            path for path, _source in skill_source_dirs(self._base_path, self._mode_skill_sources)
+            path
+            for path, _source in skill_source_dirs(
+                self._base_path, self._mode_skill_sources, mode_packages
+            )
         ]
 
-    def _copy_skills_to_workspace(self, ws_path: str) -> None:
+    def _copy_skills_to_workspace(
+        self, ws_path: str, mode_packages: list[Path] | None = None
+    ) -> None:
         """将技能快照同步到工作空间（按技能粒度增量）。
 
-        源 = 项目根 skills/ ∪ 模式包 skills/（出厂 + 用户根）∪ 用户根 skills/
-        （见 _skill_sources）；
+        源 = 项目根 skills/ ∪ 模式包 skills/ ∪ 用户根 skills/
+        （见 _skill_sources）；mode_packages 非 None 时模式包只取当前生效
+        模式（调用方按 execution_context.mode 解析），None = 全量并集回退。
         同名优先序与双根解析一致：用户根包技能 > 出厂包技能 > 仓根。任务/
         会话启动时调用一次，让 Agent 在 host / worktree / Docker 容器所有
         模式下都能通过 skills/<技能名>/… 访问技能；已有技能保持原样仅补缺。
@@ -307,7 +341,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
         # 名 → 源目录：升优先序遍历，后源同名覆盖前源（用户副本赢）
         picked: dict[str, Path] = {}
         dst_identity = resolve_path_identity(skills_dst)
-        for source in self._skill_sources():
+        for source in self._skill_sources(mode_packages):
             if not source.is_dir() or resolve_path_identity(source) == dst_identity:
                 continue
             for skill_src in source.iterdir():
@@ -460,17 +494,42 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
         )
         return meta
 
-    def _prepare_root_repo(self, root_path: Path, task_id: str) -> None:
-        """把项目根整理成可建 worktree 的就绪仓库（git init / 补提交 / auto-save 守卫）。
+    def _prepare_lock_timeout_seconds(self) -> float:
+        """同 repo 准备锁等待上限（秒；覆盖 root 就绪 + worktree 建树全程）。"""
+        cfg = getattr(self, "_config", None)
+        ws_cfg = cfg.get("workspace", {}) if isinstance(cfg, dict) else {}
+        raw = ws_cfg.get("prepare_lock_timeout_seconds", 180)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 180.0
+        return max(30.0, min(value, 3600.0))
 
-        并发互斥：多个子任务同时派发到同一项目仓时，init/add/commit 会互相
-        竞争（index.lock / rev-parse 撞上 HEAD 中间态）——初始化段用进程级
-        锁文件串行化（临时目录按项目路径哈希命名，不污染项目内容）；竞争
-        等待方在拿锁前先复检 HEAD，其他任务已完成初始化则直接跳过。
-        """
-        deadline = time.monotonic() + 30.0
+    def _prepare_lock_path(self, root_path: Path) -> Path:
+        """同 repo 初始化锁路径（临时目录按项目路径哈希命名，不污染项目内容）。"""
         digest = hashlib.sha1(str(root_path).lower().encode("utf-8")).hexdigest()[:16]
-        lock_path = Path(tempfile.gettempdir()) / f"agentos_init_{digest}.lock"
+        return Path(tempfile.gettempdir()) / f"agentos_init_{digest}.lock"
+
+    def _lock_is_stale(self, lock_path: Path) -> bool:
+        """锁文件是否陈旧（持锁方崩溃残留）；活锁不得清理。"""
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+        except OSError:
+            return False
+        return age >= max(self._prepare_lock_timeout_seconds() * 2, 600.0)
+
+    @contextlib.contextmanager
+    def _repo_prepare_lock(self, root_path: Path, task_id: str):
+        """同 repo 工作空间准备互斥（root 就绪 + worktree 建树同一临界区）。
+
+        并发 task_submit 对同一项目仓各自做 auto-save / worktree add 时，
+        index 锁与对象库 I/O 会互相拖垮（30s 级超时 → 误判失败）。临界区
+        扩到建树完成，等待方在锁释放后看到的是干净的 HEAD/对象库。
+        持锁方崩溃残留的锁文件按 `prepare_lock_timeout * 2`（≥600s）判陈旧清理。
+        """
+        lock_path = self._prepare_lock_path(root_path)
+        timeout = self._prepare_lock_timeout_seconds()
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -478,25 +537,36 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
                 os.close(fd)
                 break
             except FileExistsError:
-                if self._root_repo_ready(root_path):
-                    logger.info(
-                        "[WorkspaceLifecycle] 项目仓已由并发任务完成初始化，跳过: task_id=%s, path=%s",
-                        task_id,
-                        root_path,
-                    )
-                    return
+                if self._lock_is_stale(lock_path):
+                    logger.warning("[WorkspaceLifecycle] 清理陈旧初始化锁: %s", lock_path)
+                    with contextlib.suppress(OSError):
+                        lock_path.unlink()
+                    continue
                 if time.monotonic() > deadline:
                     raise RuntimeError(
-                        f"项目空间初始化锁等待超时(30s): task_id={task_id}, path={root_path}"
+                        f"项目空间初始化锁等待超时({timeout:.0f}s): task_id={task_id}, path={root_path}"
                     ) from None
                 time.sleep(0.5)
         try:
-            self._prepare_root_repo_locked(root_path, task_id)
+            yield
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 lock_path.unlink()
-            except OSError:
-                pass
+
+    def _prepare_root_repo(self, root_path: Path, task_id: str) -> None:
+        """把项目根整理成可建 worktree 的就绪仓库（git init / 补提交 / auto-save 守卫）。
+
+        锁只覆盖 root 就绪段；生产路径「root 就绪 + worktree 建树」整体互斥
+        走 [`_prepare_workspace_for_worktree`]。
+        """
+        with self._repo_prepare_lock(root_path, task_id):
+            self._prepare_root_repo_locked(root_path, task_id)
+
+    def _prepare_workspace_for_worktree(self, root_path: Path, ws_base: Path, task_id: str) -> dict:
+        """同一 repo 锁内完成 root 就绪 + worktree 建树。"""
+        with self._repo_prepare_lock(root_path, task_id):
+            self._prepare_root_repo_locked(root_path, task_id)
+            return self._create_worktree_root(ws_base, root_path, task_id)
 
     def _root_repo_ready(self, root_path: Path) -> bool:
         """项目仓是否已就绪（.git 存在且 HEAD 可解析）。"""
@@ -596,8 +666,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
         ws_base = self._get_workspace_root()
         if not root_path.exists():
             root_path.mkdir(parents=True, exist_ok=True)
-        self._prepare_root_repo(root_path, task_id)
-        meta = self._create_worktree_root(ws_base, root_path, task_id)
+        meta = self._prepare_workspace_for_worktree(root_path, ws_base, task_id)
         self._ws_meta_store[task_id] = meta
         return meta
 

@@ -27,6 +27,9 @@ export interface PluginStatus {
   config_files: Array<{ id: string; label: string; path: string }>
   has_contributes: boolean
   has_http_endpoints: boolean
+  /** 可见性（private 插件机制，ADR 2026-11-18 决策 5）：private = 随仓内置
+   *  分发、不进用户插件安装/管理面；缺省（旧内核响应）视为 public。 */
+  visibility?: 'public' | 'private'
   /** 准入分级（2026-09-25）：被剥除的危险前端能力（host_js/host_css），
    *  非空 = 设置页显示"已限制"（未授予即注册面剥除，禁静默） */
   restricted_capabilities?: string[]

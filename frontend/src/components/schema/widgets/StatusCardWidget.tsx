@@ -14,9 +14,9 @@
 
 import React, { useContext, useState } from 'react'
 import { AlertCircle, CheckCircle2, Clock, Loader2, PauseCircle, XCircle } from '@/assets/icons'
+import { useWidgetEventValue } from '@/hooks/useWidgetEventValue'
 import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
 import { WidgetActionContext } from '@/services/schema/widgetActionBus'
-import { useWidgetEventValue } from '@/hooks/useWidgetEventValue'
 
 // ═════════════════════════════════════════════════════════════════
 // metric 形态（原 StatusCardWidget）
@@ -153,7 +153,7 @@ function ProgressView({
         {label && (
           <div className="flex items-center gap-2">
             <span className="text-foreground text-sm font-medium">{label}</span>
-            <span className="text-muted-foreground text-xs">处理中...</span>
+            <span className="text-muted-foreground text-xs">执行中</span>
           </div>
         )}
         <div className="h-2 w-full overflow-hidden rounded-full bg-muted">

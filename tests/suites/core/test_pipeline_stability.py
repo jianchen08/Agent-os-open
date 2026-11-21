@@ -3,7 +3,7 @@
 
 覆盖范围：
 - D2: evaluator_agent.yaml max_iterations 配置约束
-- D3: evaluator_agent.yaml plugins 配置正确加载
+- D3: evaluator_agent.yaml 评估者模式退役配置键零残留（改管道 state 字段路由）
 - D4: evaluator_agent.yaml tool_ids 完整性验证
 - D5: input_adapter run_in_executor 不阻塞事件循环
 
@@ -43,11 +43,19 @@ def test_max_iterations_enforced():
 
 @pytest.mark.core
 def test_evaluator_agent_config_loaded():
-    """验证 evaluator_agent.yaml 中 plugins.enabled 包含 task_reminder 且 evaluation_mode 为 true。"""
+    """验证 evaluator_agent.yaml 不再声明 plugins 配置节（评估者模式退役键零残留）。
+
+    评估者模式自 99403b823 起不走 agent yaml 配置键：路由键 = 管道 state 的
+    ``evaluation.mode`` / ``evaluation.metric_id``（task_evaluate 派发评估子
+    管道时写入）；plugins.enabled.task_reminder.evaluation_mode 配置键随该
+    提交退役删除，声明面复活即为契约漂移（行为面路由由 task_reminder 家族
+    测试覆盖）。
+    """
     config = yaml.safe_load(EVALUATOR_YAML.read_text(encoding="utf-8"))
-    enabled_plugins = config["plugins"]["enabled"]
-    assert "task_reminder" in enabled_plugins
-    assert enabled_plugins["task_reminder"]["evaluation_mode"] is True
+    assert "plugins" not in config, (
+        "evaluator_agent.yaml 不应声明 plugins 节：评估者模式已改管道 state "
+        "字段路由（evaluation.mode / evaluation.metric_id，99403b823）"
+    )
 
 
 @pytest.mark.core

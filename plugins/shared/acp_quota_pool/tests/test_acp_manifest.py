@@ -61,10 +61,17 @@ def test_console_page_htmlpath_maps_to_declared_endpoint() -> None:
 def test_console_page_html_references_status_and_start_endpoints() -> None:
     html = acp_console_page.CONSOLE_HTML
     assert "/ext/acp_quota_pool/gateway/status" in html
-    assert "/ext/acp_quota_pool/gateway/start" in html
-    # 自导航嵌管理页 + 新窗口兜底 + 拉起按钮三件套在场（零数据渲染的形态守卫）
-    assert "location.replace" in html
-    assert "拉起网关" in html
+    # 2026-11-21 拉起面单点化：页面不再调 start 端点（拉起由 llm_provider_gateway
+    # 插件承接）——未运行态显式移交提示 + 重新检查；start 调用面不得回归。
+    assert "/ext/acp_quota_pool/gateway/start" not in html
+    assert "llm_provider_gateway" in html
+    # 运行态卡片 + 新窗口打开管理页（window.open 走沙箱 allow-popups，真实
+    # origin）形态守卫。c08ffeae1 起废除 iframe 自导航 location.replace——
+    # React SPA 强依赖 storage，沙箱 opaque origin 下 SecurityError 白屏
+    # （用户实测实证），不得回归。
+    assert "window.open" in html
+    assert "location.replace" not in html
+    assert "拉起网关" not in html  # 拉起按钮语义退役
     assert MANAGEMENT_PAGE in html or "management_url" in html
 
 
@@ -90,9 +97,28 @@ def test_gateway_config_file_declared_and_present() -> None:
 def test_gateway_config_truth_shape() -> None:
     truth = _gateway_truth()
     assert truth["base_url"].startswith("http")
-    assert truth["start_command"].endswith(".bat")
+    # 2026-11-21 拉起面单点化：start_command_* 拉起命令面（含个人路径硬编码）
+    # 全量退役——真值文件不得再含任何拉起命令键（探活面零拉起）。
+    for retired in ("start_command", "start_command_windows", "start_command_linux", "start_command_darwin"):
+        assert retired not in truth, f"退役拉起键残留: {retired}"
     assert float(truth["health_timeout_secs"]) > 0
-    assert float(truth["startup_grace_secs"]) > 0
+
+
+def test_gateway_truth_carries_no_personal_paths() -> None:
+    """个人路径红线：真值文件不得含本机个人目录（装机态不可用面）。"""
+    text = _GATEWAY_YAML.read_text(encoding="utf-8")
+    assert "C:\\Users\\jc" not in text
+    assert "start-gateway.bat" not in text
+
+
+def test_gateway_manifest_declares_probe_only_fields() -> None:
+    fields = {
+        field["name"]
+        for config_file in _manifest()["config_files"]
+        if config_file["id"] == "gateway"
+        for field in config_file.get("fields", [])
+    }
+    assert fields == {"base_url", "health_timeout_secs"}
 
 
 def test_gateway_config_management_key_is_reference_not_truth() -> None:
@@ -104,7 +130,12 @@ def test_gateway_config_management_key_is_reference_not_truth() -> None:
 
 @pytest.mark.parametrize(
     "permission_key",
-    ["ACP_GATEWAY_BASE_URL", "ACP_GATEWAY_START_COMMAND"],
+    ["ACP_GATEWAY_BASE_URL"],
 )
 def test_gateway_env_overrides_declared_in_permissions(permission_key: str) -> None:
     assert permission_key in _manifest()["permissions"]["env_vars"]
+
+
+def test_retired_start_command_env_not_declared() -> None:
+    """退役面钉子：拉起命令环境变量不再出现在权限声明面。"""
+    assert "ACP_GATEWAY_START_COMMAND" not in _manifest()["permissions"]["env_vars"]

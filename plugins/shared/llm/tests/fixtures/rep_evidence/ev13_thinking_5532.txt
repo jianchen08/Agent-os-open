@@ -1,0 +1,18 @@
+asury_seed_if_empty": 500.0 in defs. Simpler — but I already wrote treasury_seed per scenario. I can compute: pick seed for scenario by... game.rs gets scenario in tick_standing(w, scenario) but init_game_layer_once doesn't. I can change init_game_layer_once signature? It's called from web.rs:624. Easier: seed in ensure via "first non-zero seed whose scenario region matches"? Overcomplicating.
+Simplest: defs keeps treasury_seed map; init_game_layer_once(w): cell=treasury_cell(w); if amount_in < 1e-9: seed = *treasury_seed.values().find(|v| **v>0.0).unwrap_or(0.0) → spawn. For standard cell 京畿 has 800 → no seed. For qing 华北 empty → 500. Good enough, and data-driven.
+But wait — game.rs currently `use engine_core::fnv::{PVal, Payload};` etc. The json parser is at crate::qing::json. game.rs can `use crate::qing::json::{parse, J};`.
+Rather than many fiddly edits, I'll rewrite game.rs sections with python regex replacements on the CRLF file. The sections:
+A) Replace the two struct+const blocks (lines 24-64 approx) with new loader code.
+B) build(): replace "京畿" (3 places) with treasury var; ledger line.
+C) light_mandate grain_gift: spawn_at("库银",300,"京畿") → treasury; ledger text; recruit 代理人 Some("京畿") → treasury cell.
+D) annex: 3 places "京畿".
+E) ensure_mandate_state or init_game_layer_once: add seeding.
+F) uses of BUILDINGS/MANDATES (.iter().find) — with Vec, same syntax works: BUILDINGS.iter() → defs().buildings.iter(). Change references: line 69 `BUILDINGS.iter()`, 119 `BUILDINGS.iter()`, 186 `MANDATES.iter()`. Also spec.build_ticks used as i64 — keep i64.
+Let me do this with a python script using regex on bytes, converting to text with \r\n kept. I'll operate on decoded string.
+Then web.rs: move game block out of else. Current structure (lines ~597-630):
+```
+if st.scenario == "qing-v1" {
+... step_year ...
+st.series...push...
+} else {
+step_scenario(...);

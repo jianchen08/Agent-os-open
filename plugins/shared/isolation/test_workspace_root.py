@@ -142,87 +142,53 @@ class TestFindProjectRoot:
         assert find_project_root() == _REPO_ROOT
 
 
-class TestInstalledFormAnchor:
-    """装机形态相对 root 锚点（用户根）。
+class TestRelativeRootAnchor:
+    """相对 root 锚点（配置根驱动，单锚点）。
 
-    契约（2026-10-01 工作空间 root 迁用户根）：
-    - 装机链标记（AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin）在场 + 相对 root
-      → 锚 user_space.user_root()（安装目录随卸载整体删除，工作空间不得
-      锚进抹除面——BUG-85 同款动因）；
-    - 绝对 root 原样使用，两种形态都不改（用户显式配置尊重）；
-    - dev 形态（标记缺省/非 builtin）相对 root 仍锚项目根（既有语义）；
-    - 用户根不可用/user_space 缺失 → 回落项目根，不 panic。
+    契约（ADR 2026-11-07 §2.5：双源仲裁环境变量退役，形态感知随之收敛）：
+    - AGENTOS_CONFIG_ROOT 指向的配置根含 plugins/isolation/isolation_config.yaml
+      时，锚点 = 配置根父目录——dev（配置根=仓内 config）锚项目根；装机
+      （配置根=用户空间 config）锚用户空间根（可写、升级不丢、卸载保留）；
+    - 配置根无 isolation 配置 → 沿祖先目录链找仓根（既有回退）；
+    - 绝对 root 原样使用（用户显式配置尊重）。
     """
 
-    @pytest.fixture(autouse=True)
-    def _shared_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """user_space 位于 plugins/shared/，与本测试目录无包含关系，显式入 path。"""
-        shared_dir = str(_PLUGIN_DIR.parents[0])  # plugins/shared/
-        monkeypatch.syspath_prepend(shared_dir)
-
-    def _fake_user_space(self, monkeypatch: pytest.MonkeyPatch, root: Path | None) -> None:
-        import user_space
-
-        monkeypatch.setattr(user_space, "user_root", lambda: root)
-
-    @pytest.mark.parametrize("root_val", [_default_ws_root, "custom_ws"])
-    def test_installed_relative_root_anchors_user_root(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_val: str
+    def test_relative_root_anchors_config_root_parent_when_seeded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """装机形态 + 相对 root → 锚用户根（两组 root 值同契约）。"""
-        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
-        uroot = tmp_path / "uroot"
-        self._fake_user_space(monkeypatch, uroot)
+        """配置根含 isolation 配置 → 锚配置根父目录（装机=用户空间根的解析形）。"""
+        cfg_root = tmp_path / "uroot" / "config"
+        iso = cfg_root / "plugins" / "isolation"
+        iso.mkdir(parents=True)
+        (iso / "isolation_config.yaml").write_text("workspace:\n", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(cfg_root))
         mod = _load_ws()
-        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": root_val}})
-        base = Path(mod.get_workspace_base_dir())
-        assert base == uroot / root_val
-        assert base.is_absolute(), f"锚定结果必须是绝对路径，实际: {base}"
-        assert base.relative_to(uroot) == Path(root_val)
+        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
+        assert mod.get_workspace_base_dir() == tmp_path / "uroot" / "my_ws"
 
-    def test_installed_absolute_root_used_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """装机形态 + 绝对 root → 原样使用（用户显式配置尊重，不切锚）。"""
-        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
-        self._fake_user_space(monkeypatch, Path(r"C:\fake\uroot"))
+    def test_relative_root_ancestor_chain_when_config_root_not_seeded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """配置根不含 isolation 配置 → 走祖先目录链回退（仓根形态）。"""
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_empty_dir()))
+        mod = _load_ws()
+        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
+        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
+
+    def test_absolute_root_used_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """绝对 root 原样使用（用户显式配置尊重，不切锚）。"""
         mod = _load_ws()
         monkeypatch.setattr(
             mod, "_load_isolation_config", lambda: {"workspace": {"root": "D:/some/abs/dir"}}
         )
         assert mod.get_workspace_base_dir() == Path("D:/some/abs/dir")
 
-    @pytest.mark.parametrize("marker", [None, "user", ""])
-    def test_non_installed_chain_keeps_project_root(
-        self, monkeypatch: pytest.MonkeyPatch, marker: str | None
-    ) -> None:
-        """非装机链（标记缺省/非 builtin 值/空白）相对 root 仍锚项目根。"""
-        if marker is None:
-            monkeypatch.delenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", raising=False)
-        else:
-            monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", marker)
-        self._fake_user_space(monkeypatch, Path(r"C:\fake\uroot"))
-        mod = _load_ws()
-        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
-        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
 
-    def test_installed_user_root_unavailable_falls_back_to_project_root(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """装机形态 + 用户根不可得（None）→ 回落项目根，不 panic。"""
-        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
-        self._fake_user_space(monkeypatch, None)
-        mod = _load_ws()
-        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
-        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
+def tmp_empty_dir() -> str:
+    """配置根替身：真实存在但无 isolation 配置的空目录。"""
+    import tempfile
 
-    def test_installed_user_space_module_missing_falls_back(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """装机形态 + user_space 模块缺失（ImportError）→ 回落项目根，不 panic。"""
-        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
-        monkeypatch.setitem(sys.modules, "user_space", None)
-        mod = _load_ws()
-        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
-        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
+    return tempfile.mkdtemp(prefix="ws-anchor-cfg-")
 
 
 class TestWorkspaceBaseDir:

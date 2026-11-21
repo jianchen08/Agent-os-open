@@ -6,7 +6,8 @@
 按 **当前 HEAD 行号** 覆盖，并逐条给出语义）。
 
 分组覆盖（行号 = 当前 HEAD）：
-1. manager.py 68-69：`_load_provider_config` 仓库 yaml 缺失 → 返回 {}（走默认）。
+1. manager.py：providers_config 必填（`_load_provider_config` 隐藏兜底面
+   2026-11-13 删除，无注入 = 显式默认集；见 TestProviderConfigYamlFallback）。
 2. manager.py 398-399 / 482 / 601-602：wsl_native 后端三处跳过（容器恢复扫描 /
    镜像清理 / 停机清点）——wsl_native 无常驻进程，清点无意义。
 3. manager.py 858-865：`_find_existing_container` 的 wsl_native 委托通路
@@ -132,6 +133,7 @@ _MANAGER_STUB_KEYS = (
     "providers.base",
     "providers.docker_provider",
     "providers.host_provider",
+    "providers.linux_native_provider",
     "providers.wsl_native_provider",
     "hardware_profile",
     "tasks",
@@ -194,6 +196,16 @@ def _install_manager_stubs() -> None:
     wsl_mod.WslNativeProvider = WslNativeProvider
     sys.modules["providers.wsl_native_provider"] = wsl_mod
 
+    # linux_native 桩（manager.py 模块级 import；此前缺桩=文件自 linux_native
+    # 引入起全红——2026-11-13 触碰即清同刀补齐）
+    linux_mod = types.ModuleType("providers.linux_native_provider")
+
+    class LinuxNativeProvider:
+        pass
+
+    linux_mod.LinuxNativeProvider = LinuxNativeProvider
+    sys.modules["providers.linux_native_provider"] = linux_mod
+
     hp = types.ModuleType("hardware_profile")
     hp.get_resource_profile = lambda: {
         "max_environments": 3,
@@ -245,27 +257,27 @@ def _make_manager(mod: Any) -> Any:
 
 
 # ═══════════════════════════════════════════════════════════
-# 1. _load_provider_config 注入单通道（yaml 直读回退已退役，F11 2026-10-08）
+# 1. 提供者配置单通道（_load_provider_config 隐藏兜底面已于 2026-11-13 删除：
+#    providers_config 必填，无注入=显式默认集；config_path 失败亦归 {}）
 # ═══════════════════════════════════════════════════════════
 
 
 class TestProviderConfigYamlFallback:
-    def test_config_center_unreachable_returns_empty(self, manager_stubs: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ConfigCenter 不可达 → 返回 {}（调用方走默认提供者集）。
+    def test_create_providers_requires_config_no_hidden_fallback(self, manager_stubs: None) -> None:
+        """providers_config 必填：隐藏二次读取面已删（F11 单通道终点）。
 
-        仓库 yaml 直读回退已退役：无第二层读取，仓库布局假设不成立（sidecar
-        cwd ≠ 仓库根），静默兜底即 2026-09-14「yaml 已启用而落地走 cua」
-        事故形态。"""
+        旧 `_load_provider_config`（ConfigCenter 静默兜底）已删除——同型事故
+        2026-11-13 装机再现（配置快照丢 wsl_native 段 → Docker 静默补位），
+        面上无任何隐藏读取路径是本测试的执法点。"""
         mod = _load_manager()
 
-        fake_center = types.ModuleType("config")
-        fake_center.config_center = types.ModuleType("config.config_center")
-        fake_center.config_center.get_config_center = lambda: (_ for _ in ()).throw(
-            RuntimeError("cc unreachable")
-        )
-        monkeypatch.setitem(sys.modules, "config", fake_center)
-        monkeypatch.setitem(sys.modules, "config.config_center", fake_center.config_center)
-        assert mod._load_provider_config() == {}
+        import inspect  # noqa: PLC0415
+
+        sig = inspect.signature(mod._create_providers_from_config)
+        assert sig.parameters["providers_config"].default is inspect.Parameter.empty
+
+        with pytest.raises(TypeError):
+            mod._create_providers_from_config()  # type: ignore[call-arg]
 
 
 # ═══════════════════════════════════════════════════════════

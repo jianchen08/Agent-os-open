@@ -9,10 +9,18 @@ use rusqlite::Connection;
 use tracing::{error, info, warn};
 
 /// SQLite schema 版本（PRAGMA user_version）。结构变更新增 MIGRATIONS 条目并递增。
-pub(super) const SCHEMA_VERSION: i64 = 1;
+/// v2 = pending 输入行收敛为「信封 + DispatchRequest」（ADR-2026-11-17）。
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 /// 单条迁移函数类型：把 schema 从版本 i 升到 i+1。
 type MigrationFn = fn(&Connection) -> Result<(), StorageError>;
+
+/// v0 → v1 基线：0.2 全期存量库由 init 的幂等迁移集（建表 IF NOT EXISTS /
+/// 补列存在性守护 / 退役表 DROP）收敛到 v1 形状，本条目无动作——占位保证
+/// 迁移链索引与版本号一一对应。
+fn migrate_v1_baseline(_conn: &Connection) -> Result<(), StorageError> {
+    Ok(())
+}
 
 /// 有序迁移链：MIGRATIONS[i] 把 schema 从版本 i 升到 i+1。
 ///
@@ -20,7 +28,13 @@ type MigrationFn = fn(&Connection) -> Result<(), StorageError>;
 /// 退役表 DROP，对 0.2 全期存量库幂等）。后续结构变更：追加 (描述, fn) 条目并
 /// 递增 SCHEMA_VERSION；open 时只跑 user_version 之后的条目。数据库版本号高于
 /// 本内核认知 = 新版本内核写出，显式拒绝（不猜、不静默降级——fail-closed）。
-pub(super) const MIGRATIONS: &[(&str, MigrationFn)] = &[];
+pub(super) const MIGRATIONS: &[(&str, MigrationFn)] = &[
+    ("v1_baseline", migrate_v1_baseline),
+    (
+        "pending_input_dispatch_request",
+        migrate_pending_input_dispatch_request,
+    ),
+];
 
 /// SQLite 存储表 DDL（建表脚本）。
 ///
@@ -196,26 +210,22 @@ CREATE TABLE IF NOT EXISTS message_segments (
 );
 CREATE INDEX IF NOT EXISTS idx_message_segments_pipeline_seq
     ON message_segments(tenant_id, pipeline_id, base_seq);
--- 域11：pipeline_pending_inputs（pending 输入队列，ADR-2026-08-26）。
+-- 域11：pipeline_pending_inputs（pending 输入队列，ADR-2026-08-26 /
+-- ADR-2026-11-17）：队列信封 + 一次派发请求（request 列 = DispatchRequest
+-- JSON 单列）。旧 15 列强类型形态退役——业务词汇归 request 内两个不透明 map，
+-- 队列面只留查询/去重所需的信封列。
 -- 消息在入队→激活之间停留在此表：等待窗口内可修改/删除/清空，
--- 消费任务从表取参数执行（内容不被闭包捕获），重启后队列仍在（续跑）。
+-- 消费任务从表取请求重放执行（内容不被闭包捕获），重启后队列仍在（续跑）。
 -- FIFO 序 = (created_at, id) 升序；消费瞬态 = 取出行并物理删除（无 status 列）。
+-- pipeline_id 列是 request.pipeline_id 的索引投影（FIFO/管道过滤键），
+-- 单一真值仍是 request。
 CREATE TABLE IF NOT EXISTS pipeline_pending_inputs (
     id                TEXT PRIMARY KEY,
     pipeline_id       TEXT NOT NULL,
     tenant_id         TEXT NOT NULL,
-    user_id           TEXT NOT NULL,
-    content           TEXT NOT NULL,
-    thread            TEXT NOT NULL,
-    source            TEXT NOT NULL,
-    agent_id          TEXT NOT NULL DEFAULT 'agentos',
-    route_id          TEXT NOT NULL DEFAULT '',
-    thinking_strength TEXT NOT NULL DEFAULT '',
     client_message_id TEXT NOT NULL DEFAULT '',
-    execution_context TEXT,
-    state_overlay TEXT,
-    pipeline_config_id TEXT,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    request           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_pipeline
     ON pipeline_pending_inputs(tenant_id, pipeline_id, created_at, id);
@@ -324,15 +334,140 @@ pub(super) fn migrate_add_users_must_change_password(
 
 /// 为旧库（无 pipeline_config_id 列的 pipeline_pending_inputs 表）补加该列。幂等。
 /// 存量行该列为 NULL = autonomous（显式指定才写值，缺省路径不变）。
+/// 已收敛到 DispatchRequest 形状（`request` 列在）的表跳过——该字段已在 request 内。
 pub(super) fn migrate_add_pending_pipeline_config_id(
     conn: &Connection,
 ) -> Result<(), StorageError> {
-    if !table_has_column(conn, "pipeline_pending_inputs", "pipeline_config_id")? {
+    if !table_has_column(conn, "pipeline_pending_inputs", "pipeline_config_id")?
+        && !table_has_column(conn, "pipeline_pending_inputs", "request")?
+    {
         conn.execute(
             "ALTER TABLE pipeline_pending_inputs ADD COLUMN pipeline_config_id TEXT",
             [],
         )?;
     }
+    Ok(())
+}
+
+/// v1 → v2：pending 输入行收敛为「队列信封 + DispatchRequest」（ADR-2026-11-17）。
+///
+/// 旧 15 列强类型行 → `request` 单列 JSON。旧列多为 NOT NULL 无默认值，留着会让
+/// 新写入违反约束，故整体重建：建新表 → 逐行回填 → 换名 → 重建索引（单事务）。
+/// 幂等：`request` 列已存在 = 已迁移，直接返回（新库由 DDL 直接建新形状）。
+///
+/// 存量语义保全：legacy `agent_id` / `thinking_strength` 非空值并入
+/// `state_overlay` 的 `agent.id` / `thinking_strength` 键——排队中的用户选择
+/// 不因列收窄而丢失（二者本就是 overlay 通道的重复列，见 ADR）。
+pub(super) fn migrate_pending_input_dispatch_request(
+    conn: &Connection,
+) -> Result<(), StorageError> {
+    if !table_exists(conn, "pipeline_pending_inputs")?
+        || table_has_column(conn, "pipeline_pending_inputs", "request")?
+    {
+        return Ok(());
+    }
+    // ① 读旧行（按现存列动态投影：历史库可能缺后加列）
+    let rows: Vec<(String, String, String, String, String, String)> = {
+        let mut stmt = conn.prepare("SELECT * FROM pipeline_pending_inputs")?;
+        let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+        let idx = |name: &str| columns.iter().position(|c| c == name);
+        // legacy 列宽松读取，类型异常按缺失处理（旧列 NOT NULL，实际风险极低）
+        let text = |row: &rusqlite::Row<'_>, name: &str| -> Option<String> {
+            idx(name).and_then(|i| row.get::<_, Option<String>>(i).ok().flatten())
+        };
+        let json = |row: &rusqlite::Row<'_>, name: &str| -> Option<serde_json::Value> {
+            text(row, name).and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        };
+        let collected = stmt
+            .query_map([], |row| {
+                let pipeline_id = text(row, "route_id")
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| text(row, "pipeline_id"))
+                    .unwrap_or_default();
+                // 旧派对列 → overlay 键（非空且键缺席才落，不覆盖显式 overlay）
+                let mut overlay = json(row, "state_overlay")
+                    .filter(serde_json::Value::is_object)
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(obj) = overlay.as_object_mut() {
+                    if let Some(agent_id) = text(row, "agent_id").filter(|s| !s.is_empty()) {
+                        obj.entry("agent.id".to_string())
+                            .or_insert_with(|| serde_json::json!(agent_id));
+                    }
+                    if let Some(strength) = text(row, "thinking_strength").filter(|s| !s.is_empty())
+                    {
+                        obj.entry("thinking_strength".to_string())
+                            .or_insert_with(|| serde_json::json!(strength));
+                    }
+                }
+                let overlay = if overlay.as_object().is_some_and(|o| o.is_empty()) {
+                    serde_json::Value::Null
+                } else {
+                    overlay
+                };
+                let source = text(row, "source")
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .filter(|v| v.is_string())
+                    .unwrap_or_else(|| serde_json::json!("user"));
+                let client_message_id = text(row, "client_message_id").unwrap_or_default();
+                let request = serde_json::json!({
+                    "thread_id": text(row, "thread").unwrap_or_default(),
+                    "user_id": text(row, "user_id").unwrap_or_default(),
+                    "pipeline_id": pipeline_id,
+                    "content": text(row, "content").unwrap_or_default(),
+                    "client_message_id": client_message_id,
+                    "source": source,
+                    "execution_context": json(row, "execution_context")
+                        .unwrap_or(serde_json::Value::Null),
+                    "state_overlay": overlay,
+                    "pipeline_config_id": text(row, "pipeline_config_id")
+                        .filter(|s| !s.is_empty())
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                });
+                Ok((
+                    text(row, "id").unwrap_or_default(),
+                    pipeline_id,
+                    text(row, "tenant_id").unwrap_or_default(),
+                    client_message_id,
+                    text(row, "created_at").unwrap_or_default(),
+                    serde_json::to_string(&request).unwrap_or_else(|_| "{}".to_string()),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        collected
+    };
+    // ② 重建（单事务；旧列无默认值 → 必须换表，不能保留物理列）
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("DROP TABLE IF EXISTS pipeline_pending_inputs_v2")?;
+    tx.execute_batch(
+        "CREATE TABLE pipeline_pending_inputs_v2 (\
+         id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL, tenant_id TEXT NOT NULL, \
+         client_message_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, \
+         request TEXT NOT NULL)",
+    )?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO pipeline_pending_inputs_v2 \
+             (id, pipeline_id, tenant_id, client_message_id, created_at, request) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+        )?;
+        for row in &rows {
+            insert.execute(rusqlite::params![row.0, row.1, row.2, row.3, row.4, row.5])?;
+        }
+    }
+    tx.execute_batch("DROP TABLE pipeline_pending_inputs")?;
+    tx.execute_batch("ALTER TABLE pipeline_pending_inputs_v2 RENAME TO pipeline_pending_inputs")?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_pending_pipeline \
+         ON pipeline_pending_inputs(tenant_id, pipeline_id, created_at, id);\
+         CREATE INDEX IF NOT EXISTS idx_pending_cmid \
+         ON pipeline_pending_inputs(tenant_id, pipeline_id, client_message_id);",
+    )?;
+    tx.commit()?;
+    info!(
+        rows = rows.len(),
+        "pipeline_pending_inputs 迁移为 DispatchRequest 行（旧列已收窄）"
+    );
     Ok(())
 }
 

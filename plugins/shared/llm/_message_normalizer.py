@@ -6,9 +6,10 @@
 MiniMax 三阶段）。调用方（llm_core 主轮 / guard 压缩 / 未来任何 LLM
 消费方）不再各自预处理。
 
-无状态全量扫描：每次调用对完整消息列表做线性遍历（MiniMax 分支此前已
-强制全量，开销实测可接受），无增量缓存——缓存漂移（重启恢复/裁剪重建/
-多消费方交替调用）类缺陷从根上消除，摘除天然幂等。
+无状态扫描：每次调用对完整消息列表做线性遍历（MiniMax 分支此前已强制
+全量），无增量缓存——缓存漂移（重启恢复/裁剪重建/多消费方交替调用）类
+缺陷从根上消除，摘除天然幂等。历史退化折叠的复读扫描带确定性字符预算
+（见 ``collapse_degenerate_history`` 上方注释），不是无界全量扫描。
 """
 
 from __future__ import annotations
@@ -390,15 +391,26 @@ def normalize_messages_for_provider(  # noqa: PLR0912
     通用段（所有 provider）：tool_calls 结构/ id 标准化 → 配对完整性校验。
     MiniMax 专有段：标准转换（Phase 1）→ 重定位（Phase 2）→ 终极安全网
     （Phase 3），三阶段各自可独立理解，行为顺序不可交换。
+
+    就地契约：全程原地修改并**返回入参 ``messages`` 本体**（恒同一 list 对象，
+    各阶段结果写回）——被摘除/被替换的消息随之释放，不随返回容器换血留存。
     """
     # 通用修正：确保 tool_calls 是 OpenAI API 格式
     _normalize_tool_calls_in_messages(messages)
+
+    # 历史退化内容折叠（2026-11-10）：模型一次退化产出的原文留在历史里会被
+    # 每轮回放，实测回灌 2 万字即让新回复出现自我指涉与复读——出站前折成占位。
+    collapse_degenerate_history(messages, name=name, pipeline_id=pipeline_id)
 
     # ── 统一 tool_calls/tool 配对校验（所有模型）──
     # 确保每条 assistant(tool_calls) 后面跟齐所有 tool_call_id 对应的 tool 消息。
     # 消息历史在压缩/截断/执行记录恢复等场景下可能产生不配对消息，
     # 不同模型对此的容忍度不同，统一在与模型无关的归一化层修复。
-    messages = _validate_tool_call_pairing(
+    #
+    # 各阶段结果就地写回入参 list（返回恒为 ``messages`` 本体）：调用面经 MCP
+    # 派发帧在工具调用全程持有入参容器，返回新容器会让被摘除的孤儿/半轮消息
+    # （大 payload）随旧容器多持一个调用周期——写回后即释放（转换了原数据不留）。
+    messages[:] = _validate_tool_call_pairing(
         messages,
         provider,
         name,
@@ -409,8 +421,10 @@ def normalize_messages_for_provider(  # noqa: PLR0912
         return messages
 
     converted, converted_count = _minimax_phase_standardize(messages, name)
-    result, relocated_count = _minimax_phase_relocate(converted)
-    _minimax_final_system_guard(result, name)
+    messages[:] = converted
+    result, relocated_count = _minimax_phase_relocate(messages)
+    messages[:] = result
+    _minimax_final_system_guard(messages, name)
 
     if converted_count:
         logger.info(
@@ -424,7 +438,7 @@ def normalize_messages_for_provider(  # noqa: PLR0912
             name,
             relocated_count,
         )
-    return result
+    return messages
 
 
 def _minimax_phase_standardize(
@@ -613,3 +627,270 @@ def _minimax_final_system_guard(result: list[dict[str, Any]], name: str) -> int:
             _m.pop("name", None)
             final_fix_count += 1
     return final_fix_count
+
+
+# ── 历史退化内容折叠（2026-11-10）─────────────────────────────────────
+# 事故：模型一次退化产出的原文（31K/43K/71K 字符的原地重复）会被当作普通
+# assistant 消息留在会话历史里，之后每轮都回放给模型——实测把 2 万字 🍦
+# 回灌给同一模型即可让新回复出现自我指涉与 emoji 复读（2026-11-10 对照实验）。
+# 出站前把"同一单元连发 ≥20 次且总长 ≥200 字符"的片段折叠为占位：信息无损
+# （重复本身无信息量），毒源消除。
+#
+# 性能保护（2026-11-12 事故根修）：两条复读正则对"局部近似周期"文本的失败
+# 尝试成本随周期长度平方增长——实测近重复文本（每行共享长前缀、尾数不同）
+# 20-60 µs/字符，1.7M 字符历史即 30s+。且 CPython 的 re 全程持 GIL，下放
+# 线程池不解阻塞（实测 2.096s 正则期间事件循环心跳空窗 2.096s；同规模纯
+# Python 线程循环仅 0.034s 空窗）。故给复读扫描设三级短路 + 确定性字符预算：
+# - 文本 ≤ _DEGENERATE_SCAN_WINDOW_CHARS：全文精确扫描，行为与旧版一致；
+# - 长文本：多样性预筛 → 复读必要条件探针（限窗 str.find，微秒级；近似重复
+#   不命中即短路）→ 首/中/尾采样窗正则扫描；命中后按同一单元向前/向后延伸
+#   到真实边界再整段折叠（"找"有界，"折"仍覆盖整条 run）；
+# - 单次 collapse_degenerate_history 跨消息累计扫描预算，超出即停，最新
+#   消息优先（毒源就近回放）。
+# 语义影响：探针未落在 run 内或 run 落在采样窗外时该片段不被发现（旧版全量
+# 扫描会发现），且预算耗尽后的更早消息不做折叠分析。升级触发：出现"回灌未
+# 折叠"实证（新回复复读再现且折叠计数为 0）时改为后台/离线折叠，不再占用
+# 出站路径预算。
+_DEGENERATE_SAMPLE_CHARS = 2000
+"""字符多样性预筛的采样窗长度。"""
+_DEGENERATE_MAX_UNIQUE = 350
+"""采样窗内不同字符数 ≤ 此值才进入复读扫描（中文正文数千字通常 >500 个不同字符）。"""
+_DEGENERATE_RUN_PATTERN = re.compile(r"(.{3,64}?)\1{19,}", re.S)
+"""同一 3-64 字符单元连发 ≥20 次的最小匹配（短周期：同一句/同一符号）。"""
+_DEGENERATE_BLOCK_PATTERN = re.compile(r"(.{100,800}?)\1{3,}", re.S)
+"""同一 100-800 字符块连发 ≥4 次的最小匹配（长周期：整块状态梳理重写）。"""
+_DEGENERATE_BLOCK_MIN_CHARS = 5000
+"""长周期扫描的启用门槛（大消息才值得多花一次回溯扫描）。"""
+_DEGENERATE_RUN_MIN_CHARS = 200
+"""复读片段的最小总长度（短片段不动，避免误折叠正常强调）。"""
+_DEGENERATE_SCAN_WINDOW_CHARS = 1024
+"""单个复读扫描窗口的字符上限（性能保护：一次正则调用的最大输入）。"""
+_DEGENERATE_CALL_SCAN_BUDGET_CHARS = 8192
+"""单次 collapse_degenerate_history 的复读扫描字符总预算（跨消息累计）。"""
+_DEGENERATE_RUN_SEED_CHARS = 16
+"""短周期探针 seed 长度（须 ≤ 复读单元最小长度 3 以上的任意窗口，16 足够）。"""
+_DEGENERATE_RUN_MAX_PERIOD = 64
+"""短周期探针的最大重现距离（与 _DEGENERATE_RUN_PATTERN 的周期上界一致）。"""
+_DEGENERATE_BLOCK_SEED_CHARS = 100
+"""长周期探针 seed 长度（与 _DEGENERATE_BLOCK_PATTERN 的周期下界一致）。"""
+_DEGENERATE_BLOCK_MAX_PERIOD = 800
+"""长周期探针的最大重现距离（与 _DEGENERATE_BLOCK_PATTERN 的周期上界一致）。"""
+_DEGENERATE_EXTEND_BLOCK_UNITS = 8
+"""run 向两侧延伸时的整块比对单元数（少做 Python 层循环，仍逐单元精确）。"""
+
+
+def collapse_degenerate_history(
+    messages: list[dict[str, Any]],
+    *,
+    name: str,
+    pipeline_id: str = "",
+) -> int:
+    """把 assistant 历史里的"合成重复片段"折叠为占位，返回折叠掉的字符数。
+
+    只动 assistant 的 content / reasoning_content：tool 结果里的重复属工具事实
+    （日志、清单），不动。占位文案保留可读性，便于模型知道此处被截断。
+
+    复读扫描受确定性字符预算约束（见本节注释）：倒序分析（最新消息优先），
+    预算耗尽后更早的消息不再分析。
+    """
+    collapsed_total = 0
+    budget = _DEGENERATE_CALL_SCAN_BUDGET_CHARS
+    exhausted = False
+    for msg in reversed(messages):
+        if exhausted:
+            break
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for key in ("content", "reasoning_content"):
+            value = msg.get(key)
+            if not isinstance(value, str) or len(value) < _DEGENERATE_RUN_MIN_CHARS:
+                continue
+            collapsed, scanned = _collapse_repeated_runs_with_cost(value, budget)
+            if collapsed is None:  # 预算不足：本文本不分析
+                exhausted = True
+                break
+            budget -= scanned
+            if collapsed is not value:
+                msg[key] = collapsed
+                collapsed_total += len(value) - len(collapsed)
+    if collapsed_total:
+        logger.warning(
+            "[%s] 历史退化内容折叠 %d 字符（合成重复片段替换为占位）pipeline=%s",
+            name,
+            collapsed_total,
+            pipeline_id or "-",
+        )
+    if exhausted:
+        logger.debug(
+            "[%s] 复读扫描预算耗尽（剩余 %d 字符），更早消息未分析 pipeline=%s",
+            name,
+            budget,
+            pipeline_id or "-",
+        )
+    return collapsed_total
+
+
+def _collapse_repeated_runs_with_cost(text: str, budget: int) -> tuple[str | None, int]:
+    """折叠单个文本的复读片段，返回 ``(结果, 消耗的扫描字符数)``。
+
+    长文本走三级短路（由廉到贵）：字符多样性预筛 → 复读必要条件探针（seed
+    串在周期内重现，精确复读才命中）→ 采样窗正则扫描。命中后按同一单元向
+    两侧延伸到真实边界再整段折叠（"找"有界，"折"仍覆盖整条 run）。
+    只把喂给正则的字符计入预算；预算不足时返回 ``None``（调用方停止后续分析）。
+    """
+    if len(text) <= _DEGENERATE_SCAN_WINDOW_CHARS:
+        if len(text) > budget:
+            return None, 0
+        return _collapse_full(text), len(text)
+    if not _has_degenerate_sample_hint(text):
+        return text, 0
+    spans = _sample_spans(len(text))
+    span_chars = sum(end - start for start, end in spans)
+    if span_chars > budget:
+        return None, 0
+    edits: list[tuple[int, int]] = []
+    scanned = 0
+    if _has_repeat_signal(text, _DEGENERATE_RUN_SEED_CHARS, _DEGENERATE_RUN_MAX_PERIOD):
+        edits = _collect_runs(text, spans, _DEGENERATE_RUN_PATTERN)
+        scanned += span_chars
+    if (
+        not edits
+        and len(text) >= _DEGENERATE_BLOCK_MIN_CHARS
+        and scanned + span_chars <= budget
+        and _has_repeat_signal(text, _DEGENERATE_BLOCK_SEED_CHARS, _DEGENERATE_BLOCK_MAX_PERIOD)
+    ):
+        edits = _collect_runs(text, spans, _DEGENERATE_BLOCK_PATTERN)
+        scanned += span_chars
+    if not edits:
+        return text, scanned
+    return _apply_runs(text, edits), scanned
+
+
+def _sample_spans(length: int) -> list[tuple[int, int]]:
+    """首/中/尾三个采样窗（合并重叠），覆盖"退化通常延续到消息末尾"的形态。"""
+    window = _DEGENERATE_SCAN_WINDOW_CHARS
+    starts = sorted({0, max(0, length // 2 - window // 2), max(0, length - window)})
+    merged: list[tuple[int, int]] = []
+    for start in starts:
+        end = min(length, start + window)
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _has_repeat_signal(text: str, seed: int, max_period: int) -> bool:
+    """复读必要条件探针：某探针位点的 seed 串在 max_period 内精确重现。
+
+    周期 ≤ max_period 的复读 run 内部，任意 seed 长度窗口都会以该周期重现，
+    故命中是 run 存在的必要条件。探针只做限窗 ``str.find``（C 级，≤ 周期
+    长度搜索），成本每文本几微秒，用来短路平方级正则回溯——近似重复（共享
+    长前缀、尾数不同）不命中，正是正则最慢的那类文本。
+    """
+    length = len(text)
+    for pos in sorted({0, length // 4, length // 2, length * 3 // 4, length - seed}):
+        seed_text = text[pos : pos + seed]
+        if text.find(seed_text, pos + 1, min(length, pos + max_period + seed)) != -1:
+            return True
+    return False
+
+
+def _has_degenerate_sample_hint(text: str) -> bool:
+    """字符多样性预筛：采样窗内不同字符数低才值得进复读扫描（廉价短路）。"""
+    window = _DEGENERATE_SAMPLE_CHARS
+    starts = (0, max(0, len(text) // 2 - window // 2), max(0, len(text) - window))
+    return not all(len(set(text[s : s + window])) > _DEGENERATE_MAX_UNIQUE for s in starts)
+
+
+def _replace(match: re.Match[str]) -> str:
+    run = match.group(0)
+    if len(run) < _DEGENERATE_RUN_MIN_CHARS:
+        return run
+    return _placeholder(len(run))
+
+
+def _placeholder(length: int) -> str:
+    return f"[已折叠重复输出 {length} 字符]"
+
+
+def _collapse_full(text: str) -> str:
+    """全文精确扫描（短文本路径，行为与旧版一致；长周期门槛 ≥5000 不在此路径）。"""
+    collapsed = _DEGENERATE_RUN_PATTERN.sub(_replace, text)
+    return collapsed if collapsed != text else text
+
+
+def _apply_runs(text: str, runs: list[tuple[int, int]]) -> str:
+    """把复读 run 逐段替换为占位（run 已合并、非重叠、升序）。"""
+    out: list[str] = []
+    cursor = 0
+    for start, end in runs:
+        out.append(text[cursor:start])
+        out.append(_placeholder(end - start))
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out)
+
+
+def _collect_runs(
+    text: str,
+    spans: list[tuple[int, int]],
+    pattern: re.Pattern[str],
+) -> list[tuple[int, int]]:
+    """按采样窗收集复读 run 的全文真实区间（延伸补边界，重叠合并）。"""
+    found: list[tuple[int, int]] = []
+    for span_start, span_end in spans:
+        for match in pattern.finditer(text, span_start, span_end):
+            run_start, run_end = match.span()
+            unit = match.group(1)
+            # 窗口右界截断的 run：继续向右延伸后再判长度门槛
+            clipped = run_end == span_end and span_end < len(text)
+            if run_end - run_start < _DEGENERATE_RUN_MIN_CHARS and not clipped:
+                continue
+            run_start = _extend_run_start(text, run_start, unit)
+            run_end = _extend_run_end(text, run_end, unit)
+            if run_end - run_start >= _DEGENERATE_RUN_MIN_CHARS:
+                found.append((run_start, run_end))
+    return _merge_ranges(found)
+
+
+def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """合并重叠/相邻区间（跨窗命中的同一条 run 只占一条）。"""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _extend_run_end(text: str, pos: int, unit: str) -> int:
+    """从 pos 起向后吞掉完整的 unit 重复（整块比对，末段逐单元）。"""
+    size = len(unit)
+    block = unit * _DEGENERATE_EXTEND_BLOCK_UNITS
+    while pos < len(text):
+        chunk = text[pos : pos + len(block)]
+        if len(chunk) == len(block) and chunk == block:
+            pos += len(block)
+            continue
+        while pos < len(text) and text[pos : pos + size] == unit:
+            pos += size
+        return pos
+    return pos
+
+
+def _extend_run_start(text: str, pos: int, unit: str) -> int:
+    """从 pos 起向前吞掉完整的 unit 重复（回到 run 的真实起点）。"""
+    size = len(unit)
+    block = unit * _DEGENERATE_EXTEND_BLOCK_UNITS
+    while pos > 0:
+        begin = max(0, pos - len(block))
+        chunk = text[begin:pos]
+        if len(chunk) == len(block) and chunk == block:
+            pos = begin
+            continue
+        while pos - size >= 0 and text[pos - size : pos] == unit:
+            pos -= size
+        return pos
+    return pos

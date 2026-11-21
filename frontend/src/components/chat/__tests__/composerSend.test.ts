@@ -56,9 +56,11 @@ describe('composerPlaceholder（占位文案分档）', () => {
     ).toBe('Enter 发送 · Shift+Enter 换行')
   })
 
-  it('移动端提示优先于附件提示', () => {
-    expect(composerPlaceholder({ ...baseState, isMobile: true })).toBe('输入消息')
-    expect(composerPlaceholder({ ...baseState, isMobile: true, canAttach: false })).toBe('输入消息')
+  it('移动端提示优先于附件提示，且带按住说话引导（语音输入可发现性）', () => {
+    expect(composerPlaceholder({ ...baseState, isMobile: true })).toBe('输入消息，可按住麦克风说话')
+    expect(composerPlaceholder({ ...baseState, isMobile: true, canAttach: false })).toBe(
+      '输入消息，可按住麦克风说话',
+    )
   })
 
   it('桌面端按附件能力给提示', () => {

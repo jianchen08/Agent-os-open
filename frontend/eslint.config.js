@@ -47,20 +47,25 @@ export default tseslint.config(
       },
     },
     rules: {
+      // 2026-11-16 lint 执法强度升级（ADR 2026-11-16-lint-error-ratchet-
+      // electron-boundary-gate）：src 块全部 warn 规则升 error——warn 可被
+      // 无声新增（不拦合并），纠偏规则必须 error 级 + 基线吸收存量
+      // （.github/frontend-baseline.txt eslint_errors 棘轮只减不增，
+      // eslint_warnings 收 0）。存量豁免仍走 eslint-disable + HACK 登记。
       // React Hooks - recommended rules (excludes extra-strict compiler rules
       // that produce false positives with React 19)
       'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
+      'react-hooks/exhaustive-deps': 'error',
 
       // React Refresh - only for component files
       'react-refresh/only-export-components': [
-        'warn',
+        'error',
         { allowConstantExport: true },
       ],
 
       // Import ordering: React -> third-party -> internal (@/) -> relative
       'import-x/order': [
-        'warn',
+        'error',
         {
           groups: [
             'builtin',
@@ -74,13 +79,13 @@ export default tseslint.config(
           distinctGroup: false,
         },
       ],
-      'import-x/no-duplicates': 'warn',
+      'import-x/no-duplicates': 'error',
       'import-x/no-unresolved': 'off',
 
       // TypeScript rules
-      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-unused-vars': [
-        'warn',
+        'error',
         {
           argsIgnorePattern: '^_',
           varsIgnorePattern: '^_',
@@ -88,17 +93,17 @@ export default tseslint.config(
         },
       ],
       '@typescript-eslint/consistent-type-imports': [
-        'warn',
+        'error',
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
       '@typescript-eslint/no-empty-interface': 'off',
       '@typescript-eslint/no-empty-object-type': 'off',
-      '@typescript-eslint/no-non-null-assertion': 'warn',
+      '@typescript-eslint/no-non-null-assertion': 'error',
 
       // General code quality
-      'no-console': ['warn', { allow: ['warn', 'error'] }],
+      'no-console': ['error', { allow: ['warn', 'error'] }],
       'no-restricted-syntax': [
-        'warn',
+        'error',
         {
           selector: 'JSXAttribute[name.name="style"] > JSXExpressionContainer',
           message:

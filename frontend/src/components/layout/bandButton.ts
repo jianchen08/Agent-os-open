@@ -44,3 +44,9 @@ export const BAND_TAB_WIDTH_CLASS = 'shrink'
 export const BAND_TAB_MIN_WIDTH_CLASS = 'min-w-[64px]'
 export const BAND_TAB_MAX_WIDTH_CLASS = 'max-w-[200px]'
 
+
+/** 移动面板形态（无顶带槽位）标签宽界（P1-2，MuMu 实测 shots/01 标签+右侧图标组
+    无呼吸位）：可压缩（shrink）+ 64px 下限（保可点选/拖拽，与顶带同限）+
+    120px 上限——长标题 truncate 省略（TabLabel variant=truncate 承载），右侧
+    图标组（新建/只看会话/全屏/返回）恒可见不再被挤出。 */
+export const BAND_TAB_PANEL_WIDTH_CLASS = 'shrink min-w-[64px] max-w-[120px]'

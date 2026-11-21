@@ -29,18 +29,38 @@ from pathlib import Path
 from typing import Any
 
 from _root_api import atomic_write_text
-from pim_parse import DEFAULT_PRIORITY
+from pim_parse import (
+    DEFAULT_PRIORITY,
+    MONTH_DAY_MAX,
+    WEEKDAY_MAX,
+    WEEKDAY_MIN,
+    parse_iso_dt,
+)
+from pim_recurrence import last_occurrence
 
 logger = logging.getLogger(__name__)
 
 # todo 状态机枚举（backlog|today|doing|done|failed|wait）
 TODO_STATUSES = ("backlog", "today", "doing", "done", "failed", "wait")
+# todo 活跃集合（触发器注册/今日聚合/弹卡聚合共用口径——单一真相源，P0③④）
+TODO_ACTIVE_STATUSES = ("backlog", "today", "doing")
 # event 状态机枚举（planned=活跃；doing=已确认/同意；wait=已转交；其余=终态）
 EVENT_STATUSES = ("planned", "doing", "wait", "done", "cancelled", "failed")
 # event 活跃集合（空 = 历史数据/未写状态，按活跃处理）
 EVENT_ACTIVE_STATUSES = ("planned", "")
 # 优先级枚举（P0 最高）
 PRIORITIES = ("P0", "P1", "P2")
+# 提醒模式枚举（P0④：direct=到点直接弹卡；agent_classified=事实消息给 Agent 分类汇总）
+REMINDER_MODES = ("direct", "agent_classified")
+# repeat 取值域词表（daily / weekly:0-6 / monthly:1-31；非法写入拒绝——防 recurrence
+# 推进越界 OverflowError/ValueError 与触发器空转）
+# repeat 取值域正则由 pim_parse 词表构建（S2 双真值合一——weekly/monthly 边界
+# 单源 pim_parse.WEEKDAY_*/MONTH_*，防两套真值漂移）
+_MONTH_SINGLE_MAX = min(9, MONTH_DAY_MAX)
+REPEAT_PATTERN = re.compile(
+    rf"daily|weekly:[{WEEKDAY_MIN}-{WEEKDAY_MAX}]"
+    rf"|monthly:(?:3[01]|[12]\d|[1-{_MONTH_SINGLE_MAX}])"
+)
 # 方向枚举（我欠人/人欠我/无）
 DIRECTIONS = ("i_owe", "owes_me", "none")
 # op_log 环形保留条数
@@ -54,6 +74,18 @@ _RECORD_FILES = {
     "habit": "habits.jsonl",
     "preference": "preferences.jsonl",
 }
+
+
+def _normalize_reminder_mode(record: dict[str, Any]) -> None:
+    """reminder_mode 归一（todo/event 共用单点）：缺省 direct，非法拒绝。
+
+    新建卡缺省 direct=到点直接弹卡；存量 null 卡已在 _load 回填
+    agent_classified（保事实消息提醒链路），此处只兜更新路径。
+    """
+    mode = record.get("reminder_mode") or "direct"
+    if mode not in REMINDER_MODES:
+        raise ValueError(f"reminder_mode 须为 {REMINDER_MODES} 之一: {record.get('reminder_mode')!r}")
+    record["reminder_mode"] = mode
 
 
 def new_id() -> str:
@@ -165,6 +197,12 @@ class PimStore:
                 if record is not None:
                     key = self._key_of(entity, record)
                     if key:
+                        if entity in ("todo", "event"):
+                            # 存量卡（无 reminder_mode 字段，或历史落盘 null/空）回填
+                            # agent_classified：保既有事实消息提醒链路；缺省 direct
+                            # 只适用新建卡（回填 direct 会静默注销既有触发器且无弹卡兜底）。
+                            if not record.get("reminder_mode"):
+                                record["reminder_mode"] = "agent_classified"
                         self._records[entity][key] = record
         # journal 按月分文件（journal_YYYYMM.jsonl）
         for path in sorted(self._dir.glob("journal_*.jsonl")):
@@ -245,6 +283,25 @@ class PimStore:
         self._notify_change(entity, key, current, updated)
         return dict(updated), op_id
 
+    def delete(self, entity: str, key: str) -> tuple[dict[str, Any], str]:
+        """公开删除（P0②治理面）：移除记录并记账（before 快照可 undo 恢复）。
+
+        Returns:
+            (被删记录快照, op_id)——undo(op_id) 恢复原记录。
+
+        Raises:
+            KeyError: 记录不存在。
+        """
+        current = self._records[entity].get(key)
+        if current is None:
+            raise KeyError(key)
+        self._remove(entity, key)
+        op_id = self.record_op(f"{entity}.delete", [{
+            "entity": entity, "id": key, "before": current, "after": None,
+        }])
+        self._notify_change(entity, key, current, None)
+        return dict(current), op_id
+
     def mark_reminded(self, entity: str, key: str, occurrence: str) -> None:
         """系统标记：记录本次到点事实已投递（不记 op、不触发观察者）。
 
@@ -255,6 +312,54 @@ class PimStore:
         if current is None:
             return
         self._put(entity, {**current, "last_reminded_for": occurrence})
+
+    def effective_occurrence(self, record: dict[str, Any]) -> dict[str, Any]:
+        """弹卡判定坐标（计算字段不落盘）：到点坐标 = <=now 最近一次发生——
+        repeat 折叠（last_occurrence）；非 repeat 透传 due/at 但须已到点；
+        未到点 = 空串（不弹，提前 ack 亦无坐标可写，真到点仍会提醒）。"""
+        repeat = str(record.get("repeat") or "")
+        field = "due" if str(record.get("due") or "") else "at"
+        value = str(record.get(field) or "")
+        if not value:
+            if repeat:
+                now = self._clock()  # 合成分支自取时钟（原 early return 位于 now 赋值前）
+                # GAP-2：无 due/at 的 repeat 卡（direct 缺省分流后不注册触发器），
+                # 弹卡路径补到点合成——与 trigger_sync._first_scheduled_slot 同源：
+                # 以当日 09:00 为合成起点，折叠 <=now 最近一次发生；非法 repeat 返空。
+                base = now.replace(hour=9, minute=0, second=0, microsecond=0)
+                synth = last_occurrence(repeat, base.strftime("%Y-%m-%d %H:%M"), now)
+                return {**record, "_occurrence_effective": synth or ""}
+            return {**record, "_occurrence_effective": ""}
+        now = self._clock()
+        if repeat:
+            effective = last_occurrence(repeat, value, now) or ""
+        else:
+            moment = parse_iso_dt(value)
+            effective = value if moment is not None and moment <= now else ""
+        return {**record, "_occurrence_effective": effective}
+
+    def ack_reminder(self, entity: str, key: str) -> dict[str, Any]:
+        """direct 弹卡确认（P0④）：记录确认坐标 reminder_ack_for（<=now 最近一次
+        发生；due/at 基准坐标不动，坐标随周期滚动到新一次）；同坐标重复确认幂等。
+
+        Raises:
+            KeyError: 记录不存在。
+        """
+        current = self._records[entity].get(key)
+        if current is None:
+            raise KeyError(key)
+        effective = str(self.effective_occurrence(current).get("_occurrence_effective") or "")
+        if not effective:
+            return dict(current)
+        if str(current.get("reminder_ack_for") or "") == effective:
+            return dict(current)
+        updated = {**current, "reminder_ack_for": effective}
+        self._put(entity, updated)
+        self.record_op(f"{entity}.ack_reminder", [{
+            "entity": entity, "id": key, "before": current, "after": updated,
+        }])
+        self._notify_change(entity, key, current, updated)
+        return dict(updated)
 
     def _remove(self, entity: str, key: str) -> dict[str, Any]:
         """删除记录（undo 专用内部面，不独立记账——undo op 整体记账）。"""
@@ -273,6 +378,12 @@ class PimStore:
         atomic_write_text(self._dir / _RECORD_FILES[entity], _dump_lines(records))
 
     def _validate(self, entity: str, record: dict[str, Any]) -> None:
+        if entity in ("todo", "event"):
+            repeat = str(record.get("repeat") or "")
+            if repeat and not REPEAT_PATTERN.fullmatch(repeat):
+                raise ValueError(
+                    f"repeat 须为 daily / weekly:0-6 / monthly:1-31: {repeat!r}"
+                )
         if entity == "todo":
             if not str(record.get("title", "")).strip():
                 raise ValueError("todo.title 不得为空")
@@ -285,6 +396,7 @@ class PimStore:
             progress = record.get("progress", 0)
             if not isinstance(progress, int) or not 0 <= progress <= 100:
                 raise ValueError(f"todo.progress 须为 0-100 整数: {progress!r}")
+            _normalize_reminder_mode(record)
         elif entity == "event":
             if not str(record.get("title", "")).strip():
                 raise ValueError("event.title 不得为空")
@@ -294,6 +406,7 @@ class PimStore:
                 raise ValueError(
                     f"event.status 须为 {EVENT_STATUSES} 之一: {record.get('status')!r}"
                 )
+            _normalize_reminder_mode(record)
         elif entity == "habit":
             if not str(record.get("title", "")).strip():
                 raise ValueError("habit.title 不得为空")
@@ -731,14 +844,42 @@ class PimStore:
 
     # ── 聚合读面（GET /today 与工具 query scope=today 单源）──
 
+    def _pending_reminders(self) -> list[dict[str, Any]]:
+        """direct 模式待弹卡清单（到点未确认）：判定坐标 = effective_occurrence
+        （<=now 最近一次发生），与 reminder_ack_for 相同则不再弹——弹卡判定
+        两端（本聚合与 ack 确认）同源，不产生双真值。"""
+        out: list[dict[str, Any]] = []
+        for entity, active in (
+            ("todo", TODO_ACTIVE_STATUSES),
+            ("event", EVENT_ACTIVE_STATUSES),
+        ):
+            for r in self.list_records(entity):
+                if str(r.get("reminder_mode") or "direct") != "direct":
+                    continue
+                if str(r.get("status") or "") not in active:
+                    continue
+                effective = str(self.effective_occurrence(r).get("_occurrence_effective") or "")
+                if effective and str(r.get("reminder_ack_for") or "") != effective:
+                    out.append({
+                        "entity": entity,
+                        "id": str(r.get("id") or ""),
+                        "title": str(r.get("title") or ""),
+                        "occurrence": effective,
+                    })
+        return out
+
     def today(self) -> dict[str, Any]:
         """今日三栏聚合：逾期/今日/进行中 todo + 今日事件 + 今日到期习惯 +
         今日 journal + partner + op 尾（晨报数据源）。"""
         now = self._clock()
         today_str = now.date().isoformat()
         todos = self.list_records("todo")
-        active = [t for t in todos if t.get("status") in ("backlog", "today", "doing")]
-        overdue = [t for t in active if str(t.get("due", "")) and str(t["due"])[:10] < today_str]
+        active = [t for t in todos if t.get("status") in TODO_ACTIVE_STATUSES]
+        overdue = [
+            t for t in active
+            if not str(t.get("repeat") or "")
+            and str(t.get("due", "")) and str(t["due"])[:10] < today_str
+        ]
         due_today = [t for t in active if str(t.get("due", ""))[:10] == today_str]
         events_today = [
             e for e in self.list_records("event") if str(e.get("at", ""))[:10] == today_str
@@ -756,6 +897,7 @@ class PimStore:
             "backlog_count": sum(1 for t in todos if t.get("status") == "backlog"),
             "events": events_today,
             "events_overdue": self.unhandled_events(),
+            "reminders": self._pending_reminders(),
             "habits": habits,
             "journal": self._journal.get(today_str),
             "partner": self.get_partner(),

@@ -14,12 +14,17 @@
 - 派生输入集 = 编排引用 step 集合并集其 required_state_inputs；完备性
   校验过/不过（区分度输入：全齐 / 缺一 / 缺多）；
 - H3 两类错误结构：ORCHESTRATION_KEY_NOT_FOUND /
-  INCOMPLETE_INITIAL_INPUTS 均带可编程结构化字段。
+  INCOMPLETE_INITIAL_INPUTS 均带可编程结构化字段；
+- 线程卸载（2026-11-18 装机事故回归）：清单扫描期间事件循环不被阻塞，
+  卸载不改扫描语义。
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -576,6 +581,98 @@ class TestStepDeclarationIndex:
             (d / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
         got = load_step_required_inputs(root)
         assert got["s_dup"] == ["k2"]
+
+
+class TestScanOffloadEventLoop:
+    """load_step_required_inputs_async：清单扫描线程卸载（合宿循环保护）。
+
+    2026-11-18 装机事故回归锚：同步扫描直跑事件循环线程，100+ 插件慢盘
+    实测 30s+ 堵死全部并发请求。断行为不钉实现：monkeypatch os.scandir
+    注入 FS 延迟（真实扫描路径走到该调用；py3.13+ pathlib 的 iterdir
+    经 scandir 承载目录枚举、is_dir 走 DirEntry 查找数据不再逐项 stat，
+    故注入点取每目录一次的 scandir），断言扫描期间循环心跳持续推进；
+    同步阻塞实现下扫描全程占循环，心跳恒停在首轮（实测 ==1）。
+    """
+
+    @staticmethod
+    def _write_step_plugin(root: Path, sub: str, step: str, keys: list[str]) -> None:
+        d = root / sub
+        d.mkdir(parents=True)
+        manifest = {
+            "id": f"p_{sub}",
+            "capabilities": {
+                "steps": [{"name": step, "required_state_inputs": keys}],
+            },
+        }
+        (d / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_slow_scan_keeps_loop_heartbeating(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """FS 延迟注入下扫描期间循环心跳持续推进（两组延迟量级有区分度）。"""
+        from orchestration import load_step_required_inputs_async
+
+        self._write_step_plugin(tmp_path, "alpha", "step_a", ["goal"])
+        self._write_step_plugin(tmp_path, "beta", "step_b", ["ctx"])
+
+        real_scandir = os.scandir
+        real_listdir = os.listdir
+
+        for delay in (0.04, 0.10):
+            def slow_scandir(path, *args, _real=real_scandir, _delay=delay, **kwargs):
+                time.sleep(_delay)
+                return _real(path, *args, **kwargs)
+
+            def slow_listdir(path, *args, _real=real_listdir, _delay=delay, **kwargs):
+                time.sleep(_delay)
+                return _real(path, *args, **kwargs)
+
+            # 双补丁跨版本稳：Path.iterdir 在 ≤3.12 走 os.listdir、≥3.13 走
+            # os.scandir（pathlib 3.13 重写切换）；只补 scandir 时 3.12 上
+            # 延迟不生效、扫描瞬时完成，心跳断言沦为假红（Windows 本地实测）。
+            monkeypatch.setattr(os, "scandir", slow_scandir)
+            monkeypatch.setattr(os, "listdir", slow_listdir)
+            heartbeats = 0
+
+            async def _run() -> dict[str, list[str]]:
+                nonlocal heartbeats
+                scan_done = asyncio.Event()
+
+                async def _heartbeat() -> None:
+                    nonlocal heartbeats
+                    while not scan_done.is_set():
+                        heartbeats += 1
+                        await asyncio.sleep(0.01)
+
+                heartbeat = asyncio.create_task(_heartbeat())
+                index = await load_step_required_inputs_async(tmp_path)
+                scan_done.set()
+                await heartbeat
+                return index
+
+            index = asyncio.run(_run())
+            assert index == {"step_a": ["goal"], "step_b": ["ctx"]}
+            # 阻塞实现下扫描全程占循环 → 心跳恒为 1；卸载后至少推进数轮
+            assert heartbeats >= 3
+
+    def test_async_matches_sync_semantics(self, tmp_path: Path) -> None:
+        """卸载不改语义：正常声明/坏 manifest/缺根与同步版逐一同结果。"""
+        from orchestration import (
+            load_step_required_inputs,
+            load_step_required_inputs_async,
+        )
+
+        root = tmp_path / "shared"
+        self._write_step_plugin(root, "good", "s_good", ["k1"])
+        bad = root / "bad"
+        bad.mkdir(parents=True)
+        (bad / "plugin.json").write_text('{"id": broken', encoding="utf-8")
+
+        got = asyncio.run(load_step_required_inputs_async(root))
+        assert got == load_step_required_inputs(root) == {"s_good": ["k1"]}
+        absent = tmp_path / "absent"
+        assert asyncio.run(load_step_required_inputs_async(absent)) == {}
+        assert asyncio.run(load_step_required_inputs_async(absent)) == load_step_required_inputs(absent)
 
 
 class TestErrorShapes:

@@ -73,10 +73,15 @@ LLMCore = plugin_mod.LLMCore
 
 @pytest.fixture(autouse=True)
 def _isolate_llm_config_and_caller():
-    """隔离模型配置注入与能力调用句柄（退出时恢复现场）。"""
+    """隔离模型配置注入与能力调用句柄（退出时恢复现场）。
+
+    基线默认注入 ``_MODEL_CONFIG``：模型空解析现在显式报错（不再回退构造期
+    身份），不测解析的用例需要一条可绑定配置；测特定配置的用例体内覆盖。
+    """
     from _config_models import get_config, set_config
 
     prev = get_config()
+    set_config(_MODEL_CONFIG)
     yield
     set_config(prev)
     plugin_mod.set_capability_caller(None)

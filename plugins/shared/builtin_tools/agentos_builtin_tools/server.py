@@ -31,7 +31,12 @@ from agentos_builtin_tools.search_tool import ENHANCED_SEARCH_SCHEMA, enhanced_s
 # LLM 可见描述（与 plugin.json 同文镜像；改动须两处同刀）
 FILE_READ_DESCRIPTION = (
     "读取文件内容；路径为目录时返回该目录条目列表（名称/类型/大小）。"
-    "查看工作空间或目录结构直接用本工具，读文件/列目录不要用 Shell 命令代替"
+    "查看工作空间或目录结构直接用本工具，读文件/列目录/看图不要用 Shell 命令代替；"
+    "图片（png/jpeg/gif/webp/bmp，≤20MB）与 docx/pdf 也可直接读。"
+    "大图直喂会被模型 API 端视觉编码器缩放、丢失文字细节：系统按当前模型视觉"
+    "输入上限自动把超规格图片做原生分辨率网格切分（原图+分块一次性注入，"
+    "无缩放损失，分块带行列拼合标注；图块进上下文后成为前缀的一部分，后续"
+    "轮次前缀缓存命中复用，不产生额外调用）"
 )
 
 
@@ -68,12 +73,26 @@ def create_plugin() -> AgentOSPlugin:
 
         fs_tools.set_zones_service_caller(_zones_caller)
 
+        # 图像切分服务调用方（R20 定稿：multimodal.split_image，原图+分块一次
+        # 注入的像素面单点；服务降级由 fs_tools 侧按原样单图兜底）。
+        async def _split_caller(
+            base64_data: str, mime_type: str, max_pixels: int
+        ) -> dict[str, Any]:
+            handle = plugin.get_capability("multimodal")
+            return await handle.call(
+                "split_image",
+                {"base64_data": base64_data, "mime_type": mime_type, "max_pixels": max_pixels},
+            )
+
+        fs_tools.set_split_image_caller(_split_caller)
+
     @plugin.on_unload
     async def _on_unload(_params: dict[str, Any]) -> None:
-        """摘除授权名单服务调用方（防卸载窗口期残留句柄）。"""
+        """摘除授权名单/图像切分服务调用方（防卸载窗口期残留句柄）。"""
         from agentos_builtin_tools import fs_tools
 
         fs_tools.set_zones_service_caller(None)
+        fs_tools.set_split_image_caller(None)
 
     return plugin
 

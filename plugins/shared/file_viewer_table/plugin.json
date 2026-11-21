@@ -1,0 +1,62 @@
+{
+  "id": "file_viewer_table",
+  "name": "表格查看器",
+  "description": "声明式文件查看器样例：通过 contributes.file_viewers 注册 .csv/.tsv 查看器，验证「新增一类文件的查看器不改前端主代码」",
+  "version": "0.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/file_viewer_table/page/table_viewer",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "method": { "type": "string" },
+            "plugin_id": { "type": "string" },
+            "raw_body": { "type": "string" },
+            "headers": { "type": "object" },
+            "query": { "type": "object" }
+          }
+        }
+      }
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "file_viewer_table_page",
+      "method": "GET",
+      "path": "/ext/file_viewer_table/page/table_viewer",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 表格查看器（csv/tsv 只读预览）"
+    }
+  ],
+  "contributes": {
+    "file_viewers": [
+      {
+        "id": "table_viewer",
+        "label": "表格查看器",
+        "extensions": [".csv", ".tsv"],
+        "mimes": ["text/csv", "text/tab-separated-values"],
+        "render": {
+          "widget": "webview",
+          "props": {
+            "pluginId": "file_viewer_table",
+            "htmlPath": "/page/table_viewer",
+            "widgetId": "table_viewer"
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 60,
+  "host_group": "light"
+}

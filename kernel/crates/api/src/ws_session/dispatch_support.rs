@@ -87,7 +87,7 @@ pub(super) async fn emit_pending_inputs_changed(
 /// 独立消费轮的 stream_start/认领链路，前端据逐条权威 record——指纹 record_id/
 /// seq/原文——走 claimUserMessage 认领，与正常发送同一条链；链级 drain 路径恒
 /// 空传，认领链路不受扰）。
-pub(crate) async fn emit_pending_inputs_changed_with(
+pub(super) async fn emit_pending_inputs_changed_with(
     session: &Arc<agentos_session::SessionCoordinator>,
     store: &Arc<dyn agentos_core::traits::StorageBackend>,
     thread_id: &str,
@@ -102,11 +102,11 @@ pub(crate) async fn emit_pending_inputs_changed_with(
             .map(|r| {
                 serde_json::json!({
                     "id": r.id,
-                    "pipeline_id": r.pipeline_id,
-                    "content": r.content,
-                    "source": r.source,
+                    "pipeline_id": r.request.pipeline_id,
+                    "content": r.request.content,
+                    "source": r.request.source,
                     // cmid 随条目透出（returned 撤乐观气泡 / 前端对账同键）。
-                    "client_message_id": r.client_message_id,
+                    "client_message_id": r.request.client_message_id,
                     "created_at": r.created_at,
                 })
             })
@@ -239,7 +239,18 @@ pub(super) async fn resolve_regenerate_target(
         }
     }
     // 槽位 miss 或 run 锚缺失 → 账本回溯；验不出锚则按原语义拒绝。
-    resolve_target_via_ledger(store, pipeline_id, tenant_id, user_message_id)
+    // 缺省定位（user_message_id 空 = 重新生成最后一条 user）没有外部指纹可验：
+    // 以活槽自身 message_id 作账本锚——否则 run 锚缺失的遗留行（改写 op 未携
+    // _run_id 的旧 bug）永远无法回溯，缺省重试被永久拒绝（2026-11-09 装机实证）。
+    let ledger_anchor = if user_message_id.is_empty() {
+        live_seq
+            .and_then(|seq| messages.iter().find(|m| m.seq_in_branch == seq))
+            .map(|m| m.message_id.as_str())
+            .unwrap_or("")
+    } else {
+        user_message_id
+    };
+    resolve_target_via_ledger(store, pipeline_id, tenant_id, ledger_anchor)
         .await?
         .ok_or_else(|| {
             if live_seq.is_some() {
@@ -281,14 +292,34 @@ pub(super) async fn resolve_target_via_ledger(
             if op.get("op").and_then(|v| v.as_str()) != Some("set") {
                 continue;
             }
-            if op.get("message_id").and_then(|v| v.as_str()) != Some(user_message_id) {
+            // 指纹/内容锚双形态：引擎实录 op 带 message_id/blob_id；dispatch 侧
+            // 自建的改写 op（chat_regenerate rollback）只有 seq+msg——按 msg 推导
+            // 同一组内容寻址（compute_message_id 剥离位置/身份/审计锚字段，与
+            // 槽位写表同口径），否则编辑重发写出的槽位无法经账本回溯，run 锚
+            // 一旦缺失即被永久拒绝（2026-11-09 装机实证）。
+            let msg = op.get("msg").filter(|m| m.is_object());
+            let op_message_id = op
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| msg.map(agentos_core::ids::compute_message_id));
+            if op_message_id.as_deref() != Some(user_message_id) {
                 continue;
             }
+            let op_blob_id = op
+                .get("blob_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    msg.map(|m| {
+                        let src = serde_json::to_string(m)
+                            .expect("serde_json Value serialization is infallible");
+                        agentos_core::ids::compute_blob_id(src.as_bytes())
+                    })
+                });
             let (Some(seq), Some(blob_id)) = (
                 op.get("seq").and_then(|v| v.as_u64()).map(|s| s as u32),
-                op.get("blob_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                op_blob_id,
             ) else {
                 continue;
             };

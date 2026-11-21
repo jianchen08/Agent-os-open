@@ -7,9 +7,9 @@
  * persist 反序列化路径。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 import { useLayoutModeStore } from '../layoutModeStore'
 import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
-import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const makeWindow = (id: string, extra: Partial<FloatingWindowInstance> = {}): FloatingWindowInstance => ({
   id,

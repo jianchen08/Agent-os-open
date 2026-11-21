@@ -157,3 +157,33 @@ describe('Escape 退出全屏的可编辑元素守卫（件②）', () => {
     expect(useUIStore.getState().workspaceFullscreen).toBe(true)
   })
 })
+
+describe('Escape 可编辑目标 × 移动端工作区（mobile 分支收尾）', () => {
+  it('⑤ 移动端工作区开着、Escape 落在输入框 → 关闭移动工作区（编辑目标不豁免 mobile）', () => {
+    setViewportWidth(375)
+    useUIStore.setState({ mobileWorkspaceOpen: true })
+    renderLayout()
+    const input = document.createElement('input')
+    input.setAttribute('data-escape-guard', '')
+    document.body.appendChild(input)
+
+    act(() => {
+      fireEvent.keyDown(input, { key: 'Escape' })
+    })
+
+    expect(useUIStore.getState().mobileWorkspaceOpen).toBe(false)
+  })
+
+  it('⑤b 桌面宽度的编辑目标 Escape：无全屏无移动工作区 → 状态零变化（区分度对照）', () => {
+    renderLayout()
+    const ta = attachTextarea()
+    ta.setAttribute('data-escape-guard', '')
+
+    act(() => {
+      fireEvent.keyDown(ta, { key: 'Escape' })
+    })
+
+    expect(useUIStore.getState().workspaceFullscreen).toBe(false)
+    expect(useUIStore.getState().mobileWorkspaceOpen).toBe(false)
+  })
+})

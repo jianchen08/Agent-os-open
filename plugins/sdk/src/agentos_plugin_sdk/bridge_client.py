@@ -14,21 +14,25 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
+import socket
 import subprocess
+import urllib.error
 import urllib.request
 from typing import Any
+
+from agentos_plugin_sdk import bridge_gateway
 
 # 宿主/容器内均要求 docker 在 PATH（部署契约）；解析为完整路径满足进程启动审计
 _DOCKER = shutil.which("docker") or "docker"
 
-# Bridge 地址候选（容器内）：env 注入优先，其后 Docker Desktop 特殊域名。
-BRIDGE_HOST_CANDIDATES = ("env:AGENTOS_BRIDGE_URL", "http://host.docker.internal:{port}")
-
 # 容器内客户端脚本（stdlib-only）：单次调用——读 stdin JSON spec，POST
 # /mcp/{upstream}，输出一行结果 JSON。经 docker exec python - 执行。
+# 失败结果自带 kind（connect/timeout/ambiguous），与宿主 _error_kind 同口径：
+# 宿主据此决定是否拉起网关并重试，跨进程路径不靠错误文本嗅探。
 _INNER_SCRIPT = r"""
 import json, sys, urllib.request
 
@@ -41,7 +45,21 @@ caller = spec["caller"]
 payload = spec["payload"]
 timeout = spec["timeout"]
 
+import errno, socket
+
+def _kind(e):
+    # 连接层分类（与宿主侧 _error_kind 同口径）：host 侧据此决定是否拉起+重试。
+    r = getattr(e, "reason", None)
+    for x in (e, r):
+        if isinstance(x, TimeoutError) or getattr(x, "errno", None) == errno.ETIMEDOUT:
+            return "timeout"
+    for x in (e, r):
+        if isinstance(x, (ConnectionRefusedError, socket.gaierror)):
+            return "connect"
+    return "ambiguous"
+
 last_err = None
+last_kind = "ambiguous"
 for base in base_candidates:
     url = base.rstrip("/") + "/mcp/" + upstream
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
@@ -66,7 +84,8 @@ for base in base_candidates:
             print(json.dumps({"ok": False, "status": status, "body": err_body or {"error": str(e)}}))
             sys.exit(0)
         last_err = str(e)
-print(json.dumps({"ok": False, "status": 0, "body": {"error": f"bridge unreachable: {last_err}"}}))
+        last_kind = _kind(e)
+print(json.dumps({"ok": False, "status": 0, "body": {"error": f"bridge unreachable: {last_err}", "kind": last_kind}}))
 """
 
 
@@ -110,30 +129,16 @@ class BridgeClient:
 
     @staticmethod
     def _resolve_token(config: dict[str, Any]) -> str:
-        # config 优先（bridge.token）：装机侧 sidecar 无 env/.env 供给通道，
-        # 用户空间配置（config_files 注入）是唯一合规凭据面（env 仍是 dev 首选）。
+        """凭据解析：config.token → env → .env → 自生成落盘（见 bridge_gateway）。
+
+        config 优先（装机侧用户空间配置携带凭据是唯一合规供给面，env 仍是
+        dev 首选）；其后统一交 bridge_gateway.resolve_token——缺凭据时自生成
+        并写用户空间 .env（与自动拉起的网关同源），用户无需手工造密钥。
+        """
         cfg_token = str(config.get("token") or "").strip()
         if cfg_token:
             return cfg_token
-        token = os.environ.get("AGENTOS_BRIDGE_TOKEN", "")
-        if not token:
-            # 宿主开发环境：从项目 .env 读（与内核 env_file 同键，避免要求
-            # sidecar 进程预先继承）。
-            env_path = os.environ.get("AGENTOS_PROJECT_ROOT") or _find_project_root()
-            if env_path:
-                dot_env = os.path.join(env_path, ".env")
-                try:
-                    with open(dot_env, encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if line.startswith("AGENTOS_BRIDGE_TOKEN="):
-                                token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                                break
-                except OSError:
-                    pass
-        if not token:
-            raise BridgeClientError("AGENTOS_BRIDGE_TOKEN 未配置（.env 或环境变量）。在项目根 .env 设置后重启 Bridge。")
-        return token
+        return bridge_gateway.resolve_token()
 
     # ── MCP 协议 ─────────────────────────────────────────────
 
@@ -190,6 +195,45 @@ class BridgeClient:
     # ── 双传输 ────────────────────────────────────────────────
 
     def _send(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """选传输发请求；连接层失败则自动拉起网关后重试一次（自愈）。
+
+        连接层失败（status=0：网关没跑/刚崩）是"生命周期缺位"的表现，不是
+        用户该处理的事——本机地址就地拉起网关再试一次，远端地址交给
+        ``bridge_gateway`` 报明确原因，不做无效重试。
+        """
+        result = self._dispatch(payload)
+        if result.get("ok") or result.get("status") != 0:
+            return result
+        kind = _failure_kind(result)
+        if kind == "timeout":
+            # 已建立连接但读超时：工具调用可能已在上游执行（browser_click 等非幂等），
+            # 重发等于让同一次操作发生两遍——不重试，把超时原样报出。
+            return {
+                "ok": False,
+                "status": 0,
+                "body": {"error": f"{_error_text(result)}（请求超时，未自动重试以免非幂等操作重复执行）"},
+            }
+        if kind != "connect":
+            # 不可判（连接复位/中断等）：保守不重试，避免不确定的双发。
+            return {
+                "ok": False,
+                "status": 0,
+                "body": {"error": f"{_error_text(result)}（连接状态不可判，未自动重试以免重复执行）"},
+            }
+        try:
+            bridge_gateway.ensure_gateway(self._base, self._token)
+        except bridge_gateway.BridgeGatewayError as exc:
+            return {"ok": False, "status": 0, "body": {"error": f"{_error_text(result)}；自动拉起未成功：{exc}"}}
+        retried = self._dispatch(payload)
+        if retried.get("ok") or retried.get("status") != 0:
+            return retried
+        return {
+            "ok": False,
+            "status": 0,
+            "body": {"error": f"{_error_text(retried)}（已自动拉起网关并重试一次）"},
+        }
+
+    def _dispatch(self, payload: dict[str, Any]) -> dict[str, Any]:
         """按 caller 选路径：sandbox 走容器/沙箱环境内执行，host 直发。"""
         if self._caller == "sandbox":
             backend = (self._exec_backend or {}).get("backend")
@@ -225,12 +269,12 @@ class BridgeClient:
                 body = {"error": str(e)}
             return {"ok": False, "status": e.code, "body": body}
         except (urllib.error.URLError, OSError, TimeoutError) as e:
+            # kind 是"能否重试"的唯一判据来源（_failure_kind 优先读它）：
+            # 在此按真实异常分类写入，不让上层靠错误文本嗅探。
             return {
                 "ok": False,
                 "status": 0,
-                "body": {
-                    "error": f"Bridge 不可达（{req.full_url}）: {e}。请先在宿主机启动 Bridge：scripts/start_bridge.bat"
-                },
+                "body": {"error": f"Bridge 不可达（{req.full_url}）: {e}", "kind": _error_kind(e)},
             }
 
     def _send_via_wsl_native(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -275,7 +319,7 @@ class BridgeClient:
                 timeout=self._timeout + 10,
             )
         except subprocess.TimeoutExpired as e:
-            return {"ok": False, "status": 0, "body": {"error": f"wsl 环境内 MCP Client 超时: {e}"}}
+            return {"ok": False, "status": 0, "body": {"error": f"wsl 环境内 MCP Client 超时: {e}", "kind": "timeout"}}
         except OSError as e:
             return {"ok": False, "status": 0, "body": {"error": f"wsl 传输执行失败: {e}"}}
         if proc.returncode != 0:
@@ -406,6 +450,55 @@ class BridgeClient:
 
         return urlparse(self._base).port or 8765
 
+# "请求确定未送达"的连接错误（唯一允许重试的一类）：拒绝连接 / 域名解析失败。
+# URI 语义详见 _error_kind 的取舍说明。
+_CONNECT_NOT_SENT = (ConnectionRefusedError, socket.gaierror)
+
+
+def _error_kind(exc: BaseException) -> str:
+    """连接层错误分类——是否允许重试的唯一判据。
+
+    - ``connect``：确定未送达（连接拒绝 / 域名解析失败），重试安全；
+    - ``timeout``：已建立连接但读超时，请求可能已在上游执行，重发会让
+      ``browser_click``/``browser_type`` 等非幂等工具执行两遍，不重试；
+    - ``ambiguous``：连接复位/中断等不可判形态，保守按"可能已送达"处理，不重试。
+    """
+    reason = getattr(exc, "reason", None) if isinstance(exc, urllib.error.URLError) else None
+    inner = reason if isinstance(reason, BaseException) else exc
+    if isinstance(inner, TimeoutError) or getattr(inner, "errno", None) == errno.ETIMEDOUT:
+        return "timeout"
+    if isinstance(inner, _CONNECT_NOT_SENT):
+        return "connect"
+    return "ambiguous"
+
+
+def _failure_kind(result: dict[str, Any]) -> str:
+    """失败结果的连接层分类：生产路径由 ``_error_kind`` 写入 body.kind。
+
+    报文文本兜底仅用于跨进程路径（容器/WSL 内嵌脚本回传无 kind 字段），
+    不参与"是否重试"的主判断——分类以 kind 为准。
+    """
+    body = result.get("body")
+    if isinstance(body, dict):
+        kind = str(body.get("kind") or "")
+        if kind:
+            return kind
+        text = str(body.get("error") or "")
+    else:
+        text = str(body or "")
+    lowered = text.lower()
+    if "超时" in text or "timed out" in lowered:
+        return "timeout"
+    return "ambiguous"
+
+
+def _error_text(result: dict[str, Any]) -> str:
+    """取失败结果的错误文本（body 非 dict 时退化为字符串）。"""
+    body = result.get("body")
+    if isinstance(body, dict):
+        return str(body.get("error") or body)
+    return str(body or "Bridge 不可达")
+
 
 def _docker_gateway_ip() -> str:
     """宿主侧查 docker 网桥网关 IP（WSL 原生 docker 无 host.docker.internal 时的候选）。"""
@@ -420,16 +513,3 @@ def _docker_gateway_ip() -> str:
         return ip if proc.returncode == 0 and ip else ""
     except (OSError, subprocess.SubprocessError):
         return ""
-
-
-def _find_project_root() -> str:
-    """从 cwd 向上找含 .env 的目录（宿主 sidecar 开发环境兜底）。"""
-    cur = os.getcwd()
-    for _ in range(6):
-        if os.path.isfile(os.path.join(cur, ".env")):
-            return cur
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            return ""
-        cur = parent
-    return ""

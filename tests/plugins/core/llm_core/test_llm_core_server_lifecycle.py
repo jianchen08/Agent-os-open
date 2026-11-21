@@ -78,8 +78,11 @@ def _inject_tool_executor(server_mod: Any, handle: _FakeToolExecutor) -> None:
 
 async def test_on_load_injects_capability_caller() -> None:
     """on_load → _capability_caller 注入；经其调用转发到 tool-executor 能力。"""
-    server_mod = _load_server_module()
+    # 先装 plugin 再装 server：server.py 顶部 `from plugin import ...` 绑定的是
+    # 装载时的模块对象——反序会让 server 持有旧模块的 setter，断言读到新模块
+    # 的 None（模块身份分裂，非接线故障）。
     plugin_mod = _load_plugin_module()
+    server_mod = _load_server_module()
     handle = _FakeToolExecutor()
     _inject_tool_executor(server_mod, handle)
 
@@ -96,8 +99,9 @@ async def test_on_load_injects_capability_caller() -> None:
 
 async def test_on_unload_clears_capability_caller() -> None:
     """on_unload → _capability_caller 清空（防止跨插件生命周期残留调用通道）。"""
-    server_mod = _load_server_module()
+    # 装载顺序同上一个用例：先 plugin 后 server（server 顶部绑定 plugin 模块）。
     plugin_mod = _load_plugin_module()
+    server_mod = _load_server_module()
     handle = _FakeToolExecutor()
     _inject_tool_executor(server_mod, handle)
 

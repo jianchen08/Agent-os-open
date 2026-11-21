@@ -5,7 +5,7 @@
 1. default_policy_path：定位仓库根 config/plugins/isolation/isolation_policy.yaml
    （AGENTOS_CONFIG_ROOT 优先，回退祖先目录查找，不硬编码父目录层数）
 2. IsolationPolicyLoader：config_center 不可用时文件回退加载真实策略
-   （bash_execute 应命中 tools 精确匹配 → isolated/command_in_container）
+   （bash 应命中 tools 精确匹配 → isolated/command_in_container）
 3. 路径找不到时降级默认策略（不 panic）
 """
 
@@ -114,9 +114,12 @@ class TestDefaultPolicyPath:
 
 class TestPolicyLoaderFileFallback:
     def test_loads_real_policy_from_repo_root(self) -> None:
-        """config_center 不可用时文件回退加载真实策略，bash_execute 命中 tools 精确匹配。"""
+        """config_center 不可用时文件回退加载真实策略，bash 命中 tools 精确匹配。
+
+        工具名用现行命令面单工具 ``bash``（ADR 2026-11-07 T2 四单词重构，
+        bash_execute 已退役出 isolation_policy.yaml 精确匹配键）。"""
         loader = IsolationPolicyLoader()
-        policy = loader.resolve("bash_execute")
+        policy = loader.resolve("bash")
         assert policy.isolation.value == "isolated"
         assert policy.execution == "command_in_container"
 
@@ -250,7 +253,7 @@ class TestWatcherAvailabilityGuard:
         with caplog.at_level(logging.WARNING, logger=self._LOGGER):
             loader = IsolationPolicyLoader(config_path=str(_POLICY_FILE))
         assert (
-            loader.resolve("bash_execute").isolation.value == "isolated"
+            loader.resolve("bash").isolation.value == "isolated"
         ), "config_center 缺席时文件回退加载必须照常工作"
         assert any(
             "config_center 不可用" in rec.getMessage() for rec in caplog.records
@@ -289,7 +292,7 @@ class TestWatcherAvailabilityGuard:
         monkeypatch.setitem(sys.modules, "config.config_center", fake)
         with caplog.at_level(logging.WARNING, logger=self._LOGGER):
             loader = IsolationPolicyLoader(config_path=str(_POLICY_FILE))
-        assert loader.resolve("bash_execute").isolation.value == "isolated"
+        assert loader.resolve("bash").isolation.value == "isolated"
         assert any(
             "注册 watcher 失败" in rec.getMessage() for rec in caplog.records
         ), "watch 注册失败必须告警留痕"

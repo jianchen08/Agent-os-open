@@ -15,6 +15,7 @@ import {
   Menu,
   Notification,
   screen,
+  session,
   shell,
 } from "electron";
 import { createHash } from "crypto";
@@ -34,6 +35,7 @@ import {
   ensurePackagedKernelRunning,
   ensureUvForPackagedBoot,
   getPackagedAdminCredential,
+  KERNEL_HEALTH_URL,
   kernelResourcePaths,
   managedKernelLogDir,
   patrolPluginVenvs,
@@ -41,6 +43,12 @@ import {
   TOKEN_SECRET_FILE,
 } from "./kernel-manager";
 import { initDiagLog, logDiag } from "./diag-log";
+import { ensureTier2Provisioned } from "./plugin-tier2-provision";
+import {
+  ensureDeployVerified,
+  runFullVerification,
+  summarizeFullReport,
+} from "./deploy-verify";
 import {
   KERNEL_LIVENESS_STALE_THRESHOLD_MS,
   KERNEL_LIVENESS_UNKNOWN,
@@ -54,6 +62,7 @@ import {
   reportWebContentsResponsive,
   reportWebContentsUnresponsive,
 } from "./renderer-health";
+import { startRendererHeapSampling } from "./renderer-heap";
 import { startWsRelay, type WsRelayHandle } from "./ws-relay";
 import { attachEditMenu } from "./edit-menu";
 import { createTray, destroyTray } from "./tray";
@@ -73,6 +82,11 @@ import {
   restoredWindowOptions,
   saveWindowState,
 } from "./window-state";
+import {
+  createConnectionSelfHeal,
+  SELF_HEAL_REBUILT_CHANNEL,
+  SELF_HEAL_REQUEST_CHANNEL,
+} from "./connection-self-heal";
 import {
   isVisibilityWatchdogEnabled,
   VisibilityRecovery,
@@ -117,6 +131,9 @@ const MAXIMIZED_CHANGED_CHANNEL = "window:maximized-changed";
 
 /** 主窗口引用 */
 let mainWindow: BrowserWindow | null = null;
+
+/** 渲染器 JS 堆周期采样停止句柄（窗口重建时先停旧采样器，见 renderer-heap.ts） */
+let stopRendererHeapSampling: (() => void) | null = null;
 
 /** 渲染层可见性自愈控制器（主窗口一个实例，见 visibility-recovery.ts） */
 let visibilityRecovery: VisibilityRecovery | null = null;
@@ -374,6 +391,12 @@ function createMainWindow(
   });
 
   mainWindow = win;
+
+  // 渲染器 JS 堆周期采样（现有内存面全是进程级，渲染器内部堆此前零采样；
+  // 见 renderer-heap.ts）。窗口重建时先停旧采样器，避免同窗口多份定时器。
+  stopRendererHeapSampling?.();
+  stopRendererHeapSampling = startRendererHeapSampling(win, logDiag);
+
   return win;
 }
 
@@ -490,6 +513,42 @@ export async function bootPackagedKernelThenLoad(
     } catch (uvErr) {
       logDiag(`[uv-bootstrap] 启动跳过: ${String(uvErr)}`);
     }
+    // Tier2 插件供给（ADR 2026-11-07-plugin-tiered-single-copy-model 刀 3）：
+    // 安装/升级后的首次启动，把包内 Tier2 种子按基线覆盖规则解包到用户目录
+    // （Tier1 清单条目跳过；同包版本已就位则零动作）。必须在 spawn 内核之前
+    // 完成——内核启动即消费插件根。失败不反噬启动（与 uv-bootstrap 同语义）。
+    try {
+      const provision = ensureTier2Provisioned({
+        resourcesPath: process.resourcesPath,
+        appDataDir: app.getPath("appData"),
+        userRootEnv: process.env.AGENTOS_USER_ROOT,
+        packageVersion: app.getVersion(),
+      });
+      logDiag(
+        `[tier2-provision] ${provision.status} installed=${provision.installedCount} ` +
+          `overwritten=${provision.overwrittenCount} conflicts=${JSON.stringify(provision.conflictIds)} ` +
+          `tier1Skipped=${JSON.stringify(provision.skippedTier1)}`,
+      );
+    } catch (provisionErr) {
+      logDiag(`[tier2-provision] 启动跳过: ${String(provisionErr)}`);
+    }
+    // 部署回读校验（ADR 2026-11-10-deploy-freshness-verification）：安装/升级后
+    // 首启把包内 deploy-manifest.json 与安装位实际字节对账。关键项（内核 exe、
+    // app.asar、各 plugin.json、frontend index、config 内核配置、_host 宿主）
+    // 缺失/哈希不符/清单版本与应用版本混版 → 抛 DeployVerifyError，走下方
+    // 「启动失败」路径（关键项拦启动，用户裁定 2026-11-10）；全量校验在内核
+    // 就绪后异步跑，只报告 + 落状态文件（同版本清单不重复跑）。旧包无清单时
+    // status=no-manifest 直接降级，不反噬启动。
+    const deployVerify = ensureDeployVerified({
+      resourcesPath: process.resourcesPath,
+      appDataDir: app.getPath("appData"),
+      userRootEnv: process.env.AGENTOS_USER_ROOT,
+      packageVersion: app.getVersion(),
+    });
+    logDiag(
+      `[deploy-verify] ${deployVerify.status} version=${deployVerify.manifest?.version ?? "?"} ` +
+        `buildHead=${deployVerify.manifest?.build_head || "?"} criticalFailures=${deployVerify.failures.length}`,
+    );
     const result = await ensurePackagedKernelRunning({
       resourcesPath: process.resourcesPath,
       // token 签名密钥持久化（认证身份目录，机器级跨安装稳定）：刷新令牌跨
@@ -530,6 +589,27 @@ export async function bootPackagedKernelThenLoad(
       });
     } catch (patrolErr) {
       logDiag(`[venv-patrol] 启动跳过（插件根解析失败）: ${String(patrolErr)}`);
+    }
+    // 全量回读（异步、只报告）：清单 files 逐文件哈希 + 与上一版清单做差，
+    // 日志直接回答「本次更新变更 N 项 / 未落地 M 项」。状态文件命中同清单
+    // 即跳过（status=skipped-current），首启/升级后各跑一次。
+    const fullEligible = deployVerify.status === "ok" || deployVerify.status === "failed";
+    if (fullEligible && deployVerify.manifest && deployVerify.manifestDigest && deployVerify.userRoot) {
+      const { manifest, manifestDigest, userRoot } = deployVerify;
+      void runFullVerification({
+        resourcesPath: process.resourcesPath,
+        userRoot,
+        manifest,
+        manifestDigest,
+      })
+        .then((report) => {
+          logDiag(`[deploy-verify] full ${summarizeFullReport(report)}`);
+          if (report.findings.length > 0) {
+            const sample = report.findings.slice(0, 20).map((f) => `${f.kind}:${f.path}`);
+            logDiag(`[deploy-verify] 未落地明细（前 ${sample.length} 条）: ${sample.join(", ")}`);
+          }
+        })
+        .catch((fullErr) => logDiag(`[deploy-verify] full 失败: ${String(fullErr)}`));
     }
   } catch (err) {
     // 错误消息自带用户指引（缺失→重装 / 超时→看日志重试），此处原样呈现
@@ -990,6 +1070,25 @@ function registerIpcHandlers(): void {
   ipcMain.handle(UPDATE_GET_AVAILABLE_CHANNEL, () => {
     return currentUpdateInfo();
   });
+
+  // ===== 连接池毒化自愈 IPC（2026-11-18 装机事故批次 2）=====
+  // 渲染进程重连达阈值时请求；先探 KERNEL_HEALTH_URL（健康=毒化在前端网络池，
+  // 才值得重建；内核真挂不 closeAllConnections），5 分钟冷却限频。重建成功经
+  // net:self-heal:rebuilt 广播渲染进程（常驻通知在渲染侧通知中心承载）。
+  const connectionSelfHeal = createConnectionSelfHeal({
+    healthUrl: KERNEL_HEALTH_URL,
+    closeAllConnections: () => {
+      session.defaultSession.closeAllConnections();
+    },
+    notifyRebuilt: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(SELF_HEAL_REBUILT_CHANNEL, payload);
+      }
+    },
+  });
+  ipcMain.handle(SELF_HEAL_REQUEST_CHANNEL, (_event, payload: unknown) => {
+    return connectionSelfHeal.handleSelfHealRequest(payload);
+  });
 }
 
 /**
@@ -1292,8 +1391,8 @@ app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
   }
 
-  // 注册 app:// 协议处理器（必须先于窗口创建）
-  installAppProtocolHandler();
+  // 注册 app:// 协议处理器（必须先于窗口创建；失败观测面经 logDiag 落盘）
+  installAppProtocolHandler(logDiag);
 
   // 注册 IPC
   registerIpcHandlers();

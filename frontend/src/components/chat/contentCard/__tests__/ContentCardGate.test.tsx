@@ -9,8 +9,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { ContentCardDeclaration } from '@/services/schema/contentCard'
 import { ContentCardGate, extractCodeElement } from '../ContentCardGate'
+import type { ContentCardDeclaration } from '@/services/schema/contentCard'
 
 vi.mock('@lobehub/ui/es/Markdown/components/MarkdownProvider', () => ({
   useMarkdownContext: vi.fn(() => ({

@@ -7,3 +7,20 @@
 [build]
 incremental = false
 jobs = 1
+
+# mimalloc 活字节计量（MI_STAT）
+#
+# release 构建下 libmimalloc-sys 以 MI_DEBUG=0 编译 C 源，mimalloc 据此取
+# MI_STAT=0：malloc_normal/huge 的 total/peak/current 在编译点被剔除，
+# `allocator::snapshot_stats()` 的 in_use/requested/allocs 面读不出活集——
+# 内存诊断只剩 committed/reserved 总量，无法回答"涨在谁身上"（2026-11-10
+# 装机实证：committed 7 小时从 69MB 爬到 1006MB，RSS 仅 357MB，无活集可归因）。
+#
+# cc-rs 从环境取外部旗标：纯 C 编译读 CFLAGS，C++ 编译读 CXXFLAGS（MSVC
+# 路径 mimalloc 以 C++ 编译，故两个都设；cl 接受 -D 形式）。关闭 = 删本节
+# 后 `cargo clean -p libmimalloc-sys` 重编。代价：每次 malloc/free 多一次
+# 计数（MI_STAT=1 只维护计量面，不含 MI_STAT=2 的分 bin 明细与峰值追踪）。
+[env]
+CFLAGS = { value = "-DMI_STAT=1", force = true }
+CXXFLAGS = { value = "-DMI_STAT=1", force = true }
+

@@ -15,6 +15,7 @@ for _p in (str(Path(__file__).resolve().parent),):
         sys.path.insert(0, _p)
 
 from todo_extract import (  # noqa: E402
+    incremental_merge,
     latest_items,
     parse_html_card_ops,
     parse_todo_blocks,
@@ -179,13 +180,14 @@ def test_extract_falls_back_to_html_card_ops() -> None:
     _spec = importlib.util.spec_from_file_location(
         "todo_track_plugin_extract_test", str(_dir / "plugin.py")
     )
-    assert _spec is not None and _spec.loader is not None
+    assert _spec is not None
+    assert _spec.loader is not None
     _mod = importlib.util.module_from_spec(_spec)
     sys.modules["todo_track_plugin_extract_test"] = _mod
     _spec.loader.exec_module(_mod)
-    TodoTrackPlugin = _mod.TodoTrackPlugin
+    todo_track_plugin_cls = _mod.TodoTrackPlugin
 
-    plugin = TodoTrackPlugin()
+    plugin = todo_track_plugin_cls()
     state = {
         "pipeline_id": "p1",
         "messages": [
@@ -204,3 +206,154 @@ def test_extract_falls_back_to_html_card_ops() -> None:
     todo_text = out["context.todo_text"]
     assert "- [x] 查询航班" in todo_text
     assert "- [ ] 输出摘要" in todo_text
+
+
+def test_mark_matches_item_with_arrow_note() -> None:
+    """模型勾选常带 `→ 已终结` 尾注：归一化后应勾中原文，且不新增条目。"""
+    current = [
+        {"text": "装机双验证 + A1 观察中（若第 3 次再停升级处理）", "done": False},
+        {"text": "各任务完成后验收汇报", "done": False},
+    ]
+    merged = incremental_merge(
+        current,
+        [
+            {
+                "text": "装机双验证 + A1 观察中（若第 3 次再停升级处理）→ 已终结",
+                "done": True,
+            }
+        ],
+    )
+    assert merged is not None
+    assert merged[0]["done"] is True
+    assert len(merged) == 2
+
+
+def test_insert_dedupes_whitespace_and_punctuation_variants() -> None:
+    """新增查重按归一化文本：空白/全半角不同不产生重复条目。"""
+    current = [
+        {"text": "开源同步推送验收（1e973628c71b 在跑，等完成通知）", "done": False}
+    ]
+    merged = incremental_merge(
+        current,
+        [{"text": "开源同步推送验收( 1e973628c71b 在跑, 等完成通知 )", "done": False}],
+    )
+    assert merged is None
+
+
+def test_mark_similar_text_matches_unique_best() -> None:
+    """轻微措辞差异（相似度 ≥0.86）可勾中；不新增重复条目。"""
+    current = [
+        {"text": "审批设计稿 v2 出稿后转呈你评审", "done": False},
+        {"text": "开源同步推送验收（1e973628c71b 续跑中）", "done": False},
+    ]
+    merged = incremental_merge(
+        current,
+        [{"text": "审批设计稿 v2 出稿转呈你评审", "done": True}],
+    )
+    assert merged is not None
+    assert merged[0]["done"] is True
+    assert len(merged) == 2
+
+
+def test_mark_with_arrow_only_text_is_noop() -> None:
+    """只有尾注、无主体文本的行不是有效勾选：零变更直通。"""
+    assert (
+        incremental_merge(
+            [{"text": "装机双验证", "done": False}],
+            [{"text": "→ 已终结", "done": True}],
+        )
+        is None
+    )
+
+
+def test_insert_with_task_id_tail_not_duplicated() -> None:
+    """模型按「标题 — `任务ID`（状态）」汇报惯例重述同一待办（7fb38fe89e82
+    实测同条 2~3 份副本的根因形态）：破折号尾注归一化剥除后同键，判重不追加。"""
+    current = [{"text": "拉起开发版实例（内核 + 前端，可直接访问）", "done": False}]
+    merged = incremental_merge(
+        current,
+        [
+            {
+                "text": "拉起开发版实例（内核 + 前端，可直接访问）— `bbd1591dd9c5`（仍在进行中）",
+                "done": False,
+            }
+        ],
+    )
+    assert merged is None
+
+
+def test_mark_with_task_id_tail_matches_plain_item() -> None:
+    """带任务 ID 尾注的勾选行应勾中裸标题现有项，不新增副本。"""
+    current = [
+        {"text": "盘点编码规则与 CI 门禁的覆盖差（哪些规则未进 CI）", "done": False}
+    ]
+    merged = incremental_merge(
+        current,
+        [
+            {
+                "text": "盘点编码规则与 CI 门禁的覆盖差（哪些规则未进 CI）— `3ce6baca7531`",
+                "done": True,
+            }
+        ],
+    )
+    assert merged is not None
+    assert merged[0]["done"] is True
+    assert len(merged) == 1
+
+
+def test_insert_drift_variant_not_duplicated() -> None:
+    """措辞漂移变体（差一个「的」+ ID 尾注）：相似唯一最优判重，不追加副本。"""
+    current = [
+        {"text": "盘点历史方案的实施状态（找出“写了方案但没做”的）", "done": False}
+    ]
+    merged = incremental_merge(
+        current,
+        [
+            {
+                "text": "盘点历史方案的实施状态（找出“写了方案但没做”）— `a25e4c7899e2`",
+                "done": False,
+            }
+        ],
+    )
+    assert merged is None
+
+
+def test_insert_short_restate_with_id_deduped_against_long_item() -> None:
+    """短重述（裸标题 — ID）与既有长条目包含判重（短侧 ≥6 字），不追加副本。"""
+    current = [
+        {
+            "text": "实施工作区任务现场（命令、浏览器实例、截图、设备条目、悬浮标记、Word/PPT/PDF 批注、diff）",
+            "done": False,
+        }
+    ]
+    merged = incremental_merge(
+        current,
+        [{"text": "实施工作区任务现场 — `6acf31e2da3a`", "done": False}],
+    )
+    assert merged is None
+
+
+def test_insert_short_item_not_swallowed_by_long_item() -> None:
+    """防误吞对照：短真新条目（<6 字）不被长条目包含判重杀掉。"""
+    current = [
+        {"text": "写测试报告并对照门禁清单复核", "done": False},
+    ]
+    merged = incremental_merge(
+        current,
+        [{"text": "写测试", "done": False}],
+    )
+    assert merged is not None
+    assert len(merged) == 2
+    assert merged[1]["text"] == "写测试"
+
+
+def test_insert_genuinely_new_item_still_appends() -> None:
+    """防拟合对照：与现有条目无尾注/漂移/包含关系的真新条目照常追加。"""
+    current = [{"text": "拉起开发版实例（内核 + 前端，可直接访问）", "done": False}]
+    merged = incremental_merge(
+        current,
+        [{"text": "盘点装机任务执行监控轮台账", "done": False}],
+    )
+    assert merged is not None
+    assert len(merged) == 2
+    assert merged[1]["text"] == "盘点装机任务执行监控轮台账"

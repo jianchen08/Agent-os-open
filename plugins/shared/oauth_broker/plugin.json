@@ -1,13 +1,17 @@
 {
   "id": "oauth_broker",
-  "requires_services": [],
   "name": "OAuth Broker",
-  "description": "MCP 服务器 OAuth 授权代理（RFC 9728/8414/7591 + OAuth 2.1 PKCE + RFC 8707/9207，按 MCP 2026-07-28 修订）：本机回调 + 打开浏览器走授权码流程，token 落用户空间 .env（内核按 ${VAR} 占位读到，mtime 指纹触发 MCP 客户端重建，无需重启）。自助注册不可行的服务（无动态注册端点/无元数据，如 GitHub）自动打开注册页或 PAT 页并逐条列出要手填的值。",
-  "version": "1.2.0",
+  "description": "MCP 服务器 OAuth 授权代理（RFC 9728/8414/7591 + OAuth 2.1 PKCE + RFC 8707/9207，按 MCP 2026-07-28 修订）：本机回调 + 打开浏览器走授权码流程，token 落用户空间 .env（内核按 ${VAR} 占位读到，mtime 指纹触发 MCP 客户端重建，无需重启）。自助注册不可行的服务（无动态注册端点/无元数据，如 GitHub）自动打开注册页或 PAT 页并逐条列出要手填的值。授权成立即向 grants 账本幂等落 domain grant（source=oauth_broker），凭据失效（刷新被拒）联动撤销；账本缺席只降级记录面，不影响授权。",
+  "version": "1.4.0",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
+  "requires_services": [
+    "grants.ledger",
+    "grants.ledger.request",
+    "grants.ledger.revoke"
+  ],
   "capabilities": {
     "metrics_class": "tool",
     "tools": [
@@ -25,9 +29,23 @@
               "type": "string",
               "enum": [
                 "authorize",
+                "paste_callback",
                 "status"
               ],
-              "description": "oauth 动作（必填枚举）：authorize=确保目标服务器已授权（有效/刷新/全量授权码+PKCE/人工引导注册）；status=列出已授权服务器 token 状态（无 token 值）"
+              "description": "oauth 动作（必填枚举）：authorize=确保目标服务器已授权（有效/刷新/全量授权码+PKCE/人工引导注册；mode=paste_callback 走粘贴回调双模式）；paste_callback=粘回浏览器最终回调 URL 完成兑换（与 authorize 的 mode=paste_callback 配套）；status=列出已授权服务器 token 状态（无 token 值）"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "browser",
+                "paste_callback"
+              ],
+              "default": "browser",
+              "description": "仅 action='authorize'：登录模式（N3 双模式）。browser=拉本机浏览器+本机回调收码（缺省）；paste_callback=不拉浏览器，立即返回授权 URL，用户在任意浏览器完成授权后把最终回调 URL 经 action='paste_callback' 粘回完成兑换（无浏览器/远程兜底）"
+            },
+            "callback_url": {
+              "type": "string",
+              "description": "仅 action='paste_callback'：用户粘贴的浏览器最终跳转回调 URL（含 code 与 state，形如 http://127.0.0.1:9100/ext/oauth_broker/callback?code=…&state=…）；闸门（state/iss/PKCE）与 http 回调同一核"
             },
             "server_url": {
               "type": "string",
@@ -39,7 +57,7 @@
             },
             "scope": {
               "type": "string",
-              "description": "仅 action='authorize'：申请的授权范围（可选，空格分隔；缺省不显式指定，由授权服务器取默认）"
+              "description": "仅 action='authorize'：申请的授权范围（可选，空格分隔；缺省走 discovery 协商——服务器公告 scopes_supported 优先，空则 AS 元数据；offline_access 公告了会自动追加；授权服务器拒绝 scope 时自动去 scope 重试一次）"
             },
             "wait_seconds": {
               "type": "number",
@@ -83,11 +101,25 @@
                 "callback_base_url": {},
                 "client_secret": {},
                 "resource_metadata_url": {},
-                "guidance_action": {}
+                "guidance_action": {},
+                "mode": {}
               },
               "required": [
                 "action",
                 "server_url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "paste_callback"
+                },
+                "callback_url": {}
+              },
+              "required": [
+                "action",
+                "callback_url"
               ],
               "additionalProperties": false
             },
@@ -107,7 +139,7 @@
         },
         "output_schema": {
           "type": "object",
-          "description": "按 action 返回对应结构：authorize={status(authorized|pending|registration_required),method,server_url,resource,env_prefix,env_keys,expires_at,authorization_url,browser_opened,refresh_error,notes,guidance?}；status={servers:[{env_prefix,resource,has_access_token,has_refresh_token,expires_at,expired,needs_refresh}]}；参数错误返回 {success:false,error,error_code}（error 教改法）",
+          "description": "按 action 返回对应结构：authorize={status(authorized|pending|registration_required),method,server_url,resource,env_prefix,env_keys,expires_at,authorization_url,browser_opened,refresh_error,notes,guidance?}（mode=paste_callback 时恒 pending+authorization_url，完成靠 paste_callback 粘回；scope 被拒时 pending+去 scope 的新 authorization_url）；paste_callback=同 authorize 结构（status=authorized 或 pending[scope 重试]）；status={servers:[{env_prefix,resource,has_access_token,has_refresh_token,expires_at,expired,needs_refresh}]}；参数错误返回 {success:false,error,error_code}（error 教改法）",
           "properties": {
             "status": {
               "type": "string",

@@ -140,8 +140,12 @@ function renderFragment(
       )
 
     case 'system': {
-      const styles = SYSTEM_LEVEL_STYLES[fragment.level]
-      const IconComponent = SYSTEM_LEVEL_ICONS[fragment.level]
+      // level 兜底回退 info：notification_level 是后端任意字符串透传（历史回读
+      // session.ts / 实时 lifecycleHandlers 均未校验直通，现役值域含
+      // critical/success/warn），缺键取值不兜底会抛 undefined.container，
+      // 切到含该类消息的会话即整条消息流渲染崩死（路由级错误页）。
+      const styles = SYSTEM_LEVEL_STYLES[fragment.level] ?? SYSTEM_LEVEL_STYLES.info
+      const IconComponent = SYSTEM_LEVEL_ICONS[fragment.level] ?? SYSTEM_LEVEL_ICONS.info
       return (
         <div
           key={fragment.key}

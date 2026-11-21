@@ -468,12 +468,16 @@ async def review_ops(
             metrics=metrics, pipeline_ids=pipeline_ids,
         )
     if action == "get_report":
-        foreign = [k for k, v in (("task_id", task_id), ("summary", summary),
+        # task_id 不作跨动作拒收：tool_args_inject 在任务管道里对每个工具调用
+        # 无条件注入 task_id（环境键，非模型误用），纳入判定会让 get_report
+        # 在任务管道内恒失败（2026-11-18 矩阵 R6 实测）。summary/artifacts/
+        # metrics/pipeline_ids 是模型面参数，仍按误用给教学错误。
+        foreign = [k for k, v in (("summary", summary),
                                   ("pipeline_ids", pipeline_ids)) if v]
         if foreign or artifacts or metrics:
             return {
                 "success": False,
-                "error": "task_id/summary/artifacts/metrics/pipeline_ids 仅 "
+                "error": "summary/artifacts/metrics/pipeline_ids 仅 "
                          "action='trigger' 可用；get_report 只需 review_id，示例: "
                          "review_ops(action='get_report', review_id='<复盘id>')",
             }

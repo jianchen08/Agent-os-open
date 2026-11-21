@@ -10,10 +10,10 @@
  */
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DeclaredWidgetLayer } from '../DeclaredWidgetLayer'
+import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { apiClient } from '@/services/api/client'
+import { DeclaredWidgetLayer } from '../DeclaredWidgetLayer'
 
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: vi.fn() },

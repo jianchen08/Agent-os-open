@@ -22,6 +22,9 @@
   "permissions": {},
   "priority": 50,
   "state": {
-    "reads": []
+    "reads": [
+      "delegate_depth",
+      "max_delegate_depth"
+    ]
   }
 }

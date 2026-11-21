@@ -437,8 +437,9 @@ class TestLastAssistantFallback:
 
     def test_execute_falls_back_to_last_assistant_when_raw_result_bare(self) -> None:
         """评估模式：raw_result 无结论 JSON → 从最后一条 assistant 文本回扫命中。"""
-        plugin = TaskReminder(config={"evaluation_mode": True})
+        plugin = TaskReminder()
         state = _base(
+            **{"evaluation.metric_id": "semantic_check"},
             raw_result="本轮只给了一句总结",
             messages=[{"role": "assistant", "content": _EVAL_JSON}],
         )
@@ -448,13 +449,28 @@ class TestLastAssistantFallback:
 
     def test_execute_uses_raw_result_when_json_present(self) -> None:
         """对照：raw_result 自带结论 JSON 时直接命中（不必回扫 messages）。"""
-        plugin = TaskReminder(config={"evaluation_mode": True})
+        plugin = TaskReminder()
         state = _base(
+            **{"evaluation.metric_id": "semantic_check"},
             raw_result=_EVAL_JSON,
             messages=[{"role": "assistant", "content": "另一段无 JSON 文本"}],
         )
         updates = _run(plugin, state)
         assert updates["evaluation.detected_result"]["passed"] is True
+
+    def test_execute_projects_child_task_completed_on_detected_result(self) -> None:
+        """评估子管道命中结论 JSON → 自身 task.status 落 completed（终态投影）。
+
+        回归 885b1a27752f（2026-11-11）：只落 evaluation.detected_result 不落
+        task.status 时，run.completed 派生不出 task_completed → 父任务
+        task.subtasks_pending 永不解除、父挂起等不到唤醒。
+        """
+        plugin = TaskReminder()
+        updates = _run(plugin, _base(**{"evaluation.metric_id": "semantic_check"}, raw_result=_EVAL_JSON))
+        assert updates["evaluation.detected_result"]["passed"] is True
+        assert updates["task.status"] == "completed"
+        assert updates["task.ended_at"]
+        assert updates["ended"] is True
 
 
 # ═══════════════════════════════════════════════════════════
@@ -507,8 +523,9 @@ class TestEvaluationJsonCandidateTolerance:
 
     def test_execute_survives_invalid_raw_result_candidate(self) -> None:
         """执行路径：raw_result 脏候选不阻断，回退到 assistant 文本的合法结论。"""
-        plugin = TaskReminder(config={"evaluation_mode": True})
+        plugin = TaskReminder()
         state = _base(
+            **{"evaluation.metric_id": "semantic_check"},
             raw_result="扫描日志 {trace: broken} 完毕",
             messages=[
                 {

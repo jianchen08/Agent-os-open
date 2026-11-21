@@ -1,0 +1,37 @@
+# 插件分级清单——ADR 2026-11-07-plugin-tiered-single-copy-model 的单一真源
+#
+# tier1 = 安全级：落应用目录（ACL 只读），安装器不解包到用户目录，升级随包整替。
+#   篡改面 = 审批链/隔离边界/凭证/防护闸 + 跨插件共享模块根——无「用户自己改」合法场景。
+# tier2 = 其余全部功能插件（默认）：安装时解包到用户目录 + 基线清单，用户可改
+#   （基线 diff 判定，升级时未改覆盖/改过保留+告警）。
+#
+# 维护纪律：增删条目须过 CI 对账闸（清单 vs plugins/shared 实际含 plugin.json 目录一致，
+# 见 scripts/check_plugin_tiers_consistency.py，刀 4 落地）；本文件随包分发，安装器与
+# 内核启动守卫共同消费。
+# 条目语义：safety_plugins = **manifest id**（plugin.json 的 id 字段，非目录名——
+# 内核启动守卫按 id 匹配，2026-11-07 修正：目录名≠id 曾致守卫误判缺席拒启）。
+tier1:
+  # 安全关键插件（审批链/隔离边界/凭证/防护闸）
+  safety_plugins:
+    - approval_service              # 审批面（目录 approval）
+    - human_interaction_tool        # human_interaction 确认面（目录 human）
+    - isolation_service             # 隔离执行（目录 isolation）
+    - pipeline_isolation_guard      # 隔离守卫（目录 isolation_guard）
+    - oauth_broker                  # OAuth 凭证面（目录同名）
+    - pipeline_context_window_guard # 上下文窗口防护闸（目录 context_window_guard）
+    - pipeline_delegate_depth_guard # 委派深度防护闸（目录 delegate_depth_guard）
+    - pipeline_level_guard          # 级别防护闸（目录 level_guard）
+    - pipeline_spill_guard          # 泄漏防护闸（目录 spill_guard）
+  # 共享模块根（跨插件公共依赖，版本随包整体出货）
+  shared_modules:
+    - _host               # 合宿宿主
+    - _libs               # 共享测试与管道基类（含 dangerous_targets 等安全模块）
+    - _root_api           # 共享根显式出口 API
+    - _llm_streaming.py   # LLM 流式翻译共享件
+    - atomic_io.py        # 原子写共享件
+    - db_read.py          # 只读 DB 访问共享件
+    - hlc_clock.py        # HLC 时钟共享件
+    - http_json.py        # HTTP JSON 共享件
+    - isolation_path.py   # 隔离路径共享件
+    - kernel_token.py     # 内核令牌面
+    - mode_keys.py        # 模式密钥面

@@ -536,6 +536,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     };
     let bad = PluginManifest {
         force_include_tools: Vec::new(),
@@ -570,6 +571,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     };
 
     let errors = register_manifest_http_routes(&registry, &[good, bad], None);

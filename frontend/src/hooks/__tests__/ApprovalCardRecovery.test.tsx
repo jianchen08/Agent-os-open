@@ -285,3 +285,76 @@ describe('BUG-36 对照：WS 推送在途时轮询去重不重挂', () => {
     view.unmount()
   })
 })
+
+// @feature FP-T12 前端适配(装机事故批次4 断线交互卡恢复回归) | @ci: frontend-test
+describe('批次4：断线窗口内产生的交互请求随重连恢复（回归锚）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.clearAllMocks()
+    ws.handlers.clear()
+    ws.status = 'connected'
+    pendingResponse.items = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    void warn
+    useInteractionStore.setState(useInteractionStore.getInitialState(), true)
+    useNotificationStore.setState(useNotificationStore.getInitialState(), true)
+    usePipelineMessageStore.setState(usePipelineMessageStore.getInitialState(), true)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('请求发出时 WS 断 → 重连成功 → 拉取合水卡片恢复（不等轮询周期）', async () => {
+    // 挂载：请求尚未产生，挂载拉取为空
+    await mountOverlay()
+    expect(screen.queryByText('安全审批: bash_execute')).toBeNull()
+
+    // 断线窗口：WS 断开（推送不可达），后端在此窗口内产生了交互请求
+    await act(async () => {
+      ws.emit('_status', { status: 'disconnected' })
+    })
+    pendingResponse.items = [
+      approvalRecord({
+        id: 'req-dangle',
+        session_id: 'sess-dangle',
+        title: '安全审批: bash_execute',
+      }),
+    ]
+
+    // 推过恢复链的 1s 防抖窗（挂载拉取留下的 lastRestoreAt 冷却）
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100)
+    })
+
+    // 重连成功 → RECONNECTED 直接触发恢复链（不等 10s 轮询周期）
+    await act(async () => {
+      ws.emit('reconnected', { status: 'connected' })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    // 卡片恢复（合水入 store，复用既有渲染面）
+    expect(screen.getByText('安全审批: bash_execute')).toBeInTheDocument()
+    expect(
+      useInteractionStore
+        .getState()
+        .pendingInteractions.some((i) => i.requestId === 'req-dangle'),
+    ).toBe(true)
+  })
+
+  it('重连合水不重复弹：既有卡片（推送已入库）在重连拉到同 id 后保持单卡', async () => {
+    pendingResponse.items = [approvalRecord({})]
+    await mountOverlay()
+    expect(screen.getAllByText('安全审批: project_state')).toHaveLength(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_100)
+      ws.emit('reconnected', { status: 'connected' })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(screen.getAllByText('安全审批: project_state')).toHaveLength(1)
+    expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1)
+  })
+})

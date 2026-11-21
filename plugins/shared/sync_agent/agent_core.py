@@ -165,6 +165,16 @@ class RelayStatusError(RuntimeError):
         self.status = status
 
 
+# 回环 relay 端口漂移自愈面（2026-11-16 装机实证：内核端口变更后凭据 relay_url
+# 恒连接拒绝，outbox 只进不出）。凭据键与 server.py 的 _CRED_RELAY_URL 同键
+# （agent_credential 表）；本机 relay 恒经内核 dispatcher 暴露（/ext/sync_relay），
+# 回环 URL 的端口没有独立生命——跟随当前内核端口才是正确形态。
+_HEAL_CRED_RELAY_URL = "relay_url"
+_HEAL_RELAY_PATH = "/ext/sync_relay"
+_HEAL_KERNEL_PORT_ENV = "AGENTOS_KERNEL_PORT"
+_HEAL_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
 class SyncAgentEngine:
     """端侧同步引擎（capture/flush/pull/heartbeat 单拍循环 + 自举）。"""
 
@@ -350,7 +360,9 @@ class SyncAgentEngine:
                 logger.warning("[sync_agent] 入网自举未完成（relay 未就绪？），下拍重试: %s", exc)
                 return
         self.capture_local_changes()
-        self.capture_file_scopes()
+        # 属主臂 git 子进程（add/status/commit，单条 timeout 120s）出事件循环：
+        # 单拍跑在合宿宿主事件循环上，同步阻塞超 watchdog 阈值即整组退出。
+        await asyncio.to_thread(self.capture_file_scopes)
         await self._flush_when_due()
         await self._pull_when_due()
         await self.pull_file_scopes()
@@ -441,9 +453,14 @@ class SyncAgentEngine:
             return
         for scope in sorted(self._file_channel.reader_scopes):
             try:
-                bundle = await self._file_transport(scope, self._file_channel.head(scope))
+                # head（rev-parse）/ apply_bundle（fetch+reset）同属同步 git 子进程，
+                # 出事件循环执行（单拍在合宿宿主循环上）。
+                basis = await asyncio.to_thread(self._file_channel.head, scope)
+                bundle = await self._file_transport(scope, basis)
                 if bundle is not None:
-                    self._file_channel.apply_bundle(scope, bundle)
+                    await asyncio.to_thread(
+                        self._file_channel.apply_bundle, scope, bundle
+                    )
             except Exception as exc:  # noqa: BLE001 —— 网络面/git 面故障统一退避
                 self._file_pull_failures += 1
                 self.status.last_error = f"file_pull/{scope}: {exc}"
@@ -598,6 +615,8 @@ class SyncAgentEngine:
         try:
             quarantined = await self._post_batch_in_order(batch)
         except Exception as exc:  # noqa: BLE001 —— 网络失败统一退避，事件不丢
+            if await self._maybe_heal_loopback_relay(exc):
+                return
             self._flush_failures += 1
             self.status.failed_flushes += 1
             self.status.last_error = f"flush: {type(exc).__name__}: {exc}"
@@ -609,6 +628,51 @@ class SyncAgentEngine:
             return
         self._flush_failures = 0
         self.status.last_error = f"quarantine: {quarantined} 事件超限隔离" if quarantined else ""
+
+    async def _maybe_heal_loopback_relay(self, exc: Exception) -> bool:
+        """回环 relay 端口漂移自愈：凭据 URL 跟随本机内核端口（写回并立即重试）。
+
+        内核端口变更后凭据里的旧回环 URL 恒连接拒绝，outbox 只进不出（唯一
+        修复路径是重新入网，无人触发即永久积压）。触发条件全满足才动：
+        ①本次为连接级失败（relay 可达并回 HTTP 状态不算——那是业务层问题，
+        走既有退避）；②relay_url host 是回环（远端 relay 不适用）；③
+        ``AGENTOS_KERNEL_PORT`` 已注入且与现 URL 端口不同（内核自身以该变量
+        定监听端口，sidecar 继承进程环境；未注入 = 无法确知端口，不动）；④
+        新 URL 的 relay 路由可达（探测回 4xx 验签拒绝即证路由在——探活只判
+        路由存在，不判凭据）。满足则凭据落盘 + 引擎 config 热更新 + 清退避
+        立即重试，并留 warning 痕。
+
+        Returns:
+            True = 已自愈（本拍失败不再计入退避）；False = 不适用，走原退避。
+        """
+        if isinstance(exc, RelayStatusError):
+            return False
+        host = urlparse(self._config.relay_url).hostname or ""
+        if host not in _HEAL_LOOPBACK_HOSTS:
+            return False
+        port = os.environ.get(_HEAL_KERNEL_PORT_ENV, "").strip()
+        if not port.isdigit():
+            return False
+        new_url = f"http://127.0.0.1:{port}{_HEAL_RELAY_PATH}"
+        if new_url == self._config.relay_url.rstrip("/"):
+            return False
+        try:
+            await self._get_json(f"{new_url}/events", self._config.token)
+        except RelayStatusError:
+            pass  # 路由存在（401/403 即证在）
+        except Exception:  # noqa: BLE001 —— 新端口也不可达：env 与实际不符，保守不动
+            return False
+        old_url = self._config.relay_url
+        self._config.relay_url = new_url
+        self._state.save_credential(_HEAL_CRED_RELAY_URL, new_url)
+        self._flush_failures = 0
+        self._next_flush_at = 0.0  # 清退避：下一拍立即用新 URL 重试
+        logger.warning(
+            "[sync_agent] 回环 relay 端口漂移自愈：%s → %s（凭据已跟随本机内核端口重写）",
+            old_url,
+            new_url,
+        )
+        return True
 
     async def _post_batch_in_order(self, batch: list[dict[str, Any]]) -> int:
         """按序投递一批事件，返回本批隔离数。

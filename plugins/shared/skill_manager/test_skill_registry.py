@@ -97,6 +97,35 @@ class TestDetectLanguages:
         _plant_skill(tmp_path, "s", scripts=(script,))
         assert sr.detect_languages(tmp_path / "skills" / "s") == [lang]
 
+    def test_pruned_dependency_dirs_not_counted(self, tmp_path: Path) -> None:
+        """依赖/构建产物重目录整枝剪掉（技能包带 node_modules/.venv 不炸扫描）。
+
+        scripts/a.py 在 node_modules 下 → 不计入；run.sh 在顶层 → 正常计入；
+        正常子目录 scripts2/helper.py 深度不受剪枝影响。"""
+        d = _plant_skill(tmp_path, "heavy", scripts=("run.sh", "scripts2/helper.py"))
+        dep = d / "node_modules" / "some-dep"
+        dep.mkdir(parents=True)
+        (dep / "impl.py").write_text("# dep\n", encoding="utf-8")
+        venv = d / ".venv" / "lib"
+        venv.mkdir(parents=True)
+        (venv / "site.py").write_text("# venv\n", encoding="utf-8")
+        # node_modules/.venv 内的 .py 不计入；正常子目录 .py 不受剪枝影响
+        assert sr.detect_languages(d) == ["python", "bash"]
+
+    def test_early_exit_after_all_languages_found(self, tmp_path: Path) -> None:
+        """四语齐即停走树（大目录截断语义，行为面 = 返回全集）。"""
+        _plant_skill(
+            tmp_path,
+            "quad",
+            scripts=("a.py", "b.js", "c.sh", "d.ps1", "more/nested/e.py"),
+        )
+        assert sr.detect_languages(tmp_path / "skills" / "quad") == [
+            "python",
+            "nodejs",
+            "bash",
+            "powershell",
+        ]
+
 
 class TestListSkills:
     def test_sorted_metadata_without_content(self, tmp_path: Path) -> None:

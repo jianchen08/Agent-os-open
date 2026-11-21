@@ -108,27 +108,26 @@ async fn stop_generation_returns_only_user_source_keeps_system_in_queue() {
 
     let mk = |id: &str, source: PendingInputSource| PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: "P-src".to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: format!("content-{id}"),
-        thread: "T-src".to_string(),
-        source,
-        agent_id: String::new(),
-        route_id: "P-src".to_string(),
-        thinking_strength: String::new(),
-        client_message_id: format!("cmid-{id}"),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: "2026-10-27T00:00:00+00:00".to_string(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "T-src".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: "P-src".to_string(),
+            content: format!("content-{id}"),
+            client_message_id: format!("cmid-{id}"),
+            source,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     };
     store_dyn
-        .enqueue_pending_input("default", "P-src", &mk("p-user", PendingInputSource::User))
+        .enqueue_pending_input("default", &mk("p-user", PendingInputSource::User))
         .await
         .unwrap();
     store_dyn
-        .enqueue_pending_input("default", "P-src", &mk("p-sys", PendingInputSource::System))
+        .enqueue_pending_input("default", &mk("p-sys", PendingInputSource::System))
         .await
         .unwrap();
 
@@ -188,20 +187,19 @@ async fn force_pending_reorders_target_first_and_keeps_rest_queued() {
     // 三条排队（created_at 交错 = FIFO 序 a→b→c）+ 一个 Running run（在飞回复）
     let mk = |id: &str, at: &str| PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: "P-force".to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: format!("内容-{id}"),
-        thread: "T-force".to_string(),
-        source: PendingInputSource::User,
-        agent_id: String::new(),
-        route_id: "P-force".to_string(),
-        thinking_strength: String::new(),
-        client_message_id: format!("cmid-{id}"),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: at.to_string(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "T-force".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: "P-force".to_string(),
+            content: format!("内容-{id}"),
+            client_message_id: format!("cmid-{id}"),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     };
     for (id, at) in [
         ("a", "2026-10-27T00:00:01Z"),
@@ -209,7 +207,7 @@ async fn force_pending_reorders_target_first_and_keeps_rest_queued() {
         ("c", "2026-10-27T00:00:03Z"),
     ] {
         store_dyn
-            .enqueue_pending_input("default", "P-force", &mk(id, at))
+            .enqueue_pending_input("default", &mk(id, at))
             .await
             .unwrap();
     }

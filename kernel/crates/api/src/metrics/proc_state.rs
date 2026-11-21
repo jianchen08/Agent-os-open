@@ -1,3 +1,4 @@
+// @feature: FP-0.2.可观测性 进程态观测 metrics 面(win32 平台插区) | @ci: rust-test
 //! invoker 代采 C 类进程态指标（监控设计 §三 通道3 + §十一）。
 //!
 //! 指标：alive / pid / memory_commit / uptime / last_crash；内核自身进程
@@ -98,11 +99,11 @@ fn collect_memory_commit_linux(pid: u32) -> Option<u64> {
 #[cfg(target_os = "windows")]
 mod win_layout {
     /// UniqueProcessId：usize @ +0x50（80）。
-    pub const UNIQUE_PROCESS_ID: usize = 0x50;
+    pub(super) const UNIQUE_PROCESS_ID: usize = 0x50;
     /// PrivatePageCount：usize @ +0xC8（200）。
-    pub const PRIVATE_PAGE_COUNT: usize = 0xC8;
+    pub(super) const PRIVATE_PAGE_COUNT: usize = 0xC8;
     /// 解析单条目所需最小长度（读到 PrivatePageCount 尾字节）。
-    pub const MIN_ENTRY_LEN: usize = PRIVATE_PAGE_COUNT + 8;
+    pub(super) const MIN_ENTRY_LEN: usize = PRIVATE_PAGE_COUNT + 8;
 }
 
 /// 解析 SystemProcessInformation 全表缓冲，取目标 pid 的私有提交字节数

@@ -118,6 +118,7 @@ fn test_empty_http_endpoints_omitted_in_serialization() {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     };
 
     let serialized = serde_json::to_string(&manifest).expect("serialize");

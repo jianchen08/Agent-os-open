@@ -52,6 +52,26 @@ TaskReminder = _mod.TaskReminder  # noqa: E402
 _FP_KEY = _mod._RESULT_FP_KEY
 
 
+def _appended_reminder(result: Any) -> dict[str, Any]:
+    """提取提醒注入的消息本体（引擎契约：messages 更新只认 ops 声明形态）。
+
+    finalize.rs 对全量数组零兼容（收到即 warn 丢弃）——提醒若以数组回传，
+    计数与续跑标志照常生效而消息本体丢失，模型收到的是无新输入的空转重调
+    （2026-11-13 装机 1af174 reminder_exhausted 实证）。缺 seq 的 set = append。
+    """
+    updates = result.state_updates["messages"]
+    assert isinstance(updates, dict), (
+        f"messages 更新必须是 {{\"_ops\": […]}} 声明形态，实际: {type(updates).__name__}"
+    )
+    assert "_ops" in updates, f"messages 更新缺 _ops 键，实际键: {sorted(updates)}"
+    ops = updates["_ops"]
+    assert ops, "提醒 _ops 不应为空"
+    last = ops[-1]
+    assert last["op"] == "set", "提醒 op 应为 set（缺 seq = append）"
+    assert "seq" not in last, "append 形态不应携带 seq（seq 由引擎分配）"
+    return last["msg"]
+
+
 def _ctx(state: dict[str, Any], services: dict[str, Any] | None = None) -> PluginContext:
     return PluginContext(state=state, config={}, _services=services or {})
 
@@ -142,8 +162,9 @@ class TestSkipBranches:
         """评估模式下 raw_result 为空但最后 assistant 有文本 → 不进仅工具计数。"""
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 10})
+        plugin = TaskReminder(config={"max_reminders": 10})
         state = _base_task_state(
+            **{"evaluation.metric_id": "semantic_check"},
             raw_result="",
             raw_tool_calls=[{"function": {"name": "file_read"}}],
             messages=[
@@ -213,6 +234,7 @@ class TestActiveChildrenServiceFallback:
 class TestEvaluationModeToolOnly:
     def _eval_state(self, **over: Any) -> dict[str, Any]:
         base = _base_task_state(
+            **{"evaluation.metric_id": "semantic_check"},
             raw_result="",
             raw_tool_calls=[{"function": {"name": "bash"}}],
             messages=[],
@@ -223,7 +245,7 @@ class TestEvaluationModeToolOnly:
     def test_below_threshold_counts_only(self) -> None:
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 10})
+        plugin = TaskReminder(config={"max_reminders": 10})
         result = asyncio.run(plugin.execute(_ctx(self._eval_state(eval_tool_only_count=2)))
         )
         assert result.state_updates == {"eval_tool_only_count": 3, "evaluate_reminder_run": "", _FP_KEY: _mod.TaskReminder._result_fingerprint("")}
@@ -232,7 +254,7 @@ class TestEvaluationModeToolOnly:
     def test_at_threshold_forces_reminder(self) -> None:
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 10})
+        plugin = TaskReminder(config={"max_reminders": 10})
         result = asyncio.run(plugin.execute(_ctx(self._eval_state(eval_tool_only_count=5)))
         )
         assert result.state_updates.get("_has_new_llm_input") is True
@@ -240,7 +262,7 @@ class TestEvaluationModeToolOnly:
         assert result.state_updates["eval_tool_only_count"] == 0
         # 强制提醒注入：置位续跑标志（autonomous.yaml post 路由据此回 LLM）
         assert result.state_updates["_has_new_llm_input"] is True
-        appended = result.state_updates["messages"][-1]
+        appended = _appended_reminder(result)
         assert appended["role"] == "system"
         assert "evaluation_result" in appended["content"]
 
@@ -248,7 +270,7 @@ class TestEvaluationModeToolOnly:
         """提醒数已达上限时不再强制提醒，仅维持计数。"""
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 2})
+        plugin = TaskReminder(config={"max_reminders": 2})
         result = asyncio.run(plugin.execute(
                 _ctx(
                     self._eval_state(
@@ -265,7 +287,7 @@ class TestEvaluationJsonDetection:
     def test_detected_json_sends_end(self) -> None:
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True})
+        plugin = TaskReminder()
         raw = (
             "评估完成。\n```json\n"
             + json.dumps(
@@ -273,7 +295,9 @@ class TestEvaluationJsonDetection:
             )
             + "\n```"
         )
-        result = asyncio.run(plugin.execute(_ctx(_base_task_state(raw_result=raw)))
+        result = asyncio.run(plugin.execute(
+            _ctx(_base_task_state(**{"evaluation.metric_id": "semantic_check"}, raw_result=raw))
+        )
         )
         assert result.state_updates.get("ended") is True
         detected = result.state_updates["evaluation.detected_result"]
@@ -285,8 +309,10 @@ class TestEvaluationJsonDetection:
     def test_plain_text_without_json_proceeds_to_reminder(self) -> None:
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 3})
-        result = asyncio.run(plugin.execute(_ctx(_base_task_state(raw_result="还没评估完")))
+        plugin = TaskReminder(config={"max_reminders": 3})
+        result = asyncio.run(plugin.execute(
+            _ctx(_base_task_state(**{"evaluation.metric_id": "semantic_check"}, raw_result="还没评估完"))
+        )
         )
         assert result.state_updates.get("evaluate_reminder_count") == 1
         # 提醒注入：置位续跑标志（autonomous.yaml post 路由据此回 LLM 而非 end）
@@ -469,6 +495,50 @@ class TestMaxRemindersExhausted:
         assert result.state_updates["_has_new_llm_input"] is False
 
 
+class TestRepetitionDetected:
+    def test_repetition_fails_task_without_reminder(self) -> None:
+        """流式守卫判停 → 任务直接 failed（llm_degeneration），不注入提醒。"""
+        import asyncio
+
+        result = asyncio.run(
+            TaskReminder().execute(_ctx(_base_task_state(llm_repetition_detected=True)))
+        )
+        assert result.state_updates.get("ended") is True
+        assert result.state_updates["task.status"] == "failed"
+        assert result.state_updates["task.failure_class"] == "llm_degeneration"
+        assert "退化循环" in result.state_updates["task.failure_reason"]
+        assert result.state_updates["_has_new_llm_input"] is False
+        assert "messages" not in result.state_updates  # 不注入提醒
+
+    def test_repetition_does_not_override_completed(self) -> None:
+        """完成证据在场不覆盖：已完成任务保持 completed，只收束本轮。"""
+        import asyncio
+
+        result = asyncio.run(
+            TaskReminder().execute(
+                _ctx(
+                    _base_task_state(
+                        **{"task.status": "completed", "llm_repetition_detected": True}
+                    )
+                )
+            )
+        )
+        assert result.state_updates.get("ended") is True
+        assert "task.status" not in result.state_updates
+        assert "task.failure_class" not in result.state_updates
+
+    def test_repetition_session_pipeline_closes_without_task_status(self) -> None:
+        """会话管道（无 task.id）只结束本轮，不落任务终态。"""
+        import asyncio
+
+        state = _base_task_state(llm_repetition_detected=True)
+        state.pop("task.id")
+        result = asyncio.run(TaskReminder().execute(_ctx(state)))
+        assert result.state_updates.get("ended") is True
+        assert "task.status" not in result.state_updates
+        assert result.state_updates["_has_new_llm_input"] is False
+
+
 class TestReminderBuilding:
     def test_executor_reminder_lists_acceptance_criteria(self) -> None:
         import asyncio
@@ -483,7 +553,7 @@ class TestReminderBuilding:
         )
         result = asyncio.run(TaskReminder(config={"max_reminders": 5}).execute(_ctx(state))
         )
-        content = result.state_updates["messages"][-1]["content"]
+        content = _appended_reminder(result)["content"]
         assert "task_evaluate" in content
         assert "测试全绿" in content
         assert "文档已更新" in content
@@ -497,20 +567,43 @@ class TestReminderBuilding:
                 _ctx(_base_task_state())
             )
         )
-        content = result.state_updates["messages"][-1]["content"]
+        content = _appended_reminder(result)["content"]
         assert "auto_complete" in content
         assert "打回" not in content
+
+    def test_executor_reminder_returns_ops_not_retired_array(self) -> None:
+        """回归锁（2026-11-13 装机 1af174）：提醒注入必须是 ops 声明形态。
+
+        引擎 finalize 对 messages 全量数组零兼容（warn 丢弃）——数组回传时
+        计数器与续跑标志照常生效、消息本体丢失，模型在无新输入的空转重调中
+        复读至耗尽（reminder_exhausted/llm_degeneration 双失败实证）。
+        """
+        import asyncio
+
+        result = asyncio.run(TaskReminder(config={"max_reminders": 5}).execute(
+                _ctx(_base_task_state())
+            )
+        )
+        updates = result.state_updates["messages"]
+        assert not isinstance(updates, list), "全量数组已被引擎退役，收到即丢弃"
+        assert updates == {
+            "_ops": [{
+                "op": "set",
+                "msg": {"role": "system", "content": _appended_reminder(result)["content"]},
+            }]
+        }
 
     def test_evaluator_reminder_includes_metric_thresholds(self) -> None:
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 5})
+        plugin = TaskReminder(config={"max_reminders": 5})
         state = _base_task_state(
-            acceptance_criteria=[{"metric_id": "coverage", "pass_threshold": 0.9}]
+            **{"evaluation.metric_id": "semantic_check"},
+            acceptance_criteria=[{"metric_id": "coverage", "pass_threshold": 0.9}],
         )
         result = asyncio.run(plugin.execute(_ctx(state))
         )
-        content = result.state_updates["messages"][-1]["content"]
+        content = _appended_reminder(result)["content"]
         assert "【评估提醒" in content
         assert "coverage" in content
         assert "0.9" in content
@@ -555,7 +648,8 @@ class TestDetectEvaluationResultJson:
         )
         assert got is not None
         assert got["suggestions"] == ["a", "b"]
-        assert got["score"] == 0.0
+        # score 缺省 = None（output_schema: number|null），不再伪造 0 分
+        assert got["score"] is None
 
 
 class TestRuntimeConfigOverride:
@@ -570,17 +664,32 @@ class TestRuntimeConfigOverride:
         # 运行时上限 1 已达 → failed 裁决而非注入第 2 次提醒
         assert result.state_updates.get("task.status") == "failed"
 
-    def test_plugin_configs_evaluation_mode_switch(self) -> None:
+    def test_evaluation_route_reads_pipeline_field(self) -> None:
+        """评估者路由只看管道字段 evaluation.metric_id，不看插件配置。"""
         import asyncio
 
-        plugin = TaskReminder(config={"evaluation_mode": False})
+        plugin = TaskReminder()
         state = _base_task_state(
-            plugin_configs={"task_reminder": {"evaluation_mode": True}},
+            **{"evaluation.metric_id": "semantic_check"},
             raw_result="",
             raw_tool_calls=[{"function": {"name": "bash"}}],
         )
         result = asyncio.run(plugin.execute(_ctx(state)))
         assert result.state_updates == {"eval_tool_only_count": 1, "evaluate_reminder_run": "", _FP_KEY: _mod.TaskReminder._result_fingerprint("")}
+
+    def test_plugin_configs_alone_does_not_route(self) -> None:
+        """plugin_configs.evaluation_mode 是退役键：单独出现不得再切评估者模式。"""
+        import asyncio
+
+        plugin = TaskReminder()
+        state = _base_task_state(
+            plugin_configs={"task_reminder": {"evaluation_mode": True}},
+            raw_result="阶段性输出",
+        )
+        result = asyncio.run(plugin.execute(_ctx(state)))
+        content = _appended_reminder(result)["content"]
+        assert "【系统提醒" in content
+        assert "evaluation_result" not in content
 
     def test_identity_properties(self) -> None:
         plugin = TaskReminder(config={"priority": 50})

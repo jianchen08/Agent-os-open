@@ -23,8 +23,8 @@ vi.mock('@/services/api/workspaces', () => apiMocks)
 // 失败反馈走 toast（操作点可见，替代旧 window.alert 阻塞弹窗）
 vi.mock('@/components/ui/sonner', () => ({ toast: toastMocks }))
 
-import { useWorkspaceStore } from '../workspaceStore'
 import { userScopedKey as pk } from '@/utils/userScopedStorage'
+import { useWorkspaceStore } from '../workspaceStore'
 
 const WS_PAYLOAD = {
   id: 'ws-1',

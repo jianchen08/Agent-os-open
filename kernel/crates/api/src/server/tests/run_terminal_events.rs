@@ -1,3 +1,4 @@
+// @feature: FP-0.2.内核API面 | @vision: V3 可嵌入 | @ci: rust-test
 use super::*;
 
 #[test]

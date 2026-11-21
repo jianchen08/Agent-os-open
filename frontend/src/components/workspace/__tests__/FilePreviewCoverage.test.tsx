@@ -183,3 +183,51 @@ describe('FilePreview — 代码与 PDF', () => {
     expect(screen.getByText('无法加载 PDF 文件')).toBeInTheDocument()
   })
 })
+
+describe('FilePreview — Markdown 渲染态与媒体分支（接入类型渲染证据补齐）', () => {
+  beforeEach(() => {
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => 'blob:mock'),
+      revokeObjectURL: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('markdown 渲染态：content 经 MarkdownRenderer 渲染为标题元素（非源码文本）', () => {
+    render(<FilePreview filePath="docs/a.md" content="# 标题一" containerTaskId="ct-1" />)
+    // 渲染态：markdown 源码的 # 语法被消费，产出真实 heading 元素
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('标题一')
+    expect(screen.getByTestId('file-preview-markdown')).toBeInTheDocument()
+  })
+
+  it('markdown 一键切源码：点击后显示原始文本，再点切回渲染态', () => {
+    render(<FilePreview filePath="docs/a.md" content="# 标题一" containerTaskId="ct-1" />)
+    fireEvent.click(screen.getByTestId('file-preview-markdown-toggle'))
+    // 源码态：原始文本（含 # 语法）可见，heading 元素消失
+    expect(screen.getByText('# 标题一')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { level: 1 })).toBeNull()
+    // 切回渲染态
+    fireEvent.click(screen.getByTestId('file-preview-markdown-toggle'))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('标题一')
+  })
+
+  it('视频文件渲染 <video>，取流 URL 指向 file-content 端点', () => {
+    render(<FilePreview filePath="demo.mp4" content="" containerTaskId="ct-9" />)
+    expect(screen.getByTestId('file-preview-media')).toBeInTheDocument()
+    const video = document.querySelector('video')
+    expect(video).not.toBeNull()
+    expect(video).toHaveAttribute('src', expect.stringContaining('file-content'))
+    expect(video).toHaveAttribute('src', expect.stringContaining(encodeURIComponent('demo.mp4')))
+  })
+
+  it('音频文件渲染 <audio>（<video>/<audio> 按扩展名分流）', () => {
+    render(<FilePreview filePath="audio/podcast.mp3" content="" containerTaskId="ct-9" />)
+    expect(document.querySelector('audio')).not.toBeNull()
+    expect(document.querySelector('video')).toBeNull()
+  })
+})

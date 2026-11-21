@@ -224,7 +224,8 @@ class TestCohostEndToEnd:
             plugin = loader.load("resource_search_tool", _PLUGIN_DIR)
             loader.load("cohost_shadow_neighbor", neighbor_dir)
 
-        assert set(plugin._tools.keys()) == {"resource_search"}
+        # 本插件承载一对工具：资源发现（resource_search）+ 动态工具转发壳（call_tool）
+        assert set(plugin._tools.keys()) == {"resource_search", "call_tool"}
         handler = plugin._tools["resource_search"].handler
         # T4 fail-closed 端到端：合宿 loader 只 exec server.py 不触发 on_load
         # → 对账通道未接线，工具面显式失败信封（真实清单扫描面在侧也不回落）
@@ -414,11 +415,12 @@ class TestToolSurfaceWiring:
         tool = server._load_resource_search_tool()()
         out = asyncio.run(tool.execute({"resource_type": "tool"}))
         # 行源 = manifest 扫描（描述取 plugin.json 而非活条目），对账键 = 工具名
-        assert out.output == {
-            "tool_h": ["tool_name", "tool_description"],
-            "tool_d": [["download_file", "download remote files"]],
-            "tool_c": 1,
-        }
+        assert out.output["tool_h"] == ["tool_name", "tool_description"]
+        assert out.output["tool_d"] == [["download_file", "download remote files"]]
+        assert out.output["tool_c"] == 1
+        # 结构化定义键同批出口（mini 仓未声明 input_schema → 拒收 + 错误项）
+        assert out.output["tool_defs"] == []
+        assert out.output["tool_defs_errors"] == [{"name": "download_file", "reason": "input_schema_missing"}]
         assert len(fetches) == 1
 
     def test_on_unload_detaches_tool_surface_fail_closed(
@@ -515,3 +517,122 @@ class TestFetchLiveTools:
         monkeypatch.delenv("AGENTOS_ADMIN_PASSWORD", raising=False)
         with pytest.raises(RuntimeError, match="AGENTOS_ADMIN_PASSWORD"):
             server._fetch_live_tools()
+
+
+class TestManifestLlmFacingText:
+    """manifest 的 LLM 可见文案必须与实现行为一致（P2 缺陷防回归）。
+
+    缺陷形态：实现改造（`tool.py` 已返回 `tool_defs`、`call_tool` 已可调用）后，
+    `plugin.json` 里同一件事的 **LLM 可见描述**仍是旧口径「不支持动态工具注入，
+    detailed 模式下 tool 类型不会真正加载到会话」。模型读的是 manifest 描述，
+    这等于主动劝退它使用已实现的能力——功能在、模型不知道。
+
+    本组锁「描述面与行为面不矛盾」：同一事实在代码与 manifest 两处描述，
+    改一处漏另一处即红。不做字符串全等（文案可改），只锁**方向性语义**。
+    """
+
+    #: 已退役的旧口径片段：出现在 LLM 可见面即说明描述与实现相反
+    _STALE_PHRASES = ("不支持动态工具注入", "不会真正加载到会话", "不动态注入工具")
+
+    @staticmethod
+    def _tool_decl() -> dict[str, Any]:
+        import json as _json
+
+        payload = _json.loads((Path(__file__).resolve().parent / "plugin.json").read_text(encoding="utf-8"))
+        return next(
+            t for t in payload["capabilities"]["tools"] if t.get("name") == "resource_search"
+        )
+
+    def test_no_stale_dynamic_injection_phrases_in_llm_facing_text(self) -> None:
+        """LLM 可见面（description / mode 描述 / caveats）不得含已退役旧口径。"""
+        decl = self._tool_decl()
+        mode_desc = decl["input_schema"]["properties"]["mode"]["description"]
+        visible = " ".join([
+            decl.get("description", ""),
+            mode_desc,
+            " ".join(decl.get("caveats") or []),
+            decl.get("mode_description") or "",
+        ])
+        for phrase in self._STALE_PHRASES:
+            assert phrase not in visible, (
+                f"manifest LLM 可见文案仍含旧口径「{phrase}」——实现已支持动态面，"
+                f"描述会劝退模型使用。实际文案: {visible[:300]}"
+            )
+
+    def test_mode_description_points_to_dynamic_path(self) -> None:
+        """detailed 的描述必须指向真实可达路径（tool_defs + call_tool），不是"仅描述"。"""
+        decl = self._tool_decl()
+        mode_desc = decl["input_schema"]["properties"]["mode"]["description"]
+        assert "tool_defs" in mode_desc, f"detailed 描述未提 tool_defs 定义出口: {mode_desc}"
+        assert "call_tool" in mode_desc, f"detailed 描述未提 call_tool 调用入口: {mode_desc}"
+
+    def test_output_schema_declares_tool_defs_family(self) -> None:
+        """结构化定义族在 output_schema 有声明（契约与实现同源，不只是代码里有）。"""
+        props = self._tool_decl()["output_schema"]["properties"]
+        for key in ("tool_defs", "tool_defs_count", "tool_defs_errors"):
+            assert key in props, f"output_schema 缺结构化键声明: {key}"
+        assert props["tool_defs"]["type"] == "array"
+        assert props["tool_defs_count"]["type"] == "integer"
+        assert props["tool_defs_errors"]["type"] == "array"
+
+
+class TestLiveToolsTokenCache:
+    """工具面对账通道的登录 token 缓存（2026-11-19 搜索性能修复）。
+
+    契约：TTL 内复用 token（每次搜索不再重付 login+GET 两次 HTTP 往返）；
+    缓存 token 取数失败 = 缓存失效，重登一次再试（真实错误以重登结果为准，
+    fail-closed 语义不变）。
+    """
+
+    @staticmethod
+    def _install(
+        monkeypatch: pytest.MonkeyPatch,
+        fail_token_on_reuse: str | None,
+    ) -> dict[str, int]:
+        server = _load_server()
+        monkeypatch.setattr(server, "_cached_token", None)
+        calls = {"login": 0, "fetch": 0}
+
+        def fake_login() -> str:
+            calls["login"] += 1
+            return f"tok{calls['login']}"
+
+        def fake_fetch(token: str) -> dict[str, Any]:
+            calls["fetch"] += 1
+            # 过期场景 = 该 token 首次使用成功、复用时才失败（首次使用即失败
+            # 是真错误，不触发重试路径）
+            if fail_token_on_reuse is not None and token == fail_token_on_reuse and calls["fetch"] > 1:
+                raise OSError("401 from kernel")
+            return {"items": [{"name": "bearer", "token": token}], "total": 1}
+
+        monkeypatch.setattr(server, "_login_admin_token", fake_login)
+        monkeypatch.setattr(server, "_fetch_tools_with_token", fake_fetch)
+        monkeypatch.setattr(server, "_fetch_live_tools", server._fetch_live_tools)  # 显式取绑定，可读性
+        TestLiveToolsTokenCache.server = server
+        return calls
+
+    def test_ttl_window_reuses_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._install(monkeypatch, fail_token_on_reuse=None)
+        first = server_mod_fetch(self.server)
+        second = server_mod_fetch(self.server)
+        assert calls["login"] == 1, f"TTL 内不应重登: {calls}"
+        assert calls["fetch"] == 2
+        assert first["items"][0]["token"] == "tok1"
+        assert second["items"][0]["token"] == "tok1"
+
+    def test_stale_token_relogins_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._install(monkeypatch, fail_token_on_reuse="tok1")
+        first = server_mod_fetch(self.server)  # 首次登录 tok1，取数成功
+        assert calls["login"] == 1
+        assert first["items"][0]["token"] == "tok1"
+        second = server_mod_fetch(self.server)  # tok1 复用失败 → 重登 tok2
+        assert calls["login"] == 2
+        assert second["items"][0]["token"] == "tok2"
+        third = server_mod_fetch(self.server)  # 新 token 进缓存，不再重登
+        assert calls["login"] == 2
+        assert third["items"][0]["token"] == "tok2"
+
+
+def server_mod_fetch(server: Any) -> dict[str, Any]:
+    """经模块函数取工具面（_fetch_live_tools 在 to_thread 外的同步直调）。"""
+    return server._fetch_live_tools()

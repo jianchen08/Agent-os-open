@@ -23,15 +23,17 @@ use agentos_core::traits::{PluginManifest, ToolCapability};
 
 use crate::plugin_watcher::G2VerifyOutcome;
 
-/// G2 净化证据（ADR 2026-08-28 决策2）：剔除动作的既成事实留痕，
-/// 处置（净化/重注册）不得销毁判定证据——后续观测路径必须能还原"处理前发现了什么"。
+/// G2 净化证据（ADR 2026-08-28 决策2）：拒绝/降级动作的既成事实留痕，
+/// 处置（失败桩注册/重注册）不得销毁判定证据——后续观测路径必须能还原
+/// "处理前发现了什么"。ADR 2026-11-12 起 `tools_after` = 可执行工具数
+/// （被拒工具 schema 仍保留在工具面、调用显式失败）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SanitizeEvidence {
-    /// 被剔除的工具名。
+    /// 被拒（降级为失败桩）的工具名。
     pub rejected_tools: Vec<String>,
     /// 净化前声明的工具数。
     pub tools_before: usize,
-    /// 净化后保留的工具数。
+    /// 可执行工具数（声明数 − 被拒声明工具数）。
     pub tools_after: usize,
     /// 剔除原因。
     pub reason: String,
@@ -57,7 +59,7 @@ pub struct ContractGates {
     /// 加载通过 = manifest schema 合法（loader 严格反序列化 fail-closed）。
     pub manifest_schema_valid: bool,
     pub dep_ok: bool,
-    /// `ok` | `drift` | `sanitized`（判定失败已净化重注册）|
+    /// `ok` | `drift` | `sanitized`（判定失败，拒绝工具已降级为失败桩）|
     /// `verify_incomplete`（观测通道故障 = 没验到，声明注册保留待复验）| `not_covered`。
     pub g2_consistency: String,
     /// `ok` | `failed` | `skipped` | `not_covered`.
@@ -108,7 +110,7 @@ impl PluginContractState {
                 // 前端/契约状态页可见"待复验"。
                 let g2_consistency = if o.spawn_failed {
                     "verify_incomplete"
-                } else if is_sanitized(plugin, o) {
+                } else if is_sanitized(o) {
                     "sanitized"
                 } else if o.drift {
                     "drift"
@@ -131,19 +133,37 @@ impl PluginContractState {
                     Some("校验未完成（观测通道故障：spawn/tools-list 重试后仍失败，声明注册保留待复验）".to_string())
                 } else if o.rejected_tools.is_empty() {
                     None
-                } else {
+                } else if is_sanitized(o) {
                     Some(format!(
-                        "声明与实现不一致，剔除工具（需修改插件）: {}",
+                        "声明与实现不一致，相关工具降级为失败桩（schema 保留在工具面、调用显式失败；需修改插件）: {}",
+                        o.rejected_tools.join(", ")
+                    ))
+                } else {
+                    // 巡检/服务面未回铺等只报告不处置的漂移：不得声称已降级。
+                    Some(format!(
+                        "声明与实现不一致（需修改插件）: {}",
                         o.rejected_tools.join(", ")
                     ))
                 };
                 // 净化证据：净化是处置既成事实，账本必留痕（ADR 决策2）。
-                let sanitized = if is_sanitized(plugin, o) {
+                // tools_after 口径 = 可执行工具数（声明数 − 被拒声明工具数）；
+                // 被拒工具 schema 仍保留在工具面（ADR 2026-11-12）。
+                let sanitized = if is_sanitized(o) {
+                    let rejected_declared = plugin
+                        .capabilities
+                        .tools
+                        .iter()
+                        .filter(|t| o.rejected_tools.contains(&t.name))
+                        .count();
                     Some(SanitizeEvidence {
                         rejected_tools: o.rejected_tools.clone(),
                         tools_before: plugin.capabilities.tools.len(),
-                        tools_after: o.manifest.capabilities.tools.len(),
-                        reason: "G2 声明↔实现一致性复核失败，剔除工具后按净化 manifest 重注册"
+                        tools_after: plugin
+                            .capabilities
+                            .tools
+                            .len()
+                            .saturating_sub(rejected_declared),
+                        reason: "G2 声明↔实现一致性复核失败，相关工具降级为失败桩（声明 schema 保留在工具面、调用显式失败）"
                             .to_string(),
                         sanitized_ts: now_ms(),
                     })
@@ -290,13 +310,12 @@ impl PluginContractState {
     }
 }
 
-/// G2 结果是否为"实际净化"（ADR 决策2）：被拒工具非空且 outcome 携带的 manifest
-/// 工具数少于声明——manifest 已被替换为净化版。validate-all 巡检（manifest 原样
-/// 回传、未处置）不满足，仍标 `drift`。
-fn is_sanitized(declared: &PluginManifest, o: &G2VerifyOutcome) -> bool {
-    !o.spawn_failed
-        && !o.rejected_tools.is_empty()
-        && o.manifest.capabilities.tools.len() < declared.capabilities.tools.len()
+/// G2 结果是否为"实际净化处置"（ADR 决策2 + ADR 2026-11-12）：注册/复验路径
+/// 判定拒绝工具并已武装失败桩（`stub_armed=true`）——声明 schema 保留在工具面、
+/// 调用时显式失败。validate-all 巡检（只报告不处置，`stub_armed=false`）不满足，
+/// 仍标 `drift`。
+fn is_sanitized(o: &G2VerifyOutcome) -> bool {
+    !o.spawn_failed && o.stub_armed && !o.rejected_tools.is_empty()
 }
 
 /// 插件契约状态账本（每插件一条；boot/热发现/reenable/validate-all 收口写入）。
@@ -368,8 +387,9 @@ impl ContractLedger {
     }
 
     /// 验证未完成（verify_incomplete）与验证失败终态（verify_failed）的插件 id
-    /// （BUG-51 注册门禁：LLM 工具面遮挡名单的账本视图）。复验通过（`ok`）即
-    /// 自动移出——调用方实时读账本现值，无独立状态机。
+    /// （BUG-51 注册门禁：工具调用临时拦截名单的账本视图，ADR 2026-11-12 起不再
+    /// 用于工具面遮挡）。复验通过（`ok`）即自动移出——调用方实时读账本现值，
+    /// 无独立状态机。
     pub fn verify_pending_plugin_ids(&self) -> Vec<String> {
         let g = self.inner.read();
         let mut ids: Vec<String> = g
@@ -384,6 +404,27 @@ impl ContractLedger {
             .collect();
         ids.sort();
         ids
+    }
+
+    /// 声明↔实现漂移被拒工具的账本现值：`(plugin_id, tool_name)` 清单
+    /// （`g2_consistency ∈ {drift, sanitized}` 且 `rejected_tools` 非空）。
+    /// 这些工具的声明 schema 保留在工具面，调用时显式失败
+    /// （`TOOL_DECLARATION_MISMATCH`）；复验通过（`ok`）即自动清空。
+    /// 排序稳定（按插件 id、工具名），便于调用侧线性比对与测试断言。
+    pub fn rejected_tool_names(&self) -> Vec<(String, String)> {
+        let g = self.inner.read();
+        let mut items: Vec<(String, String)> = g
+            .values()
+            .filter(|st| matches!(st.gates.g2_consistency.as_str(), "drift" | "sanitized"))
+            .flat_map(|st| {
+                st.gates
+                    .rejected_tools
+                    .iter()
+                    .map(move |tool| (st.plugin_id.clone(), tool.clone()))
+            })
+            .collect();
+        items.sort();
+        items
     }
 
     pub fn snapshot(&self) -> Vec<PluginContractState> {
@@ -500,8 +541,10 @@ mod tests {
             manifest: manifest("x"),
             rejected_tools: Vec::new(),
             drift,
+            soft_drift: false,
             spawn_failed,
             smoke_failed: false,
+            stub_armed: false,
         }
     }
 
@@ -571,23 +614,30 @@ mod tests {
         .expect("valid manifest")
     }
 
-    /// 净化型 outcome：rejected 非空且 manifest 已替换为净化版（工具变少）。
-    fn sanitized_outcome(keep: &[&str], rejected: &[&str]) -> G2VerifyOutcome {
+    /// 处置型 outcome（ADR 2026-11-12）：rejected 非空、manifest 保留全部声明
+    /// 工具（schema 继续进工具面），失败桩已武装。
+    fn sanitized_outcome(declared_tools: &[&str], rejected: &[&str]) -> G2VerifyOutcome {
         let mut o = outcome(true, false);
-        o.manifest = manifest_with_tools("x", keep);
+        o.manifest = manifest_with_tools("x", declared_tools);
         o.rejected_tools = rejected.iter().map(|s| s.to_string()).collect();
+        o.stub_armed = true;
         o
     }
 
     #[test]
     fn sanitized_outcome_records_evidence() {
         let declared = manifest_with_tools("a", &["t1", "t2"]);
-        let o = sanitized_outcome(&["t1"], &["t2"]);
+        let o = sanitized_outcome(&["t1", "t2"], &["t2"]);
+        assert_eq!(
+            o.manifest.capabilities.tools.len(),
+            2,
+            "声明原样保留（被拒工具 schema 仍在工具面）"
+        );
         let st = PluginContractState::derived(&declared, true, Some(&o));
         assert_eq!(st.gates.g2_consistency, "sanitized");
         let ev = st.gates.sanitized.as_ref().expect("净化必留证据");
         assert_eq!(ev.tools_before, 2);
-        assert_eq!(ev.tools_after, 1);
+        assert_eq!(ev.tools_after, 1, "tools_after = 可执行工具数");
         assert_eq!(ev.rejected_tools, vec!["t2".to_string()]);
         assert!(ev.sanitized_ts > 0, "净化时间戳必填");
         assert_eq!(st.gates.rejected_tools, vec!["t2".to_string()]);
@@ -596,14 +646,57 @@ mod tests {
 
     #[test]
     fn inspection_outcome_without_disposal_stays_drift() {
-        // validate-all 巡检：manifest 原样回传（未处置）——漂移但不是净化
+        // validate-all 巡检：只报告不处置（stub_armed=false）——漂移但不是净化
         let declared = manifest_with_tools("a", &["t1"]);
-        let mut o = sanitized_outcome(&[], &["t1"]);
-        o.manifest = declared.clone();
+        let mut o = sanitized_outcome(&["t1"], &["t1"]);
+        o.stub_armed = false;
         let st = PluginContractState::derived(&declared, true, Some(&o));
         assert_eq!(st.gates.g2_consistency, "drift");
         assert!(st.gates.sanitized.is_none());
         assert_eq!(st.gates.rejected_tools, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn ledger_rejected_tool_names_tracks_drift_and_sanitized() {
+        let l = ContractLedger::new();
+        let declared = manifest_with_tools("a", &["t1", "t2"]);
+        l.upsert(PluginContractState::derived(
+            &declared,
+            true,
+            Some(&sanitized_outcome(&["t1", "t2"], &["t2"])),
+        ));
+        let mut drift = outcome(true, false);
+        drift.manifest = manifest_with_tools("b", &["d1"]);
+        drift.rejected_tools = vec!["d1".into()];
+        l.upsert(PluginContractState::derived(
+            &manifest_with_tools("b", &["d1"]),
+            true,
+            Some(&drift),
+        ));
+        l.upsert(PluginContractState::derived(
+            &manifest_with_tools("ok", &["fine"]),
+            true,
+            Some(&outcome(false, false)),
+        ));
+        assert_eq!(
+            l.rejected_tool_names(),
+            vec![
+                ("a".to_string(), "t2".to_string()),
+                ("b".to_string(), "d1".to_string()),
+            ],
+            "只收 drift/sanitized 的被拒工具，ok 插件零条目"
+        );
+        // 复验转正（ok 唯一清除口）→ 拒调清单自动清空
+        l.upsert(PluginContractState::derived(
+            &declared,
+            true,
+            Some(&outcome(false, false)),
+        ));
+        assert_eq!(
+            l.rejected_tool_names(),
+            vec![("b".to_string(), "d1".to_string())],
+            "复验通过的插件移出清单"
+        );
     }
 
     #[test]
@@ -627,7 +720,7 @@ mod tests {
         l.upsert(PluginContractState::derived(
             &declared,
             true,
-            Some(&sanitized_outcome(&["t1"], &["t2"])),
+            Some(&sanitized_outcome(&["t1", "t2"], &["t2"])),
         ));
         l.upsert(PluginContractState::not_covered(&declared, true));
         let st = l.get("a").expect("账本必须有记录");
@@ -825,7 +918,7 @@ mod tests {
         let st = PluginContractState::derived(
             &declared,
             true,
-            Some(&sanitized_outcome(&["t1"], &["t2"])),
+            Some(&sanitized_outcome(&["t1", "t2"], &["t2"])),
         );
         let v = serde_json::to_value(&st).unwrap();
         let gates = v["gates"].as_object().expect("gates 必须是嵌套对象");

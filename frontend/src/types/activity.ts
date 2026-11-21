@@ -164,6 +164,10 @@ export interface ActivityData {
   title: string
   /** 条目摘要（头部标题旁的一行补充：文件路径/命令/URL 等，折叠态也可见） */
   subtitle?: string
+  /** 间接调用标记（call_tool 动态转发卡，2026-11-19 用户裁定）：头部标题旁渲染
+   * 「间接调用」徽标——卡面标题已是目标工具名，徽标表明它非本 agent 原生持有、
+   * 经 call_tool 转发执行 */
+  indirectCall?: boolean
   /** 工具名称（仅 type=tool_call 时有值，用于工具级渲染配置匹配） */
   toolName?: string
   /** 关联的文件路径（如 file_read/file_write 操作的文件） */

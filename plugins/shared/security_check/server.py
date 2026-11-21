@@ -14,14 +14,23 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
 
 from plugin import (  # noqa: E402
+    _PERMANENT_WHITELIST,
     _PERMISSION_MODES,
+    _PIPELINE_PERMISSION_MODES,
     PERMISSION_MODES,
     SecurityCheckPlugin,
+    _load_permanent_whitelist,
     _load_permission_modes,
+    _load_pipeline_permission_modes,
+    _save_permanent_whitelist,
     _save_permission_modes,
+    _save_pipeline_permission_modes,
     _set_plugin_ref,
+    _state_file_path,
     apply_permission_modes_settings,
+    audit_event,
     set_frontend_emit,
+    set_grants_ref_resolver,
 )
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
@@ -35,6 +44,10 @@ def get_instance() -> SecurityCheckPlugin:
     """懒构建并缓存插件单例（线程安全；替代模块级可变 `_instance` 全局）。"""
     # 注入 plugin 引用，供 SecurityCheckPlugin 内部拿 human-interaction capability。
     _set_plugin_ref(plugin)
+    # grants 两面（policy/ledger）生产解析缝：经 plugin ref 按 provides namespace
+    # 解析（grants.policy / grants.ledger，requires_services 声明面注入）；
+    # grants 插件缺席时解析失败 → 执法侧 inert 降级（既有语义零变化）。
+    set_grants_ref_resolver(lambda: plugin)
     config = plugin.get_config()
     return SecurityCheckPlugin(config=config)
 
@@ -60,6 +73,8 @@ async def _on_load(params: dict) -> None:
     # 导入期解析只能拿缺省值），再加载持久化表——读写同落点。
     apply_permission_modes_settings(plugin.get_config().get("settings"))
     _load_permission_modes()  # 加载权限模式持久化表
+    _load_pipeline_permission_modes()  # 加载管道级权限档覆盖表（审批卡授予）
+    _load_permanent_whitelist()  # 加载永久免审批白名单（命令精确指纹）
     # 前端一次性事件通道（安全规则降级提示用；内核内置能力，缺失只降级日志）
     try:
         frontend_handle = plugin.get_capability("frontend")
@@ -179,6 +194,8 @@ async def _confirm_switch(session_id: str, mode: str, user_id: str = "") -> bool
             "options": _switch_options(),
             "priority": "high",
             "user_id": user_id,
+            # 审批非阻塞 M1：category 由发起方显式传（设计 §四），权限审批类恒 permission
+            "category": "permission",
         })
         if not isinstance(create_res, dict) or create_res.get("error"):
             raise RuntimeError(f"create_choice failed: {create_res}")
@@ -239,10 +256,26 @@ async def http_handle(path: str, method: str, plugin_id: str = "", raw_body: str
             body = {**query, **body}
         else:
             try:
-                body = {k: v for k, v in query}  # type: ignore[misc]
+                body = {**dict(query), **body}  # type: ignore[arg-type]
             except Exception as exc:  # noqa: BLE001 — query 异形按缺参走 GET 读取路径
                 logger.debug("[security_check] GET query 解析失败（按缺参处理）| path=%s | error=%s", path_norm, exc)
         return await _get_permission_mode(body)
+
+    # ── 管道级权限档覆盖（审批卡「本管道后续免审批」的撤销/查询面）──
+    if method.upper() == "GET" and path_norm == "/ext/pipeline_security_check/permission_mode/pipeline":
+        return _get_pipeline_permission_modes()
+    if method.upper() in ("DELETE", "POST") and path_norm == "/ext/pipeline_security_check/permission_mode/pipeline":
+        return _revoke_pipeline_permission_mode(body)
+
+    # ── 永久免审批白名单管理面（命令精确指纹）──
+    if method.upper() == "GET" and path_norm == "/ext/pipeline_security_check/whitelist":
+        return _list_whitelist()
+    if method.upper() == "POST" and path_norm == "/ext/pipeline_security_check/whitelist/remove":
+        return _remove_whitelist(body)
+
+    # ── 审计台账查询面（授权动作问责：谁在哪个管道何时切档/加白）──
+    if method.upper() == "GET" and path_norm == "/ext/pipeline_security_check/audit":
+        return _query_audit(_query_params(kwargs))
 
     # ── 授权区管理面（ADR 2026-09-24-read-deny-write-zones：名单增删查）──
     # 租户转发（隔离执法点，1018 审计 G1）：名单是 per-租户用户空间真值，
@@ -344,6 +377,128 @@ async def _get_permission_mode(body: dict) -> dict:
         200,
         {"mode": mode, "explicit": explicit, "valid_modes": list(PERMISSION_MODES.keys())},
     )
+
+
+def _query_params(kwargs: dict) -> dict:
+    """GET query 归一（dict 或 [key, value] 元组列表两种到站形态）。"""
+    query = kwargs.get("query") or {}
+    if isinstance(query, dict):
+        return dict(query)
+    try:
+        return dict(query)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — 异形 query 按空参处理（GET 读取路径）
+        return {}
+
+
+def _get_pipeline_permission_modes() -> dict:
+    """列出管道级权限档覆盖表条目（管理面消费）。"""
+    return _http_response(
+        200,
+        {
+            "entries": dict(_PIPELINE_PERMISSION_MODES),
+            "count": len(_PIPELINE_PERMISSION_MODES),
+        },
+    )
+
+
+def _revoke_pipeline_permission_mode(body: dict) -> dict:
+    """撤销某管道的权限档覆盖（幂等）；子树血缘链查表随即不再命中。"""
+    pipeline_id = str(body.get("pipeline_id") or "").strip()
+    if not pipeline_id:
+        return _http_response(400, {"error": "pipeline_id required", "revoked": False})
+    removed = _PIPELINE_PERMISSION_MODES.pop(pipeline_id, None)
+    if removed is not None:
+        _save_pipeline_permission_modes()
+        audit_event(
+            {
+                "event": "mode_switch",
+                "action": "revoke",
+                "mode": removed,
+                "pipeline_id": pipeline_id,
+                "session_id": str(body.get("session_id") or ""),
+                "user_id": str(body.get("user_id") or ""),
+                "source": "revoke_endpoint",
+            }
+        )
+        logger.info(
+            "[security_check] 管道级免审批撤销 | pipeline=%s | mode=%s",
+            pipeline_id,
+            removed,
+        )
+    return _http_response(
+        200,
+        {"revoked": removed is not None, "pipeline_id": pipeline_id},
+    )
+
+
+def _list_whitelist() -> dict:
+    """列出永久免审批白名单（命令精确指纹）。"""
+    return _http_response(
+        200,
+        {
+            "entries": sorted(_PERMANENT_WHITELIST),
+            "count": len(_PERMANENT_WHITELIST),
+        },
+    )
+
+
+def _remove_whitelist(body: dict) -> dict:
+    """移除永久白名单条目（幂等）。"""
+    signature = str(body.get("signature") or "").strip()
+    if not signature:
+        return _http_response(400, {"error": "signature required", "removed": False})
+    existed = signature in _PERMANENT_WHITELIST
+    _PERMANENT_WHITELIST.discard(signature)
+    if existed:
+        _save_permanent_whitelist()
+        audit_event(
+            {
+                "event": "whitelist_remove",
+                "signature": signature,
+                "pipeline_id": str(body.get("pipeline_id") or ""),
+                "session_id": str(body.get("session_id") or ""),
+                "user_id": str(body.get("user_id") or ""),
+            }
+        )
+        logger.info("[security_check] 永久免审批白名单移除 | sig=%s", signature)
+    return _http_response(200, {"removed": existed, "signature": signature})
+
+
+def _query_audit(query: dict) -> dict:
+    """查询审计台账（按 pipeline_id/session_id 过滤，新→旧取最近 limit 条）。"""
+    import json  # noqa: PLC0415
+
+    pipeline_id = str(query.get("pipeline_id") or "").strip()
+    session_id = str(query.get("session_id") or "").strip()
+    try:
+        limit = max(1, min(int(str(query.get("limit") or 100)), 1000))
+    except (TypeError, ValueError):
+        limit = 100
+    path = _state_file_path("security_audit.jsonl")
+    events: list[dict] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if pipeline_id and str(record.get("pipeline_id") or "") != pipeline_id:
+                    continue
+                if session_id and str(record.get("session_id") or "") != session_id:
+                    continue
+                events.append(record)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001 — 台账读取失败显式返回空集+原因
+        logger.warning("[security_check] 审计台账读取失败: %s", exc)
+        return _http_response(200, {"events": [], "count": 0, "error": f"read failed: {exc}"})
+    return _http_response(200, {"events": events[-limit:], "count": len(events[-limit:])})
 
 
 # ─── 授权区管理面（/ext/pipeline_security_check/zones*）────────────────────

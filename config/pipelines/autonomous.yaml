@@ -102,16 +102,20 @@ loop_bodies:
     # 2026-10-08-step-service-level3-wiring）：静态指引幂等注入 + 当前清单
     # 追加动态变量消息尾部——清单逐轮更新，不可门化。
     - todo.fold
+    # 审批非阻塞输入步（M1，设计 docs/working/3a9cc256c6d7_审批非阻塞方案设计.md
+    # §三 ③）：mode=async 提交的审批不阻塞工具，本步把待决项与已决结果并入
+    # 动态变量消息尾部 + 已决条目两阶段清理——决定须下一轮可见（G3），不可门化。
+    - approval.fold
     # W2a 上下文压缩粗门（引擎只算术，零领域知识）：占用比 =（上次真实
     # input_tokens + 自锚以来字符增量 × 2.0）÷ 模型窗口。口径：token ≈ 紧凑
     # JSON 字节/2（中文保守偏高）；窗口经 track.model_context_window 由
-    # llm_core 随 usage 写入。阈值 0.6 与 context_window_guard 的
+    # llm_core 随 usage 写入。阈值 0.5 与 context_window_guard 的
     # compress_trigger_ratio 缺省（manifest fields.default）同源语义，系数/
     # 阈值均为本 YAML 配置域可调。窗口 0（未解析到）→ 除零 fail-soft 判假，
     # 仅剩冷启动兜底支。冷启动兜底：无 token 锚（从未调用 LLM）且消息多
     # （>40）也放行 guard 做精确判定。
     - name: pipeline_context_window_guard
-      when: '(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.6 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)'
+      when: '(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.5 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)'
   # LLM 轮：消费工具结果产出下一轮响应。
   # （原此处的单次调用上界止血键已退役：调用界由插件 manifest 自报派生——
   # llm_core 声明 call_timeout_seconds（L3 公式取值）、context_window_guard
@@ -180,6 +184,22 @@ loop_bodies:
         core_type: llm_call
       then: loop
       when: router.duplicate_back_llm == True
+    # LLM 失败轮回环（R13 根修）：llm 轮调用失败（插件错误，引擎记录后继续）
+    # 且未产出工具调用时，此前回环路由全不命中——会话管道（无 task.id）此前
+    # 直接命中兜底 end，失败轮被折算 completed 静默收官（TB 终跑 887b8135f4c5
+    # 实证：LLM 输出退化循环截断轮后管道收官，模型 todo 未完成、分判 0）。
+    # 本路由把失败轮交回 LLM 重试；连击计数 router.llm_fail_streak 由
+    # duplicate_check 维护（同文连击累加、异文重计、成功轮清零），达熔断阈值
+    # （model_unavailable 3 / 瞬态 5）由其收束——should_stop +
+    # router.stop_reason 署名（llm_fail_loop / model_unavailable，manifest
+    # capabilities.stop_reasons 声明进 Failed 词表）→ run 折算 Failed。
+    # duplicate_check 的 LLM 失败熔断器依赖本路由才可达（否则首个失败轮即被
+    # 兜底 end 短路，streak 永到不了阈值）。fail-soft：键缺席（从未失败）判假，
+    # 正常轮与工具迭代不受影响（路由 2/5 已先行消费）。
+    - set:
+        core_type: llm_call
+      then: loop
+      when: router.llm_fail_streak.count > 0
     # 任务管道纯文本轮不终局（D2 一次性终局修复）：叶子执行者用嘴回答而未调
     # 工具时，回 llm_core 继续——由 task_reminder 三信号注入提醒并按
     # max_reminders 预算耗尽裁决（终态改写），兜底 end 只留给真终态。此前
@@ -241,12 +261,14 @@ loop_bodies:
     - pipeline_environment_lifecycle
 # 轮次预算唯一所有者 = stop_check（按 LLM 调用次数计，agent 配置
 # max_iterations；用户裁定 2026-10-17）。本键只是引擎机械硬顶兜底：形态拆分
-# （ADR 2026-10-10-pipeline-shape-split-core-type）下 500 次调用 ≤ 1000 迭代，
-# 1200 = 留 ~20% 余量（错误轮/重试也占迭代），确保硬顶永不先于预算触发；
+# （ADR 2026-10-10-pipeline-shape-split-core-type）下 1000 次调用 ≤ 2000 迭代
+# （mode_coding/mode_godot 编排 agent 预算 2026-11-14 用户裁定上调至 1000，
+# 任务 756fcf 402 轮耗尽实证 400 不够），2400 = 留 ~20% 余量（错误轮/重试也
+# 占迭代），确保硬顶永不先于预算触发；
 # 引擎缺省 200 保持不变，供未声明管道沿用旧口径。
-max_rounds: 1200
+max_rounds: 2400
 name: autonomous
 # 出厂播种版本（ADR 2026-10-24-config-seed-version-arbitration）：装机播种按
 # 版本裁决覆盖用户空间陈旧副本（用户侧严格更大才保留）；改本文件内容必须
 # 抬此版本（CI 门禁 check_config_seed_versions.py 执法）。
-version: 3
+version: 5

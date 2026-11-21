@@ -17,7 +17,9 @@ export const moeSoftTheme: ThemeConfig = {
 
   colors: {
     // 主色加深一档:玫瑰粉 / 软紫 / 奶油杏
-    primary: '#d9738f',
+    // primary 自 #d9738f 沿 hue343 再加深：奶白底/淡杏 muted 对比度达 WCAG ≥3
+    // （#d9738f 对 muted 仅 2.68，hover 底上的主色文字不可读）
+    primary: '#cc5d7e',
     secondary: '#b8a1cf',
     accent: '#f5d6b8',
 

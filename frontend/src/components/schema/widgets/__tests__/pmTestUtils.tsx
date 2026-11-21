@@ -48,6 +48,7 @@ export const pmSeed = {
   pauseTask: vi.fn(() => Promise.resolve()),
   resumeTask: vi.fn(() => Promise.resolve()),
   cancelTask: vi.fn(() => Promise.resolve()),
+  deleteTask: vi.fn(() => Promise.resolve(true)),
   deleteProject: vi.fn(() =>
     Promise.resolve({
       message: '项目已删除',
@@ -87,11 +88,12 @@ export function resetPmContainers() {
 
 /** widget 依赖模块的 mock 造型（各测试文件 vi.mock 工厂体单行委托） */
 export const pmMod = {
-  /** 任务域端点：暂停/恢复/取消/删除项目/项目登记拉取 */
+  /** 任务域端点：暂停/恢复/取消/删除任务/删除项目/项目登记拉取 */
   tasksApi: () => ({
     pauseTask: pmSeed.pauseTask,
     resumeTask: pmSeed.resumeTask,
     cancelTask: pmSeed.cancelTask,
+    deleteTask: pmSeed.deleteTask,
     deleteProject: pmSeed.deleteProject,
     fetchProjects: pmSeed.fetchProjects,
   }),

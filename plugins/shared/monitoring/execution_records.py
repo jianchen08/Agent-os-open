@@ -237,10 +237,11 @@ async def get_execution_record(record_id: str) -> dict[str, Any]:
 async def clear_all_records(authorization: str = "") -> dict[str, Any]:
     """清理所有执行记录与轨迹。
 
-    经 db-admin.clear_execution_data 能力真删：内核 9 表（runs/traces/blobs/
-    branches/sessions/pipeline_sessions/pipeline_state/pipeline_checkpoints/
-    message_slots，users 保留）+ 内存常驻 registry；清理前自动产出数据库
-    快照备份（backup_path 回传）。有运行中管道时内核返回 409（detail 透传）。
+    经 db-admin.clear_execution_data 能力真删：内核 9 表（traces/blobs/sessions/
+    pipeline_sessions/pipeline_state/pipeline_checkpoints/message_slots/
+    message_segments/pipeline_pending_inputs，users 保留）+ 内存常驻 registry；
+    清理前自动产出数据库快照备份（backup_path 回传）。有运行中管道时内核
+    返回 409（detail 透传）。
 
     Raises:
         kernel_reads.ClearExecutionDataError: 原状态码透传（403/409/502/503/500），

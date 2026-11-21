@@ -1,25 +1,46 @@
 # 语音识别（ASR）Provider 配置
-# YAML 驱动切换，修改 default_provider 即可切换服务商，不改代码
+# YAML 驱动：声明 provider 与尝试顺序，改 default_provider / fallback_chain 即可
+# 切换，不改代码。
 #
 # 说明：
-# - api_key 支持 ${ENV_VAR} 占位符，运行时从环境变量读取
-# - 采用 OpenAI 兼容契约 POST /audio/transcriptions，切换服务商成本最低
-# - 未配置 api_key（环境变量未设置）时，enabled 自动降为 False，
-#   前端语音输入会收到友好提示而非崩溃
+# - 首选本地 SenseVoiceSmall（sherpa-onnx，纯 CPU、离线、零费用），识别率够高时
+#   不出网；本地不可用（未装依赖/模型缺失且下载失败）才走免费远端，再次才付费。
+# - fallback_chain 按序尝试，自动跳过不可用 provider（本地缺模型、远端缺 api_key）。
+# - api_key 支持 ${ENV_VAR} 占位符，运行时从环境变量读取；未配置的远端 provider
+#   会被跳过，不阻塞链上其他 provider。
+# - 本地模型默认落用户空间 <USER_ROOT>/models/asr/<模型目录>；model_dir 置空即用
+#   该默认坐标，auto_download=true 时首次转写自动从 download_base 下载缺失文件。
+# - 远端沿用 OpenAI 兼容契约 POST {api_base}/audio/transcriptions。
 
 asr:
   enabled: true
-  default_provider: glm
+  default_provider: local
+  fallback_chain: [local, siliconflow, glm]
   providers:
-    # 智谱 GLM-ASR（默认，复用已有 ZHIPU_API_KEY）
+    # 本地 SenseVoiceSmall（sherpa-onnx int8 ONNX，中英日韩粤）
+    local:
+      type: local
+      engine: sensevoice
+      model_dir: ""          # 空 = 用户空间默认 models/asr/sherpa-onnx-sense-voice-...
+      model_file: model.int8.onnx
+      tokens_file: tokens.txt
+      num_threads: 2
+      language: zh           # 固定中文；auto = 自动语种
+      use_itn: true          # 带标点/数字规整
+      auto_download: true
+      download_base: "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
+      download_timeout: 900
+    # SiliconFlow 免费 ASR（SenseVoiceSmall 托管）
+    siliconflow:
+      type: openai
+      api_base: "https://api.siliconflow.cn/v1"
+      api_key: "${SILICONFLOW_API_KEY}"
+      model: "FunAudioLLM/SenseVoiceSmall"
+      language: "zh-CN"
+    # 智谱 GLM-ASR（付费兜底，复用已有 ZHIPU_API_KEY）
     glm:
+      type: openai
       api_base: "https://open.bigmodel.cn/api/paas/v4"
       api_key: "${ZHIPU_API_KEY}"
-      model: "glm-asr-v1"
+      model: "glm-asr"
       language: "zh-CN"
-    # 示例：将来切换到讯飞，取消注释并改 default_provider 为 xfyun
-    # xfyun:
-    #   api_base: "https://raasr.xfyun.cn/v2/api"
-    #   api_key: "${XFYUN_API_KEY}"
-    #   model: ""
-    #   language: "zh-CN"

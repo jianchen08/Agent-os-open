@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-import os
+import os  # noqa: F401
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -24,10 +24,10 @@ _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
+import tool as _tool_mod  # noqa: E402
 from _root_api import collect_planning_executors  # noqa: E402
 from project_manager import project_registry as pr  # noqa: E402
 from tool import TaskSubmitTool  # noqa: E402
-import tool as _tool_mod  # noqa: E402
 
 
 @pytest.fixture

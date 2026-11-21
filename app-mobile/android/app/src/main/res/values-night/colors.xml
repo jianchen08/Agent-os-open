@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式窗口背景：对齐前端 .dark background 变量 #04060F（见 values/colors.xml 注释） -->
+    <color name="agentos_window_bg">#04060F</color>
+</resources>

@@ -17,7 +17,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PKG = Path(__file__).resolve().parents[1]
-_SHARED = _PKG.parents[1]
+_SHARED = _PKG.parent  # plugins/shared/（_root_api 等共享模块所在）
 
 
 def _load(name: str, mod_name: str) -> Any:
@@ -261,3 +261,42 @@ class TestEventAndPreferenceFaces:
             "op", {"op": "focus_stop", "id": todo["id"]}, store
         )
         assert stopped["result"]["todo"]["focus_started_at"] is None
+
+
+class TestCaptureReminderMode:
+    """P0④：capture 结构化路径透传 reminder_mode（缺省 direct 由 store 落盘）；
+    非法值以 error 回执返回不抛出工具面（错误是值）。"""
+
+    def test_capture_carries_reminder_mode(self, store: Any) -> None:
+        rec = pim_tool.handle_pim(
+            "capture", {"title": "站会", "reminder_mode": "agent_classified"}, store
+        )
+        assert rec["status"] == "ok"
+        assert rec["result"]["todo"]["reminder_mode"] == "agent_classified"
+
+    def test_capture_defaults_direct(self, store: Any) -> None:
+        rec = pim_tool.handle_pim("capture", {"title": "A"}, store)
+        assert rec["status"] == "ok"
+        assert rec["result"]["todo"]["reminder_mode"] == "direct"
+
+    def test_capture_invalid_mode_error_receipt(self, store: Any) -> None:
+        rec = pim_tool.handle_pim(
+            "capture", {"title": "A", "reminder_mode": "yolo"}, store
+        )
+        assert rec["status"] == "error"
+        assert rec["error"]
+
+    def test_capture_text_path_carries_reminder_mode(self, store: Any) -> None:
+        """行语法路径透传显式 reminder_mode（建卡时判定，与结构化路径同轨）。"""
+        rec = pim_tool.handle_pim(
+            "capture",
+            {"text": "- [ ] 明天找 Boss 谈加薪", "reminder_mode": "agent_classified"},
+            store,
+        )
+        assert rec["status"] == "ok"
+        assert rec["result"]["todo"]["reminder_mode"] == "agent_classified"
+
+    def test_capture_text_path_defaults_direct(self, store: Any) -> None:
+        rec = pim_tool.handle_pim("capture", {"text": "- [ ] 明天交周报"}, store)
+        assert rec["status"] == "ok"
+        assert rec["result"]["todo"]["reminder_mode"] == "direct"

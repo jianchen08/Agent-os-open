@@ -23,8 +23,8 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
-import { parseYamlStrict, serializeYaml } from '@/services/schema/yaml'
 import { WS_SERVER_EVENTS, deriveWsServerEventsFromSource } from '@/constants/websocket'
+import { parseYamlStrict, serializeYaml } from '@/services/schema/yaml'
 
 const REPO_ROOT = resolve(__dirname, '../../../..')
 const WS_EVENTS_PATH = join(REPO_ROOT, 'config/kernel/ws_events.yaml')

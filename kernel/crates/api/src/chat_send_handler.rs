@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use agentos_core::traits::StorageBackend;
-use agentos_core::types::PendingInputSource;
+use agentos_core::types::{DispatchRequest, PendingInputSource};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -50,6 +50,7 @@ pub(crate) const HANDLED_PARAM_NAMES: &[&str] = &[
     "agent_id",
     "pipeline_config_id",
     "state",
+    "force",
 ];
 
 /// `chat` namespace handler：sidecar → 投递消息到会话并跑管道。
@@ -128,15 +129,17 @@ struct SendParams<'a> {
     /// 归属会话声明，仅创建分支消费（None → 以引擎新 id 兼作派发坐标）。
     ownership_thread: Option<&'a str>,
     execution_context: Option<&'a Value>,
-    /// 显式指定的执行 agent（可选，默认 "agentos"）：任务派发按 target 选执行
-    /// agent。仅作派发簿记（registry 登记/run 日志）——run 的执行身份已改为
-    /// 管道 state 持久键 `agent.id`（出生方经 state 透传、agent_config_load 与
-    /// 内核工具面消费），派发不再注入身份。
-    agent_id: String,
+    /// 显式指定的执行 agent（可选，None = 未指定）：入口统一下压为
+    /// `state["agent.id"]` overlay（ADR-2026-11-17 契约键，与 WS 路由器同法），
+    /// 不再作为独立派发形参/列存在——run 执行身份只认该 state 键。
+    agent_id: Option<String>,
     /// 显式指定的管道配置（config/pipelines/{id}.yaml）：按需加载编译该配置
     /// 执行；None = autonomous 缺省路径。
     pipeline_config_id: Option<String>,
     overlay: Option<Value>,
+    /// 强制发送（可选，默认 false）：先引擎层停当前 run，再投递本条并触发
+    /// 新一轮（不等当前 run 的自然边界）。任务管理「送消息给下级」用它。
+    force: bool,
 }
 
 impl ChatSendHandler {
@@ -174,7 +177,7 @@ impl ChatSendHandler {
             user = %p.user_id,
             msg_len = p.message.len(),
             created,
-            agent = %p.agent_id,
+            agent = p.agent_id.as_deref().unwrap_or("-"),
             has_execution_context = p.execution_context.is_some(),
             has_state = p.overlay.is_some(),
             "chat.send_message 派发触发消息"
@@ -206,21 +209,25 @@ impl ChatSendHandler {
                 .spawn_background_dispatch(&p, &pipeline_id, &thread_id, created)
                 .await;
         }
-        self.dispatcher
-            .dispatch_user_input(
-                &thread_id,
-                &effective_user,
-                p.message,
-                &pipeline_id,
-                "",
-                p.execution_context,
-                p.overlay.as_ref(),
-                &p.agent_id,
-                p.pipeline_config_id.as_deref(),
-                "",
-                PendingInputSource::Trigger,
-            )
-            .await
+        // force=true → 强制通道（先停当前 run 再投递）；否则普通派发（排队等
+        // run 边界）。两条走同一 dispatcher，差别只在停止段。
+        let request = DispatchRequest {
+            thread_id: thread_id.clone(),
+            user_id: effective_user,
+            pipeline_id: pipeline_id.clone(),
+            content: p.message.to_string(),
+            client_message_id: String::new(),
+            source: PendingInputSource::Trigger,
+            execution_context: p.execution_context.cloned(),
+            state_overlay: p.overlay.clone(),
+            pipeline_config_id: p.pipeline_config_id.clone(),
+        };
+        let dispatched = if p.force {
+            self.dispatcher.dispatch_force_input(request).await
+        } else {
+            self.dispatcher.dispatch_user_input(request).await
+        };
+        dispatched
             .map(|_| {
                 if created {
                     json!({"status": "created", "pipeline_id": pipeline_id})
@@ -310,15 +317,15 @@ impl ChatSendHandler {
         // init 体 workspace_lifecycle / environment_lifecycle 插件消费。
         let execution_context = params.get("execution_context").filter(|v| v.is_object());
 
-        // agent_id（可选，默认 "agentos"）：任务派发按 target 选执行 agent——
-        // 仅作派发簿记；agent yaml 加载（人格/tool_ids）归 agent_config_load 插件，
-        // run 执行身份读管道 state 持久键 agent.id。
+        // agent_id（可选，None = 未指定）：任务派发按 target 选执行 agent。
+        // 入口统一下压为 `state["agent.id"]` overlay（ADR-2026-11-17）——
+        // agent yaml 加载（人格/tool_ids）归 agent_config_load 插件，run 执行
+        // 身份读管道 state 持久键 agent.id，派发面无独立形参。
         let agent_id = params
             .get("agent_id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or("agentos")
-            .to_string();
+            .map(str::to_string);
 
         // pipeline_config_id（可选）：显式指定执行管道的配置，按需加载编译缓存。
         // 形态校验对齐 WS router 同款（valid_config_id），非法按缺失 = autonomous
@@ -329,8 +336,32 @@ impl ChatSendHandler {
             .filter(|s| agentos_session::router::valid_config_id(s))
             .map(str::to_string);
 
+        // force（可选，默认 false）：强制发送通道——先引擎层停当前 run，再投递
+        // 本条并触发新一轮（不等当前 run 的自然边界）。任务管理「送消息给下级」
+        // 走它；与 no_dispatch 互斥（一个必须派发、一个不派发）。
+        let force = params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if force && no_dispatch {
+            return Err(McpError::Protocol {
+                message: "chat.send_message force 与 no_dispatch 互斥（强制发送必须派发）"
+                    .to_string(),
+            });
+        }
+
         // state 注入（可选）：校验保留字后作为 overlay 透传。
-        let overlay = validate_state_overlay(params.get("state"))?;
+        let mut overlay = validate_state_overlay(params.get("state"))?;
+        // 显式 agent_id 下压为 overlay 单键（消息级执行身份，覆盖 state 同名键——
+        // 与 WS 路由器同序同法）：派发面/队列行只剩 state_overlay 一条身份通道。
+        if let Some(agent_id) = agent_id.as_deref() {
+            let mut obj = overlay
+                .take()
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            obj.insert("agent.id".to_string(), serde_json::json!(agent_id));
+            overlay = Some(Value::Object(obj));
+        }
 
         Ok(SendParams {
             message,
@@ -344,6 +375,7 @@ impl ChatSendHandler {
             agent_id,
             pipeline_config_id,
             overlay,
+            force,
         })
     }
 
@@ -413,6 +445,62 @@ impl ChatSendHandler {
         let Some(store) = self.store.as_ref() else {
             return Ok(());
         };
+        // 派生创建闸门①（归属会话必须存在）：会话删除只清数据，在途 run 仍
+        // 可能拿旧 session_id 派生子任务；不拦会让删后立刻长出孤儿管道
+        // （2026-11-10 装机实证：已删会话的子管道仍被创建并挂回该 thread）。
+        if let Some(thread) = p.ownership_thread {
+            match store.session_exists(thread).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        target: "capability:chat",
+                        thread = %thread,
+                        pipeline = %pipeline_id,
+                        "归属会话不存在或已删除，拒绝创建派生管道"
+                    );
+                    return Err(McpError::Protocol {
+                        message: format!(
+                            "chat.send_message 归属会话不存在或已删除，拒绝创建派生管道（thread_id={thread}）"
+                        ),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "capability:chat",
+                        thread = %thread,
+                        pipeline = %pipeline_id,
+                        error = %e,
+                        "归属会话存在性查询失败，拒绝创建分支（fail-closed）"
+                    );
+                    return Err(McpError::Protocol {
+                        message: format!("chat.send_message 归属会话存在性查询失败: {e}"),
+                    });
+                }
+            }
+        }
+        // 派生创建闸门②（父管道未删）：出生 state 声明血缘父时，父已进删除
+        // 墓碑即拒绝——血缘是删除级联的向下指针，父没了仍出生必成孤儿。
+        if let Some(parent) = p
+            .overlay
+            .as_ref()
+            .and_then(|o| o.get("lineage.parent_pipeline_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if agentos_engine::deleted_pipelines::is_deleted(parent) {
+                tracing::warn!(
+                    target: "capability:chat",
+                    parent = %parent,
+                    pipeline = %pipeline_id,
+                    "父管道已删除，拒绝创建派生管道"
+                );
+                return Err(McpError::Protocol {
+                    message: format!(
+                        "chat.send_message 父管道已删除，拒绝创建派生管道（parent_pipeline_id={parent}）"
+                    ),
+                });
+            }
+        }
         // 租户解析失败拒继续（K8 修订 ADR 2026-10-10）：出生字段落库/映射
         // 落库都带租户坐标，解析不出真租户就写 = 数据串入 default 租户。
         let tenant_id =
@@ -535,6 +623,14 @@ impl ChatSendHandler {
                     .to_string(),
             });
         }
+        // 删除终态：已删管道的登记不再落库/入注册表（DB 写入由 store 墓碑屏障
+        // 丢弃；此处提前返回，避免内存 registry 重新长出幽灵条目）。
+        if agentos_engine::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(json!({
+                "status": "recorded",
+                "pipeline_id": pipeline_id,
+            }));
+        }
         let Some(overlay) = p.overlay.as_ref() else {
             return Err(McpError::Protocol {
                 message: "chat.send_message no_dispatch 必须携带 state（只写 state 不派发）"
@@ -604,7 +700,7 @@ impl ChatSendHandler {
                 &tenant_id,
                 pipeline_id,
                 thread_id,
-                &p.agent_id,
+                p.agent_id.as_deref().unwrap_or("agentos"),
                 serde_json::Value::Object(base),
             );
         }
@@ -669,26 +765,27 @@ impl ChatSendHandler {
         let pid = pipeline_id.to_string();
         let tid = thread_id.to_string();
         let uid = effective_user.to_string();
-        let msg = p.message.to_string();
-        let ec = p.execution_context.cloned();
-        let ov = p.overlay.clone();
-        let aid = p.agent_id.clone();
-        let pcid = p.pipeline_config_id.clone();
+        let request = DispatchRequest {
+            thread_id: tid.clone(),
+            user_id: uid,
+            pipeline_id: pid.clone(),
+            content: p.message.to_string(),
+            client_message_id: String::new(),
+            source: PendingInputSource::Trigger,
+            execution_context: p.execution_context.cloned(),
+            state_overlay: p.overlay.clone(),
+            pipeline_config_id: p.pipeline_config_id.clone(),
+        };
+        let force_flag = p.force;
         let session = self.session.clone();
         tokio::spawn(async move {
-            let dispatch = dispatcher.dispatch_user_input(
-                &tid,
-                &uid,
-                &msg,
-                &pid,
-                "",
-                ec.as_ref(),
-                ov.as_ref(),
-                &aid,
-                pcid.as_deref(),
-                "",
-                PendingInputSource::Trigger,
-            );
+            // force=true 走强制通道（先停当前 run 再投递），否则普通派发
+            // （排队等 run 边界）。两条同 dispatcher，差别只在停止段。
+            let dispatch = if force_flag {
+                dispatcher.dispatch_force_input(request)
+            } else {
+                dispatcher.dispatch_user_input(request)
+            };
             // task_local 不跨 spawn：捕获的注入身份在此重建（外部面为 None，
             // 直跑——dispatch 内部走 user→tenant 解析分支）。
             let dispatched = match injected_identity {

@@ -6,6 +6,11 @@
  * 此前仅经 LoginModal mock 间接覆盖，本件补模块直测。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  loadShellLocalCredential,
+  notifyShellLoginOutcome,
+  shellAutoLoginDisabled,
+} from '@/services/shellLocalAuth'
 
 const apiBase = vi.hoisted(() => ({
   getServerBaseUrl: vi.fn((): string | null => null),
@@ -25,11 +30,6 @@ vi.mock('@/services/shellPlugins', () => ({
   getShellKernelHost: () => host.plugin,
 }))
 
-import {
-  loadShellLocalCredential,
-  notifyShellLoginOutcome,
-  shellAutoLoginDisabled,
-} from '@/services/shellLocalAuth'
 
 beforeEach(() => {
   sessionStorage.clear()
@@ -72,7 +72,7 @@ describe('loadShellLocalCredential 本机内核档凭据', () => {
   })
 
   it('非回环自定义后端仍不给本机凭据（回归对照）', async () => {
-    apiBase.getServerBaseUrl.mockReturnValue('http://162.14.69.153')
+    apiBase.getServerBaseUrl.mockReturnValue('http://203.0.113.153')
     host.plugin = { localCredentials: vi.fn().mockResolvedValue({ username: 'admin', password: 'pw123' }) }
     await expect(loadShellLocalCredential()).resolves.toBeNull()
   })

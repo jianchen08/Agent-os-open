@@ -20,6 +20,16 @@ workspace:
   crossdrive_root_name: .agentos-workspaces
   nesting_mode: shared
   large_file_threshold_mb: 50
+  # 同 repo 工作空间准备（root 就绪 + worktree 建树）串行锁等待上限（秒）。
+  # 并发 task_submit 对同一项目仓会抢 index/对象库，串行化避免 30s 级超时误判；
+  # 锁覆盖建树全程，故上限需大于 worktree_add_timeout_seconds。
+  prepare_lock_timeout_seconds: 180
+  # git worktree add 单次超时（秒）。大仓库/并发 I/O 下 30s 偏紧；超时后若
+  # 工作树已完整落地（注册条目 + branch + HEAD 可解析 + tracked 工作面干净）
+  # 会认领并解锁，不再留 locked 孤儿。
+  worktree_add_timeout_seconds: 120
+  # index.lock 陈旧阈值（秒）：并发 git 正在持有的活锁不删除；仅超阈值才清。
+  index_lock_stale_seconds: 120
   worktree_link_patterns:
   - assets
   - node_modules
@@ -38,7 +48,9 @@ workspace:
   max_eval_retries: 3
 coordinator:
   enabled: true
-  enable_fallback: false
+  # enable_fallback 键已删（2026-11-13：全仓零消费面，纯死配置；隔离后端
+  # 兜底语义由 providers 段的平台缺省承载——Windows=wsl_native、Linux=
+  # linux_native，Docker 仅显式 opt-in，见 ADR 2026-11-13）。
   default_level: isolated
   reuse_environment: true
   resource_limits:
@@ -49,6 +61,10 @@ providers:
   host:
     enabled: true
   cua:
+    # Docker 后端：显式 opt-in（2026-11-13 用户裁定隔离技术栈 Codex 式原生
+    # 优先——Windows=wsl_native、Linux=linux_native 占 CONTAINER 槽位；本段
+    # enabled:true 仅在原生后端未接管槽位时生效——macOS 无原生后端即走此，
+    # browser_* 工具的容器 bridge 通路 v1 仍需 Docker 后端）。
     enabled: true
     image: agentos:latest
     # 容器资源配额默认按引擎宿主动态计算（hardware_profile adaptive：
@@ -68,7 +84,10 @@ providers:
     build_context: .                              # 构建上下文，默认仓库根
     build_timeout: 1800                           # 秒；首次冷构建 Playwright 慢，缓存命中后秒级
   # WSL 原生隔离后端（Codex 式：无 Docker 层，环境随进程消亡、结构性无泄漏）。
-  # enabled: true 时占据 CONTAINER 槽位（与 cua 互斥），隔离级别语义不变。
+  # Windows 上缺省启用（enabled 缺省即 true，显式 false 才让位——2026-11-13
+  # 用户裁定隔离技术栈 Codex 式原生优先，配置段缺席/注入链断裂不再静默降
+  # Docker）；enabled: true 时占据 CONTAINER 槽位（与 cua 互斥），隔离级别
+  # 语义不变。
   # 平台门：enabled 仅在 Windows 平台生效；非 Windows 平台该配置不参与槽位
   # 竞争，CONTAINER 槽位自动落 Docker（装载期平台适配，manager/guard 同一
   # os.name 谓词双端一致，非运行期静默兜底，F11 语义不变），无需改配置。
@@ -79,7 +98,21 @@ providers:
     enabled: true
     distro: Ubuntu
     user: null            # 建议配非特权专用用户；null = 发行版默认用户
-    sandbox_cmd: []       # 例: ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--unshare-net"]
+    # 沙箱前缀：留空 = 任务直接跑在发行版完整视图里（/mnt 下宿主 Windows 盘
+    # 全可读写、docker socket 可用）。启用后只可见工作空间，见 ADR
+    # 2026-11-10-wsl-native-workspace-only-sandbox。
+    # 启用两步：①python scripts/install_wsl_sandbox.py（把 bwrap 与包装脚本装进
+    # 发行版 ~/.agentos/bin，免 sudo）②把下面 sandbox_cmd 换成注释里的接线。
+    # 出厂留空是供给顺序使然：没装 bwrap 的机器一旦置上，隔离可用性检查
+    # fail-closed，所有隔离 bash 会被拒——装机版需与 bwrap 随包分发同批开启。
+    # 间接层（bash -c exec "$@"）的必要性：wsl --exec 的 PATH 不含
+    # ~/.agentos/bin，裸名解析不到；写绝对路径又违反「禁止本机路径入库」。
+    sandbox_cmd: []
+    # sandbox_cmd:
+    # - bash
+    # - -c
+    # - exec "$HOME/.agentos/bin/aos-sandbox" "$@"
+    # - --
     # state_dir: .ai_workspaces/wsl_native_envs   # 缺省即此值（相对仓库根）
   # Linux 原生隔离后端（Codex 式：bubblewrap namespace 沙箱，免 daemon，
   # 环境随进程消亡、结构性无泄漏）。Linux 平台的默认 CONTAINER 后端：
@@ -99,8 +132,39 @@ providers:
     network: false        # 默认禁网（--unshare-net）；true 放开
     # bwrap_path: bwrap                          # 缺省即 PATH 解析
     # state_dir: .ai_workspaces/linux_native_envs # 缺省即此值（相对仓库根）
+  # MXC 原生隔离后端（Microsoft eXecution Container；Windows 专属，槽位顺序在
+  # wsl_native 之前）。设计真值 = docs/working/MXC隔离后端_设计草案_20261117.md。
+  # 选择真值 = 本段 backends 注册表（profile → MXC containment），装载期按
+  # 平台门注册、运行期探测只做健康检查不改选后端。默认关闭：执行器（MXC
+  # 发行包 533MB）未随包分发到位前启用会 fail-closed 拦掉全部隔离 bash。
+  # 启用前置：①executor 指向 wxc-exec.exe（或设 AGENTOS_MXC_EXECUTOR）
+  # ②Win11 24H2 26100.9278+/25H2 26200.9278+（processcontainer）③linux-bash
+  # 档需 WSL ≥3.0.5（WSLC）。execution_profile 缺省 linux-bash（与现状兼容）。
+  mxc_native:
+    enabled: false
+    backends:
+      linux-bash: wslc
+      native-win: processcontainer
+    default_profile: linux-bash
+    # executor: null                # 绝对路径或 PATH 名；null = 读 AGENTOS_MXC_EXECUTOR
+    # executor_args: ["{request}"]  # {request} 替换为一次性请求 JSON 路径
+    # state_dir: .ai_workspaces/mxc_native_envs   # metadata/策略档目录
+    # cache_root: null              # 编译缓存根（只读基线 + 任务可写层）
+    image: agentos-linux:latest
+    require_wsl: true               # linux-bash 档校验 WSL ≥3.0.5
+    # ProcessContainer ui 段：disable 缺省 false —— 锁 Win32k 会让 git/
+    # powershell 等控制台程序 STATUS_DLL_INIT_FAILED（真机实证 2026-11-17）；
+    # 剪贴板/合成输入仍保持 MXC 缺省（none/false）。wslc 档不带 ui 段。
+    # ui:
+    #   disable: false
+    #   clipboard: none
+    #   injection: false
+    network:
+      default: deny
+      allow: []
 policy:
-  enable_fallback: false
+  # enable_fallback 键已删（2026-11-13：全仓零消费面死配置；级别不可用即
+  # 拒绝执行（blocked）的 fail-closed 语义本就不允许降级兜底）。
   custom: {}
 permission_policies:
   default_policy:

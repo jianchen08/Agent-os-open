@@ -23,16 +23,18 @@ class TestEnumContracts:
     """枚举与词表 = 文档类型规范 §一/§二/§六 的机械投影（真值锁定）。"""
 
     def test_doc_types_match_spec(self):
-        # 类型规范 §一：追溯链上六种类型；rule 已于 v2.1 移出
+        # 类型规范 §二：追溯链六种 + standard（文档治理方案 D1，Standards 层）
         assert gm.DOC_TYPES == frozenset(
-            {"requirement", "plan", "adr", "design", "report", "ledger"}
+            {"requirement", "plan", "adr", "design", "report", "ledger", "standard"}
         )
         assert "rule" not in gm.DOC_TYPES
         assert "test" not in gm.DOC_TYPES
 
     def test_doc_statuses_match_spec(self):
-        # 文档类型规范 §四：状态四值
-        assert gm.DOC_STATUSES == frozenset({"draft", "active", "superseded", "archived"})
+        # 文档类型规范 §六：状态五值（deprecated = 废弃三处置落位）
+        assert gm.DOC_STATUSES == frozenset(
+            {"draft", "active", "superseded", "archived", "deprecated"}
+        )
 
     def test_frontmatter_fields_whitelist(self):
         # v3.0 元数据极简化：裁至三字段
@@ -140,9 +142,9 @@ class TestSimpleYaml:
         assert gm.parse_simple_yaml(yaml) == {"id": "p", "next": "v"}
 
     def test_top_level_list_extraction(self):
-        yaml = "id: g\ntool_ids:\n- bash_execute\n- human_interaction\nnext: v"
+        yaml = "id: g\ntool_ids:\n- bash\n- human_interaction\nnext: v"
         assert gm.parse_simple_yaml_list(yaml, "tool_ids") == [
-            "bash_execute",
+            "bash",
             "human_interaction",
         ]
 

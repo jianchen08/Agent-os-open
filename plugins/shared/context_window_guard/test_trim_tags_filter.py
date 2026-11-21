@@ -1,11 +1,16 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
-"""压缩块检索 tags 过滤测试（D1：裁剪放弃根因修复）。
+# @feature: FP-0.2.〇 管道引擎 | @ci: pytest-plugins
+"""压缩块检索 tags 过滤测试（D1 演进：裁剪已与记忆库解耦后的两个存量消费点）。
 
-_trim_covered_messages 与 clean_if_window_changed 的检索必须带
-``tags=[f"pipeline:{pipeline_id}"], tags_match="any"`` 服务端过滤
-（对齐 _estimate_assembled_tokens 正确口径）：缺 tags 时向量召回混入
-同 thread 旧代 pipeline 压缩块，max_end 被历史大值抬高 → 误判当前消息
-全部已压缩 → 触发 <10% 防护放弃裁剪。
+2026-11-16 修复后 _trim_covered_messages 不再检索记忆库（证据源 =
+历史已应用压缩块 metadata.compression_ref.seq_range，孤儿 chunk 不驱动
+删除）。仍检索后端的消费点剩两处——clean_if_window_changed（window 变更
+检测）与 _estimate_assembled_tokens（压缩块拼接估算），它们的检索必须带
+``tags=[f"pipeline:{pipeline_id}"], tags_match="any"`` 服务端过滤（D1 既有
+保护意图）：缺 tags 时向量召回混入同 thread 旧代 pipeline 块，l1 估算
+失真 / window 判定错块。
+
+另含本事故回归：孤儿 chunk（落库后回写前被打断的覆盖声明）不影响裁剪
+决策——trim 零检索、零删除。
 
 memory backend 属外部依赖，用 stub 替身（按 hindsight 服务端 tags
 过滤契约模拟：带 tags 只回本管道块，不带 tags 回全量）；断行为不断实现。
@@ -102,51 +107,11 @@ def _make_ctx(mod: Any, pipeline_id: str) -> Any:
     return mod._make_minimal_ctx(pipeline_id=pipeline_id)
 
 
-class TestTrimSearchTagsFilter:
-    """_trim_covered_messages 检索必须带 pipeline tags 服务端过滤。"""
-
-    def test_search_passes_pipeline_tags_contract(self) -> None:
-        """检索调用带 tags=["pipeline:<id>"], tags_match="any"（契约断言）。"""
-        mod = _load_guard_module()
-        backend = _TagsAwareBackend(
-            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-2"])],
-            stale_chunks=[],
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.ContextWindowGuardPlugin()
-        messages = [
-            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 5)
-        ]
-        _run(plugin._trim_covered_messages(_make_ctx(mod, "p"), messages))
-        assert len(backend.search_calls) == 1
-        call = backend.search_calls[0]
-        assert call["tags"] == ["pipeline:p"]
-        assert call["tags_match"] == "any"
-
-    def test_stale_pipeline_chunks_excluded_from_max_end(self) -> None:
-        """有区分度行为断言：tags 过滤生效 → 旧代大 seq 块不入 max_end。
-
-        本管道块 seq:1-4 + 旧代块 seq:1-1000；消息 seq 1..8。带 tags 时
-        服务端滤掉旧代块，max_end=4，保留 seq 5..8；若缺 tags（bug 形态）
-        全量召回 max_end=1000 → 全裁触发防护放弃。两组输入几何不同：
-        本组验证「部分裁剪生效」，反向组验证防护告警取证字段。
-        """
-        mod = _load_guard_module()
-        backend = _TagsAwareBackend(
-            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-4"])],
-            stale_chunks=[_l1_chunk(["pipeline:p-old-gen", "seq:1-1000"])],
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.ContextWindowGuardPlugin()
-        messages = [
-            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 9)
-        ]
-        result = _run(plugin._trim_covered_messages(_make_ctx(mod, "p"), messages))
-        kept_seqs = [m["seq"] for m in result if m.get("seq") is not None]
-        assert kept_seqs == [5, 6, 7, 8]
+class TestCleanSearchTagsFilter:
+    """clean_if_window_changed 检索必须带 pipeline tags 服务端过滤。"""
 
     def test_clean_if_window_changed_passes_pipeline_tags(self) -> None:
-        """clean_if_window_changed 检索同样带 pipeline tags（第二处同病）。"""
+        """检索调用带 tags=["pipeline:<id>"], tags_match="any"（契约断言）。"""
         mod = _load_guard_module()
         backend = _TagsAwareBackend(
             own_chunks=[_l1_chunk(["pipeline:p", "seq:1-2", "ctx:64000"])],
@@ -166,59 +131,63 @@ class TestTrimSearchTagsFilter:
         assert call["tags_match"] == "any"
 
 
-class TestProtectionAlertCarriesRecallTags:
-    """<10% 防护告警须附召回块的 pipeline tag（取证字段）。"""
+class TestEstimateSearchTagsFilter:
+    """_estimate_assembled_tokens 检索必须带 pipeline tags 服务端过滤。"""
 
-    def test_protection_alert_includes_pipeline_tags(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """裁剪过激触发防护 → error 告警含召回块 pipeline tag。"""
-        import logging
-
+    def test_estimate_passes_pipeline_tags_contract(self) -> None:
+        """检索调用带 tags=["pipeline:<id>"], tags_match="any"（契约断言）。"""
         mod = _load_guard_module()
         backend = _TagsAwareBackend(
-            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-10"])],
+            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-2"])],
             stale_chunks=[],
         )
         mod.set_memory_backend(backend)
         plugin = mod.ContextWindowGuardPlugin()
         ctx = _make_ctx(mod, "p")
-        messages = [
-            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 12)
-        ]
-        with caplog.at_level(logging.ERROR):
-            result = _run(plugin._trim_covered_messages(ctx, messages))
-        assert result is messages  # 防护生效，放弃裁剪
-        alert = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert alert, "应有一条 <10% 防护 error 告警"
-        assert any("pipeline:p" in r.getMessage() for r in alert)
+        _run(plugin._estimate_assembled_tokens(ctx, []))
+        assert len(backend.search_calls) == 1
+        call = backend.search_calls[0]
+        assert call["tags"] == ["pipeline:p"]
+        assert call["tags_match"] == "any"
 
-    def test_protection_alert_lists_mixed_pipeline_tags(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """召回块携带多 pipeline 标签时，告警应全部列出（取证可辨）。
+    def test_stale_pipeline_chunks_excluded_from_estimate(self) -> None:
+        """有区分度行为断言：tags 过滤生效 → 旧代大块不入估算。
 
-        旧代块以双标签形态命中服务端过滤（残留历史管道 tag + 本管道
-        tag），seq:1-50 混入抬高 max_end=50 → 防护触发，告警须同时给出
-        本管道与遗留管道两个 tag，取证时可直接定位错位来源。
+        本管道块 seq:1-2（40 字符 → l1 估算 20）+ 旧代块 seq:1-1000；
+        消息仅 seq 5 一条（"hello" → recent 估算 2）。带 tags 时服务端滤掉
+        旧代块：total = 20 + 2 = 22；若缺 tags（bug 形态）全量召回两块：
+        l1 40 + max_end=1000 → recent 0 → total 40。两组输入几何可辨。
         """
-        import logging
-
         mod = _load_guard_module()
         backend = _TagsAwareBackend(
-            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-10"])],
-            stale_chunks=[
-                _l1_chunk(["pipeline:p", "pipeline:p-legacy", "seq:1-50"])
-            ],
+            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-2"])],
+            stale_chunks=[_l1_chunk(["pipeline:p-old-gen", "seq:1-1000"])],
         )
         mod.set_memory_backend(backend)
         plugin = mod.ContextWindowGuardPlugin()
         ctx = _make_ctx(mod, "p")
+        messages = [{"role": "user", "content": "hello", "seq": 5}]
+        estimated = _run(plugin._estimate_assembled_tokens(ctx, messages))
+        assert estimated == 22, (
+            f"估算必须只计本管道块（l1=20 + recent=2），实际 {estimated}"
+        )
+
+
+class TestOrphanChunksDoNotAffectTrim:
+    """本事故回归（2026-11-16）：孤儿 chunk 不影响裁剪决策。"""
+
+    def test_orphan_chunks_do_not_drive_trim(self) -> None:
+        """仅记忆库裸 chunk、历史无已应用块 → trim 零检索、零删除。"""
+        mod = _load_guard_module()
+        backend = _TagsAwareBackend(
+            own_chunks=[_l1_chunk(["pipeline:p", "seq:1-50"])],
+            stale_chunks=[],
+        )
+        mod.set_memory_backend(backend)
+        plugin = mod.ContextWindowGuardPlugin()
         messages = [
-            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 12)
+            {"role": "user", "content": f"m{i}", "seq": i} for i in range(1, 61)
         ]
-        with caplog.at_level(logging.ERROR):
-            result = _run(plugin._trim_covered_messages(ctx, messages))
-        assert result is messages
-        alert_text = "\n".join(r.getMessage() for r in caplog.records)
-        assert "pipeline:p-legacy" in alert_text
+        result = _run(plugin._trim_covered_messages(messages))
+        assert result is messages, "孤儿 chunk 不得驱动删除"
+        assert backend.search_calls == [], "trim 已与记忆库解耦（零检索）"

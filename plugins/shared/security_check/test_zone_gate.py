@@ -2,11 +2,11 @@
 """位置闸测试（ADR 2026-09-24-read-deny-write-zones 修订：位置轴管道层统一执法）。
 
 锁定契约（security_check._enforce_zone_policy，判定单源 zone_policy）：
-1. 写区外 → 弹授权卡（两选项：仅本管道/永久），批准即放行且授权落盘；
+1. 写区外 → 弹授权卡（三选项：仅本管道/永久/拒绝执行），批准即放行且授权落盘；
 2. 「仅本管道」→ state 键 task.authorized_write_zones 更新 + 当前调用参数
    就地补授权（param_inject 注入先于本阶段，工具层兜底靠它看到本次授权）；
 3. 「永久」→ add_write_zone 落名单文件（env 钉 tmp）；
-4. 拒绝/超时/未知选项 → 软拦截，不产生任何授权；
+4. 显式拒绝（卡面 denied）/超时/未知选项 → 软拦截，不产生任何授权；
 5. 仓库自保目录（config/ 等）对写直接拦不弹卡；
 6. 读链（用户裁定 2026-09-28）：锚内读豁免（工作区/项目根不查黑名单）；
    锚外黑名单命中弹读授权卡（state 键 task.authorized_read_zones /
@@ -77,7 +77,8 @@ class FakeHICap:
         if method == "create_choice":
             if self.fail:
                 return {"error": "boom"}
-            assert [o["id"] for o in params["options"]] == ["pipeline", "permanent"]
+            assert [o["id"] for o in params["options"]] == ["pipeline", "permanent", "denied"]
+            assert params["options"][2]["semantics"] == "deny", "授权卡必须带可点的拒绝项"
             assert all(o.get("semantics") for o in params["options"]), "授权卡必须声明语义"
             return {"request_id": "req-1"}
         if method == "wait_for_choice":
@@ -110,8 +111,8 @@ def zone_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[s
 
 def _ctx(
     state_overrides: dict[str, Any],
-    cap: FakeHICap | None,
-) -> tuple[Any, FakeHICap | None]:
+    cap: Any | None,
+) -> tuple[Any, Any | None]:
     def _get_service(name: str) -> Any:
         raise KeyError(name)
 
@@ -215,7 +216,9 @@ async def test_pipeline_grant_reaches_dispatch_via_state_updates(
         {
             "raw_tool_calls": _tool_calls("file_write", {"path": str(outsider / "a.txt")}),
             "workspace": str(zone_env["ws"]),
-            "execution_contexts": [{"provider": "docker", "level": "isolated", "task_isolated": True}],
+            # provider=host：宿主路径写，位置闸执法（R11 起容器路由调用豁免，
+            # 见 test_container_routed_fs_call_skips_host_zone_gate）
+            "execution_contexts": [{"provider": "host", "level": "isolated", "task_isolated": True}],
         },
         cap,
     )
@@ -309,6 +312,127 @@ async def test_write_outside_zone_denied_soft_blocks_without_grant(
     assert zone_policy.STATE_KEY not in updates
     assert zone_policy.STATE_KEY not in ctx.state
     assert not (zone_env["users_dir"] / "default" / "project_whitelist.yaml").exists()
+
+
+async def test_write_outside_zone_explicit_deny_option_soft_blocks(
+    zone_env: dict[str, Path],
+) -> None:
+    """卡面「拒绝执行」可点（回归 2026-11-18：此前授权卡只有两个批准项）。
+
+    显式拒绝 → 软拦截，state 与名单均无授权痕迹（拒绝记忆武装由 human
+    服务按 semantics=deny 侧承担，此处断言消费面结算方向）。
+    """
+    outsider = zone_env["tmp"] / "deny_btn_dir"
+    outsider.mkdir()
+    cap = FakeHICap(selected="denied")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": str(outsider / "d.txt")}),
+            "workspace": str(zone_env["ws"]),
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is not None
+    assert blocked["pre_decided_results"], "显式拒绝=软拦截"
+    assert zone_policy.STATE_KEY not in updates
+    assert zone_policy.STATE_KEY not in ctx.state
+    assert not (zone_env["users_dir"] / "default" / "project_whitelist.yaml").exists()
+
+
+async def test_container_routed_fs_call_skips_host_zone_gate(
+    zone_env: dict[str, Path],
+) -> None:
+    """容器路由（provider=docker 对齐）跳过宿主位置闸（R11 fs 容器路由配套）。
+
+    容器内路径（/app/...）在宿主 resolve 出盘符根假路径（E:\\app\\output），
+    误判写区外弹授权卡会把管道卡死等人工（真内核三连实证）。容器路由判定
+    归 isolation_guard（服务端），位置闸只认对齐的 execution_contexts。
+    """
+    cap = FakeHICap(selected=None)  # 若闸未豁免，卡片将无人应答 → 软拦截（红）
+    ctx, cap_ref = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": "/app/output/config.json"}),
+            "workspace": str(zone_env["ws"]),
+            "execution_contexts": [
+                {"provider": "docker", "level": "isolated", "task_isolated": True,
+                 "tool_name": "file_write"}
+            ],
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is None, "容器路由调用的路径参数不进宿主位置闸"
+    assert cap_ref is not None
+    assert cap_ref.calls == [], "不得弹宿主写区授权卡"
+    assert zone_policy.STATE_KEY not in updates
+
+
+async def test_zone_gate_alignment_mismatch_still_enforces(
+    zone_env: dict[str, Path],
+) -> None:
+    """上下文与调用数不对齐：不豁免（fail-closed），照常执法。"""
+    outsider = zone_env["tmp"] / "mismatch_dir"
+    outsider.mkdir()
+    cap = FakeHICap(selected=None)
+    ctx, cap_ref = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": str(outsider / "x.txt")}),
+            "workspace": str(zone_env["ws"]),
+            "execution_contexts": [],  # 与调用数不一致 → aligned=False
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is not None, "不对齐时不豁免位置闸"
+    assert cap_ref is not None
+    assert cap_ref.calls, "照常弹授权卡（fail-closed 方向）"
+
+
+async def test_write_outside_zone_feedback_text_returned_in_tool_result(
+    zone_env: dict[str, Path],
+) -> None:
+    """授权卡下方自由文本随 feedback 进入工具返回值（用户说明不丢失）。"""
+
+    class _FeedbackCap:
+        async def call(self, method: str, params: dict[str, Any], **kwargs: Any) -> Any:  # noqa: ARG002
+            if method == "create_choice":
+                return {"request_id": "req-feedback"}
+            if method == "wait_for_choice":
+                return {
+                    "response_type": "answered",
+                    "selected_option": "",
+                    "selected_semantics": "",
+                    "feedback": "请改为写工作区内路径",
+                }
+            raise AssertionError(f"unexpected method {method}")
+
+    outsider = zone_env["tmp"] / "feedback_dir"
+    outsider.mkdir()
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": str(outsider / "c.txt")}),
+            "workspace": str(zone_env["ws"]),
+        },
+        _FeedbackCap(),
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is not None
+    error = blocked["pre_decided_results"][0]["error"]
+    assert "用户反馈: 请改为写工作区内路径" in error
+    assert zone_policy.STATE_KEY not in updates
 
 
 async def test_write_outside_zone_unknown_option_soft_blocks(
@@ -439,6 +563,27 @@ async def test_read_blacklist_pipeline_grant_allows_and_updates_state(
     args = ctx.state["raw_tool_calls"][0]["args"]
     assert json.loads(args["authorized_read_zones"]) == [grant_dir]
     assert cap.calls[0][1]["title"] == f"授权读取 {grant_dir}"
+
+
+async def test_read_blacklist_explicit_deny_option_soft_blocks(
+    zone_env: dict[str, Path],
+) -> None:
+    """读授权卡「拒绝执行」可点：软拦截，无读授权痕迹（与写卡同构）。"""
+    target = zone_env["repo"] / "config" / "llm.yaml"
+    cap = FakeHICap(selected="denied")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_read", {"path": str(target)}),
+            "workspace": str(zone_env["ws"]),
+        },
+        cap,
+    )
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
+
+    assert blocked is not None
+    assert blocked["pre_decided_results"], "显式拒绝=软拦截"
+    assert zone_policy.STATE_KEY_READ not in ctx.state
 
 
 async def test_read_blacklist_permanent_grant_writes_read_allow(
@@ -612,7 +757,9 @@ async def test_zone_gate_precedes_bypass_short_circuit(
         {
             "raw_tool_calls": _tool_calls("file_write", {"path": str(outsider / "f.txt")}),
             "workspace": str(zone_env["ws"]),
-            "execution_contexts": [{"provider": "docker", "level": "isolated", "task_isolated": True}],
+            # provider=host：宿主路径写走位置闸（容器路由豁免见
+            # test_container_routed_fs_call_skips_host_zone_gate）
+            "execution_contexts": [{"provider": "host", "level": "isolated", "task_isolated": True}],
         },
         cap,
     )

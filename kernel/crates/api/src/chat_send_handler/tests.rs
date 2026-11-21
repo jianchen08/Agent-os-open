@@ -12,29 +12,23 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 /// 单次 dispatch_user_input 记录（全参快照）：
-/// (thread_id, user_id, content, pipeline_id, thinking, execution_context,
-///  state_overlay, agent_id, pipeline_config_id)
-type DispatchRecord = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<Value>,
-    Option<Value>,
-    String,
-    Option<String>,
-);
+/// 一次派发请求（ADR-2026-11-17：入口面收敛为单个 DispatchRequest，
+/// 执行身份只经 `state_overlay["agent.id"]` 承载）。
+type DispatchRecord = agentos_core::types::DispatchRequest;
 
 /// 记录型 mock dispatcher：捕获每次 dispatch 调用供断言。
 struct RecordingDispatcher {
     calls: Mutex<Vec<DispatchRecord>>,
+    /// 强制发送通道调用记录（pipeline_id）：区分「停当前 run 再投递」与普通
+    /// 排队派发。默认 trait 实现会退化成 dispatch_user_input，故必须覆写。
+    force_calls: Mutex<Vec<String>>,
 }
 
 impl RecordingDispatcher {
     fn shared() -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
+            force_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -43,29 +37,9 @@ impl RecordingDispatcher {
 impl PipelineDispatcher for RecordingDispatcher {
     async fn dispatch_user_input(
         &self,
-        thread_id: &str,
-        user_id: &str,
-        content: &str,
-        pipeline_id: &str,
-        thinking_strength: &str,
-        execution_context: Option<&Value>,
-        state_overlay: Option<&Value>,
-        agent_id: &str,
-        pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: PendingInputSource,
+        request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
-        self.calls.lock().unwrap().push((
-            thread_id.to_string(),
-            user_id.to_string(),
-            content.to_string(),
-            pipeline_id.to_string(),
-            thinking_strength.to_string(),
-            execution_context.cloned(),
-            state_overlay.cloned(),
-            agent_id.to_string(),
-            pipeline_config_id.map(str::to_string),
-        ));
+        self.calls.lock().unwrap().push(request);
         Ok(())
     }
 
@@ -79,6 +53,18 @@ impl PipelineDispatcher for RecordingDispatcher {
     }
 
     async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn dispatch_force_input(
+        &self,
+        request: agentos_core::types::DispatchRequest,
+    ) -> Result<(), String> {
+        self.force_calls
+            .lock()
+            .unwrap()
+            .push(request.pipeline_id.clone());
+        self.calls.lock().unwrap().push(request);
         Ok(())
     }
 }
@@ -149,9 +135,15 @@ async fn inject_existing_pipeline_keeps_current_contract() {
         assert_eq!(res["pipeline_id"], pid);
         let c = calls(&d);
         assert_eq!(c.len(), 1);
-        assert_eq!(c[0].0, pid, "无 store 回退：thread_id 与 pipeline_id 同值");
-        assert_eq!(c[0].3, pid);
-        assert!(c[0].6.is_none(), "无 state 参数时 overlay 为 None");
+        assert_eq!(
+            c[0].thread_id, pid,
+            "无 store 回退：thread_id 与 pipeline_id 同值"
+        );
+        assert_eq!(c[0].pipeline_id, pid);
+        assert!(
+            c[0].state_overlay.is_none(),
+            "无 state 参数时 overlay 为 None"
+        );
     }
 }
 
@@ -172,7 +164,7 @@ async fn inject_passes_state_overlay() {
         .unwrap();
     assert_eq!(res["status"], "dispatched");
     let overlay = calls(&d)[0]
-        .6
+        .state_overlay
         .clone()
         .expect("state overlay 应透传到派发层");
     assert_eq!(overlay["task.status"], "running");
@@ -216,11 +208,11 @@ async fn inject_with_store_resolves_real_thread_coordinate() {
     let c = calls(&d);
     assert_eq!(c.len(), 1);
     assert_eq!(
-        c[0].0, "thread-trig-1",
+        c[0].thread_id, "thread-trig-1",
         "thread 槽位应是黑盒解析出的真实会话坐标，不是 pipeline_id"
     );
     assert_eq!(
-        c[0].3, "a1b2c3d4e5f64789abcdef0123456789",
+        c[0].pipeline_id, "a1b2c3d4e5f64789abcdef0123456789",
         "pipeline 槽位保持调用方原值"
     );
 }
@@ -284,10 +276,10 @@ async fn inject_background_resolves_real_thread_coordinate() {
     }
     let rec = rec.expect("background 注入应最终派发");
     assert_eq!(
-        rec.0, "thread-trig-2",
+        rec.thread_id, "thread-trig-2",
         "background 分支 thread 槽位同样解析"
     );
-    assert_eq!(rec.3, "b1b2c3d4e5f64789abcdef0123456789");
+    assert_eq!(rec.pipeline_id, "b1b2c3d4e5f64789abcdef0123456789");
 }
 
 /// 1017 事故回归（刀2 预检）：无注入身份 + user 不可解析 → background
@@ -364,7 +356,7 @@ async fn inject_background_omitted_user_uses_injected_identity() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let rec = rec.expect("省略 user 的注入派发应最终执行");
-    assert_eq!(rec.1, "u-injected", "dispatcher 收到注入身份 user");
+    assert_eq!(rec.user_id, "u-injected", "dispatcher 收到注入身份 user");
 }
 
 // ── 创建分支：id 生成与响应 ──────────────────────────────────
@@ -489,7 +481,14 @@ async fn inject_branch_agent_param_is_bookkeeping_only() {
     )
     .await
     .unwrap();
-    assert_eq!(calls(&d)[0].7, "agentos");
+    assert!(
+        calls(&d)[0]
+            .state_overlay
+            .as_ref()
+            .and_then(|o| o.get("agent.id"))
+            .is_none(),
+        "缺省不注入 agent.id（身份沿用管道 state）"
+    );
 
     h.handle(
         "send_message",
@@ -502,7 +501,11 @@ async fn inject_branch_agent_param_is_bookkeeping_only() {
     )
     .await
     .unwrap();
-    assert_eq!(calls(&d)[1].7, "general_agent", "显式值原样透传簿记");
+    assert_eq!(
+        calls(&d)[1].state_overlay.as_ref().unwrap()["agent.id"],
+        "general_agent",
+        "显式 agent_id 下压为 state agent.id overlay"
+    );
 }
 
 // ── pipeline_config_id：显式指定管道配置（按需加载编译缓存）──────────
@@ -525,7 +528,11 @@ async fn pipeline_config_id_param_forwarded_to_dispatch() {
             .await
             .unwrap();
         assert_eq!(res["status"], "dispatched");
-        assert_eq!(calls(&d)[0].8.as_deref(), Some(cfg), "显式配置应透传");
+        assert_eq!(
+            calls(&d)[0].pipeline_config_id.as_deref(),
+            Some(cfg),
+            "显式配置应透传"
+        );
     }
 }
 
@@ -539,7 +546,7 @@ async fn pipeline_config_id_invalid_or_absent_is_none() {
     )
     .await
     .unwrap();
-    assert!(calls(&d)[0].8.is_none(), "缺省必须为 None");
+    assert!(calls(&d)[0].pipeline_config_id.is_none(), "缺省必须为 None");
 
     // 形态非法（路径穿越/空白/超长）按缺失忽略，不报错
     for (why, bad) in [
@@ -562,7 +569,7 @@ async fn pipeline_config_id_invalid_or_absent_is_none() {
             .unwrap();
         assert_eq!(res["status"], "dispatched", "{why}: 非法值不阻断派发");
         assert!(
-            calls(&d2)[0].8.is_none(),
+            calls(&d2)[0].pipeline_config_id.is_none(),
             "{why}: 非法值必须按缺失 = autonomous"
         );
     }
@@ -592,10 +599,10 @@ async fn create_with_flag_generates_engine_pipeline_id() {
     // resolve 链路对陌生 id 落回退分支 ③ 原样穿透）
     let c = calls(&d);
     assert_eq!(c.len(), 1);
-    assert_eq!(c[0].0, pid);
-    assert_eq!(c[0].3, pid);
+    assert_eq!(c[0].thread_id, pid);
+    assert_eq!(c[0].pipeline_id, pid);
     // overlay：task.* 自由键 + lineage 扁平键（调用方经 state 透传）
-    let overlay = c[0].6.clone().expect("state overlay 应透传");
+    let overlay = c[0].state_overlay.clone().expect("state overlay 应透传");
     assert_eq!(overlay["task.goal"], "喝水提醒");
     assert_eq!(overlay["task.status"], "pending");
     assert_eq!(overlay["lineage.parent_pipeline_id"], "pipe_parent");
@@ -607,8 +614,11 @@ async fn create_with_ownership_thread_links_real_session() {
     // 创建分支携带归属会话（任务管道透传用户会话）：thread 槽位 = 调用方
     // 声明会话（不再自环），pipeline_sessions 落真实映射可反查；pipeline
     // 槽位保持引擎生成值。缺省（不传）行为不变 = 自环（create_with_flag 用例）。
-    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> =
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     seed_default_user(&*store, "u1").await;
+    // 归属锚点必须指向真实会话（派生创建闸门：已删/不存在的会话拒绝出生）
+    seed_session(&store, "thread-user-1", "p_chat_user").await;
     let (h, d) = handler_with_store(Some(store.clone()));
     let res = h
         .handle(
@@ -628,10 +638,10 @@ async fn create_with_ownership_thread_links_real_session() {
     let c = calls(&d);
     assert_eq!(c.len(), 1);
     assert_eq!(
-        c[0].0, "thread-user-1",
+        c[0].thread_id, "thread-user-1",
         "thread 槽位应是调用方归属会话，不是管道自身（自环已按可选 thread_id 修正）"
     );
-    assert_eq!(c[0].3, pid, "pipeline 槽位保持引擎生成值");
+    assert_eq!(c[0].pipeline_id, pid, "pipeline 槽位保持引擎生成值");
     // 映射落库：pipeline_sessions 反查命中真实会话（前端 runs 快照据此归属）
     let stored = store.get_thread_id_by_pipeline(&pid).await.unwrap();
     assert_eq!(stored.as_deref(), Some("thread-user-1"));
@@ -659,7 +669,7 @@ async fn create_without_flag_when_pipeline_id_absent() {
         .unwrap();
     assert_eq!(res["status"], "created");
     assert_simple_uuid_v4(res["pipeline_id"].as_str().unwrap());
-    let overlay = calls(&d)[0].6.clone().unwrap();
+    let overlay = calls(&d)[0].state_overlay.clone().unwrap();
     assert_eq!(overlay["lineage.root"], true);
     assert_eq!(overlay["lineage.origin.kind"], "channel");
     assert_eq!(overlay["lineage.origin.source"], "dingtalk");
@@ -748,7 +758,10 @@ async fn state_lineage_prefixed_keys_accepted() {
         .await
         .unwrap();
     assert_eq!(res["status"], "dispatched");
-    let overlay = calls(&d)[0].6.clone().expect("lineage.* 应透传");
+    let overlay = calls(&d)[0]
+        .state_overlay
+        .clone()
+        .expect("lineage.* 应透传");
     assert_eq!(overlay["lineage.root"], true);
     assert_eq!(overlay["lineage.parent_pipeline_id"], "pipe_parent");
 }
@@ -807,11 +820,11 @@ async fn create_passes_execution_context_alongside_state() {
     assert_eq!(res["status"], "created");
     let c = calls(&d);
     assert_eq!(
-        c[0].5,
+        c[0].execution_context,
         Some(json!({"workspace": {"mode": "worktree"}, "isolation": {"level": "plain"}}))
     );
     // task.id 调用方预传值原样透传（内核零解释）
-    assert_eq!(c[0].6.as_ref().unwrap()["task.id"], "t9");
+    assert_eq!(c[0].state_overlay.as_ref().unwrap()["task.id"], "t9");
 }
 
 // ── GAP-1：background 参数（任务派发不阻塞等待任务完成） ──────────
@@ -827,23 +840,13 @@ struct GatedDispatcher {
 impl PipelineDispatcher for GatedDispatcher {
     async fn dispatch_user_input(
         &self,
-        _thread_id: &str,
-        _user_id: &str,
-        _content: &str,
-        _pipeline_id: &str,
-        _thinking_strength: &str,
-        _execution_context: Option<&Value>,
-        state_overlay: Option<&Value>,
-        _agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: PendingInputSource,
+        request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         self.gate.notified().await;
         self.calls
             .lock()
             .unwrap()
-            .push(state_overlay.cloned().unwrap_or(Value::Null));
+            .push(request.state_overlay.clone().unwrap_or(Value::Null));
         Ok(())
     }
     async fn dispatch_interaction_response(
@@ -951,7 +954,7 @@ async fn create_passes_caller_supplied_task_id_through() {
         .unwrap();
     assert_eq!(res["status"], "created");
     assert_eq!(
-        calls(&d)[0].6.as_ref().unwrap()["task.id"],
+        calls(&d)[0].state_overlay.as_ref().unwrap()["task.id"],
         "fake_id_999",
         "内核不解释任务域键，原样透传"
     );
@@ -1097,17 +1100,7 @@ struct FailingDispatcher {
 impl PipelineDispatcher for FailingDispatcher {
     async fn dispatch_user_input(
         &self,
-        _t: &str,
-        _u: &str,
-        _c: &str,
-        _p: &str,
-        _ts: &str,
-        _ec: Option<&Value>,
-        _ov: Option<&Value>,
-        _a: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: PendingInputSource,
+        _request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         Err(self.err.clone())
     }
@@ -1145,8 +1138,11 @@ impl agentos_session::EventSink for CapturingSink {
 /// （统一错误模型：假成功显式化）。
 #[tokio::test]
 async fn background_dispatch_failure_emits_system_notification() {
-    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> =
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     seed_default_user(&*store, "u1").await;
+    // 归属锚点必须指向真实会话（派生创建闸门）
+    seed_session(&store, "thread-fail-1", "p_chat_fail").await;
     let session = Arc::new(agentos_session::SessionCoordinator::new());
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));
     session.register_thread("thread-fail-1", "u1");
@@ -1969,14 +1965,14 @@ async fn create_without_ownership_thread_leaves_sessions_untouched() {
     );
 }
 
-/// 锚点线程无 sessions 行（陈旧锚/伪造）：跳过切换不阻断出生——
-/// 任务执行不依赖该指针，不得凭空造会话行，也不得让出生失败。
+/// 锚点线程无 sessions 行（陈旧锚/伪造）：拒绝出生——归属会话不存在即
+/// "删后仍派生的孤儿"入口（2026-11-10 装机实证），闸门必须 fail-closed。
 #[tokio::test]
-async fn create_with_unknown_anchor_thread_skips_pointer_switch() {
+async fn create_with_unknown_anchor_thread_is_rejected() {
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     seed_default_user(&*store, "u1").await;
     let (h, _d) = handler_with_store(Some(store.clone()));
-    let res = h
+    let err = h
         .handle(
             "send_message",
             json!({
@@ -1986,18 +1982,21 @@ async fn create_with_unknown_anchor_thread_skips_pointer_switch() {
             }),
         )
         .await
-        .unwrap();
-    assert_eq!(res["status"], "created", "指针切换跳过不得阻断出生");
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("归属会话不存在或已删除"),
+        "归属会话不存在必须拒绝出生，实际: {err}"
+    );
     assert!(
         store.get_session("thread-ghost-1").await.unwrap().is_none(),
         "不得凭空创建锚点线程的 sessions 行"
     );
 }
 
-/// 锚点线程会话读写失败（存储故障）：warn 留痕不阻断出生——指针是视图
-/// 便利面，pipeline_sessions 映射与出生键才是 B7 契约面。
+/// 归属会话存在性查询失败（存储故障）：fail-closed 拒绝出生——无法确认
+/// 会话是否已被删除时宁可不出生，避免把孤儿写进库。
 #[tokio::test]
-async fn create_pointer_switch_storage_failure_does_not_abort_birth() {
+async fn create_anchor_session_lookup_failure_is_rejected() {
     let (guard, logs) = crate::test_env::capture_logs();
     let _ = &guard;
     let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
@@ -2012,7 +2011,7 @@ async fn create_pointer_switch_storage_failure_does_not_abort_birth() {
     let store: Arc<dyn StorageBackend> = sqlite;
     let d = RecordingDispatcher::shared();
     let h = ChatSendHandler::with_store(d.clone(), Some(store));
-    let res = h
+    let err = h
         .handle(
             "send_message",
             json!({
@@ -2022,11 +2021,39 @@ async fn create_pointer_switch_storage_failure_does_not_abort_birth() {
             }),
         )
         .await
-        .unwrap();
-    assert_eq!(res["status"], "created", "指针切换失败不得阻断出生");
+        .unwrap_err();
     assert!(
-        logs.text().contains("切线程活跃管道失败"),
-        "指针切换失败必须 warn 留痕"
+        err.to_string().contains("归属会话存在性查询失败"),
+        "查询失败必须拒绝出生（fail-closed），实际: {err}"
+    );
+    assert!(
+        logs.text().contains("归属会话存在性查询失败"),
+        "拒绝必须 ERROR 留痕"
+    );
+}
+
+/// 父管道已进删除墓碑：出生 state 声明的血缘父已删除时必须拒绝出生——
+/// 否则删掉的父管道会继续长出子管道（孤儿）。
+#[tokio::test]
+async fn create_with_deleted_parent_pipeline_is_rejected() {
+    let parent = "pipe-tombstone-parent";
+    agentos_engine::deleted_pipelines::mark_deleted(parent);
+    let (h, _d) = handler_with_store(Some(Arc::new(
+        agentos_engine::SqliteStore::open_memory().unwrap(),
+    )));
+    let err = h
+        .handle(
+            "send_message",
+            json!({
+                "create": true, "message": "登记子任务", "user_id": "u1",
+                "state": {"lineage.parent_pipeline_id": parent, "task.goal": "g"}
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("父管道已删除"),
+        "血缘父已删除必须拒绝出生，实际: {err}"
     );
 }
 
@@ -2105,4 +2132,69 @@ async fn pointer_stays_switched_when_background_dispatch_fails() {
         Some(pid.as_str()),
         "创建即切、失败保持：派发失败不得把指针切回旧聊天管道"
     );
+}
+
+// ── 强制发送通道（2026-11-14：修「送消息给下级发了没反应」）──────────
+//
+// 旧行为：force 参数不存在，chat.send_message 一律 dispatch_user_input——消息
+// 只在当前 run 的自然边界被消费，且目标管道已停时无人驱动。强制通道 =
+// 先停当前 running（引擎层 suspended、不退回队列）再投递并触发新一轮。
+
+#[tokio::test]
+async fn force_true_uses_force_channel_not_queued_dispatch() {
+    // 两组有区分度输入：注入分支（带 pipeline_id）走强制通道
+    for pid in ["pipe_force_a", "pipe_force_b"] {
+        let (h, d) = handler();
+        let res = h
+            .handle(
+                "send_message",
+                json!({"pipeline_id": pid, "message": "立刻处理", "user_id": "u1", "force": true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dispatched");
+        assert_eq!(
+            d.force_calls.lock().unwrap().clone(),
+            vec![pid.to_string()],
+            "force=true 必须走强制通道（先停当前 run 再投递）"
+        );
+        assert_eq!(calls(&d).len(), 1, "强制通道仍要真实投递本条消息");
+        assert_eq!(calls(&d)[0].content, "立刻处理");
+    }
+}
+
+#[tokio::test]
+async fn force_absent_or_false_keeps_queued_dispatch() {
+    // 缺省与显式 false 同义：普通派发（排队等 run 边界），不触碰停止段
+    for params in [
+        json!({"pipeline_id": "pipe_plain_a", "message": "排队吧", "user_id": "u1"}),
+        json!({"pipeline_id": "pipe_plain_b", "message": "排队吧", "user_id": "u1", "force": false}),
+    ] {
+        let (h, d) = handler();
+        h.handle("send_message", params).await.unwrap();
+        assert!(
+            d.force_calls.lock().unwrap().is_empty(),
+            "force 缺省/false 不得走强制通道（老调用方行为不变）"
+        );
+        assert_eq!(calls(&d).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn force_with_no_dispatch_is_protocol_error() {
+    // 互斥：一个要求派发、一个要求不派发——协议错误且零副作用
+    let (h, d) = handler();
+    expect_protocol_error(
+        &h,
+        &d,
+        json!({
+            "pipeline_id": "pipe_conflict",
+            "message": "x",
+            "user_id": "u1",
+            "force": true,
+            "no_dispatch": true
+        }),
+        "force 与 no_dispatch 互斥",
+    )
+    .await;
 }

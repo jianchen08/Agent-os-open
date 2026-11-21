@@ -13,6 +13,7 @@ ToolExecutionResult / ToolSource / create_failure_result / create_success_result
 GitHelpers 走本目录平铺模块 git_helpers.py（同目录 sys.path 注入解析）。
 """
 
+import asyncio
 import logging
 import os
 import shutil
@@ -361,7 +362,10 @@ class ResourceMergeTool(BuiltinTool):
                 # 扫描失败返回显式 failure（对齐同文件 git diff 失败路径），
                 # 不允许不完整文件集伪装成合并成功
                 try:
-                    changed_files = self._scan_workspace_files(workspace)
+                    # 全树 rglob 与工作空间体量线性，必须出事件循环（审计 A-6）
+                    changed_files = await asyncio.to_thread(
+                        self._scan_workspace_files, workspace
+                    )
                 except Exception as e:
                     logger.error(
                         "[ResourceMerge] 工作区扫描失败，中止合并 | workspace=%s | error=%s",
@@ -373,30 +377,11 @@ class ResourceMergeTool(BuiltinTool):
                         error_code="WORKSPACE_SCAN_FAILED",
                     )
 
-            merged_files: list[str] = []
-            change_report: dict[str, list[str]] = {
-                "added": [],
-                "modified": [],
-                "deleted": [],
-            }
-
-            for file_rel_path in changed_files:
-                src = workspace / file_rel_path
-                dst = target_dir / file_rel_path
-
-                if src.exists():
-                    dst_already_exists = dst.exists()
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(src), str(dst))
-                    merged_files.append(file_rel_path)
-
-                    if dst_already_exists:
-                        change_report["modified"].append(file_rel_path)
-                    else:
-                        change_report["added"].append(file_rel_path)
-                elif dst.exists():
-                    dst.unlink()
-                    change_report["deleted"].append(file_rel_path)
+            # 逐文件复制/删除整体下放（一次线程内跑完整批，不逐文件跨线程）；
+            # 复制量级随变更集线性，同步跑在宿主循环上会饿死 watchdog（审计 A-6）。
+            merged_files, change_report = await asyncio.to_thread(
+                self._apply_file_copies, changed_files, workspace, target_dir
+            )
 
             logger.info(
                 "ResourceMerge merge: mode=%s, workspace=%s, target=%s, merged=%d files",
@@ -633,6 +618,50 @@ class ResourceMergeTool(BuiltinTool):
             result.append(str(item.relative_to(workspace)))
         return result
 
+    @staticmethod
+    def _apply_file_copies(
+        changed_files: list[str], workspace: Path, target_dir: Path
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """把 workspace 变更文件逐条复制到目标目录（纯同步，整批在线程内执行）。
+
+        copy/unlink 均为阻塞文件操作（变更集可含构建产物/依赖目录），在线程池
+        里跑完整批，避免逐文件跨线程切换。返回 (merged_files, change_report)。
+
+        Args:
+            changed_files: 相对 workspace 的变更文件路径列表
+            workspace: 源工作空间目录
+            target_dir: 合并目标目录
+
+        Returns:
+            merged_files 与 added/modified/deleted 三分类报告
+        """
+        merged_files: list[str] = []
+        change_report: dict[str, list[str]] = {
+            "added": [],
+            "modified": [],
+            "deleted": [],
+        }
+
+        for file_rel_path in changed_files:
+            src = workspace / file_rel_path
+            dst = target_dir / file_rel_path
+
+            if src.exists():
+                dst_already_exists = dst.exists()
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+                merged_files.append(file_rel_path)
+
+                if dst_already_exists:
+                    change_report["modified"].append(file_rel_path)
+                else:
+                    change_report["added"].append(file_rel_path)
+            elif dst.exists():
+                dst.unlink()
+                change_report["deleted"].append(file_rel_path)
+
+        return merged_files, change_report
+
     async def _rollback(self, inputs: dict[str, Any], workspace: Path) -> ToolExecutionResult:
         """rollback 操作：在 worktree 中恢复到分支初始状态
 
@@ -716,7 +745,11 @@ class ResourceMergeTool(BuiltinTool):
                 if return_code != 0:
                     logger.warning("[resource_merge] worktree remove 失败: %s, 尝试手动删除", stderr)
                     try:
-                        shutil.rmtree(str(workspace), onerror=_remove_readonly_func)
+                        # 整 worktree 删除（分钟级）出事件循环（审计 A-6）；
+                        # onerror 回调只做 chmod+重试，线程内执行无共享态。
+                        await asyncio.to_thread(
+                            shutil.rmtree, str(workspace), onerror=_remove_readonly_func
+                        )
                     except Exception as e:
                         logger.warning("[resource_merge] 手动删除 workspace 失败: %s", e)
                         cleanup_failed.append(f"worktree 删除失败: {e}")
@@ -733,7 +766,9 @@ class ResourceMergeTool(BuiltinTool):
             elif workspace.exists():
                 git_dir = workspace / ".git"
                 if git_dir.exists():
-                    shutil.rmtree(str(git_dir), onerror=_remove_readonly_func)
+                    await asyncio.to_thread(
+                        shutil.rmtree, str(git_dir), onerror=_remove_readonly_func
+                    )
 
             data: dict[str, Any] = {
                 "action": "cleanup",

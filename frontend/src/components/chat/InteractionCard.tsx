@@ -300,7 +300,9 @@ export function InteractionCard({
         open={!!detailOption}
         onOpenChange={(open) => !open && setDetailOption(null)}
       >
-        <DialogContent className="max-w-md">
+        {/* zIndex 高于 GlobalInteractionOverlay（z-[10000]）：底部交互层内的卡
+            打开详情窗时，弹窗与遮罩必须盖住交互层，否则只见背景变暗、弹窗被盖住 */}
+        <DialogContent className="max-w-md" zIndex={10001}>
           <DialogHeader>
             <DialogTitle>{detailOption?.label}</DialogTitle>
           </DialogHeader>

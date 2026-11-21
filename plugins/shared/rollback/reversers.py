@@ -160,7 +160,9 @@ class FileReverser(BaseReverser):
                     }
                 except StopIteration:
                     pass
-            shutil.rmtree(path)
+            # 整树删除是同步阻塞（合宿宿主事件循环连坐）：出循环执行，
+            # 异常照旧上抛给 reverse 的兜底。
+            await asyncio.to_thread(shutil.rmtree, path)
 
         return {
             "success": True,

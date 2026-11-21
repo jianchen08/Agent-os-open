@@ -42,6 +42,12 @@ REM  NOTE: keep comments in this file ASCII-only -- cmd parses the
 REM  batch in a legacy codepage and non-ASCII text can be misread
 REM  into executable fragments (precedent ced82b8cb).
 REM ============================================================
+REM 2026-11-18: dev launcher chain contract -- deliver the repo user space.
+REM kernel/crates/core user_space is zero-fallback (ADR 2026-11-07 2.2):
+REM without this env the kernel sees NO user root (no .env keys, no config
+REM layer). The dev start chain owns this delivery (config/kernel/
+REM instance.yaml header). Default to <repo>\user_root when unset.
+if not defined AGENTOS_USER_ROOT set "AGENTOS_USER_ROOT=%~dp0user_root"
 if not defined AGENTOS_SUPERVISOR_BACKOFF_MS_BASE set "AGENTOS_SUPERVISOR_BACKOFF_MS_BASE=5000"
 if not defined AGENTOS_SUPERVISOR_BACKOFF_MS_MAX set "AGENTOS_SUPERVISOR_BACKOFF_MS_MAX=45000"
 if not defined AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS set "AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS=5"

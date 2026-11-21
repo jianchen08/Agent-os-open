@@ -2,14 +2,15 @@
  * 文件预览组件
  *
  * 在工作区面板中提供多格式文件的在线预览功能。
- * 支持图片、PDF、代码只读预览和二进制文件友好提示。
+ * 支持图片、PDF、Markdown、音视频、Excel、代码只读预览和二进制文件友好提示。
  *
  * @module components/workspace/FilePreview
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icons'
 import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import {
   EXTENSION_TO_LANGUAGE,
   extractExtension,
@@ -18,6 +19,7 @@ import {
 } from '@/components/shared/markdown/prismLanguages'
 import { cn } from '@/lib/utils'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
+import type { ExcelWorkbook } from '@/components/workspace/excelSheet'
 
 /** 图片扩展名集合 */
 const IMAGE_EXTENSIONS = new Set([
@@ -26,6 +28,20 @@ const IMAGE_EXTENSIONS = new Set([
 
 /** PDF 扩展名 */
 const PDF_EXTENSION = '.pdf'
+
+/** 音视频扩展名（浏览器原生 <video>/<audio> 可播；取流走原始字节面不解码文本） */
+const MEDIA_EXTENSIONS = new Set([
+  '.mp4', '.webm', '.mov', '.m4v', '.mp3', '.wav', '.ogg', '.m4a', '.flac',
+])
+
+/** Markdown 扩展名（渲染态预览 + 一键切源码） */
+const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
+
+/** Excel 扩展名（@e965/xlsx 解析；.xlsb 未声明的取舍见 fileViewerRegistry excel_viewer 注释） */
+const EXCEL_EXTENSIONS = new Set(['.xlsx', '.xlsm', '.xls'])
+
+/** 视频扩展名（<video> 与 <audio> 按此分流） */
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.m4v'])
 
 /** 代码只读预览扩展名集合 */
 const CODE_PREVIEW_EXTENSIONS = new Set([
@@ -37,7 +53,7 @@ const CODE_PREVIEW_EXTENSIONS = new Set([
 ])
 
 /** 预览类型 */
-type PreviewType = 'image' | 'pdf' | 'code' | 'binary'
+type PreviewType = 'image' | 'pdf' | 'markdown' | 'media' | 'excel' | 'code' | 'binary'
 
 /**
  * SyntaxHighlighter 行级样式
@@ -78,10 +94,151 @@ function getPreviewType(filePath: string): PreviewType {
   const ext = extractExtension(filePath)
   if (IMAGE_EXTENSIONS.has(ext)) return 'image'
   if (ext === PDF_EXTENSION) return 'pdf'
+  // markdown / 音视频 / excel 先于代码判定：这些扩展名部分同时命中
+  // CODE_PREVIEW_EXTENSIONS（.md）或无语言映射，落进代码分支就只剩源码，
+  // 用户要的是预览态
+  if (MARKDOWN_EXTENSIONS.has(ext)) return 'markdown'
+  if (MEDIA_EXTENSIONS.has(ext)) return 'media'
+  if (EXCEL_EXTENSIONS.has(ext)) return 'excel'
   if (CODE_PREVIEW_EXTENSIONS.has(ext)) return 'code'
   // 尝试通过语言映射判断是否为可读文本
   if (ext in EXTENSION_TO_LANGUAGE) return 'code'
   return 'binary'
+}
+
+/**
+ * 取预览字节（Excel 用）：url 优先（附件 blob 直链 = 真字节），
+ * content 兜底按 UTF-8 编码。两者都缺返回 undefined（调用方显式报错）。
+ *
+ * 已知局限（如实交代）：工作区 file-content 端点对二进制做 UTF-8 replace 解码
+ * 后包 JSON 返回（plugins/shared/workspace/server.py），工作区场景拿到的 content
+ * 非真字节，xlsx（zip 容器）解析必失败 → 显式错误态。附件 blob url 场景为真字节
+ * 可正常渲染。修复归属 workspace 插件（超出本模块边界）。
+ */
+async function loadPreviewBytes(url?: string, content?: string): Promise<Uint8Array | undefined> {
+  if (url) {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`取流失败: ${response.status}`)
+    return new Uint8Array(await response.arrayBuffer())
+  }
+  if (typeof content === 'string' && content !== '') {
+    return new TextEncoder().encode(content)
+  }
+  return undefined
+}
+
+/**
+ * Excel 正文：@e965/xlsx 解析（动态 import，独立 lazy chunk）+ 只读表格渲染。
+ * 状态机：loading → success / empty / error；多 sheet 可切换；超限表截断提示。
+ */
+function ExcelBody({ url, content }: { url?: string; content?: string }) {
+  const [workbook, setWorkbook] = useState<ExcelWorkbook | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [activeSheet, setActiveSheet] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setError(null)
+    setWorkbook(null)
+    setActiveSheet(0)
+    void (async () => {
+      try {
+        const bytes = await loadPreviewBytes(url, content)
+        if (!bytes) throw new Error('缺少文件数据，无法预览')
+        const { parseExcelWorkbook } = await import('@/components/workspace/excelSheet')
+        if (cancelled) return
+        // parseExcelWorkbook 为 async（OLE2 需先装载 codepage 表，审查 MF-1 修复）
+        const workbook = await parseExcelWorkbook(bytes)
+        // await 之后必须复查 cancelled：旧文件解析完成晚于新文件挂载时，
+        // 无守卫会把过期 workbook 写进新文件的状态（查看器复验 MF 修复面）
+        if (cancelled) return
+        setWorkbook(workbook)
+      } catch (err) {
+        if (!cancelled) setError((err as Error).message)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [content, url])
+
+  if (error) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="text-center">
+          <p className="text-foreground text-sm font-medium">Excel 渲染失败</p>
+          <p className="text-muted-foreground mt-1 text-xs">{error}</p>
+        </div>
+      </div>
+    )
+  }
+  if (!workbook) {
+    return (
+      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+        Excel 解析中…
+      </div>
+    )
+  }
+  const sheet = workbook.sheets[activeSheet] ?? workbook.sheets[0]
+  if (!sheet) {
+    return (
+      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+        工作簿不含任何工作表
+      </div>
+    )
+  }
+  return (
+    <div className="flex h-full flex-col" data-testid="file-preview-excel">
+      {workbook.sheets.length > 1 && (
+        <div className="border-border bg-muted/30 flex flex-wrap gap-1 border-b px-3 py-1.5">
+          {workbook.sheets.map((s, i) => (
+            <button
+              key={s.name}
+              type="button"
+              onClick={() => setActiveSheet(i)}
+              className={cn(
+                'rounded px-2 py-0.5 text-xs transition-colors',
+                i === activeSheet
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {sheet.truncated && (
+        <div className="text-status-waiting bg-status-waiting/10 px-3 py-1 text-[11px]">
+          仅显示前 {sheet.rows.length} 行（共 {sheet.totalRows} 行）
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {sheet.rows.length === 0 ? (
+          <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+            空工作表
+          </div>
+        ) : (
+          <table className="w-full border-collapse text-xs" data-testid="excel-table">
+            <tbody>
+              {sheet.rows.map((row, r) => (
+                <tr key={r} className="border-border/60 border-b">
+                  {row.map((cell, c) => (
+                    <td
+                      key={c}
+                      className="border-border/40 text-foreground px-2 py-1 whitespace-nowrap"
+                    >
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /**
@@ -90,6 +247,9 @@ function getPreviewType(filePath: string): PreviewType {
  * 根据文件类型自动选择预览方式：
  * - 图片：居中显示，支持缩放
  * - PDF：iframe/embed 渲染
+ * - Markdown：渲染态 + 一键切源码
+ * - 音视频：浏览器原生播放
+ * - Excel：@e965/xlsx 解析 + 只读表格（选型真值 = docs/working/971600b7ff1e_查看器选型与双链方案.md §1.2）
  * - 代码：只读语法高亮
  * - 二进制：友好提示
  */
@@ -103,6 +263,8 @@ export function FilePreview({
 }: FilePreviewProps) {
   const [zoomLevel, setZoomLevel] = useState(100)
   const [rotation, setRotation] = useState(0)
+  /** markdown 预览态 / 源码态（默认渲染态） */
+  const [markdownSource, setMarkdownSource] = useState(false)
 
   const fileName = useMemo(() => {
     const lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
@@ -184,6 +346,7 @@ export function FilePreview({
               src={fileUrl}
               alt={fileName}
               className="max-w-full object-contain"
+              // eslint-disable-next-line no-restricted-syntax -- 缩放/旋转变换每帧动态值（zoomLevel/rotation state），无法静态类化
               style={{
                 transform: `scale(${zoomLevel / 100}) rotate(${rotation}deg)`,
                 transformOrigin: 'center center',
@@ -232,6 +395,88 @@ export function FilePreview({
     )
   }
 
+  /** Markdown 预览（渲染态 + 一键切源码） */
+  if (previewType === 'markdown') {
+    return (
+      <div className={cn('flex h-full flex-col', className)}>
+        <div className="border-border bg-muted/30 flex items-center justify-between border-b px-4 py-2">
+          <div className="flex items-center gap-2">
+            <span className="text-foreground text-sm font-medium">{fileName}</span>
+            <span className="text-muted-foreground text-xs">Markdown</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setMarkdownSource((prev) => !prev)}
+              className="text-muted-foreground hover:text-foreground text-xs transition-colors"
+              title={markdownSource ? '切到渲染预览' : '查看 Markdown 源码'}
+              data-testid="file-preview-markdown-toggle"
+            >
+              {markdownSource ? '预览' : '源码'}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs transition-colors"
+              title="下载文件"
+            >
+              <Download className="h-3.5 w-3.5" />
+              下载
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-4" data-testid="file-preview-markdown">
+          {markdownSource ? (
+            <pre className="font-mono text-xs whitespace-pre-wrap">{content}</pre>
+          ) : (
+            <MarkdownRenderer content={content} />
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  /** 音视频播放（浏览器原生；取流 URL 与图片同为 file-content 端点） */
+  if (previewType === 'media') {
+    const isVideo = VIDEO_EXTENSIONS.has(extractExtension(filePath))
+    return (
+      <div className={cn('flex h-full flex-col', className)} data-testid="file-preview-media">
+        <div className="border-border bg-muted/30 flex items-center gap-2 border-b px-4 py-2">
+          <span className="text-foreground text-sm font-medium">{fileName}</span>
+          <span className="text-muted-foreground text-xs">{isVideo ? '视频' : '音频'}</span>
+        </div>
+        <div className="flex flex-1 items-center justify-center overflow-auto p-4">
+          {fileUrl ? (
+            isVideo ? (
+              <video src={fileUrl} controls className="max-h-full max-w-full" />
+            ) : (
+              <audio src={fileUrl} controls className="w-full max-w-xl" />
+            )
+          ) : (
+            <div className="text-muted-foreground text-xs">
+              缺少文件坐标，无法取流播放
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  /** Excel 预览（解析与取流归 ExcelBody，见上） */
+  if (previewType === 'excel') {
+    return (
+      <div className={cn('flex h-full flex-col', className)}>
+        <div className="border-border bg-muted/30 flex items-center gap-2 border-b px-4 py-2">
+          <span className="text-foreground text-sm font-medium">{fileName}</span>
+          <span className="text-muted-foreground text-xs">Excel（只读）</span>
+        </div>
+        <div className="min-h-0 flex-1">
+          <ExcelBody url={fileUrl || undefined} content={content} />
+        </div>
+      </div>
+    )
+  }
+
   /** 代码只读预览 */
   if (previewType === 'code') {
     return (
@@ -256,6 +501,7 @@ export function FilePreview({
         <div className="min-h-0 flex-1 overflow-auto">
           <PrismSyntaxHighlighter
             language={language}
+            // eslint-disable-next-line no-restricted-syntax -- react-syntax-highlighter 官方 API style prop（主题高亮配色对象直传），非 DOM 内联样式
             style={codeHighlightStyle}
             showLineNumbers={true}
             wrapLongLines={true}

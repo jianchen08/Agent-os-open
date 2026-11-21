@@ -101,7 +101,7 @@
       ]
     },
     {
-      "name": "string_data_scalar_document",
+      "name": "string_data_verbatim",
       "tool_calls": [
         {"name": "file_read", "id": "call_s1", "args": {"path": "a.txt"}}
       ],
@@ -120,7 +120,7 @@
         {
           "role": "tool",
           "tool_call_id": "call_s1",
-          "content": "plain text\n",
+          "content": "plain text",
           "tool_result": {
             "call_id": "call_s1",
             "tool_name": "file_read",
@@ -134,7 +134,7 @@
       ]
     },
     {
-      "name": "number_like_string_quoted",
+      "name": "number_like_string_verbatim",
       "tool_calls": [
         {"name": "calc", "id": "call_q1", "args": {}}
       ],
@@ -153,7 +153,7 @@
         {
           "role": "tool",
           "tool_call_id": "call_q1",
-          "content": "'42'\n",
+          "content": "42",
           "tool_result": {
             "call_id": "call_q1",
             "tool_name": "calc",
@@ -219,6 +219,49 @@
             "data": null,
             "metadata": {"decided_by": "security_check"},
             "duration_ms": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "multiline_content_verbatim",
+      "tool_calls": [
+        {"name": "file_read", "id": "call_fr1", "args": {"path": "docs/a.md"}}
+      ],
+      "results": [
+        {
+          "call_id": "call_fr1",
+          "tool_name": "file_read",
+          "success": true,
+          "error": null,
+          "data": {
+            "file": "D:\\myproject\\docs\\a.md",
+            "lines": 5,
+            "size": 42,
+            "content": "# 标题\n\n  2. **缩进行保留** —— \"引号\" \\反斜杠\n- 列表尾行"
+          },
+          "metadata": null,
+          "duration_ms": 1.5
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_fr1",
+          "content": "# 标题\n\n  2. **缩进行保留** —— \"引号\" \\反斜杠\n- 列表尾行",
+          "tool_result": {
+            "call_id": "call_fr1",
+            "tool_name": "file_read",
+            "success": true,
+            "error": null,
+            "data": {
+              "file": "D:\\myproject\\docs\\a.md",
+              "lines": 5,
+              "size": 42,
+              "content": "# 标题\n\n  2. **缩进行保留** —— \"引号\" \\反斜杠\n- 列表尾行"
+            },
+            "metadata": null,
+            "duration_ms": 1.5
           }
         }
       ]

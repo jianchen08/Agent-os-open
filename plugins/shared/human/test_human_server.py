@@ -752,7 +752,8 @@ def test_mode_inferred_default_is_nonblocking_notification(monkeypatch):
 
 
 def test_options_win_over_legacy_mode_param(monkeypatch):
-    """mode 参数已废：显式传 mode=notification 也被忽略，带 options → 统一交互卡。"""
+    """历史 mode 值仍忽略：显式传 mode=notification 也被忽略，带 options → 统一交互卡
+    （审批非阻塞 M1 后 mode 仅认 "async"，其余历史值照旧走双态推断）。"""
     captured: dict[str, Any] = {}
     run = _capture_mode(monkeypatch, captured)
     run({"title": "标题", "options": [{"id": "a", "label": "A"}], "mode": "notification"})
@@ -760,14 +761,16 @@ def test_options_win_over_legacy_mode_param(monkeypatch):
 
 
 def test_declaration_dual_state_schema():
-    """声明契约：历史参数（mode/questions/initial_message/suggestions）全部下架，
-    title 必填，双态推断写进 options 描述与工具 description。"""
+    """声明契约：历史参数（questions/initial_message/suggestions）全部下架；
+    mode 仅保留 "async" 合法值（审批非阻塞 M1，枚举单值）；title 必填，
+    双态推断写进 options 描述与工具 description。"""
     from human.server import plugin
 
     td = plugin._tools["human_interaction"]
     assert "title" in td.schema.get("required", [])
     props = td.schema["properties"]
-    for legacy in ("mode", "questions", "initial_message", "suggestions"):
+    for legacy in ("questions", "initial_message", "suggestions"):
         assert legacy not in props, f"历史参数 {legacy} 应已从 schema 下架"
+    assert props["mode"]["enum"] == ["async"], "mode 仅认 async（审批非阻塞 M1）"
     assert "有 options=阻塞交互卡" in props["options"]["description"]
     assert "双态" in td.description

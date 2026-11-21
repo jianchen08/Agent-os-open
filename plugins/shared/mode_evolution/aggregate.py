@@ -278,3 +278,157 @@ def daily_projection(runs: list[dict[str, Any]] | None,
         "recent_failures": failures[:_DAILY_FAILURE_CAP],
         "window_total": len(runs),
     }
+
+
+def _wf_node(seq: int, step: str, title: str, status: str,
+             started_at: str = "", ended_at: str = "",
+             inputs: dict[str, Any] | None = None,
+             artifacts: dict[str, Any] | None = None,
+             driven_by: str = "") -> dict[str, Any]:
+    """单个步骤节点的面板投影（标题按 step 定义补齐；artifacts 里的提案 id 提面）。"""
+    artifacts = dict(artifacts or {})
+    return {
+        "seq": int(seq),
+        "step": step,
+        "title": title,
+        "status": status,
+        "started_at": str(started_at or ""),
+        "ended_at": str(ended_at or ""),
+        "inputs": dict(inputs or {}),
+        "artifacts": artifacts,
+        "proposal_ids": [str(p) for p in (artifacts.get("proposal_ids") or [])],
+        "driven_by": str(driven_by or ""),
+    }
+
+
+def _instance(doc: dict[str, Any], titles: dict[str, str],
+              trace_steps: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """工作流实例 → 面板实例投影（工具事件节点 + traces 派生节点合并）。"""
+    nodes: list[dict[str, Any]] = []
+    seq = 0
+    for raw in doc.get("steps") or []:
+        if not isinstance(raw, dict):
+            continue
+        seq += 1
+        step = str(raw.get("step") or "")
+        nodes.append(_wf_node(
+            int(raw.get("seq") or seq), step, titles.get(step, ""),
+            str(raw.get("status") or "running"),
+            str(raw.get("started_at") or ""), str(raw.get("ended_at") or ""),
+            raw.get("inputs") if isinstance(raw.get("inputs"), dict) else {},
+            raw.get("artifacts") if isinstance(raw.get("artifacts"), dict) else {},
+            str(raw.get("driven_by") or "")))
+    seen = {n["step"] for n in nodes}
+    for item in trace_steps or []:
+        step = str(item.get("step") or "")
+        if not step or step in seen:
+            # 工具事件已落该步 → traces 派生不重复造节点（同一事实只留一份）
+            continue
+        seen.add(step)
+        seq += 1
+        nodes.append(_wf_node(seq, step, titles.get(step, ""),
+                              str(item.get("status") or "done"),
+                              str(item.get("at") or ""), str(item.get("at") or ""),
+                              {}, {"evidence": str(item.get("evidence") or "")},
+                              "traces.list_by_pipeline"))
+    nodes.sort(key=lambda n: n["seq"])
+    return {
+        "wf_id": str(doc.get("wf_id") or ""),
+        "mode": str(doc.get("mode") or ""),
+        "round_type": str(doc.get("round_type") or "treatment"),
+        "status": str(doc.get("status") or "running"),
+        "close_reason": str(doc.get("close_reason") or ""),
+        "opened_at": str(doc.get("opened_at") or ""),
+        "closed_at": str(doc.get("closed_at") or ""),
+        "pipeline_id": str(doc.get("pipeline_id") or ""),
+        "nodes": nodes,
+    }
+
+
+def workflow_projection(ledger: dict[str, Any],
+                        workflows: list[dict[str, Any]] | None = None,
+                        defs: list[dict[str, Any]] | None = None,
+                        edges: list[dict[str, Any]] | None = None,
+                        trace_steps: dict[str, list[dict[str, Any]]] | None = None
+                        ) -> dict[str, Any]:
+    """步骤定义 + 工作流实例 + 改进产物 → 一体化工作流图投影（纯函数，无 IO）。
+
+    一张图的三层内容同源产出：
+    ① 骨架 = ``defs``/``edges``（来自 rules/flow_steps.yaml 的步骤枚举声明）；
+    ② 实例 = ``instances[].nodes``（工具 handler 落账的真实节点，seq 严格递增；
+       回边产生的第二次 T3 是新节点而非覆盖）；``trace_steps`` 是 traces 派生的
+       T2/T7（不埋点，按证据补节点；证据缺失就不出节点）；
+    ③ 改进产物 = ``threads``（提案 → 触点节点），并反向挂到节点 ``proposal_ids``。
+
+    ``workflows`` 为 None/空 → ``instances == []`` 且 ``gaps`` 记录空态原因（页面
+    按空态渲染骨架，不出现 status 色节点）。
+    """
+    defs = list(defs or [])
+    edges = list(edges or [])
+    titles = {str(d.get("step") or ""): str(d.get("title") or "") for d in defs}
+    gaps: list[dict[str, str]] = []
+
+    docs = [d for d in (workflows or []) if isinstance(d, dict)]
+    instances = [_instance(d, titles, (trace_steps or {}).get(str(d.get("wf_id") or "")))
+                 for d in docs]
+    instances.sort(key=lambda i: i["opened_at"])
+    if not instances:
+        gaps.append({"key": "instances", "reason": "no_workflow_data",
+                     "detail": "尚无回顾工作流记录——自下一轮 T1 工具调用起自动生成"})
+    if trace_steps is None:
+        gaps.append({"key": "T2/T7", "reason": "traces_unavailable",
+                     "detail": "traces.list_by_pipeline 能力未注入，T2 归因/T7 记忆回填"
+                               "节点按缺口占位（不造节点）"})
+
+    focus = ""
+    for inst in reversed(instances):
+        if inst["status"] == "running":
+            focus = inst["wf_id"]
+            break
+    if not focus and instances:
+        focus = instances[-1]["wf_id"]
+
+    # 改进产物（改进线）：提案账 + 节点触点（按 seq 顺序，跨轮即多触点）
+    touches: dict[str, list[dict[str, Any]]] = {}
+    for inst in instances:
+        for node in inst["nodes"]:
+            for pid in node["proposal_ids"]:
+                touches.setdefault(pid, []).append({
+                    "wf_id": inst["wf_id"], "seq": node["seq"],
+                    "step": node["step"], "status": node["status"],
+                    "round_id": str((node["artifacts"] or {}).get("run_id") or ""),
+                })
+    threads: list[dict[str, Any]] = []
+    for pid, prop in (ledger.get("proposals") or {}).items():
+        if not isinstance(prop, dict):
+            continue
+        linked = sorted(touches.get(pid, []), key=lambda t: t["seq"])
+        threads.append({
+            "proposal_id": str(pid),
+            "outcome": str(prop.get("outcome") or ""),
+            "target": str(prop.get("target") or ""),
+            "motivation": str(prop.get("motivation") or ""),
+            "commit": str(prop.get("commit") or ""),
+            "category": str(prop.get("category") or ""),
+            "round_id": str(prop.get("round_id") or ""),
+            "touches": linked,
+            "linked": bool(linked),
+        })
+    threads.sort(key=lambda t: (t["linked"], t["proposal_id"]), reverse=True)
+    linked_n = sum(1 for t in threads if t["linked"])
+
+    return {
+        "defs": defs,
+        "edges": edges,
+        "instances": instances,
+        "focus": focus,
+        "threads": threads,
+        "gaps": gaps,
+        "summary": {
+            "instances_total": len(instances),
+            "nodes_total": sum(len(i["nodes"]) for i in instances),
+            "proposals_total": len(threads),
+            "proposals_linked": linked_n,
+            "proposals_unlinked": len(threads) - linked_n,
+        },
+    }

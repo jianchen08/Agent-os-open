@@ -63,22 +63,38 @@ function Loading(): ReactNode {
 export function PluginPageRenderer(): ReactNode {
   const params = useParams<{ pageId: string }>()
   const pageId = params.pageId ?? ''
+  // tick 只用于强制重渲染；expired 记录轮询窗口是否耗尽（决定 404）
   const [tick, setTick] = useState(0)
+  const [expired, setExpired] = useState(false)
 
-  // schema 异步加载未完成时，轮询重试（每 300ms 触发重渲染）
+  // 页面未就绪时轮询重试（每 300ms 触发重渲染，最多 ~5s = 16 次）。
+  // 用 interval 而非逐次 setTimeout：页面可能被无关状态频繁重渲染，逐次
+  // setTimeout 会被 effect 清理反复重置导致永远等不到 tick 推进。
+  // 不按 isInitialized 提前收口：页面除 schema 声明外还可能是**schema 之后**
+  // 动态注册的（DSH 槽位页按已装插件清单注册），schema 就绪不代表页面集合终态。
   useEffect(() => {
-    const page = contributionRegistry.getPage(pageId)
-    const initialized = contributionRegistry.isInitialized()
-    // page 找到了 或 schema 已初始化但确实没这个 page → 停止轮询
-    if (page || initialized) return
-    // schema 未加载完，启动轮询（最多 ~5s = 16 次 × 300ms）
-    if (tick >= 16) return
-    const timer = setTimeout(() => setTick((t) => t + 1), 300)
-    return () => clearTimeout(timer)
-  }, [pageId, tick])
+    if (contributionRegistry.getPage(pageId)) return
+    setExpired(false)
+    let attempts = 0
+    const timer = setInterval(() => {
+      attempts += 1
+      if (contributionRegistry.getPage(pageId)) {
+        clearInterval(timer)
+        setTick((t) => t + 1)
+        return
+      }
+      if (attempts >= 16) {
+        clearInterval(timer)
+        setExpired(true)
+        return
+      }
+      setTick((t) => t + 1)
+    }, 300)
+    return () => clearInterval(timer)
+  }, [pageId])
 
   const page = contributionRegistry.getPage(pageId)
-  const initialized = contributionRegistry.isInitialized()
+  void tick
 
   // page 找到 → 渲染
   if (page) {
@@ -89,12 +105,12 @@ export function PluginPageRenderer(): ReactNode {
     )
   }
 
-  // schema 未加载完 + 轮询次数未超限 → loading
-  if (!initialized && tick < 16) {
+  // 轮询窗口内 → loading（动态注册页可能在 schema 之后到达）
+  if (!expired) {
     return <Loading />
   }
 
-  // schema 已加载完但仍未找到 → 真正的 404
+  // 轮询耗尽仍未找到 → 真正的 404
   return <NotFound pageId={pageId} />
 }
 

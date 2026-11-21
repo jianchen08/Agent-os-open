@@ -394,7 +394,8 @@ async fn sync_once_consistent_plugin_registers_all_tools() {
     assert_eq!(registry_arc.list_tools().len(), 2);
 }
 
-/// G2：新插件声明有、实际无（missing）→ 漂移工具拒绝注册，其余照常。
+/// G2：新插件声明有、实际无（missing）→ 漂移工具判拒（声明 schema 保留在
+/// 工具面，调用显式失败），其余能力照常注册。
 #[tokio::test]
 async fn sync_once_drifted_tool_is_rejected_from_registration() {
     let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
@@ -428,15 +429,16 @@ async fn sync_once_drifted_tool_is_rejected_from_registration() {
         "漂移插件报告可见"
     );
     assert_eq!(
-        report.tools_registered, 1,
-        "漂移工具 ghost 被拒绝，t1 照常注册"
+        report.tools_registered, 2,
+        "声明工具全部注册（ghost 为失败桩，调用显式失败；t1 照常）"
     );
-    let names: Vec<String> = registry_arc
+    let mut names: Vec<String> = registry_arc
         .list_tools()
         .into_iter()
         .map(|t| t.name)
         .collect();
-    assert_eq!(names, vec!["t1".to_string()]);
+    names.sort();
+    assert_eq!(names, vec!["ghost".to_string(), "t1".to_string()]);
 }
 
 /// G2：观测失败（list_tools 报错）≠ 判定失败——按声明注册不净化，
@@ -1011,7 +1013,9 @@ async fn g2_verify_light_member_namespaced_names_not_drift() {
 }
 
 #[tokio::test]
-async fn g2_verify_drift_sanitizes_rejected_tool_only() {
+async fn g2_verify_drift_keeps_declared_schema_and_arms_stub() {
+    // 漂移工具不再从 manifest 剔除（ADR 2026-11-12）：声明 schema 保留在工具面
+    // （失败桩），工具名记入 rejected_tools 并武装 stub_armed。
     let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
     invoker.list_tools.insert(
         "p1".into(),
@@ -1028,15 +1032,19 @@ async fn g2_verify_drift_sanitizes_rejected_tool_only() {
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    assert_eq!(names, vec!["t1".to_string()], "漂移工具被剔除、其余照常");
+    assert_eq!(
+        names,
+        vec!["t1".to_string(), "ghost".to_string()],
+        "声明 schema 原样保留（失败桩），工具数组不缩水"
+    );
+    assert!(out.stub_armed, "漂移判定须武装调用显式失败闸");
 }
 
 #[tokio::test]
-async fn g2_verify_schema_mismatch_sanitizes_drifted_tool_only() {
+async fn g2_verify_schema_mismatch_keeps_declared_schema() {
     // SchemaMismatch 类漂移（BUG-5 实测形态）：声明了 input_schema 且与上报
-    // 逐字不一致（实现新增参数未同步声明 / 声明富 schema 上报瘦 schema）
-    // → 剔除该工具（fail-closed），未漂移工具照常——后续账本 derived 出
-    // sanitized 契约页可见（contract.rs 已测证据链）。
+    // 逐字不一致 → 工具记入 rejected_tools（调用显式失败），声明 schema 保留
+    // 在工具面（ADR 2026-11-12）；未漂移工具照常。
     let v = json!({
         "id": "p1", "name": "p1", "version": "1.0.0",
         "plugin_type": "tool", "language": "rust",
@@ -1065,7 +1073,7 @@ async fn g2_verify_schema_mismatch_sanitizes_drifted_tool_only() {
     assert_eq!(
         out.rejected_tools,
         vec!["t1".to_string()],
-        "schema 漂移工具被剔除"
+        "schema 漂移工具被拒（调用显式失败）"
     );
     let names: Vec<String> = out
         .manifest
@@ -1074,7 +1082,12 @@ async fn g2_verify_schema_mismatch_sanitizes_drifted_tool_only() {
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    assert_eq!(names, vec!["t2".to_string()], "未漂移工具照常保留");
+    assert_eq!(
+        names,
+        vec!["t1".to_string(), "t2".to_string()],
+        "声明 schema 原样保留（t1 仍在工具面，作为失败桩）"
+    );
+    assert!(out.stub_armed);
 }
 
 #[tokio::test]
@@ -1175,7 +1188,8 @@ async fn run_boot_verify(
 
 /// 串行语义不变锚：concurrency=1 与 concurrency=8 的汇总/账本/注册表逐项一致，
 /// 且各插件账本状态与原串行循环语义一一对应（ok/sanitized/not_covered/
-/// verify_incomplete），漂移净化重注册只带未漂移工具（ghost 不进注册表）。
+/// verify_incomplete）；漂移工具保留声明 schema 在工具面（ghost 同样注册，
+/// 作为失败桩，调用由账本拦截——ADR 2026-11-12）。
 #[tokio::test]
 async fn g2_boot_verify_semantics_invariant_across_concurrency() {
     let (s1, states1, tools1) = run_boot_verify(1).await;
@@ -1193,7 +1207,7 @@ async fn g2_boot_verify_semantics_invariant_across_concurrency() {
     assert_eq!(
         (s1.verified, s1.drifted, s1.spawn_failed),
         (1, 1, 1),
-        "混装面计数：ok1 过闸 / drift1 净化 / dead1 观测失败"
+        "混装面计数：ok1 过闸 / drift1 判定漂移 / dead1 观测失败"
     );
     assert_eq!(inc1, vec!["dead1".to_string()]);
     for id in ["ok1", "drift1", "disabled1", "light1", "native1", "dead1"] {
@@ -1207,7 +1221,7 @@ async fn g2_boot_verify_semantics_invariant_across_concurrency() {
     assert_eq!(
         states1.get("drift1").map(String::as_str),
         Some("sanitized"),
-        "漂移净化在账本留痕"
+        "漂移判定留痕 sanitized（拒绝工具已降级失败桩）"
     );
     assert_eq!(
         states1.get("dead1").map(String::as_str),
@@ -1230,10 +1244,10 @@ async fn g2_boot_verify_semantics_invariant_across_concurrency() {
     assert_eq!(tools1, tools8, "注册表工具集并行度不变量");
     assert_eq!(
         tools1,
-        ["t1".to_string()]
+        ["t1".to_string(), "ghost".to_string()]
             .into_iter()
             .collect::<std::collections::HashSet<_>>(),
-        "ok1 与净化后 drift1 各注册 t1，ghost 不得进注册表"
+        "ok1 与 drift1 的声明工具都注册：ghost 作为失败桩保留在工具面（调用由账本拦截）"
     );
 }
 
@@ -1435,9 +1449,9 @@ async fn g2_dynamic_mcp_spawn_fail_stays_empty_and_flags() {
 }
 
 #[tokio::test]
-async fn g2_external_mcp_with_declared_tools_still_sanitizes() {
+async fn g2_external_mcp_with_declared_tools_still_detects_drift() {
     // 静态模式保持：有声明的 external MCP 仍走 drift 对照——声明即契约不松动，
-    // 一行接入只对零声明形态生效。
+    // 一行接入只对零声明形态生效；漂移工具判拒但声明 schema 保留在工具面。
     let mut invoker = MockInvoker::new(vec![mk_manifest_external_mcp(
         "static_mcp",
         &["t1", "ghost"],
@@ -1455,7 +1469,12 @@ async fn g2_external_mcp_with_declared_tools_still_sanitizes() {
     .await;
     assert!(out.drift);
     assert_eq!(out.rejected_tools, vec!["ghost".to_string()]);
-    assert_eq!(out.manifest.capabilities.tools.len(), 1);
+    assert_eq!(
+        out.manifest.capabilities.tools.len(),
+        2,
+        "声明 schema 原样保留（ghost 在面但调用显式失败）"
+    );
+    assert!(out.stub_armed);
 }
 
 /// services-only（无 tools）插件：不 spawn 校验，原样返回（若被调用会因
@@ -1891,11 +1910,13 @@ async fn smoke_failure_rejects_the_tool() {
     invoker.invoke_tool_fail = true;
     let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p1", "t_smoke", true)).await;
     assert!(out.smoke_failed, "冒烟失败须标记");
-    assert!(
-        out.manifest.capabilities.tools.is_empty(),
-        "冒烟失败的工具被拒绝"
+    assert_eq!(
+        out.manifest.capabilities.tools.len(),
+        1,
+        "冒烟失败的工具声明 schema 仍保留在工具面（失败桩）"
     );
     assert!(out.rejected_tools.contains(&"t_smoke".to_string()));
+    assert!(out.stub_armed, "冒烟拒绝同样武装调用失败闸");
 }
 
 #[tokio::test]
@@ -1933,8 +1954,9 @@ async fn smoke_not_run_without_optin() {
     );
 }
 
-/// output_schema 声明合法性（声明即校验）：畸形声明 → 注册期拒绝该工具，
-/// 不再等到 tool_core 运行时才暴露。
+/// output_schema 声明合法性（声明即校验）：畸形声明 → 该工具调用被拒
+/// （记入 rejected_tools），声明 schema 保留在工具面（失败桩），不再等到
+/// tool_core 运行时才暴露。
 #[tokio::test]
 async fn malformed_output_schema_rejected_at_registration() {
     let v = serde_json::json!({
@@ -1955,18 +1977,23 @@ async fn malformed_output_schema_rejected_at_registration() {
         out.rejected_tools.contains(&"t_bad".to_string()),
         "畸形 output_schema 的工具必须被拒"
     );
-    assert_eq!(out.manifest.capabilities.tools.len(), 1, "t_ok 保留");
-    assert_eq!(out.manifest.capabilities.tools[0].name, "t_ok");
+    assert_eq!(
+        out.manifest.capabilities.tools.len(),
+        2,
+        "声明 schema 原样保留（t_bad 在面但调用显式失败）"
+    );
+    assert_eq!(out.manifest.capabilities.tools[0].name, "t_bad");
+    assert!(out.stub_armed);
 }
 
-// ── G2 复验闭环：净化不被下轮 sync 复活 / manifest 编辑绕不过 G2 / 代码修复恢复 ──
+// ── G2 复验闭环：声明 schema 保留不被下轮 sync 误动 / manifest 编辑绕不过 G2 / 代码修复恢复 ──
 
-/// 回归锚（复活）：净化剔除的工具不得在下轮 sync 中复活——修复前的实现以
-/// 净化版 manifest 指纹为基线，下轮 raw 声明指纹必与之相异，被误判"变更"
-/// 后把被剔工具原样重注册（复活）。基线必须落声明指纹。
+/// 回归锚（工具面稳定）：漂移工具保留声明 schema 在注册表（失败桩），下轮
+/// sync 未变更不得误判、不得改变工具面；manifest 编辑仍走 G2 复验，声明
+/// schema 继续保留（ADR 2026-11-12）。
 #[tokio::test]
-async fn sync_next_round_does_not_resurrect_sanitized_tool() {
-    // 首轮：声明 [t1, ghost]，实现只报 t1 → ghost 净化剔除
+async fn sync_keeps_declared_stub_and_ledger_sanitized() {
+    // 首轮：声明 [t1, ghost]，实现只报 t1 → ghost 判拒（失败桩），声明原样注册
     let mut inv1 = MockInvoker::new(vec![mk_manifest("d1", "tool", &["t1", "ghost"], false)]);
     inv1.list_tools.insert(
         "d1".into(),
@@ -1997,11 +2024,17 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
     .unwrap();
     assert_eq!(r1.drifted_plugins, vec!["d1".to_string()]);
     assert!(
-        registry_arc.get_tool("ghost").is_none(),
-        "首轮 ghost 被净化剔除"
+        registry_arc.get_tool("ghost").is_some(),
+        "漂移工具仍按声明注册（schema 保留在工具面，调用显式失败）"
+    );
+    assert!(registry_arc.get_tool("t1").is_some(), "未漂移工具照常注册");
+    assert_eq!(
+        ledger.rejected_tool_names(),
+        vec![("d1".to_string(), "ghost".to_string())],
+        "账本记拒调工具：调用侧据此显式失败"
     );
 
-    // 次轮：磁盘无任何变化——不得误判变更、不得复活 ghost
+    // 次轮：磁盘无任何变化——不得误判变更、工具面稳定、拒调清单保持
     let r2 = sync_once_with_store(
         &inv1,
         &registry_arc,
@@ -2020,10 +2053,15 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
     .unwrap();
     assert!(r2.changed_plugin_ids.is_empty(), "未变更不得重注册");
     assert!(
-        registry_arc.get_tool("ghost").is_none(),
-        "被剔工具不得随下轮 sync 复活"
+        registry_arc.get_tool("ghost").is_some(),
+        "工具面不随 sync 轮次缩水"
     );
-    // store 与账本保持净化真相：store 条目无 ghost；账本 sanitized 证据保留
+    assert_eq!(
+        ledger.rejected_tool_names(),
+        vec![("d1".to_string(), "ghost".to_string())],
+        "拒调清单不因无变更轮次漂移"
+    );
+    // store 保持磁盘声明真相；账本 sanitized 证据保留
     let store_tools: Vec<String> = store
         .read()
         .await
@@ -2035,12 +2073,12 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    assert_eq!(store_tools, vec!["t1".to_string()]);
+    assert_eq!(store_tools, vec!["t1".to_string(), "ghost".to_string()]);
     let st = ledger.get("d1").expect("账本应含 d1");
     assert_eq!(st.gates.g2_consistency, "sanitized");
 
     // 第三轮：manifest 编辑（name 变更 → 声明指纹变化）但仍漂移 → 走 G2 复验，
-    // ghost 依旧剔除——manifest 编辑不得绕过 G2 复活被剔工具
+    // ghost 仍判拒但声明 schema 保留——manifest 编辑不得改变工具面数组
     let mut m3 = mk_manifest("d1", "tool", &["t1", "ghost"], false);
     m3.name = "d1-edited".into();
     let mut inv3 = MockInvoker::new(vec![m3]);
@@ -2070,14 +2108,15 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
         "声明变更须触发复验重注册"
     );
     assert!(
-        registry_arc.get_tool("ghost").is_none(),
-        "manifest 编辑不得绕过 G2 复活被剔工具"
+        registry_arc.get_tool("ghost").is_some(),
+        "manifest 编辑后声明 schema 仍在工具面（失败桩）"
     );
     assert_eq!(r3.drifted_plugins, vec!["d1".to_string()], "复验漂移可见");
 }
 
-/// 回归锚（修复后恢复）：G2 净化剔除的工具，实现修复（代码指纹变化、manifest
-/// 未动）后由 watcher 复验自动恢复——不再要求 manifest 再改或重启内核。
+/// 回归锚（修复后恢复）：G2 判拒的工具（声明 schema 保留在面、调用显式失败），
+/// 实现修复（代码指纹变化、manifest 未动）后由 watcher 复验自动解除失败桩——
+/// 不再要求 manifest 再改或重启内核。
 #[tokio::test]
 async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     let scopes = PluginScopeRegistry::new();
@@ -2100,7 +2139,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         Arc::new(move |_id: &str| Some(stage.read().clone()))
     };
 
-    // 首轮：声明 [t1, t2]，实现只报 t1 → t2 净化剔除
+    // 首轮：声明 [t1, t2]，实现只报 t1 → t2 判拒（声明 schema 保留在面，调用显式失败）
     let mut inv1 = MockInvoker::new(vec![mk_manifest("fix1", "tool", &["t1", "t2"], false)]);
     inv1.list_tools.insert(
         "fix1".into(),
@@ -2124,7 +2163,15 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     .await
     .unwrap();
     assert_eq!(r1.drifted_plugins, vec!["fix1".to_string()]);
-    assert!(registry_arc.get_tool("t2").is_none(), "t2 首轮被净化剔除");
+    assert!(
+        registry_arc.get_tool("t2").is_some(),
+        "t2 首轮按声明注册（失败桩），工具面不缩水"
+    );
+    assert_eq!(
+        ledger.rejected_tool_names(),
+        vec![("fix1".to_string(), "t2".to_string())],
+        "t2 调用由账本显式拦截"
+    );
     assert!(
         inv1.force_unloads.lock().unwrap().is_empty(),
         "基线轮零驱逐"
@@ -2187,7 +2234,11 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     );
     assert!(
         registry_arc.get_tool("t2").is_some(),
-        "修复后的工具经复验恢复，无需 manifest 变更或重启"
+        "修复后的工具经复验解除失败桩（声明 schema 一直在面），无需 manifest 变更或重启"
+    );
+    assert!(
+        ledger.rejected_tool_names().is_empty(),
+        "复验通过后拒调清单清空（调用自动放行）"
     );
     let st = ledger.get("fix1").expect("复验后账本应有记录");
     assert_eq!(
@@ -2949,51 +3000,48 @@ async fn dynamic_import_fuse_stops_reobservation_after_max_fails() {
     assert_eq!(obs_fail.get("hub"), Some(&1), "重置后连击从 1 重计");
 }
 
-/// 用户插件根必须进 notify 监听集合（ADR 2026-09-13 §2.3 缺口一）：此前只 watch
-/// 内置根，用户根装卸最坏要等一个 60s 轮询周期，同一台机器上两根待遇不一致。
+/// Tier2 根必须进 notify 监听集合（ADR 2026-11-07 分级单副本：env 载体承载
+/// boot 解析值）——Tier2 根装卸不靠 60s 轮询兜底，双根待遇一致。
 #[test]
-fn watch_roots_includes_user_plugin_root() {
-    // 环境变量是进程全局态：与其它读 user-space env 的用例互斥。
+fn watch_roots_includes_tier2_plugin_root() {
+    // 环境变量是进程全局态：与其它读 tier2 env 的用例互斥。
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let builtin = std::path::PathBuf::from("/plugins/shared");
-    let original_root = std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok();
-    let original_plugins = std::env::var(agentos_core::user_space::USER_PLUGINS_DIR_ENV).ok();
+    const TIER2_ENV: &str = "AGENTOS_PLUGIN_TIER2_ROOT";
+    let tier1 = std::path::PathBuf::from("/plugins/shared");
+    let original_tier2 = std::env::var(TIER2_ENV).ok();
     let tmp = tempfile::tempdir().unwrap();
 
-    // ① 用户根可用 → 内置根 + 用户根双监听
-    std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, tmp.path());
-    std::env::remove_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV);
-    let roots = watch_roots(&builtin);
-    assert_eq!(roots.len(), 2, "内置根 + 用户根: {roots:?}");
-    assert!(roots.contains(&builtin));
+    // ① Tier2 根已交付 → Tier1 + Tier2 双监听
+    let tier2 = tmp.path().join("user-root/plugins");
+    std::env::set_var(TIER2_ENV, &tier2);
+    let roots = watch_roots(&tier1);
+    assert_eq!(roots.len(), 2, "Tier1 根 + Tier2 根: {roots:?}");
+    assert!(roots.contains(&tier1));
     assert!(
-        roots.contains(&tmp.path().join("plugins")),
-        "用户插件根必须在监听集合内: {roots:?}"
+        roots.contains(&tier2),
+        "Tier2 根必须在监听集合内: {roots:?}"
     );
 
-    // ② 分区覆盖生效且不与内置根重复（同路径去重，避免重复 watch）
-    let same_as_builtin = tmp.path().join("shared");
-    std::env::set_var(
-        agentos_core::user_space::USER_PLUGINS_DIR_ENV,
-        &same_as_builtin,
-    );
-    std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, tmp.path());
-    let overlapped = watch_roots(&same_as_builtin);
+    // ② Tier2 与 Tier1 同路径时去重（同路径重复 watch 无意义）
+    std::env::set_var(TIER2_ENV, &tier1);
+    let overlapped = watch_roots(&tier1);
     assert_eq!(
         overlapped.len(),
         1,
-        "与内置根同路径时应去重: {overlapped:?}"
+        "与 Tier1 根同路径时应去重: {overlapped:?}"
     );
 
-    match original_root {
-        Some(v) => std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v),
-        None => std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV),
-    }
-    match original_plugins {
-        Some(v) => std::env::set_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV, v),
-        None => std::env::remove_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV),
+    // ③ Tier2 未交付/空白 = 仅 Tier1 根
+    std::env::remove_var(TIER2_ENV);
+    assert_eq!(watch_roots(&tier1), vec![tier1.clone()]);
+    std::env::set_var(TIER2_ENV, "   ");
+    assert_eq!(watch_roots(&tier1), vec![tier1.clone()], "空白值视同未交付");
+
+    match original_tier2 {
+        Some(v) => std::env::set_var(TIER2_ENV, v),
+        None => std::env::remove_var(TIER2_ENV),
     }
 }
 
@@ -3470,6 +3518,15 @@ async fn provides_without_backing_tool_is_flagged() {
 
     let text = logs.text();
     assert!(out.drift, "服务公告无工具背书必须判 drift");
+    assert_eq!(
+        out.rejected_tools,
+        vec!["ghost_svc".to_string(), "ghost_svc.status".to_string()],
+        "未回铺服务名与缺失服务声明都进拒绝清单（消费侧可见）"
+    );
+    assert!(
+        !out.stub_armed,
+        "服务名不是声明工具：无工具可桩，账本保持 drift 而非 sanitized"
+    );
     assert!(
         text.contains("公告的服务没有对应已声明工具"),
         "未背书服务须留痕: {text}"
@@ -3521,9 +3578,10 @@ async fn dynamic_mcp_import_emits_diagnostics() {
     );
 }
 
-/// G2 复验漂移（声明与实际不一致）→ warn + drifted_plugins + 剔除后重注册。
+/// G2 复验漂移（声明与实际不一致）→ warn + drifted_plugins + 失败桩重注册
+/// （声明 schema 保留在工具面）。
 #[tokio::test]
-async fn reverify_drift_emits_diagnostics_and_reregisters_sanitized() {
+async fn reverify_drift_emits_diagnostics_and_reregisters_stub() {
     let (guard, logs) = crate::test_env::capture_logs();
     let _ = &guard;
     let m = mk_manifest("drift_p", "tool", &["t1", "t2"], false);
@@ -3557,7 +3615,8 @@ async fn reverify_drift_emits_diagnostics_and_reregisters_sanitized() {
     .unwrap();
     assert_eq!(registry_arc.list_tools().len(), 2);
 
-    // 第二轮：声明变更（触发复验）+ 实现只剩 t1（漂移）→ 剔除 t2 后重注册
+    // 第二轮：声明变更（触发复验）+ 实现只剩 t1（漂移）→ t2 判拒后按声明重注册
+    // （失败桩，schema 保留在工具面）
     let mut m2 = m;
     m2.version = "1.0.1".to_string();
     let mut inv2 = MockInvoker::new(vec![m2]);
@@ -3585,13 +3644,13 @@ async fn reverify_drift_emits_diagnostics_and_reregisters_sanitized() {
     let text = logs.text();
     assert_eq!(r2.drifted_plugins, vec!["drift_p".to_string()]);
     assert!(
-        text.contains("声明与实现漂移，剔除漂移工具后重注册"),
+        text.contains("相关工具降级为失败桩后重注册"),
         "漂移处置须留痕: {text}"
     );
     assert_eq!(
         registry_arc.list_tools().len(),
-        1,
-        "漂移工具从注册面剔除（其余能力照常）"
+        2,
+        "声明 schema 保留在工具面（t2 为失败桩，调用由账本拦截）"
     );
 }
 
@@ -3742,9 +3801,10 @@ fn write_full_mode_package(root: &Path, mode_id: &str) {
 }
 
 /// loader 背书 invoker：discover_new_plugins 委托真实 PluginLoaderImpl（双根
-/// 扫描 + 用户根子树优先裁决走生产代码，本测试不做发现层替身）；root_paths 逐
-/// 轮按预置序列轮转——复现热路径 collect_plugin_roots 每轮新建 HashSet 的序不
-/// 稳定（双源同 id 胜者翻转的机制）。
+/// 扫描 + 平版包内优先裁决走生产代码，本测试不做发现层替身）；root_paths 逐
+/// 轮按预置序列轮转——复现热路径 collect_plugin_roots 曾有的 HashSet 序不稳
+/// 定（双源同 id 胜者翻转的机制；2026-11-08 起根序已定化 + 平版包内优先，
+/// 本测试锁的是「任序下胜者恒稳定」的端到端契约）。
 struct DualRootInvoker {
     loader: std::sync::Arc<agentos_plugin_loader::PluginLoaderImpl>,
     /// 每轮 discover 使用的 root_paths（按调用次序取；耗尽后停在最后一组）。
@@ -3806,12 +3866,14 @@ impl PluginInvoker for DualRootInvoker {
     }
 }
 
-/// 双源同 id 场景：用户份存在且启用 → 60s 重验证逐轮把 root_paths 序翻转
-/// （模拟热路径 HashSet 序不稳定），路由必须恒可达、零复验驱逐（无 swap）。
-/// 朴素 last-wins 下第二轮胜者翻到 repo 份 → 源码目录翻转 → 代码指纹必变 →
-/// 复验驱逐 + 路由 revoke/re-register（/ext 间歇 503 的机制链）。
+/// 双源同 id 场景（平版）：60s 重验证逐轮把 root_paths 序翻转（模拟热路径
+/// HashSet 序不稳定），胜者必须恒稳定在**包内份**（平版包内优先，扫描序无关）
+/// ——路由恒可达、零复验驱逐（无 swap）。朴素 last-wins 下第二轮胜者翻面 →
+/// 源码目录翻转 → 代码指纹必变 → 复验驱逐 + 路由 revoke/re-register（/ext
+/// 间歇 503 的机制链）；平版落用户份则首装有 venv 供给窗（用户副本按
+/// provision 契约排除 .venv，包内副本带 venv 交付——2026-11-08 装机实证）。
 #[tokio::test]
-async fn dual_source_same_id_user_wins_no_swap_routes_alive_across_syncs() {
+async fn dual_source_same_id_builtin_wins_no_swap_routes_alive_across_syncs() {
     let builtin = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
     write_full_mode_package(builtin.path(), "mode_x");
@@ -3916,14 +3978,15 @@ async fn dual_source_same_id_user_wins_no_swap_routes_alive_across_syncs() {
         route_count,
         "路由表不得被 revoke/re-register 洗牌"
     );
-    // 胜者稳定在用户份：源码目录落在用户根（代码指纹不再振荡）。
+    // 胜者稳定在包内份（平版包内优先）：源码目录落在 builtin 根（代码指纹
+    // 不再振荡；用户副本按 provision 契约无 venv，包内副本带 venv 交付）。
     let dir = {
         use agentos_core::traits::PluginLoader as _;
         loader.get_plugin_dir("mode_x").unwrap()
     };
     assert!(
-        std::path::Path::new(&dir).starts_with(user.path()),
-        "源码目录必须稳定在用户根，got: {dir}"
+        std::path::Path::new(&dir).starts_with(builtin.path()),
+        "源码目录必须稳定在包内根，got: {dir}"
     );
 }
 
@@ -4090,8 +4153,10 @@ async fn verify_failed_crossing_notifies_once_until_recovered() {
         manifest: m.clone(),
         rejected_tools: Vec::new(),
         drift: false,
+        soft_drift: false,
         spawn_failed: false,
         smoke_failed: false,
+        stub_armed: false,
     };
     ledger.upsert(crate::contract::PluginContractState::derived(
         &m,
@@ -4188,4 +4253,69 @@ fn code_change_hysteresis_respects_legacy_confirmations() {
     streaks2.insert("p".to_string(), (999, 5));
     assert!(!code_change_confirmed(None, 200, &mut streaks2, "p", 2));
     assert!(!streaks2.contains_key("p"), "基线缺失撤销候选");
+}
+
+// ── 同步冷却（1c 风暴降噪）纯函数表 ─────────────────────────────────
+
+/// 连续无变化轮次 → 冷却窗 ×2 指数退避；首轮（streak=0）= 基值。
+#[test]
+fn sync_cooldown_backs_off_exponentially_from_base() {
+    let base = Duration::from_millis(1000);
+    let max = Duration::from_secs(60);
+    assert_eq!(sync_cooldown_for(0, base, max), base, "有变化轮 = 基值");
+    assert_eq!(
+        sync_cooldown_for(1, base, max),
+        Duration::from_millis(2000),
+        "1 轮无变化 = ×2"
+    );
+    assert_eq!(
+        sync_cooldown_for(2, base, max),
+        Duration::from_millis(4000),
+        "2 轮无变化 = ×4"
+    );
+}
+
+/// 退避封顶 = max（生产传轮询间隔）：无变化期零额外延迟、不吞轮询节奏。
+#[test]
+fn sync_cooldown_caps_at_max() {
+    let base = Duration::from_millis(1000);
+    let max = Duration::from_secs(60);
+    assert_eq!(
+        sync_cooldown_for(6, base, max),
+        max,
+        "退避达上限（1000×64 封顶到 60s）"
+    );
+    assert_eq!(
+        sync_cooldown_for(30, base, max),
+        max,
+        "超长空闲（指数溢出防护）恒 = max"
+    );
+    // max < base 的病态配置也封在 max（冷却永不超轮询间隔）
+    assert_eq!(
+        sync_cooldown_for(0, Duration::from_secs(5), Duration::from_millis(500)),
+        Duration::from_millis(500)
+    );
+}
+
+/// 无变化轮判定（退避依据）：任一变更面非空即有变化；全空 = 无变化。
+#[test]
+fn report_has_changes_covers_all_change_surfaces() {
+    let mut r = SyncReport::default();
+    assert!(!report_has_changes(&r), "全空报告 = 无变化轮");
+    r.new_plugin_ids.push("p".into());
+    assert!(report_has_changes(&r));
+    let mut r2 = SyncReport::default();
+    r2.changed_plugin_ids.push("p".into());
+    assert!(report_has_changes(&r2), "GAP-6 变更重注册也算有变化");
+    let mut r3 = SyncReport::default();
+    r3.uninstalled.push("p".into());
+    assert!(report_has_changes(&r3), "卸载也算有变化");
+    let r4 = SyncReport {
+        cdylib_change: Some(CdylibChange {
+            added: vec!["p".into()],
+            removed: vec![],
+        }),
+        ..SyncReport::default()
+    };
+    assert!(report_has_changes(&r4), "cdylib 集合变更也算有变化");
 }

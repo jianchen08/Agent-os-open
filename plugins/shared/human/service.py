@@ -27,6 +27,7 @@ import contextlib
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -68,6 +69,11 @@ _LEGACY_OPTION_SEMANTICS: dict[str, str] = {
     "仅本次执行": OptionSemantics.APPROVE_ONCE.value,
     "approved_remember": OptionSemantics.APPROVE_AND_REMEMBER.value,
     "本管道内同命令免批": OptionSemantics.APPROVE_AND_REMEMBER.value,
+    "approved_pipeline_scope": OptionSemantics.APPROVE_PIPELINE_SCOPE.value,
+    "本管道后续免审批": OptionSemantics.APPROVE_PIPELINE_SCOPE.value,
+    "approved_permanent_whitelist": OptionSemantics.APPROVE_PERMANENT_WHITELIST.value,
+    "将该命令加入永久免审批白名单": OptionSemantics.APPROVE_PERMANENT_WHITELIST.value,
+    "本次命令全部加入永久免审批白名单": OptionSemantics.APPROVE_PERMANENT_WHITELIST.value,
     "denied": OptionSemantics.DENY.value,
     "拒绝执行": OptionSemantics.DENY.value,
     "pipeline": OptionSemantics.GRANT_WRITE.value,
@@ -194,6 +200,77 @@ class HumanInteractionService(IHumanInteractionService):
         self._lock = asyncio.Lock()
         self._requests: dict[str, dict[str, Any]] = {}
         self._responses: dict[str, dict[str, Any]] = {}
+        # 审批 ticket 持久写面（M1 审批非阻塞）：经内核 pipeline-state.update
+        # 单一路径落 pipeline_state（审计铁律——所有 state 变更经 update 留痕）。
+        # 回调签名 (pipeline_id, fields)；server.py on_load 注入，测试可替换。
+        self._state_writer: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
+        # ticket 版本号（approval.inbox_rev 单调递增，前端变更检测）
+        self._inbox_rev: int = 0
+
+    def set_state_writer(
+        self, writer: Callable[[str, dict[str, Any]], Awaitable[None]] | None
+    ) -> None:
+        """注入 ticket 持久写面（server.py on_load 装配；None = 卸载）。"""
+        self._state_writer = writer
+
+    async def _write_ticket_state(self, pipeline_id: str, fields: dict[str, Any]) -> None:
+        """经 state-writer 走 pipeline-state.update 写 ticket（best-effort）。
+
+        写失败不阻断审批主链（非核心旁路：卡仍会弹、等待仍进行；日志带
+        pipeline_id 与键集留痕，fold/inbox 侧读不到该 ticket 属可观测降级）。
+        """
+        if self._state_writer is None or not pipeline_id:
+            return
+        try:
+            await self._state_writer(pipeline_id, fields)
+        except Exception:
+            logger.exception(
+                "[HumanInteraction] ticket state 写入失败（主链不受影响）| pipeline_id=%s | keys=%s",
+                pipeline_id,
+                sorted(fields.keys()),
+            )
+
+    def _make_ticket(self, record: dict[str, Any]) -> dict[str, Any]:
+        """从请求记录构造审批 ticket（state 落盘形态，设计 §四）。
+
+        category 由发起方显式传（decision/permission/generic 缺省），不由
+        后端按标题猜测；blocking 由调用路径判定（阻塞等待=True）。
+        """
+        msg = record.get("message_data") or {}
+        return {
+            "ticket_id": record.get("id", ""),
+            "category": str(msg.get("category") or "generic"),
+            "blocking": bool(msg.get("blocking", False)),
+            "title": msg.get("title", ""),
+            "description": msg.get("description", ""),
+            "options": msg.get("options"),
+            "status": record.get("status", "pending"),
+            "session_id": record.get("session_id", ""),
+            "thread_id": msg.get("thread_id", ""),
+            "pipeline_id": msg.get("pipeline_id", ""),
+            "agent_id": msg.get("agent_id", ""),
+            "agent_level": msg.get("agent_level", ""),
+            "agent_name": msg.get("agent_name", ""),
+            "created_at": str(record.get("created_at") or ""),
+            "deadline_at": msg.get("deadline_at"),
+            "decision": None,
+            "consumed_at": None,
+        }
+
+    async def _persist_ticket(self, pipeline_id: str, ticket: dict[str, Any]) -> None:
+        """单 ticket upsert 写面（含 inbox_rev 递增，经 pipeline-state.update 单一路径）。
+
+        真删不在 service 侧做——已决条目由 approval.fold 步经
+        pipeline-state.update 的 delete_keys 参数真删（两阶段第二段）。
+        """
+        if self._state_writer is None or not pipeline_id:
+            return
+        self._inbox_rev += 1
+        fields = {
+            f"approval.tickets.{ticket['ticket_id']}": ticket,
+            "approval.inbox_rev": self._inbox_rev,
+        }
+        await self._write_ticket_state(pipeline_id, fields)
 
     def _set_event_threadsafe(self, request_id: str) -> None:
         """线程安全地设置 Event，确保跨事件循环时也能正确唤醒等待方。
@@ -297,6 +374,7 @@ class HumanInteractionService(IHumanInteractionService):
         pipeline_id: str | None = None,
         agent_name: str | None = None,
         memory_key: str | None = None,
+        category: str | None = None,
     ) -> str:
         """创建选择模式请求，返回 request_id。
 
@@ -309,6 +387,12 @@ class HumanInteractionService(IHumanInteractionService):
         （工具+指纹）时按 (session, memory_key)，否则回退 (session, title)。
         options 契约（决策 2，只增不改）：选项可携带 semantics 封闭枚举声明，
         应答归一点据此映射；无声明的历史卡回退 label 表。
+
+        审批非阻塞 M1：``category`` 由发起方显式传（decision=决策审批 /
+        permission=权限审批 / generic=其余交互缺省），不由后端按标题猜测；
+        ``blocking`` 由调用路径判定（调用方将 wait_for_choice=阻塞等待）。
+        创建后 ticket 经 state-writer 落 pipeline_state（best-effort，
+        pipeline_id 在场才写）。
         """
         request_id = str(uuid4())
         timeout: float = timeout_seconds or int(self._default_timeout)
@@ -333,6 +417,8 @@ class HumanInteractionService(IHumanInteractionService):
                 "priority": priority.value,
                 "timeout_reminded": False,
                 "file_paths": file_paths,
+                "category": category or "generic",
+                "blocking": True,
                 **({"memory_key": memory_key} if memory_key else {}),
                 **({"agent_level": agent_level} if agent_level else {}),
                 **({"pipeline_id": pipeline_id} if pipeline_id else {}),
@@ -362,6 +448,12 @@ class HumanInteractionService(IHumanInteractionService):
             return request_id
 
         self._requests[request_id] = record
+
+        # 审批非阻塞 M1：ticket 落 pipeline_state（best-effort，pipeline_id 在场
+        # 才写；写失败主链不受影响，见 _write_ticket_state）。拒绝记忆命中分支
+        # 不落 ticket——请求已按拒绝终局，无待批项可展示。
+        if pipeline_id:
+            await self._persist_ticket(pipeline_id, self._make_ticket(record))
 
         async with self._lock:
             self._pending_events[request_id] = asyncio.Event()
@@ -396,11 +488,18 @@ class HumanInteractionService(IHumanInteractionService):
         agent_level: str | None = None,
         pipeline_id: str | None = None,
         agent_name: str | None = None,
+        category: str | None = None,
+        blocking: bool = True,
     ) -> str:
         """创建统一交互请求（options 点选 / 文本 / 进入对话），返回 request_id。
 
         2026-10-19 用户裁定：选择=对话，对话模式即统一交互态（超集），
         选项/等待上限/优先级与 choice 记录同契约，卡片倒计时同数据面。
+
+        审批非阻塞 M1（设计 §三/§5.10，与 create_choice_request 同契约）：
+        ``category`` 由发起方显式传；``blocking=False``（mode=async）= 不建
+        等待事件、工具立即返回——ticket 照常落 pipeline_state（best-effort）、
+        WS 通知照常发、超时照常安排（expired 终态，G5 绝不超时放行）。
         """
         request_id = str(uuid4())
         timeout: float = timeout_seconds or int(self._default_timeout)
@@ -425,6 +524,8 @@ class HumanInteractionService(IHumanInteractionService):
                 "priority": priority.value,
                 "timeout_reminded": False,
                 "file_paths": file_paths,
+                "category": category or "generic",
+                "blocking": blocking,
                 **({"agent_level": agent_level} if agent_level else {}),
                 **({"pipeline_id": pipeline_id} if pipeline_id else {}),
                 **({"agent_name": agent_name} if agent_name else {}),
@@ -432,8 +533,14 @@ class HumanInteractionService(IHumanInteractionService):
         )
         self._requests[request_id] = record
 
-        async with self._lock:
-            self._pending_events[request_id] = asyncio.Event()
+        # 审批非阻塞 M1：ticket 落 pipeline_state（best-effort，pipeline_id 在场
+        # 才写；写失败主链不受影响）。
+        if pipeline_id:
+            await self._persist_ticket(pipeline_id, self._make_ticket(record))
+
+        if blocking:
+            async with self._lock:
+                self._pending_events[request_id] = asyncio.Event()
 
         if self._notifier:
             await self._notifier.notify_request(record)
@@ -817,6 +924,28 @@ class HumanInteractionService(IHumanInteractionService):
 
         request_record["status"] = InteractionStatus.COMPLETED.value
         request_record.setdefault("message_data", {})["responded_at"] = now
+
+        # 审批非阻塞 M1（T1 决定面）：决定回写 ticket——改状态不删键（两阶段
+        # 第一段，fold 注入后才经 delete_keys 真删）。answered+选项 = approved
+        # （用户点了选项即批准推进）；denied → denied；其余按词形如实落。
+        pipeline_id = str(msg_data.get("pipeline_id") or "")
+        if pipeline_id:
+            ticket = self._make_ticket(request_record)
+            ticket["status"] = (
+                "denied"
+                if response_type == ResponseType.DENIED.value
+                else "approved"
+                if response_type == ResponseType.APPROVED.value or selected_option
+                else "cancelled"
+            )
+            ticket["decision"] = {
+                "response_type": response_type,
+                "selected_option": selected_option,
+                "selected_semantics": selected_semantics,
+                "feedback": feedback,
+                "decided_at": now,
+            }
+            await self._persist_ticket(pipeline_id, ticket)
 
         async with self._lock:
             event_exists = request_id in self._pending_events
@@ -1231,6 +1360,17 @@ class HumanInteractionService(IHumanInteractionService):
             if record.get("status") != InteractionStatus.PENDING.value:
                 return  # 幂等：已被响应/取消/已超时处理
             record["status"] = InteractionStatus.TIMEOUT.value
+            # 审批非阻塞 M1（G5）：超时 → ticket expired（封闭枚举无
+            # timeout→approved 分支）；decision 记 timeout 词形供 fold 注入。
+            ticket_pipeline = str((record.get("message_data") or {}).get("pipeline_id") or "")
+            if ticket_pipeline:
+                ticket = self._make_ticket(record)
+                ticket["status"] = "expired"
+                ticket["decision"] = {
+                    "response_type": ResponseType.TIMEOUT.value,
+                    "decided_at": datetime.now(UTC).isoformat(),
+                }
+                await self._persist_ticket(ticket_pipeline, ticket)
 
         async with self._lock:
             if request_id in self._pending_events:

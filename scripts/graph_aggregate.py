@@ -71,6 +71,13 @@ def _anchored_rglob(root: Path, pattern: str) -> list[str]:
 #: 是素材模板语法而非双链，进图只会制造恒悬空红点并让数据文件膨胀。
 _EXCLUDED_SOURCE_PREFIXES: tuple[str, ...] = ("docs/working/rp_prompt_material/",)
 
+#: 模板件豁免（同 check_doc_frontmatter「模板件不是文档实例」口径）：文件名
+#: 含字面量 ``{{task_id}}`` 的是任务书派发模板形态（真实实例必是替换后的
+#: task_id，见 AGENTS.md 产物路径任务唯一），不是文档实例——进图会让模板
+#: doc_id 与派生实例 doc_id 相撞（2026-11-17 实证：任务现场入口交互方案
+#: 模板件与 fbec2299bf7a 实例件同 doc_id 触发 doc_id 冲突红）。
+_TEMPLATE_DOC_MARKER = "{{task_id}}"
+
 
 def discover_files(root: Path) -> list[str]:
     """发现全部提取源（方案 §4.2 源表 + docs 下全部 md），posix 相对路径。"""
@@ -92,7 +99,11 @@ def discover_files(root: Path) -> list[str]:
     files.update(_glob("config/pipelines/*.yaml"))
     files.update(_glob("config/steps/*.yaml"))
     files.update(_rglob("docs/**/*.md"))
-    return sorted(rel for rel in files if not rel.startswith(_EXCLUDED_SOURCE_PREFIXES))
+    return sorted(
+        rel
+        for rel in files
+        if not rel.startswith(_EXCLUDED_SOURCE_PREFIXES) and _TEMPLATE_DOC_MARKER not in rel
+    )
 
 
 def _read_text(path: Path) -> str:
@@ -225,6 +236,45 @@ def _sorted_nodes(nodes: dict[str, gm.Node]) -> list[gm.Node]:
     return sorted(nodes.values(), key=lambda n: (n.type, n.id))
 
 
+def build_backlinks(data: dict) -> dict:
+    """边集反转 → 反链投影（纯内存遍历，毫秒级；不新增扫描，复用同一遍装配的边集）。
+
+    返回 ``{meta, by_target, path_to_id, id_to_path}``：
+
+    - ``by_target``：目标节点 id → 反链条目列表（按 ``(s, k, note)`` 排序保证确定性）。
+      条目只带 ``s/label/path/k/note`` 五字段——**不带正文**（graph.js 已因 4KB
+      正文膨胀到 8 MB，反链数据面不重复搬运，调研报告 §5.4）；
+    - ``path_to_id``：节点 path → 节点 id——前端侧栏用"当前打开文件的仓库相对
+      路径"定位节点 id（doc_id 形态与路径形态双链经装配解析后已收敛到同一节点）；
+    - ``id_to_path``：反查节点 id → 真实仓库路径——doc_id 形态双链点击跳转的唯一
+      解析真值（渲染层不发明目录约定，审查 MF-1 修复面）。
+    """
+    nodes_by_id: dict[str, dict] = {n["id"]: n for n in data["nodes"]}
+    by_target: dict[str, list[dict]] = {}
+    for edge in sorted(
+        data["edges"],
+        key=lambda e: (e["s"], e["k"], e.get("note", "")),
+    ):
+        source = nodes_by_id.get(edge["s"])
+        by_target.setdefault(edge["t"], []).append(
+            {
+                "s": edge["s"],
+                "label": source["label"] if source else edge["s"],
+                "path": source["path"] if source else "",
+                "k": edge["k"],
+                "note": edge.get("note", ""),
+            }
+        )
+    path_to_id = {n["path"]: n["id"] for n in data["nodes"] if n.get("path")}
+    id_to_path = {n["id"]: n["path"] for n in data["nodes"] if n.get("path")}
+    return {
+        "meta": data.get("meta", {}),
+        "by_target": by_target,
+        "path_to_id": path_to_id,
+        "id_to_path": id_to_path,
+    }
+
+
 def _resolve_link(
     target: str,
     nodes: dict[str, gm.Node],
@@ -304,8 +354,36 @@ def _load_state(state_path: Path) -> dict:
 # ── 三合一入口 ────────────────────────────────────────────────────────
 
 
+def _precheck_inputs(root: Path) -> tuple[list[str], int]:
+    """输入面前置校验：不可判定即红（返回 ``(sources, 退出码)``）。
+
+    门禁的红绿承诺是"文档面有没有问题"，输入面残缺时"0 个问题"是假绿——
+    根目录指错、空检出（稀疏/浅检出）、docs/ 整体缺失三种形态下没有任何
+    被执法者，此时放行等于把门禁退化成恒绿包装。故这三类一律 fail-closed
+    判红（2），且**不产出数据文件**（免得残留 graph.js 被误当新鲜数据）。
+    """
+    if not root.is_dir():
+        print(f"graph-check: 根目录不存在或不是目录: {root}", file=sys.stderr)
+        return [], 2
+    sources = discover_files(root)
+    if not sources:
+        print(f"graph-check: 未发现任何提取源（root={root}）——空输入不放行", file=sys.stderr)
+        return [], 2
+    if not any(rel.startswith("docs/") for rel in sources):
+        print(
+            f"graph-check: 未发现 docs/ 文档源（root={root}，源 {len(sources)} 个）——文档面缺失不放行",
+            file=sys.stderr,
+        )
+        return [], 2
+    return sources, 0
+
+
 def aggregate(root: Path, out_path: Path, state_path: Path) -> int:
-    """增量聚合 → 落盘 graph.js → 校验红绿。返回进程退出码（0 绿 / 1 红）。
+    """增量聚合 → 落盘 graph.js → 校验红绿。
+
+    退出码三值：0 = 绿（零问题）；1 = 校验红（有 finding）；2 = 输入不可判定
+    （根不存在/空源集合/文档面缺失，fail-closed 红）。run_gates 对非 0 一律
+    判门禁失败，两者都是"红"，分码只为排障时区分"文档有问题"与"没看到文档"。
 
     校验红时数据文件仍落盘（副产物语义：图永远有新鲜数据，红绿由退出码
     表达，供 run_gates / 手动跑判定）。
@@ -314,11 +392,15 @@ def aggregate(root: Path, out_path: Path, state_path: Path) -> int:
     out_path = Path(out_path)
     state_path = Path(state_path)
 
+    sources, code = _precheck_inputs(root)
+    if code:
+        return code
+
     cached = _load_state(state_path).get("files", {})
     entries: dict[str, dict] = {}
     facts_list: list[gm.SourceFacts] = []
     extracted = 0
-    for rel in discover_files(root):
+    for rel in sources:
         content = _read_text(root / rel)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
         entry = cached.get(rel)
@@ -336,6 +418,14 @@ def aggregate(root: Path, out_path: Path, state_path: Path) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = "window.GRAPH_DATA = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n"
     out_path.write_text(payload, encoding="utf-8")
+
+    # 反链投影随 graph.js 同批落盘（out 同目录；双链侧栏数据面，见 build_backlinks），
+    # 副产物语义同 graph.js：校验红仍落盘（图/索引永远有新鲜数据，红绿由退出码表达）。
+    backlinks_path = out_path.parent / "backlinks.json"
+    backlinks_path.write_text(
+        json.dumps(build_backlinks(data), ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(

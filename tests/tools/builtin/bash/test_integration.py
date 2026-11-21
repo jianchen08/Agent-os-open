@@ -176,16 +176,23 @@ class TestTerminateProcess:
 
     @pytest.mark.asyncio
     async def test_terminate_running(self, pm):
-        """启动 sleep → terminate → 验证状态"""
+        """启动 sleep → terminate → 验证状态与日志收尾。
+
+        击杀排空契约（ADR 2026-11-07）：terminate 内部先等输出任务排空再写终止
+        行——排空完成即触发即时清理，terminate 返回后内存条目已被清（确定性
+        时序，不再是异步滞后）；状态与终止行经磁盘真理源可查。
+        """
         pid, _ = await pm.start_process("sleep 30")
         await asyncio.sleep(0.5)
 
         ok, err = await pm.terminate_process(pid, force=True)
         assert ok, f"terminate failed: {err}"
 
-        proc_info = pm.get_process_info(pid)
-        assert proc_info is not None
-        assert proc_info.status == "terminated"
+        assert pid not in pm.active_processes, "排空完成后已终止条目应被即时清理"
+        file_data = pm.read_log_by_pid(pid)
+        assert file_data is not None, "被杀进程日志凭 pid 磁盘可读"
+        assert file_data["exit_code"] is not None
+        assert file_data["terminated_by"] == "user"
 
     @pytest.mark.asyncio
     async def test_terminate_nonexistent(self, pm):

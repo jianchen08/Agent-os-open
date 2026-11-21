@@ -61,6 +61,20 @@ _OWES_ME = "欠我"
 # 记录缺省优先级（auto P0-P2 的缺省档：无显式 !Pn = P2）
 DEFAULT_PRIORITY = "P2"
 
+# repeat 取值域词表（单一真相源）：weekly 周几 0-6（weekday() 同轴）、monthly 几号 1-31。
+# pim_parse（自然语言解析出口）与 pim_recurrence（推进判定）共用，防两套真值漂移。
+WEEKDAY_MIN, WEEKDAY_MAX = 0, 6
+MONTH_DAY_MIN, MONTH_DAY_MAX = 1, 31
+
+
+def validate_repeat_target(kind: str, target: int) -> bool:
+    """repeat 目标值合法性（词表单点，公共契约——pim_recurrence/pim_store 跨模块消费）。"""
+    if kind == "weekly":
+        return WEEKDAY_MIN <= target <= WEEKDAY_MAX
+    if kind == "monthly":
+        return MONTH_DAY_MIN <= target <= MONTH_DAY_MAX
+    return False
+
 
 def parse_iso_dt(value: str) -> datetime | None:
     """ISO 串（``YYYY-MM-DD`` / ``YYYY-MM-DD HH:MM``）→ datetime；非法 = None。
@@ -224,7 +238,7 @@ def _parse_at_token(token: str, now: datetime | None) -> tuple[str, str] | None:
     m_monthly = _AT_MONTHLY_RE.match(body)
     if m_monthly:
         day_of_month = int(m_monthly.group(1))
-        if not 1 <= day_of_month <= 31:
+        if not validate_repeat_target("monthly", day_of_month):
             return None
         return ("repeat", f"monthly:{day_of_month}")
 

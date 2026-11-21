@@ -27,7 +27,7 @@
   "host_group": "light",
   "state": {
     "reads": [
-      "_plugin_errors",
+      "_plugin_error_stats",
       "agent_level",
       "core_type",
       "delegate_depth",
@@ -36,6 +36,8 @@
       "raw_result",
       "raw_tool_calls",
       "router.duplicate_intercepts",
+      "router.dynamic_tool_fail_banned",
+      "router.dynamic_tool_fail_streak",
       "router.last_response",
       "router.last_response_text",
       "router.llm_error_cursor",
@@ -44,6 +46,7 @@
       "router.repetitive_count",
       "router.tool_fail_banned",
       "router.tool_fail_streak",
+      "task.id",
       "tool_ids",
       "tool_results"
     ]

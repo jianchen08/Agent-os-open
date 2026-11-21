@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-execution-semantics
+type: standard
+status: active
+---
+
 # 执行语义规则（Agent 身份 × 编排）
 
 > 返回 [开发指南索引](README.md)。横切规则物料（供注入遵守）：只写跨模式公共契约。

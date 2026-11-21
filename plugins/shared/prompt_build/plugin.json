@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Prompt Build",
-  "version": "1.1.1",
+  "version": "1.1.3",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -29,35 +29,13 @@
     "services": [
       {
         "name": "prompt.preview",
-        "description": "组装预览（离线面）：输入与管道步同形的 context 片段（system_prompt/static_vars/dynamic_vars/constraints_text/agent_name），走与 execute 完全相同的组装代码，返回 system_message 与 prompt.dynamic_vars 消息——供管理面预览端点等离线消费方取组装结果，组装逻辑单源零复制",
+        "description": "Assemble a preview SystemMessage + dynamic-vars message from context state pieces (same code path as the pipeline step; for offline surfaces like agent config preview)",
         "input_schema": {
           "type": "object",
           "properties": {
             "context": {
               "type": "object",
-              "description": "prompt_build 消费的 context.* 片段（去 context. 前缀的键名）",
-              "properties": {
-                "system_prompt": {
-                  "type": "string",
-                  "description": "系统提示词模板（占位符在此替换）"
-                },
-                "static_vars": {
-                  "type": "array",
-                  "description": "静态变量 items（与 agent yaml static_vars.items 同形）"
-                },
-                "dynamic_vars": {
-                  "type": "array",
-                  "description": "动态变量 items（与 agent yaml dynamic_vars.items 同形）"
-                },
-                "constraints_text": {
-                  "type": "string",
-                  "description": "约束文本块（agent 装载面已渲染的 hard/soft 约束）"
-                },
-                "agent_name": {
-                  "type": "string",
-                  "description": "agent 显示名"
-                }
-              }
+              "description": "prompt_build 消费的 context.* 片段（去 context. 前缀的键名）"
             },
             "session_id": {
               "type": "string",
@@ -92,7 +70,9 @@
       "project_roots",
       "prompt.tool_descriptions",
       "tool_surface.unavailable",
-      "user_id"
+      "user_id",
+      "agent_id",
+      "tool_ids"
     ]
   },
   "export_fields": [

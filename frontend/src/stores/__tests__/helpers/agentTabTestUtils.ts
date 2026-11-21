@@ -2,7 +2,7 @@
  * agentTab 测试家族共享的实体工厂（makeSession/makeSubTab/makeSubTabInput）。
  * 曾在三个测试文件逐字复制（jscpd 克隆门禁重复源）；常量改为参数注入。
  */
-import type { Session } from '@/types/sessions'
+import type { Session } from '@/types/models'
 import type { AgentTab } from '@/types/task'
 
 export function makeSessionFactory(sessionId: string, mainPid: string) {

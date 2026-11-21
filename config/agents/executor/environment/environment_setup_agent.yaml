@@ -99,7 +99,6 @@ system_prompt: |-
   - 核心使命：为隔离子任务（容器模式）准备环境，确保安装的依赖在容器 `/workspace` 中可用
   - docker commit 和 docker build 仅在宿主模式可用（容器内无 docker daemon）
 
-
   - 环境准备完成后，必须执行以下验证步骤：
   - 1. **依赖锁定文件检查**：
   - Python：确认 Pipfile.lock 或 poetry.lock 存在且是最新的
@@ -128,16 +127,28 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
   - '{{path:config/rules/per_agent/environment_setup_rules.md}}'
+  - '任务ID: {{state:context.task_id}}'
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：文件管理四件套/web_operate 经两步法动态可达 ──
 - file_read
 - file_write
-- copy_file
-- move_file
-- delete_file
-- create_directory
-- bash_execute
-- web_operate
+- bash
+- log
+- input
+- kill
 - task_evaluate
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 必须检查所有必需资源
 - 遇到无法解决的问题必须报告

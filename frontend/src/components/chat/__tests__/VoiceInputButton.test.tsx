@@ -9,7 +9,7 @@
  * 打桩边界：仅图标聚合器（@/assets/icons，纯展示 glyph，以 testid 区分图标身份）。
  */
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VoiceInputButton } from '../VoiceInputButton'
 import type { VoiceInputError } from '@/types/voiceInput'
 
@@ -185,5 +185,70 @@ describe('VoiceInputButton 交互与类名', () => {
   it('自定义 className 合入按钮类名', () => {
     render(<VoiceInputButton className="my-extra-class" />)
     expect(button().className).toContain('my-extra-class')
+  })
+})
+
+describe('VoiceInputButton 触屏按住说话（pointerType 分流）', () => {
+  // jsdom 无指针捕获 API（真实浏览器能力，DOM 壳缺失——同 setup.ts polyfill 惯例）：
+  // 按压路径第 98 行调用 currentTarget.setPointerCapture，缺失即 TypeError。
+  const originalCapture = Element.prototype.setPointerCapture
+  beforeAll(() => {
+    Element.prototype.setPointerCapture = vi.fn()
+  })
+  afterAll(() => {
+    Element.prototype.setPointerCapture = originalCapture
+  })
+
+  it('触屏按下开录、松手收停；松手后的合成 click 被吞，之后独立 click 正常触发', () => {
+    const onPressStart = vi.fn()
+    const onPressEnd = vi.fn()
+    const onClick = vi.fn()
+    render(
+      <VoiceInputButton onPressStart={onPressStart} onPressEnd={onPressEnd} onClick={onClick} />,
+    )
+
+    fireEvent.pointerDown(button(), { pointerType: 'touch', pointerId: 7 })
+    expect(onPressStart).toHaveBeenCalledTimes(1)
+
+    fireEvent.pointerUp(button(), { pointerType: 'touch', pointerId: 7 })
+    expect(onPressEnd).toHaveBeenCalledTimes(1)
+
+    // 触屏松手跟发的合成 click：suppressClick 哨兵吞掉，不二次切换
+    fireEvent.click(button())
+    expect(onClick).not.toHaveBeenCalled()
+
+    // 哨兵一次性：之后的独立鼠标 click 正常走 onClick
+    fireEvent.click(button())
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('触屏按压被打断（pointercancel）同样收停转写', () => {
+    const onPressStart = vi.fn()
+    const onPressEnd = vi.fn()
+    render(<VoiceInputButton onPressStart={onPressStart} onPressEnd={onPressEnd} />)
+    fireEvent.pointerDown(button(), { pointerType: 'touch', pointerId: 3 })
+    fireEvent.pointerCancel(button(), { pointerType: 'touch', pointerId: 3 })
+    expect(onPressEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('鼠标 pointerdown 不走按压路径：不开录，click 正常点按切换', () => {
+    const onPressStart = vi.fn()
+    const onClick = vi.fn()
+    render(<VoiceInputButton onPressStart={onPressStart} onClick={onClick} />)
+    fireEvent.pointerDown(button(), { pointerType: 'mouse', pointerId: 1 })
+    expect(onPressStart).not.toHaveBeenCalled()
+    fireEvent.click(button())
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    { name: 'recording 态按压被拒', props: { state: 'recording' as const } },
+    { name: 'transcribing 态按压被拒', props: { state: 'transcribing' as const } },
+    { name: 'disabled 按压被拒', props: { disabled: true } },
+  ])('$name：onPressStart 不触发', ({ props }) => {
+    const onPressStart = vi.fn()
+    render(<VoiceInputButton {...props} onPressStart={onPressStart} />)
+    fireEvent.pointerDown(button(), { pointerType: 'touch', pointerId: 9 })
+    expect(onPressStart).not.toHaveBeenCalled()
   })
 })

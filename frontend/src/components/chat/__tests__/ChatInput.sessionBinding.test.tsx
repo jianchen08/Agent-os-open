@@ -80,7 +80,7 @@ describe('会话身份绑定指示条', () => {
     )
   })
 
-  it('本地存储不可用：退出报显式错误，不静默假退出', async () => {
+  it('本地存储不可用：退出报显式错误，不静默假退出（P1-6 修订：折叠态显一行摘要，全文经「详情」展开可达）', async () => {
     binder.readSessionAgentBinding.mockReturnValue({ name: '研究员' })
     binder.clearSessionAgentBinding.mockImplementation(() => {
       throw new Error('quota exceeded')
@@ -88,8 +88,14 @@ describe('会话身份绑定指示条', () => {
     renderInput()
     await screen.findByTestId('session-agent-indicator')
     fireEvent.click(screen.getByRole('button', { name: '退出会话身份绑定' }))
+    // 折叠态：操作点显式报错（摘要短语），不静默
     await waitFor(() =>
-      expect(screen.getByText(/退出会话身份绑定失败：quota exceeded/)).toBeInTheDocument(),
+      expect(screen.getByText(/退出会话身份绑定失败/)).toBeInTheDocument(),
+    )
+    // 全文可达：「详情」展开显原始全文（含 quota exceeded 根因）
+    fireEvent.click(screen.getByTestId('input-error-expand'))
+    expect(screen.getByTestId('input-error-full')).toHaveTextContent(
+      '退出会话身份绑定失败：quota exceeded',
     )
   })
 })

@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -58,6 +60,43 @@ def parse_mode_agent_key(key: str) -> tuple[str, str] | None:
     if matched is None:
         return None
     return matched.group(1), matched.group(2)
+
+
+def primary_mode_tag(value: Any) -> str:
+    """模式标签集主标签：末元素（最新激活优先）；字符串旧形态兼容。
+
+    与前端 modeOptions.primaryModeTag / mode_material.resolve_mode 同口径；
+    无键/空集/形态不符 → 空串（零激活语义，调用方回退）。
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        for item in reversed(value):
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    return ""
+
+
+def resolve_active_mode(state: Mapping[str, Any]) -> str:
+    """当前激活模式（工具/技能按模式收窄的单点解析）。
+
+    优先序（与 mode_material_inject 激活判定同式）：显式
+    ``state["execution_context"]["mode"]`` 标签集主标签 > ``state["mode"]``
+    观测回写键 > ``state["agent.id"]`` 键 ``mode_X/<stem>`` 派生（包目录存在
+    才派生，防凭空键伪造）。全落空 → 空串（调用方回退全量/零注入）。
+    """
+    ec = state.get("execution_context")
+    if isinstance(ec, Mapping):
+        tag = primary_mode_tag(ec.get("mode"))
+        if tag:
+            return tag
+    observed = primary_mode_tag(state.get("mode"))
+    if observed:
+        return observed
+    parsed = parse_mode_agent_key(str(state.get("agent.id") or ""))
+    if parsed is not None and find_mode_package_dir(parsed[0]) is not None:
+        return parsed[0]
+    return ""
 
 
 def is_skill_name(name: str) -> bool:
@@ -269,6 +308,48 @@ def find_mode_package_dir(mode: str) -> Path | None:
         if (candidate / "plugin.json").is_file():
             return candidate
     return None
+
+
+def collect_mode_inject_tool_ids(mode: str) -> dict[str, str]:
+    """读指定模式包 ``mode.yaml`` 的 ``inject_tool_ids``（借外部插件工具的声明面）。
+
+    与 ``collect_mode_tool_ids`` 的分工：
+    - ``collect_mode_tool_ids`` = 各包 ``capabilities.tools`` 并集（仅
+      ``inject_tools: true`` 的包；消费者是**非任务管道**的模式工具面）；
+    - 本函数 = **当前激活模式**显式借用的外部工具 id（工具由别的插件注册，
+      故不进本包 plugin.json，避免 G2 声明↔实现比对误判），任务管道也并入。
+
+    形态闸：``mode`` 过 MODE_ID_RE；列表条目过 ``_TOOL_ID_RE``；非法条目
+    warning 后零贡献。返回 ``{tool_id: 包目录名}``；未声明/包未命中 = {}。
+    """
+    if not isinstance(mode, str) or MODE_ID_RE.match(mode) is None:
+        return {}
+    pkg = find_mode_package_dir(mode)
+    if pkg is None:
+        return {}
+    try:
+        decl = yaml.safe_load((pkg / "mode.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning(
+            "[mode_keys] mode.yaml 不可读，inject_tool_ids 零贡献 | pkg=%s | err=%s",
+            pkg.name,
+            exc,
+        )
+        return {}
+    declared = decl.get("inject_tool_ids") if isinstance(decl, dict) else None
+    if not isinstance(declared, list):
+        return {}
+    collected: dict[str, str] = {}
+    for name in declared:
+        if isinstance(name, str) and _TOOL_ID_RE.match(name) is not None:
+            collected[name] = pkg.name
+        else:
+            logger.warning(
+                "[mode_keys] inject_tool_ids 形态非法条目跳过（零贡献）| pkg=%s | name=%r",
+                pkg.name,
+                name,
+            )
+    return collected
 
 
 def find_mode_agent_yaml(key: str) -> Path | None:

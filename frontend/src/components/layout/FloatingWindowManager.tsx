@@ -6,6 +6,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { renderPageContent } from '@/components/schema/PageRenderer'
+import { useAndroidBackCloser } from '@/hooks/useAndroidBackCloser'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { isDragReleased, suppressEmbeddedPointerEvents } from '@/utils/dragGuard'
@@ -100,6 +101,16 @@ export function FloatingWindowManager({
   } | null>(null)
   /** 当前拖拽的 document 监听清理函数（mouseUp 移除；卸载兜底移除） */
   const dragCleanupRef = useRef<(() => void) | null>(null)
+
+  // Android back 优先关浮窗（P1-8）：有浮窗在挂时注册关闭器，back 一按关掉
+  // 栈顶（z-index 最高）浮窗并消费该按；无浮窗零注册（back 走壳侧既有语义）
+  const topWindowId = windows.length > 0
+    ? windows.reduce((top, w) => ((w.zIndex ?? 0) >= (top.zIndex ?? 0) ? w : top)).id
+    : null
+  useAndroidBackCloser(topWindowId !== null, () => {
+    if (topWindowId === null) return
+    onCloseWindow(topWindowId)
+  })
 
   // 拖拽监听挂在 document 上：组件在拖拽中卸载（如窗口被关闭）时必须移除，
   // 否则泄漏的全局 mousemove 持续驱动 onUpdateWindow

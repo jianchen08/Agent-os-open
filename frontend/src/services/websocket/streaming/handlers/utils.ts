@@ -1,6 +1,10 @@
 /** 流式事件处理器公共工具函数 统一抽取的消息 ID 提取、流式占位符创建、Streaming 状态管理， */
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
+import { clearRunStartedAt, noteRunStartedAt } from '@/utils/streamRunAnchor'
+import type { Message } from '@/types/models'
 
 /** 合并本地流式累积的 parts 与后端 stream_end/new_message 下发的 serverParts。
  *
@@ -198,10 +202,37 @@ export function extractMessageId(eventData: any): string | null {
 const STOP_REQUEST_TTL_MS = 15_000
 const stopRequestedByPipeline = new Map<string, { messageId: string; at: number }>()
 
+// 停止受理 TTL 翻转定时器（pipelineId → timer）：点停后护栏 TTL 过期仍无终态
+// 事件时，解除 store 的 stoppingByPipeline——生成观感回落 runs 真值（run 仍在
+// 跑 → 转圈恢复，停止未生效可辨别、可再点），不静默装作已停。终态收口
+// （clearStopRequested）/新一轮 stream_start/重按停止（重置窗口）均撤销定时器。
+const stopUiTtlTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function cancelStopUiTtl(pipelineId: string): void {
+  const timer = stopUiTtlTimers.get(pipelineId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    stopUiTtlTimers.delete(pipelineId)
+  }
+}
+
 /** 用户请求停止：登记护栏（router.handleStopGenerate 调用）。 */
 export function markStopRequested(pipelineId: string, messageId: string | null): void {
   if (!pipelineId) return
   stopRequestedByPipeline.set(pipelineId, { messageId: messageId || '', at: Date.now() })
+  // 重按停止重置 TTL 窗口：先撤旧定时器再挂新的
+  cancelStopUiTtl(pipelineId)
+  stopUiTtlTimers.set(
+    pipelineId,
+    setTimeout(() => {
+      stopUiTtlTimers.delete(pipelineId)
+      // 2026-11-19 用户裁定（停止意图粘性）：TTL 到期不再复位生成观感——复位会在
+      // runStatus 仍是旧值 'running'（30s 兜底轮询）时造成「点停后又变回执行中」的
+      // 回跳。改为触发一次对账取数，由终态收口（run 变 cancelled/completed/failed，
+      // 见 ChatContainer 收口 effect）清除停止意图；停止未生效时用户可再点（重按重置）。
+      void queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns })
+    }, STOP_REQUEST_TTL_MS),
+  )
 }
 
 /** 查询护栏：该消息的迟到事件是否应压制生成态重点亮。TTL 过期自动失效。 */
@@ -223,12 +254,14 @@ export function noteFreshStreamStart(pipelineId: string, messageId: string): voi
   if (!mark) return
   if (!mark.messageId || mark.messageId !== messageId) {
     stopRequestedByPipeline.delete(pipelineId)
+    cancelStopUiTtl(pipelineId)
   }
 }
 
 /** run 收尾（pipeline_round_finished / stream_error）：护栏使命完成，清除。 */
 export function clearStopRequested(pipelineId: string): void {
   stopRequestedByPipeline.delete(pipelineId)
+  cancelStopUiTtl(pipelineId)
 }
 
 /** 启动管道流式传输（带停止护栏检查：护栏命中则只落数据不点亮生成态）。 */
@@ -236,9 +269,14 @@ export function startPipelineStreaming(
   pipelineId: string,
   messageId: string,
 ): void {
+  // run 执行起点登记（2026-11-07 用户纠偏）：内核 未流式→流式 的跳变点即 run
+  // 真开始——重新生成/回退/编辑重发不产生新 user 消息，流式计时锚点靠本登记
+  // 归位到重跑那一刻；跨轮 stream_start（含空轮占位）时已流式，不覆写。
+  const isRunStart = !pipelineStore.getState().isStreaming(pipelineId)
   if (!isStopRequested(pipelineId, messageId)) {
     pipelineStore.getState().startStreaming(pipelineId, messageId)
   }
+  if (isRunStart) noteRunStartedAt(pipelineId, Date.now())
 
   // 轮次级安全兜底：单个消息的流式若超过 90s 仍未结束（说明 stream_end/new_message
   // 事件漏接或与 pipeline 未对齐），强制收尾，避免 UI 永久卡在
@@ -303,11 +341,30 @@ export function sweepEmptyStreamingPlaceholders(pipelineId: string): void {
 // 不再为 store 消息伪造 sequence——事件未携带权威 seq 时挂空（compareMessages
 // 回落 timestamp 排序），权威值到达后由对账纠正。
 
+/** 权威槽位补落：消息已存在且本地 seq 缺失时写入事件携带的权威值；
+ *  已有值（任何来源）一律不覆写——迟到/乱序事件的 seq 不得重排已落位消息。
+ *
+ *  事件乱序（工具卡/正文事件先于 stream_start 建容器）下容器先出生、权威
+ *  seq 后到：旧实现「同 id 已存在 → 提前返回」把 seq 丢在地上，容器直到
+ *  stream_end/new_message 才可能补上；中断/事件丢失时永久缺 seq，按排序键
+ *  `Number.MAX_SAFE_INTEGER` 钉在消息流末尾（用户实证症状）。 */
+export function backfillAuthoritativeSequence(
+  pipelineId: string,
+  messageId: string,
+  sequence?: number,
+): void {
+  if (sequence == null || !Number.isFinite(sequence) || sequence <= 0) return
+  const store = pipelineStore.getState()
+  const msg = store.getMessages(pipelineId).find((m) => m.id === messageId)
+  if (!msg || msg.sequence != null) return
+  store.updateMessage(pipelineId, messageId, { sequence } as Partial<Message>)
+}
+
 /** 确保流式占位符消息存在 精确 ID 生命周期：占位气泡以后端
  * 真实 message_id 为键（stream_start 事件携带；发送瞬间的反馈由 pending 区承担，
  * 不再在主 store 建 placeholder_ 前缀气泡）。同 id 已存在（chunk 先于 start 自动
- * 建占位 / 事件重放）→ 原地保留，绝不改写别的消息的 id（旧"并入前一条改写 ID"
- * 是迟到事件劫持当前气泡的空气泡根因，已废除）。 */
+ * 建占位 / 事件重放）→ 原地保留并补落权威 seq，绝不改写别的消息的 id（旧"并入
+ * 前一条改写 ID"是迟到事件劫持当前气泡的空气泡根因，已废除）。 */
 export function ensureStreamingPlaceholder(
   pipelineId: string,
   messageId: string,
@@ -318,9 +375,16 @@ export function ensureStreamingPlaceholder(
 
   const store = pipelineStore.getState()
   const existing = store.getMessages(pipelineId)
+  const placeholderSeq = backendSequence != null && backendSequence > 0
+    ? backendSequence
+    : undefined
 
-  // 精确匹配：同 id 消息已存在（含已积累的流式内容）→ 原地保留
-  if (existing.some((m) => m.id === messageId)) return
+  // 精确匹配：同 id 消息已存在（含已积累的流式内容）→ 原地保留；权威 seq
+  // 若本地还缺则补落（事件先建容器、stream_start 后到的乱序窗口）。
+  if (existing.some((m) => m.id === messageId)) {
+    backfillAuthoritativeSequence(pipelineId, messageId, placeholderSeq)
+    return
+  }
 
   // orphan 清理：本轮 start 之前残留的 streaming assistant（上一轮 stream_end
   // 丢失/断线遗留）。有完整内容或未解析 tool_call → completed 保留；完全无内容
@@ -363,13 +427,9 @@ export function ensureStreamingPlaceholder(
   }
 
   // 前一条不是本消息（正常路径：前一条是 user/已完成的 assistant）→ 新建占位。
-  // sequence：stream_start 事件不携带消息 seq（后端在引擎执行时才分配），
-  // 挂 undefined（排序落到末尾按 timestamp），stream_end 的 final_sequence /
+  // sequence 只认事件携带的权威槽位（stream_start 入口占位行 / 工具事件的宿主
+  // 槽位）；旧内核/降级世界无 seq → 挂空，stream_end 的 final_sequence /
   // new_message 的权威 seq 到达后由对账纠正——绝不本地拼 localMax+1 冒充权威值。
-  const placeholderSeq = backendSequence != null && backendSequence > 0
-    ? backendSequence
-    : undefined
-
   store.addMessage(pipelineId, {
     id: messageId,
     sessionId: threadId || '',
@@ -383,6 +443,37 @@ export function ensureStreamingPlaceholder(
   } as any)
 }
 
+/** 结果侧宿主兜底：tool_result 先于一切占位到达（stream_start/tool_start 双丢）
+ *  时，工具结果不得静默丢弃——按事件携带的权威槽位补建宿主消息，卡落到
+ *  结果事件归属的轮次坐标上。不点亮生成态：结果事件不是 run 活跃信号，
+ *  且 run 已终止时不得因迟到结果复活「思考中」。
+ *
+ *  状态：run 仍在流式 → streaming（后续 new_message/stream_end 正常收尾）；
+ *  run 已终止 → interrupted（半截轮的中断语义，与停止收口一致）。 */
+export function ensureMessageSlot(
+  pipelineId: string,
+  messageId: string,
+  threadId?: string,
+  sequence?: number,
+): void {
+  const store = pipelineStore.getState()
+  if (store.getMessages(pipelineId).some((m) => m.id === messageId)) {
+    backfillAuthoritativeSequence(pipelineId, messageId, sequence)
+    return
+  }
+  store.addMessage(pipelineId, {
+    id: messageId,
+    sessionId: threadId || '',
+    role: 'assistant',
+    content: '',
+    timestamp: new Date().toISOString(),
+    parentId: null,
+    sequence: sequence != null && sequence > 0 ? sequence : undefined,
+    status: store.isStreaming(pipelineId) ? 'streaming' : 'interrupted',
+    _lastUpdated: Date.now(),
+  } as any)
+}
+
 /** 从事件数据中提取 threadId 统一处理 `eventData.data?._threadId || eventData._threadId` 模式。 */
 export function extractThreadId(eventData: any): string | undefined {
   return eventData.data?._threadId || eventData._threadId
@@ -392,5 +483,14 @@ export function extractThreadId(eventData: any): string | undefined {
  *  只清事件明确归属的管道。 */
 export function terminatePipeline(pipelineId: string): void {
   stopPipelineStreaming(pipelineId)
+  // run 级计时锚点随终态清（残值自愈：下一次 run 开始覆盖写，期间被消费也只
+  // 回落 user 消息锚点语义）
+  clearRunStartedAt(pipelineId)
+
+  // 2026-11-19 用户报「输出完后执行中要等好几秒才解除」：生成态判据里的
+  // runStatus 来自 usePipelineRunsQuery 的 30s 兜底轮询，流结束事件不清缓存，
+  // 界面只能等下一次 refetch 才切完成态。此处由终止事件直接驱动失效，立即重新
+  // 取数（本地一次往返，远小于 1s），不再依赖轮询节奏。
+  void queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns })
 }
 

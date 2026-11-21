@@ -738,3 +738,146 @@ class TestReadCssFileAndShadcnBridge:
         )
         assert "--region-sidebar-fg" in variables
         assert "--region-sidebar-muted-fg" in variables
+
+
+# ── 宿主依赖扫描 / 渲染器聚合 / 槽位映射（2026-11-09 翻译面接通）──────────
+
+
+class TestHostImportsAndRenderers:
+    """插件引用的宿主包扫描 + toolview 渲染器聚合 + 真实插件槽位映射。"""
+
+    def _pkg(self, tmp_path: Path, *, manifest: dict[str, Any] | None = None,
+             files: dict[str, str] | None = None) -> Path:
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "package.json").write_text(
+            json.dumps(manifest or {"name": "x", "version": "1.0.0"}), encoding="utf-8")
+        for rel, text in (files or {}).items():
+            path = pkg / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return pkg
+
+    def test_scan_host_imports_collects_code_and_manifest(self, tmp_path: Path) -> None:
+        pkg = self._pkg(tmp_path, manifest={
+            "name": "x", "version": "1.0.0",
+            "dependencies": {"@deepseek-ai/dsh-settings": "^1", "left-pad": "^1"},
+            "peerDependencies": {"@deepseek-ai/dsh-typert-registry": "*"},
+        }, files={
+            "lib/index.js": (
+                "import { a } from '@deepseek-ai/dsh-tools';\n"
+                "const b = require('@deepseek-ai/dsh-tools');\n"
+                "import('@deepseek-ai/dsh-credentials').then(() => {});\n"),
+            "lib/nested/deep.mjs": "import x from '@deepseek-ai/dsh-fs-local';\n",
+        })
+        assert tr.scan_host_imports(pkg) == [
+            "@deepseek-ai/dsh-credentials",
+            "@deepseek-ai/dsh-fs-local",
+            "@deepseek-ai/dsh-settings",
+            "@deepseek-ai/dsh-tools",
+            "@deepseek-ai/dsh-typert-registry",
+        ]
+
+    def test_scan_host_imports_skips_node_modules_and_bad_manifest(self, tmp_path: Path) -> None:
+        pkg = self._pkg(tmp_path, manifest={"name": "x", "version": "1.0.0"}, files={
+            "lib/index.js": "import a from '@deepseek-ai/dsh-tools';\n",
+            "node_modules/@deepseek-ai/nested/index.mjs": "import a from '@deepseek-ai/dsh-should-not-appear';\n",
+        })
+        (pkg / "package.json").write_text("{broken", encoding="utf-8")  # 清单坏 → 只用代码扫描
+        assert tr.scan_host_imports(pkg) == ["@deepseek-ai/dsh-tools"]
+
+    def test_scan_host_imports_empty_package(self, tmp_path: Path) -> None:
+        assert tr.scan_host_imports(self._pkg(tmp_path)) == []
+
+    def test_collect_installed_renderers_dedupes_filters_and_isolates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manifests: dict[str, Any] = {
+            "a": {"client": {"renderers": [
+                {"tool": "read", "card": "read"},
+                {"tool": "bad-card", "card": "not-a-render-card"},
+                {"tool": "", "card": "read"},
+            ]}},
+            "b": {"client": {"renderers": [
+                {"tool": "read", "card": "read"},
+                {"tool": "bash", "card": "terminal"},
+            ]}},
+        }
+
+        def fake_translate(directory: Any) -> dict[str, Any]:
+            value = manifests.get(Path(directory).name)
+            if value is None:
+                raise ValueError("broken package")
+            return value
+
+        monkeypatch.setattr(tr, "translate_package", fake_translate)
+        out = tr.collect_installed_renderers(
+            [tmp_path / "a", tmp_path / "b", tmp_path / "missing"])
+        assert out == [
+            {"tool": "bash", "card": "terminal"},
+            {"tool": "read", "card": "read"},
+        ]
+
+    @pytest.mark.parametrize(("slot", "target"), [
+        ("settings.section", "settingsPanels"),
+        ("sidebar.right.pane.tab", "workspaceTabs"),
+        ("conversation.session.header", "chatMessages"),
+        ("conversation.session.header.actions", "chatActions"),
+        ("sidebar.footer.action", "statusBarItems"),
+    ])
+    def test_real_plugin_slots_map(self, slot: str, target: str) -> None:
+        assert tr.map_dsh_slot(slot)["lingxi_slot"] == target
+        assert slot in tr.DSH_KNOWN_SLOT_NAMES
+
+    def test_translate_package_maps_real_plugin_slot(self, tmp_path: Path) -> None:
+        pkg = self._pkg(tmp_path, files={
+            "lib/index.js": "slots.register({ name: 'settings.section', id: 'x' }, Panel);\n",
+        })
+        manifest = tr.translate_package(pkg)
+        assert manifest["client"]["slots"]["settings.section"]["lingxi_slot"] == "settingsPanels"
+        assert tr.unmapped_slots(manifest["client"]["slots"]) == []
+
+    def test_unmapped_slots_reports_direct_only(self) -> None:
+        slots = {
+            "settings.section": {"lingxi_slot": "settingsPanels"},
+            "conversation.trajectory": {"lingxi_slot": "direct"},
+        }
+        assert tr.unmapped_slots(slots) == [{
+            "slot": "conversation.trajectory",
+            "reason": "灵汐无对应挂载位（direct 兜底，未强行归并）",
+        }]
+        assert tr.unmapped_slots({}) == []
+
+    def test_scan_host_imports_read_failure_is_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pkg = self._pkg(tmp_path, files={
+            "lib/index.js": "import a from '@deepseek-ai/dsh-tools';\n",
+            "lib/other.js": "import b from '@deepseek-ai/dsh-settings';\n",
+        })
+        _fail_read_text_for(monkeypatch, pkg / "lib" / "other.js")
+        assert tr.scan_host_imports(pkg) == ["@deepseek-ai/dsh-tools"]
+
+    def test_translate_package_resolves_slot_name_constants(self, tmp_path: Path) -> None:
+        """seat 注册形：name 是常量标识符 + 三元多 name（describe-image 实测形）。"""
+        pkg = self._pkg(tmp_path, files={"lib/client.js": (
+            "const OFFICIAL = 'settings.plugin.item';\n"
+            "const FAMILY = 'web-ui.plugin.item';\n"
+            "slots.register(target === 'web-ui.plugin.item' ? { name: FAMILY } "
+            ": { name: OFFICIAL }, C);\n")})
+        manifest = tr.translate_package(pkg)
+        assert manifest["client"]["slots"]["settings.plugin.item"]["lingxi_slot"] == "settingsPanels"
+        assert "visual" in manifest["kinds"]
+        assert [u["slot"] for u in tr.unmapped_slots(manifest["client"]["slots"])] == [
+            "web-ui.plugin.item"]
+
+    def test_slot_names_in_unbalanced_call_keeps_prefix(self) -> None:
+        """括号不闭合的截断源码：取到文本末尾，不抛错（失败隔离）。"""
+        assert tr.slot_names_in("slots.register({ name: 'settings.section'") == {
+            "settings.section"}
+
+    def test_params_already_json_schema_passthrough(self) -> None:
+        """社区插件直接写 JSON Schema（不走 DSH DSL）→ 原样透传（不二次包裹）。"""
+        schema = {"type": "object", "properties": {"url": {"type": "string"}},
+                  "required": ["url"]}
+        assert tr.dsh_params_to_json_schema(schema) == schema

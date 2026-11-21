@@ -14,6 +14,9 @@ export interface Agent {
   configId?: string
   /** Agent 名称 */
   name: string
+  /** Agent 图标配置（config/agents/**\/*.yaml 的 `icon`：emoji 优先，其次内置
+   *  图标名；未配置由前端缺省图标兜底，不留空） */
+  icon?: string
   /** Agent 描述 */
   description: string
   /** Agent 类型: system | code | doc | test | debug | review */

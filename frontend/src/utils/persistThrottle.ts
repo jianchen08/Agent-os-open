@@ -5,6 +5,9 @@
  * （中间态会被后续覆盖）。本工具把窗口内的多次写入合并为最后一次，
  * trailing 定时器统一落盘；持续高频时按 maxWait 强制落盘避免无限推迟。
  *
+ * 缓冲按 name 分槽：同一节流器实例服务多个 name 时，不同 name 的挂起写入
+ * 互不覆盖（单槽缓冲会让后到的 name 静默丢掉前者的写入，2026-11-12 修复）。
+ *
  * 每个调用方通过 createPersistThrottle() 取得独立实例，
  * 状态互不干扰（不同 store / 不同存储介质各自节流）。
  */
@@ -16,11 +19,11 @@ const PERSIST_THROTTLE_MS = 1000
 const PERSIST_MAX_WAIT_MS = 5000
 
 /** 实际落盘动作：由调用方注入（同步或异步均可，错误自行处理） */
-export type PersistWriter = (name: string, value: string) => void | Promise<void>
+export type PersistWriter<T> = (name: string, value: T) => void | Promise<void>
 
-interface ThrottleState {
-  /** 缓冲的最新一次待写入（窗口内多次 set 只保留最后一次） */
-  buffer: { name: string; value: string }
+interface ThrottleState<T> {
+  /** 各 name 的最新待写值（窗口内多次 set 只保留最后一次；按 name 分槽互不覆盖） */
+  buffers: Map<string, T>
   /** trailing 定时器句柄 */
   timer: ReturnType<typeof setTimeout> | null
   /** 当前节流窗口起点（首次进入窗口的时刻） */
@@ -35,31 +38,31 @@ interface ThrottleState {
  *   throttle.schedule('pipeline-messages', json)  // 高频调用只触发一次落盘
  *   throttle.cancel()                              // 清理时取消挂起写入
  */
-export function createPersistThrottle(write: PersistWriter) {
-  const state: ThrottleState = {
-    buffer: { name: '', value: '' },
+export function createPersistThrottle<T = string>(write: PersistWriter<T>) {
+  const state: ThrottleState<T> = {
+    buffers: new Map(),
     timer: null,
     windowStartedAt: 0,
   }
 
-  /** 取出缓冲的最后一次写入执行落盘 */
+  /** 取出全部挂起写入执行落盘 */
   function flush(): void {
     state.timer = null
     state.windowStartedAt = 0
-    const { name, value } = state.buffer
-    state.buffer.name = ''
-    state.buffer.value = ''
-    if (!name) return
-    void write(name, value)
+    if (state.buffers.size === 0) return
+    const pending = [...state.buffers.entries()]
+    state.buffers.clear()
+    for (const [name, value] of pending) {
+      void write(name, value)
+    }
   }
 
   /** 调度一次节流落盘。
    * - 窗口内已有挂起写入：推迟到当前窗口结束（合并）；
    *   若已达 maxWait 上限则强制落盘（防止流式期间永远推迟）。
    * - 无挂起写入：开启新窗口，trailing 定时器到点落盘。 */
-  function schedule(name: string, value: string): void {
-    state.buffer.name = name
-    state.buffer.value = value
+  function schedule(name: string, value: T): void {
+    state.buffers.set(name, value)
     if (state.timer !== null) {
       if (Date.now() - state.windowStartedAt >= PERSIST_MAX_WAIT_MS) {
         clearTimeout(state.timer)
@@ -78,8 +81,7 @@ export function createPersistThrottle(write: PersistWriter) {
       state.timer = null
     }
     state.windowStartedAt = 0
-    state.buffer.name = ''
-    state.buffer.value = ''
+    state.buffers.clear()
   }
 
   return { schedule, cancel, flush }

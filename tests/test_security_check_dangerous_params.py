@@ -38,7 +38,7 @@ def _make_plugin() -> Any:
     p._dangerous_ops_by_tool = {
         "file_read": ["read:/etc/", "read:/sys/", "read:C:\\Windows\\"],
         "file_write": ["write:/etc/", "write:/sys/", "write:C:\\Windows\\", "delete_lines:"],
-        "bash_execute": ["rm -rf", "curl"],
+        "bash": ["rm -rf", "curl"],
     }
     return p
 
@@ -80,8 +80,8 @@ class TestTrack2ParamMatching:
 
     def test_命令子串命中(self) -> None:
         p = _make_plugin()
-        assert _is_dangerous(p, "bash_execute", {"command": "rm -rf /tmp/a"}) is True
-        assert _is_dangerous(p, "bash_execute", {"command": "ls -la"}) is False
+        assert _is_dangerous(p, "bash", {"command": "rm -rf /tmp/a"}) is True
+        assert _is_dangerous(p, "bash", {"command": "ls -la"}) is False
 
     def test_无参数不命中(self) -> None:
         p = _make_plugin()

@@ -149,6 +149,37 @@ async def multimodal_supported(model_name: str) -> dict[str, Any]:
 
 
 @plugin.tool(
+    name="multimodal.split_image",
+    schema={
+        "type": "object",
+        "properties": {
+            "base64_data": {"type": "string", "description": "Base64编码的图像内容"},
+            "mime_type": {"type": "string", "description": "图像 MIME 类型（如 image/png）"},
+            "max_pixels": {
+                "type": "integer",
+                "description": "当前模型视觉输入不缩放总像素上限（来自 llm.yaml multimodal.max_pixels）",
+            },
+        },
+        "required": ["base64_data", "mime_type", "max_pixels"],
+    },
+    description=(
+        "图像原生分辨率网格切分（R20/R21 总像素口径）：长宽各自 ceil(轴长/sqrt(max_pixels))"
+        " 等分，零缩放，分块总像素 ≤ 上限不触发模型 API 端缩放；返回原图+分块元数据与拼合标注"
+    ),
+)
+async def multimodal_split_image(
+    base64_data: str, mime_type: str, max_pixels: int
+) -> dict[str, Any]:
+    """图像原生分辨率网格切分（tiling.py 纯函数装配；错误以 error 键显式返回）。"""
+    from tiling import split_image_tiling  # noqa: PLC0415
+
+    try:
+        return split_image_tiling(base64_data, mime_type, int(max_pixels))
+    except ValueError as exc:
+        return {"error": str(exc), "tiled": False}
+
+
+@plugin.tool(
     name="multimodal.transcribe",
     schema={
         "type": "object",

@@ -7,6 +7,7 @@
  * 本机栈永不拉起=127.0.0.1 拒连）；非回环自定义基址 → remote；无壳桩不调用。
  */
 import { describe, expect, it, vi } from 'vitest'
+import { applyShellBackendMode, reconcileShellBackendMode } from '@/services/shellBackendMode'
 
 const host = vi.hoisted(() => ({ plugin: null as Record<string, unknown> | null }))
 
@@ -30,7 +31,6 @@ vi.mock('@/services/connectionProbe', () => ({
   },
 }))
 
-import { applyShellBackendMode, reconcileShellBackendMode } from '@/services/shellBackendMode'
 
 describe('applyShellBackendMode 后端模式上报', () => {
   it('壳无 KernelHost 桩（浏览器/桌面）→ 静默跳过', () => {
@@ -68,7 +68,7 @@ describe('reconcileShellBackendMode 启动期模式归位', () => {
   })
 
   it('非回环自定义基址 → 归位 remote（栈生命周期与目标一致）', () => {
-    apiBase.serverBaseUrl = 'http://162.14.69.153'
+    apiBase.serverBaseUrl = 'http://203.0.113.153'
     const setBackendMode = vi.fn().mockResolvedValue(undefined)
     host.plugin = { setBackendMode }
     reconcileShellBackendMode()

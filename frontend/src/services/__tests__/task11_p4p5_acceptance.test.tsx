@@ -19,10 +19,10 @@ import { CommandPalette, ContextMenuItems } from '@/components/extension/Extensi
 import { SlotOverlayHost } from '@/components/slots/SlotOverlayHost'
 import { CommandDispatcher } from '@/services/schema/commandDispatcher'
 import { ContributionRegistry, contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
-import { slotRegistry } from '@/services/slots/slotRegistry'
 import { ShortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
 
 /**

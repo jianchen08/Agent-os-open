@@ -1,5 +1,9 @@
 # Multi-device path tree mount (device branch: VM-0-16-ubuntu).
-# Scheduled task LingxiMultiDeviceMount (ONLOGON + manual schtasks /run).
+# Scheduled task LingxiMultiDeviceMount (ONLOGON + 5-minute repetition) calls
+# this script through mount_task_hidden.vbs: wscript (GUI subsystem) hosts a
+# windowless powershell, so the watchdog never flashes a console window. Manual
+# debug runs can invoke this script directly (elevated); MOUNT_TASK_RESULT then
+# prints to that console and failures also land in .zctmp\rclone_reclean_diag.txt.
 # Semantics (user-approved 2026-10-19): all connected devices = one logical device
 # with multiple disks; each remote device = one standalone NAS drive on this machine
 # (drive-letter form, volume name = device name; remote drive-letter layout never
@@ -11,18 +15,56 @@ $ErrorActionPreference = 'Continue'
 $Log = 'D:\myproject\container_e17cc5927dfd\.zctmp\rclone_mount_task.log'
 $Diag = 'D:\myproject\container_e17cc5927dfd\.zctmp\rclone_reclean_diag.txt'
 
-# --- idempotent watchdog entry: live rclone = nothing to do. The task now
-# repeats every 5 minutes (ONLOGON trigger kept); only a dead rclone pays the
-# reclean+remount cost (single-instance rule: repeated kill+remount cycles
-# cause VFS cache data loss). NOTE: the V: drive check CANNOT live here - the
-# task runs elevated and an elevated token sees no network-mode drives (probed
-# 2026-10-22: Get-ChildItem V:\ and Win32_LogicalDisk both empty from
-# elevated), so rclone process liveness is the only elevation-proof health
-# signal; SFTP flakes are rclone's own reconnect domain. ---
+# --- health probe: rclone rc (mount-object level) with process-liveness
+# fallback. rc answers only on mounts started with --rc (mount_launch.vbs adds
+# --rc --rc-addr 127.0.0.1:5572 --rc-no-auth); mounts that predate the flag
+# answer nothing and fall back to the old process check, so ambiguity never
+# kills a live mount. The V: drive check still CANNOT live here - the task runs
+# elevated and an elevated token sees no network-mode drives (probed 2026-10-22:
+# Get-ChildItem V:\ and Win32_LogicalDisk both empty from elevated).
+# Decision table:
+#   rc OK + expected VFS present     -> ALREADY_OK (no touch)
+#   rc OK + VFS missing (mount dead) -> fall through to reclean+remount
+#   rc unreachable                   -> ALREADY_OK (process liveness only)
+#   diskCache.erroredFiles > 0       -> diag trace only, never a kill trigger
+#     (a single errored file would otherwise loop kill+remount forever) ---
+$RcBase = 'http://127.0.0.1:5572'
+$RcState = 'D:\myproject\container_e17cc5927dfd\.zctmp\rclone_rc_health.txt'
+
+function Invoke-RcCall([string]$Method) {
+  Invoke-RestMethod -Uri ($RcBase + '/' + $Method) -Method Post -TimeoutSec 4 -ErrorAction Stop
+}
+
 $rcloneAlive = @(Get-Process rclone -ErrorAction SilentlyContinue).Count -gt 0
 if ($rcloneAlive) {
-  Write-Output 'MOUNT_TASK_RESULT=ALREADY_OK'
-  exit 0
+  $vfses = @()
+  $health = 'RC_DOWN'
+  try {
+    $vfses = @((Invoke-RcCall 'vfs/list').vfses)
+    $health = if ($vfses -match '^VM-0-16-ubuntu:') { 'OK' } else { 'BAD_VFS' }
+  } catch {
+    $health = 'RC_DOWN'
+  }
+  if ($health -eq 'OK') {
+    try {
+      $errored = (Invoke-RcCall 'vfs/stats').diskCache.erroredFiles
+      if ($errored -gt 0) { "rc vfs erroredFiles=$errored (trace only)" | Out-File $Diag -Append -Encoding utf8 }
+    } catch { }
+    [IO.File]::WriteAllText($RcState, 'ok')
+    Write-Output 'MOUNT_TASK_RESULT=ALREADY_OK'
+    exit 0
+  }
+  if ($health -eq 'RC_DOWN') {
+    $prev = if (Test-Path $RcState) { (Get-Content $RcState -Raw).Trim() } else { '' }
+    if ($prev -ne 'rc_down') {
+      "rc unreachable (mount predates --rc, or rc broken); process liveness only" | Out-File $Diag -Append -Encoding utf8
+      [IO.File]::WriteAllText($RcState, 'rc_down')
+    }
+    Write-Output 'MOUNT_TASK_RESULT=ALREADY_OK'
+    exit 0
+  }
+  "rc reports no mounted VFS (vfses=[$($vfses -join ',')]) -> remount" | Out-File $Diag -Append -Encoding utf8
+  [IO.File]::WriteAllText($RcState, 'bad_vfs')
 }
 
 # --- resolve rclone: the packaged app layout has already moved once

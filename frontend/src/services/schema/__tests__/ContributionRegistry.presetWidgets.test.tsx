@@ -11,10 +11,10 @@
 
 import { fireEvent, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ContributionRegistry, contributionRegistry } from '../ContributionRegistry'
 import { WidgetStage } from '@/components/schema/widgets/WidgetStage'
-import { initializeWidgets } from '../registerWidgets'
 import { renderWithProviders } from '@/test/renderWithProviders'
+import { ContributionRegistry, contributionRegistry } from '../ContributionRegistry'
+import { initializeWidgets } from '../registerWidgets'
 
 // 组台集成用例挂载 PluginHostsWidget：mock 外部 API 请求层，数据面非本文件关注点
 vi.mock('@/services/api/pluginHosts', () => ({

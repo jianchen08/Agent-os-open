@@ -10,10 +10,11 @@
  *  - 静态资源：frontend/dist 按 URL path 映射（存在才按文件伺服，防路径穿越）；
  *  - SPA 深链（/p/<pageId>、/login 等无文件对应路径）：回落 index.html，
  *    createBrowserRouter 按 pathname 匹配（与 nginx try_files 同语义）；
- *  - 内核 API（/api、/ext、/media、/uploads）：主进程 net.fetch 回源
+ *  - 内核 API（/api、/ext、/media、/uploads）：主进程回源
  *    http://127.0.0.1:<内核端口>（缺省=打包件默认端口，与 dev 栈 9100 错峰）——同源化后
  *    前端 axios 沿用相对路径，无 CORS、无 CSP connect-src 问题（与 dev 侧
- *    vite server.proxy 拓扑同构）。
+ *    vite server.proxy 拓扑同构）。回源客户端 = Node 侧 fetch（proxyToKernel
+ *    注释载取舍），不经 Chromium 网络栈。
  *    WebSocket（/ws）无法经协议层代理，由前端按打包件形态直连内核
  *    （frontend/src/constants/websocket.ts deriveWsUrl 的 app: 分支）。
  *
@@ -28,6 +29,7 @@ import * as path from "path";
 import { pathToFileURL } from "url";
 
 import { KERNEL_PORT } from "./kernel-manager";
+import type { DiagLineSink } from "./renderer-health";
 
 /** 自定义协议名与宿主（app://bundle 为打包件前端唯一源） */
 export const APP_SCHEME = "app";
@@ -132,7 +134,13 @@ const APP_CSP = [
   "img-src 'self' data: blob:",
   `connect-src 'self' http: https: ws: wss: ${KERNEL_ORIGIN} ${KERNEL_WS_ORIGIN}`,
   "font-src 'self' data:",
-  "frame-src 'self' blob: data:",
+  // frame-src 放行项 = DSH 官方插件页（插件 `dsh_adapter` 的 `dsh_plugin_manager`
+  // 页以跨源 iframe 内嵌该 SPA）。端口由 `plugins/shared/dsh_adapter/web_app.py`
+  // 的 `WEB_PORT_DEFAULT` 固定为 9177——随机端口无法被静态 CSP 精确放行，唯一能
+  // 放行它的写法是 `http://127.0.0.1:*` 通配（把整个回环纳入可嵌面，放宽过大）。
+  // 与 Python 常量的一致性由 `plugins/shared/dsh_adapter/tests/
+  // test_official_ui_csp_origin.py` 对账；dev 侧同款声明见 `frontend/vite.config.ts`。
+  "frame-src 'self' blob: data: http://127.0.0.1:9177 http://localhost:9177",
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'self'",
@@ -241,15 +249,32 @@ async function serveStatic(distRoot: string, url: URL): Promise<Response> {
   );
 }
 
+/**
+ * 内核回源客户端 = Node 侧 fetch（Electron main 的 global fetch 是内置 Node
+ * 的 undici 实现，走 node:http 直连），不用 electron net.fetch（Chromium
+ * 网络栈）。
+ *
+ * 取舍（2026-11-20 装机事故）：用户开启系统代理（ProxyEnable=1 → Clash 系
+ * 127.0.0.1:7993）时，net.fetch 的回环回源请求被 Chromium 代理路径在拨号前
+ * 吞掉（应用全进程零 TCP 拨号，Clash 对回环目标 502），且代理关闭后运行中
+ * 的 Chromium 网络服务不自愈、只能重启应用——app:// 全页面「internal error」
+ * 且操作全灭。undici 不读系统代理（注册表/WPAD/PAC 环境代理均不涉），回环
+ * 回源恒直达内核；流式请求体直传无碍（protocol.handle 传入的 Request 即
+ * main 进程 undici Request，body 为 Node stream/web 流，同 realm）。
+ * 被否方案：session.setProxy({ mode: 'direct' })——作用面是该 session 全部
+ * 流量，DSH 官方插件页（127.0.0.1:9177 跨源 iframe）等外部内容会被误伤；
+ * 本方案只换内核回源一处客户端，零外溢。
+ */
+
 /** 主进程侧回源内核：同源化代理（渲染进程侧无 CORS/预检问题） */
 async function proxyToKernel(request: Request, url: URL): Promise<Response> {
   const target = KERNEL_ORIGIN + url.pathname + url.search;
   const headers = new Headers(request.headers);
-  // 源相关/逐跳头不透传：Host 由 net.fetch 按目标重写，Origin/Referer 属页面源语义
+  // 源相关/逐跳头不透传：Host 由 fetch 客户端按目标重写，Origin/Referer 属页面源语义
   headers.delete("Origin");
   headers.delete("Referer");
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
-  return net.fetch(target, {
+  return fetch(target, {
     method: request.method,
     headers,
     body: hasBody ? request.body : undefined,
@@ -258,11 +283,40 @@ async function proxyToKernel(request: Request, url: URL): Promise<Response> {
   });
 }
 
+/** 诊断错误串长度上限（防超长刷盘/防堆栈类内容整段落盘，message 链足够定位） */
+export const DIAG_ERROR_MAX_CHARS = 300;
+
+/**
+ * 底层错误摘要（单行，观测面用）：沿 Error cause 链逐层取 message——undici
+ * fetch 把真实失败原因包在 cause 里（顶层 message 只有无信息量的
+ * "fetch failed"），不穿透链等于没记；非 Error 值 String 化；超长截断
+ * （尾部省略号收尾）。
+ */
+export function describeDiagError(
+  err: unknown,
+  maxChars: number = DIAG_ERROR_MAX_CHARS,
+): string {
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur instanceof Error; depth++) {
+    parts.push(cur.message || cur.name);
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  if (parts.length === 0) {
+    parts.push(String(cur));
+  }
+  const joined = parts.join(" <- ");
+  return joined.length > maxChars ? joined.slice(0, maxChars - 1) + "…" : joined;
+}
+
 /**
  * 安装 app:// 协议处理器。在 app ready 之后、创建任何窗口之前调用一次。
- * 处理失败一律 500（含内核不可达时的 net.fetch 异常），不向渲染进程泄漏堆栈。
+ * 处理失败一律 500（含内核不可达时的回源 fetch 异常），不向渲染进程泄漏
+ * 堆栈；失败详情经 logDiag 落 diag-log（userData/logs/electron-main.log）——
+ * 打包件 console.* 无 stdout 消费者，2026-11-20 装机事故的真实错误（URL/
+ * 错误码）因此前零落盘而多耗数小时排障（logDiag 注入式接线同 renderer-health）。
  */
-export function installAppProtocolHandler(): void {
+export function installAppProtocolHandler(logDiag: DiagLineSink): void {
   const distRoot = resolveDistRoot();
   protocol.handle(APP_SCHEME, async (request) => {
     try {
@@ -281,6 +335,9 @@ export function installAppProtocolHandler(): void {
       return await serveStatic(distRoot, url);
     } catch (err) {
       console.error(`[Electron] app:// 请求处理失败: ${request.url}`, err);
+      logDiag(
+        `[app-protocol] 请求处理失败 url=${request.url} err=${describeDiagError(err)}`,
+      );
       return new Response("app:// internal error", { status: 500 });
     }
   });

@@ -5,7 +5,7 @@
   ],
   "name": "Sync Relay",
   "description": "多端同步中继插件（可驻云端或桌面）：/ext/sync_relay/** 承载 sync_event 接收/下发（租户内多端扇出）+ 设备注册表（device_id/档位/版本/能力面/在线心跳，2c 路由唯一输入）+ 入网初始化基线发放（层级权威：云>桌面>手机）+ cursor 发放 + 入网码配对（一次性码换 per-device token，防重放）+ 执行凭据双钥面（发起端签发→属主端验证，独立分库，per-device 短时效）。per-device token 鉴权（env AGENTOS_SYNC_RELAY_TOKENS 预置 + 入网码兑换签发两源，device:token 绑定防顶名，P6）；ULID 幂等零重复；无 HLC 事件拒收（裸墙钟 LWW 已否）；会话等属主面只追加（他端写拒绝死信留痕）。存储为插件自有 SQLite（data/ 自持先例，真值库挂 relay，内核零改动）。",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",

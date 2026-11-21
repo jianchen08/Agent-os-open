@@ -42,10 +42,15 @@ pytestmark = pytest.mark.unit
 
 
 def _ctx_for(command: str) -> Any:
-    """构造危险命令执行的最小上下文（host provider、非隔离）。"""
+    """构造危险命令执行的最小上下文（host provider、非隔离）。
+
+    工具名用现行命令面单工具 ``bash``（ADR 2026-11-07 T2 四单词重构：
+    bash_execute 退役，isolation_policy 精确匹配键已换名——轨道 1 判定依赖
+    policy.resolve(name).execution == command_in_container，退役名会落默认
+    host_direct 而绕过危险分类）。"""
     state = {
         "core_type": "tool_execute",
-        "raw_tool_calls": [{"name": "bash_execute", "args": {"command": command}}],
+        "raw_tool_calls": [{"name": "bash", "args": {"command": command}}],
         "execution_contexts": [{"provider": "host", "task_isolated": False}],
         "session_id": "sess-refresh-probe",
     }
@@ -65,7 +70,7 @@ def _yaml_rules_config() -> dict[str, Any]:
                 # safe_commands 白名单（YAML 独有，内联默认规则没有）
                 {
                     "name": "safe_commands",
-                    "tools": ["bash_execute"],
+                    "tools": ["bash"],
                     "params": ["command", "cmd"],
                     "action": "allow",
                     "patterns": [
@@ -183,19 +188,20 @@ class TestRefreshInjectedConfig:
         )
 
     def test_refresh_keeps_pipeline_instance_state(self, caplog: pytest.LogCaptureFixture) -> None:
-        """配置刷新不重建实例：同命令免批指纹等管道内状态跨刷新保持。
+        """配置刷新不重建实例：管道内实例状态跨刷新保持。
 
-        （指纹集合是刷新面上唯一必须存活的可变状态——审批记忆不能因配置
-        到站被清空，否则用户刚批过的命令重新弹卡。）
+        指纹记忆 v2 起迁管道级 state 键 task.approved_signatures（引擎持有，
+        配置刷新天然不可清）；实例侧以连续拒绝计数为探针，验证刷新走原实例
+        重载而非重建。
         """
         plugin = SecurityCheckPlugin(config={"enabled": True})
-        plugin._approved_signatures.add("bash_execute:refresh-probe-sig")
+        plugin._rejected_signatures["bash_execute:refresh-probe-sig"] = 2
 
         with caplog.at_level(logging.INFO):
             plugin.refresh_injected_config(_yaml_rules_config())
 
-        assert "bash_execute:refresh-probe-sig" in plugin._approved_signatures, (
-            "配置刷新不得清空本管道审批指纹记忆"
+        assert plugin._rejected_signatures.get("bash_execute:refresh-probe-sig") == 2, (
+            "配置刷新不得重建实例（管道内状态须存活）"
         )
 
 

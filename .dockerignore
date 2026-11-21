@@ -87,3 +87,19 @@ mcp-servers/
 future/
 vscode_extension/
 .bash.exe.stackdump
+
+# =============================================================================
+# 构建产物与工作区残留（实测可达 60GB+，不排除会让每次 docker build
+# 传输整个构建上下文，构建极慢甚至超时）
+# =============================================================================
+kernel/target/
+kernel/target-cov-*/
+**/target/
+node_modules/
+**/node_modules/
+.zctmp/
+.test_kernel/
+release/
+dist-electron/
+*.lcov
+.coverage

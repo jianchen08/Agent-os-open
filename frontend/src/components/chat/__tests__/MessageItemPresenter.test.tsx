@@ -14,8 +14,8 @@
  */
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { MessageItem } from '../MessageItem'
 import type { PresenterProfile } from '@/services/api/presenterProfiles'
@@ -184,7 +184,8 @@ describe('MessageItem 呈现徽标与头像位', () => {
     )
     expect(screen.getByText('月见')).toBeInTheDocument()
     expect(screen.getByTestId('presenter-avatar').textContent).toBe('🌙')
-    expect(screen.getByText('思考中...')).toBeInTheDocument()
+    // 空内容占位文案已统一为「执行中」（2026-11-18 规格：空态占位与底部活动行同词）
+    expect(screen.getByText('执行中')).toBeInTheDocument()
   })
 
   it('用户消息不出现扮演徽标与头像位（用户侧后置，气泡不动）', () => {

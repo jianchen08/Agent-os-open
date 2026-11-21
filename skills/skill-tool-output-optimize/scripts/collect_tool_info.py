@@ -179,7 +179,9 @@ async def main():
         f.write("# -*- coding: utf-8 -*-\n")
         f.write("# 内置工具配置\n")
         f.write("# 此文件由 scripts/tools/collect_tool_info.py 自动生成\n")
-        f.write("# 请勿手动修改，运行脚本重新生成\n\n")
+        f.write("# 请勿手动修改，运行脚本重新生成\n")
+        f.write("# 出厂播种版本（seedConfigTree 裁决：用户副本严格大于才保留；内容变更须抬版本）\n")
+        f.write("version: 2\n\n")
         yaml.dump(config, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
     print(f"\n✅ 配置文件已生成: {config_path}")

@@ -33,11 +33,12 @@ describe('reportError 单签名通知中心提示', () => {
     expect(n.message).toContain('会话加载失败')
   })
 
-  it('5xx 服务端错误优先级为 high 且 10s 自动消失（瞬时失败不常驻挂屏）', () => {
+  it('5xx 服务端错误 high + 常驻不自动消失 + mergeKey 合并（装机事故批次 3：断连期逐条上报不刷屏）', () => {
     reportError('内核不可用', { type: ErrorType.SERVER, severity: ErrorSeverity.ERROR })
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.priority).toBe('high')
-    expect(n.autoDismissMs).toBe(10000)
+    expect(n.autoDismissMs).toBeUndefined()
+    expect(n.mergeKey).toBe('svc-request-failed')
   })
 
   it('showToast: false 时不打扰用户（重试进度等静默调用点）', () => {

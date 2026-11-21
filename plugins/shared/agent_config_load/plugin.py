@@ -21,10 +21,12 @@ from typing import Any
 from _libs.pipeline_base.plugin import IInputPlugin, PluginContext, PluginResult
 from _libs.pipeline_base.types import StateKeys
 from _root_api import (
+    collect_mode_inject_tool_ids,
     collect_mode_tool_ids,
     find_mode_agent_yaml,
     find_mode_package_dir,
     parse_mode_agent_key,
+    resolve_active_mode,
 )
 from rp_packs import load_packs, merge_state_decl
 
@@ -170,6 +172,45 @@ def _user_packs_dir() -> str | None:
     return str(Path(config_dir) / "packs") if config_dir else None
 
 
+def _resolve_kernel_relative_path(raw: Path | str) -> Path:
+    """还原内核对相对配置路径的解析基（sidecar cwd ≠ 内核 cwd 的错位修复）。
+
+    内核对显式传入的相对 AGENTOS_CONFIG_ROOT / AGENTOS_USER_ROOT 不做规范化
+    （仅未设时写派生绝对值），sidecar 原样继承 env 且 cwd = 插件目录——直接
+    Path(raw) 会按插件目录解析出幻影路径（2026-11-16 R6 真内核实测：相对
+    config root → agent yaml 双根全空 → 工具面/模型档静默回退）。
+
+    还原基 = 内核 cwd 的等价物：内核能启动 ⟹ <config_root>/kernel/instance.yaml
+    必存在于内核 cwd（启动硬契约，ADR 2026-11-07 三根 fail-closed）。从本插件
+    自身位置与 sidecar cwd 的祖先链找第一个使命中成立的目录，即等价还原。
+
+    绝对路径原样返回；还原失败返回原值（既有 cwd 语义兜底，不劣于修复前）。
+    """
+    from pathlib import Path as _Path
+
+    p = raw if isinstance(raw, _Path) else _Path(str(raw))
+    if p.is_absolute():
+        return p
+    # cwd 优先（sidecar cwd=插件目录，生产与插件目录锚同源同结果；测试
+    # 以 cwd 隔离 tmp 工作区时不被插件目录锚的仓祖先抢先）
+    anchors = [_Path.cwd(), _Path(__file__).resolve().parent]
+    seen: set[_Path] = set()
+    for anchor in anchors:
+        for base in [anchor, *anchor.parents]:
+            if base in seen:
+                continue
+            seen.add(base)
+            candidate = base / p
+            if (candidate / "kernel" / "instance.yaml").is_file():
+                return candidate
+    logger.debug(
+        "[agent_config_load] 相对配置路径还原失败（instance.yaml 标记未命中，"
+        "保留原值按 sidecar cwd 解析）| raw=%s",
+        raw,
+    )
+    return p
+
+
 class AgentConfigLoadPlugin(IInputPlugin):
     """上下文构建 Input 插件。
 
@@ -183,7 +224,8 @@ class AgentConfigLoadPlugin(IInputPlugin):
         _config: 插件配置字典
         _system_prompt: 系统 prompt 模板
         _agent_name: Agent 名称
-        _agent_level: Agent 层级
+        _agent_level: 插件配置的默认 Agent 层级（构造期固定；本轮实际层级由
+            ``_do_work`` 局部值贯穿，不经实例字段中转）
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -376,6 +418,15 @@ class AgentConfigLoadPlugin(IInputPlugin):
         # 双根解析（ADR 2026-09-14 §2.4）：用户配置层的 agents/ 优先——用户层
         # 存在同路径文件即接管生效，factory 同名文件完全不参与；否则回落
         # factory（与 Rust 侧 user_space::resolve_config_path 同构）。
+        # 相对 env 还原（2026-11-16 R6 返修）：内核对显式传入的相对
+        # AGENTOS_CONFIG_ROOT/AGENTOS_USER_ROOT 不做规范化（main.rs 仅在未设
+        # 时写派生绝对值），sidecar 原样继承且 cwd=插件目录（invoker
+        # with_working_dir）——Path("config")/agents 会落到插件目录下的幻影
+        # 路径，双根全空 → agent yaml 静默回退（tool_ids/model_tier 全丢，
+        # 2026-11-16 真内核实测）。还原基 = 内核 cwd 的等价物：从本插件位置
+        # 向上找第一个使 <raw>/kernel/instance.yaml 存在的祖先（instance.yaml
+        # 是启动硬契约，可启动内核必然满足）；还原失败保留原值（既有 cwd
+        # 语义兜底，不比修复前更差）。
         candidates: list[Path] = []
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -383,12 +434,12 @@ class AgentConfigLoadPlugin(IInputPlugin):
 
             user_cfg = _user_space.user_config_dir()
             if user_cfg:
-                candidates.append(Path(user_cfg) / "agents")
+                candidates.append(_resolve_kernel_relative_path(user_cfg) / "agents")
         except Exception as exc:
             logger.debug("[agent_config_load] 用户配置层不可用（仅 factory）| err=%s", exc)
         factory_root = os.environ.get("AGENTOS_CONFIG_ROOT", "")
         if factory_root:
-            candidates.append(Path(factory_root) / "agents")
+            candidates.append(_resolve_kernel_relative_path(factory_root) / "agents")
         candidates = [d for d in candidates if d.is_dir()]
         found = None
         for agents_dir in candidates:
@@ -466,10 +517,12 @@ class AgentConfigLoadPlugin(IInputPlugin):
         """
         updates: dict[str, Any] = {}
 
-        # 同 sidecar 实例被多个 agent 管道连续复用：先复位实例层级默认值，
-        # 再按本管道 agent yaml 覆盖（下方第 2 步）——前一 agent 的 level
-        # 不得残留到下一 agent。
-        self._agent_level = self._config.get("agent_level", "L1")
+        # 层级是 per-pipeline 事实：同 sidecar 实例被多管道并发复用（SDK 对
+        # async handler 不加锁），若经实例字段中转，A 在下方 await 处让出期间
+        # B 整轮写入会在 A 恢复后被当成本轮层级（L1 豁免/评估闸门旁路）。
+        # 故按局部值贯穿本轮：起始取构造期配置默认，第 2 步按本管道 agent yaml
+        # 覆盖，直至写入 state 只用局部量。
+        agent_level = self._agent_level
 
         # 1. 系统提示词：优先 state 注入；否则按 state 持久键 agent.id 加载
         #    agent yaml（执行身份是管道 state 的一部分：出生方经 chat.send_message
@@ -514,6 +567,16 @@ class AgentConfigLoadPlugin(IInputPlugin):
                 # 审计键独立于 tool_ids 列表（内核对列表内非字符串条目静默丢弃，
                 # 标记不得内嵌；同刀进本插件 export_fields，漏声明 = 审计出口断链）。
                 updates["tool_ids.mode_source"] = mode_source
+        # 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：agent yaml
+        # tool_deny 非空 list = 该 agent 搜不到（resource_search 过滤）也调不动
+        # （call_tool 门禁）的工具名集；空表/未声明不写键（缺席 = 无否决）。
+        # 非字符串条目与 tool_ids 同口径丢弃（内核列表键契约）。原生白名单面
+        # 不受此键影响——deny 只收动态面，tool_ids 仍是原生面单真值。
+        _tool_deny = agent_cfg.get("tool_deny")
+        if isinstance(_tool_deny, list):
+            deny_names = [str(t) for t in _tool_deny if isinstance(t, str) and t.strip()]
+            if deny_names:
+                updates["tool_deny"] = deny_names
         # 卡产物装载（regex_scripts / rp_state_* / rp_engine / rp_actions 与
         # pack 合并管线）单点在 _load_card_extensions，此处只并结果。
         updates.update(
@@ -600,11 +663,11 @@ class AgentConfigLoadPlugin(IInputPlugin):
                 updates["model_id"] = _resolved_model
         # agent 层级：yaml level（如 code_writer L3）覆盖插件默认 L1——子任务
         # 管道按目标 agent 定层级（L1 豁免会让 task_reminder 评估闸门旁路）。
-        # 插件配置显式 agent_level 仍最高优先。
+        # 插件配置显式 agent_level 仍最高优先。只覆盖本轮局部值，不回写实例。
         if agent_cfg.get("level") and self._config.get("agent_level") is None:
             lvl = str(agent_cfg["level"]).strip().upper()
             if lvl.startswith("L"):
-                self._agent_level = lvl
+                agent_level = lvl
 
         # 2. Agent 身份信息（层级单一真值：顶层 agent_level，level_guard/
         # isolation_guard/tool_schema/param_inject 等下游统一读此键）
@@ -612,7 +675,7 @@ class AgentConfigLoadPlugin(IInputPlugin):
 
         # 始终用实际 Agent 层级覆盖 state 中的 AGENT_LEVEL，
         # 防止子管道继承父管道的层级（如 L2 agent 错误继承 L1）。
-        updates[StateKeys.AGENT_LEVEL] = self._agent_level
+        updates[StateKeys.AGENT_LEVEL] = agent_level
 
         # 3. 会话元数据
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
@@ -633,13 +696,13 @@ class AgentConfigLoadPlugin(IInputPlugin):
         updates["context.is_tool_execution"] = bool(ctx.state.get(StateKeys.RAW_TOOL_CALLS))
 
         # 7. 项目级标记
-        updates["context.is_project"] = self._agent_level == "L1"
+        updates["context.is_project"] = agent_level == "L1"
 
         logger.debug(
             "[%s] Context built | agent=%s | level=%s | iteration=%d",
             self.name,
             self._agent_name,
-            self._agent_level,
+            agent_level,
             iteration,
         )
 
@@ -649,17 +712,20 @@ class AgentConfigLoadPlugin(IInputPlugin):
         self, original: list[str], ctx: PluginContext
     ) -> tuple[list[str], dict[str, str]]:
         """模式声明工具并入（ADR 2026-10-12-personal-mode-package-form-and-boundary，
-        审查报告 `模式工具并入机制审查_20261012.md` §3 落点）。
+        审查报告 `模式工具并入机制审查_20261012.md` §3 落点；任务模式标签注入
+        见 ADR 2026-11-11-mode-scoped-assets-and-plugin-verify-tool D2）。
 
-        三重判据全部成立才并入，缺一即原样返回（并入 = 权限面增补，收紧方向
-        的缺省永远安全）：
-        - 声明非空：collect_mode_tool_ids 磁盘聚合（工具 id 形态，插件 id 形态
-          被证伪——漂移告警每轮误报 + 面外溢）；无包声明工具 = 零探针零成本。
-        - 非任务管道：state 无 ``lineage.*`` 血缘键（与任务域出生投影同款检测；
-          子任务经 task_birth 出生恒带血缘键 → 结构性不可见，审查 Q5）。
-        - 活注册表命中：tool-surface 探针取交集（同解禁用/G2 遮挡/未注册三类
-          面，审查 §3 落点 2）；探针通道未接线/调用失败 = 本轮不并入（降级
-          可见：warning 留痕，权限面不放宽）。
+        两类来源、两种边界：
+        - **模式包 capabilities.tools**（``collect_mode_tool_ids`` 并集）：
+          仅非任务管道并入（state 无 ``lineage.*`` 血缘键）；任务管道维持
+          结构性不可见（权限面收紧方向）。
+        - **当前激活模式的 ``inject_tool_ids``**（``mode.yaml`` 声明，工具由
+          别的插件注册）：任务/非任务管道都并入——这是"按任务模式标签挂载
+          外部工具"的唯一入口（例：mode_evolution 借 plugin_verify）。
+
+        并入仍需活注册表命中：tool-surface 探针取交集（同解禁用/G2 遮挡/
+        未注册三类面）；探针通道未接线/调用失败 = 本轮不并入（降级可见：
+        warning 留痕，权限面不放宽）。
 
         合并语义：去重保序追加（tool_ids 全部消费方假设 = list[str]、顺序
         不敏感、重复无害，审查 Q7）。
@@ -668,10 +734,12 @@ class AgentConfigLoadPlugin(IInputPlugin):
             (并入后清单, 审计映射)——审计映射空 = 本轮零并入（键不写，缺席
             语义不靠空值表达）。
         """
-        declared = collect_mode_tool_ids()
+        is_task_pipeline = any(str(k).startswith("lineage.") for k in ctx.state)
+        active_mode = resolve_active_mode(ctx.state)
+        injected = collect_mode_inject_tool_ids(active_mode) if active_mode else {}
+        declared = {} if is_task_pipeline else collect_mode_tool_ids()
+        declared.update(injected)
         if not declared:
-            return original, {}
-        if any(str(k).startswith("lineage.") for k in ctx.state):
             return original, {}
         live = await self._probe_live_tools(sorted(declared))
         if not live:
@@ -683,7 +751,10 @@ class AgentConfigLoadPlugin(IInputPlugin):
             if name not in merged:
                 merged.append(name)
         logger.info(
-            "[agent_config_load] 模式声明工具并入（非任务管道）| tools=%s | sources=%s",
+            "[agent_config_load] 模式声明工具并入 | task_pipeline=%s | mode=%s | "
+            "tools=%s | sources=%s",
+            is_task_pipeline,
+            active_mode or "-",
             live,
             sorted(set(mode_source.values())),
         )

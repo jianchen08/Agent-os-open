@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-plugin-external-mcp
+type: standard
+status: active
+---
+
 # 外部 MCP 接入（零代码接第三方工具）
 
 > 返回 [开发指南索引](README.md)。前置阅读：[插件协议规则](plugin-protocol.md)。

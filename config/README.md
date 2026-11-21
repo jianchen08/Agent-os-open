@@ -54,6 +54,17 @@ config/
 3. 出厂文件（本目录，随安装介质升级翻新）
 4. 代码默认值（fail-closed 域不回退，显式报错）
 
+## 出厂播种版本声明（2026-11-09）
+
+出厂资产随安装包播种到用户空间（electron `seedConfigTree`）。受管面 = 自声明
+版本的文件：yaml/yml 顶层 `version: N`，md **首个非空行**
+`<!-- seed-version: N -->`；用户副本版本严格大于包内才保留，否则包内覆盖。
+强制声明面（CI 缺声明即红）= `config/{pipelines,agents,rules}` 下的
+yaml/yml/md（README 除外）；`config/` 下任何自声明资产改内容必须抬版本
+（`scripts/check_config_seed_versions.py` 执法）。用户数据域（kernel/storage、
+models 密钥、plugins 配置、users 名单等）不声明版本，维持 copy-if-missing。
+用户改受管文件想保留自己的副本 = 改完把版本抬到严格大于包内。
+
 ## 注意事项
 
 - 敏感信息只落 `<USER_ROOT>/.env`，不入仓

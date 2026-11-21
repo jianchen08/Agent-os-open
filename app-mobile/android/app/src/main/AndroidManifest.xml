@@ -60,10 +60,27 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 语音输入：Capacitor BridgeWebChromeClient 在 getUserMedia 时运行时请求录音权限 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 语音输入必带：BridgeWebChromeClient 的 AUDIO_CAPTURE 授权同时请求本权限
+         （未声明=launch 即 denied，回调要求全 granted → 整体 deny → NotAllowedError） -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- 语音起录/取消的触觉反馈（navigator.vibrate，best-effort） -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Android 13+ 通知权限：由 @capacitor/local-notifications 在运行时请求 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 前台服务插件要求（README）：FOREGROUND_SERVICE + 按类型 DATA_SYNC + WAKE_LOCK -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Android 11+ 包可见性：系统语音识别服务（ShellSpeech 原生语音识别，
+         SpeechRecognizer.isRecognitionAvailable 需能解析 RecognitionService intent；
+         缺失时探测恒 false，原生路径永不激活。假设声明：部分系统服务豁免可见性
+         过滤，显式声明冗余但无害）。识别服务自持录音，客户端无需新增任何权限。 -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 </manifest>

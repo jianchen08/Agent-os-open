@@ -61,7 +61,14 @@ WIRING_BASELINE_PATH = ROOT / ".github" / "gate-wiring-baseline.txt"
 # 估时总和 139s；预算随门禁面增长同前例。
 # 139→140（2026-10-30 gate-change doc-frontmatter）：新增 docs 三字段闸
 # est 1s 入 fast 批（实测 ~0.2s）；预算随门禁面增长同前例。
-FAST_BUDGET_SECONDS = 140
+# 140→142（2026-11-09 运行面产物新鲜）：新增 native-artifacts 闸 est 2s
+# （实测 ~4.5s，含 cargo 检查；守护"内核加载的那份 cdylib 是否由当前源码
+# 构建"——旧口径只比 native-sdk，实测漏检插件自身源码变更）。
+# 142→144（2026-11-12 切片投喂声明面）：新增 state-reads-declaration 闸
+# est 2s（实测 ~0.3s，AST 扫描 32 个 plugin.py + 解析 Rust 控制键真源）——
+# state.reads 漏声明是静默行为降级（两起实证事故），须进 fast 预检面。
+# 预算随门禁面增长同前例，本次即归因。
+FAST_BUDGET_SECONDS = 144
 
 FILTER_RE = re.compile(r"run_gates\.py[^\n]*?--filter[ =]+([A-Za-z0-9_,\-]+)")
 MODE_RE = re.compile(r"run_gates\.py[^\n]*?--mode\b")

@@ -681,7 +681,7 @@ describe('BackendConnectionPage — 注册表设备卡连接与储存（自报�
     mockGets({
       agentStatus: {
         ...PAIRED_PHONE,
-        relay_url: 'http://162.14.69.153/ext/sync_relay',
+        relay_url: 'http://203.0.113.153/ext/sync_relay',
       },
       devices: {
         devices: [
@@ -702,7 +702,7 @@ describe('BackendConnectionPage — 注册表设备卡连接与储存（自报�
     await act(async () => {
       fireEvent.click(button)
     })
-    expect(borrowMock.borrowAndConnect).toHaveBeenCalledWith('http://162.14.69.153', true)
+    expect(borrowMock.borrowAndConnect).toHaveBeenCalledWith('http://203.0.113.153', true)
     vi.useRealTimers()
   })
 

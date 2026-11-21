@@ -141,24 +141,53 @@ impl KernelCapabilityRouter {
                 }
             },
         };
-        // G2 注册门禁（全能力面通用化，用户裁定 2026-10-26）：直调通道与 LLM
-        // 工具面同源同语义——遮挡名单（账本 verify_incomplete/verify_failed
-        // 现值）内插件的工具是必败面，调用即拒绝且不得到达 sidecar；复验通过
-        // （账本 ok）自动放行，无需重启。显式 plugin_id 与注册表反查两条路径
-        // 都经此处（plugin_id 解析收敛点）。
+        // G2 注册门禁（ADR 2026-11-12）：校验态只拦截调用，不遮挡工具面——
+        // 插件级（verify_incomplete/verify_failed）临时不可用，如实说明插件
+        // 可能仍可用；工具级（sanitized/drift 且该工具被拒）声明与实现不一致。
+        // 两态均不得到达 sidecar，复验通过（账本 ok）自动放行。
         if let Some(lookup) = self.shadowed_plugin_ids_lookup.as_ref() {
             if lookup().iter().any(|id| id == &plugin_id) {
                 warn!(
                     target: "tool-executor",
                     plugin = %plugin_id,
                     tool = %tool_name,
-                    "tool-executor.invoke 被拦截：插件校验未完成或校验失败（G2 注册门禁）"
+                    error_code = super::ERR_TOOL_TEMPORARILY_UNAVAILABLE,
+                    "tool-executor.invoke 被拦截：插件校验未完成或校验失败（G2 注册门禁，临时不可用）"
                 );
                 return Ok(json!({
                     "success": false,
+                    "error_code": super::ERR_TOOL_TEMPORARILY_UNAVAILABLE,
                     "error": format!(
-                        "工具调用被拦截：插件 {plugin_id} 校验未完成或校验失败（G2 注册门禁），\
-                         已拦截；复验通过后自动恢复"
+                        "{}: 工具 {tool_name} 所属插件 {plugin_id} 临时不可用——该插件的 G2 校验未完成\
+                         （观测通道故障，插件本身可能仍可用）或已达校验失败终态。本次调用被临时拦截，\
+                         未进入插件进程；修复插件后执行 POST /api/v1/plugins/validate-all（或禁用→启用）\
+                         触发复验，通过后自动恢复。",
+                        super::ERR_TOOL_TEMPORARILY_UNAVAILABLE
+                    ),
+                }));
+            }
+        }
+        if let Some(lookup) = self.rejected_tool_names_lookup.as_ref() {
+            if lookup()
+                .iter()
+                .any(|(pid, rejected_tool)| pid == &plugin_id && rejected_tool == tool_name)
+            {
+                warn!(
+                    target: "tool-executor",
+                    plugin = %plugin_id,
+                    tool = %tool_name,
+                    error_code = super::ERR_TOOL_DECLARATION_MISMATCH,
+                    "tool-executor.invoke 被拦截：工具声明与实现不一致（G2 注册门禁，声明 schema 保留在面）"
+                );
+                return Ok(json!({
+                    "success": false,
+                    "error_code": super::ERR_TOOL_DECLARATION_MISMATCH,
+                    "error": format!(
+                        "{}: 工具 {tool_name}（插件 {plugin_id}）的声明与实现不一致\
+                         （G2 注册闸判定：实现缺失或 schema 漂移）。该工具的声明 schema 仍保留在工具面，\
+                         但调用被拒绝、未进入插件进程；修复 plugin.json 声明或插件实现后执行\
+                         POST /api/v1/plugins/validate-all（或禁用→启用）复验，通过后自动恢复。",
+                        super::ERR_TOOL_DECLARATION_MISMATCH
                     ),
                 }));
             }

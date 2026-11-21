@@ -11,8 +11,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PendingInputQueueBar } from '@/components/chat/PendingInputQueueBar'
-import { usePendingInputStore } from '@/stores/pendingInputStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
+import { usePendingInputStore } from '@/stores/pendingInputStore'
 import type * as api from '@/services/api/pipelines'
 import type { PendingInputItem } from '@/services/api/pipelines'
 

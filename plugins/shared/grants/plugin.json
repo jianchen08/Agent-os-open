@@ -1,0 +1,274 @@
+{
+  "id": "grants",
+  "name": "Grants Ledger",
+  "version": "0.3.1",
+  "description": "授权账本（SQLite）+ 动作级策略引擎 + proto-grant 只读投影 + 管理端点。无 LLM 工具面（ADR 2026-11-19 D1：不进任何 tool_ids）；执法接线由 P1 security_check 消费 provides namespaces；P2 authorize 增跨端 mandate 契约位（四要素校验，验签留给执行面）；P3 增指标端点（只读聚合）与 trust_profile 三档（生效点仅在 grants classify 内部）。",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "activation": "eager",
+  "requires_services": [],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "grants.ledger.request",
+        "description": "授出 grant（授权决定面入口：P1 审批卡授予 / 用户规则 / oauth_broker）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "subject_kind": {
+              "type": "string",
+              "enum": ["user", "agent", "task", "pipeline"]
+            },
+            "subject_id": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string",
+              "description": "'*' 允许"
+            },
+            "action": {
+              "type": "string",
+              "description": "'*' 允许"
+            },
+            "granularity": {
+              "type": "string",
+              "enum": ["once", "task", "standing", "domain"]
+            },
+            "source": {
+              "type": "string",
+              "enum": ["approval_card", "user_rule", "oauth_broker", "proto_projection"]
+            },
+            "scope": {
+              "type": "object"
+            },
+            "max_uses": {
+              "type": "integer"
+            },
+            "expires_at": {
+              "type": "string",
+              "description": "ISO 8601"
+            },
+            "evidence": {
+              "type": "string",
+              "description": "审批卡 id / 审计事件指针"
+            },
+            "pipeline_id": {
+              "type": "string"
+            },
+            "parent_task_id": {
+              "type": "string"
+            }
+          },
+          "required": ["subject_kind", "subject_id", "tool", "action", "granularity", "source"]
+        }
+      },
+      {
+        "name": "grants.ledger.authorize",
+        "description": "查活跃 grant 是否命中（P1 执法入口：特权类调用先经此面）。P2 mandate 契约位：携带 mandate 或 require_mandate=true 时返回值增 mandate 校验报告——无 grant/无 mandate/四要素任一不符 → authorized=false；验签留给跨端执行面。缺省路径返回形态零变化。",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "subject_kind": {
+              "type": "string",
+              "enum": ["user", "agent", "task", "pipeline"]
+            },
+            "subject_id": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string"
+            },
+            "mandate": {
+              "type": "object",
+              "description": "跨端委派四要素（scope/expires_at/task_id/revocable）；携带即强制校验（P2 契约位）"
+            },
+            "require_mandate": {
+              "type": "boolean",
+              "description": "声明 mandate 强制：未携带 mandate → mandate_absent 拒（无 mandate 不放行）"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "调用方声明的执行任务 id（mandate.task_id 绑定校验基准）"
+            }
+          },
+          "required": ["subject_kind", "subject_id", "tool", "action"]
+        }
+      },
+      {
+        "name": "grants.ledger.consume",
+        "description": "记账一次 grant 使用（uses+1；达 max_uses 置 consumed）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "grant_id": {
+              "type": "string"
+            },
+            "context": {
+              "type": "object"
+            }
+          },
+          "required": ["grant_id"]
+        }
+      },
+      {
+        "name": "grants.ledger.revoke",
+        "description": "撤销活跃 grant（幂等；即时生效）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "grant_id": {
+              "type": "string"
+            },
+            "context": {
+              "type": "object"
+            }
+          },
+          "required": ["grant_id"]
+        }
+      },
+      {
+        "name": "grants.ledger.list",
+        "description": "按过滤器列 grant（subject_kind/subject_id/tool/status）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "subject_kind": {
+              "type": "string"
+            },
+            "subject_id": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": ["active", "consumed", "revoked", "expired"]
+            }
+          }
+        }
+      },
+      {
+        "name": "grants.policy.classify",
+        "description": "动作级分级裁决（未分类 fail-closed deny + 审计，ADR D2）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "description": "v1 不参与查表（上下文修正因子 P1+ 预留）"
+            }
+          },
+          "required": ["tool", "action"]
+        }
+      }
+    ]
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "grants.ledger",
+        "methods": [
+          "request",
+          "authorize",
+          "consume",
+          "revoke",
+          "list"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "grants.ledger"
+      },
+      {
+        "namespace": "grants.policy",
+        "methods": [
+          "classify"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "grants.policy"
+      }
+    ]
+  },
+  "state": {
+    "volatile_keys": [],
+    "reads": []
+  },
+  "permissions": {},
+  "priority": 60,
+  "contributes": {
+    "pages": [
+      {
+        "id": "grants_admin",
+        "title": "授权账本",
+        "icon": "🔐",
+        "space": "settings",
+        "order": 7,
+        "widget": "grants_ledger_admin",
+        "description": "授权账本管理（P3 运营面）：grant 列表/筛选/撤销 + 审计流 + 四指标卡；proto-grant（永久白名单/管道级免审批）同面收口（ADR 2026-11-12 未做项）。只读管理 + 撤销，授予面仍是审批卡"
+      }
+    ]
+  },
+  "config_files": [
+    {
+      "id": "tool_policy",
+      "path": "config/plugins/grants/tool_policy.yaml",
+      "label": "工具动作级分级策略表（v1 初稿，键名以 P1 CI 实扫为准补齐）"
+    },
+    {
+      "id": "trust_profile",
+      "path": "config/plugins/grants/trust_profile.yaml",
+      "label": "trust profile 三档生效档选择（strict/balanced=默认/open；升降档矩阵代码固定，P3）"
+    }
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "grants_list",
+      "method": "GET",
+      "path": "/ext/grants/list",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "列账本 grant（query: subject_kind/subject_id/tool/status；含 proto-grant 统一查询面在 P3 管理页接入）"
+    },
+    {
+      "route_id": "grants_revoke",
+      "method": "DELETE",
+      "path": "/ext/grants/{grant_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "撤销活跃 grant（幂等；即时生效，下一次同类 authorize 未命中）"
+    },
+    {
+      "route_id": "grants_audit",
+      "method": "GET",
+      "path": "/ext/grants/audit",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "账本审计事件流（query: grant_id/event_type；issue/consume/deny/revoke/expire）"
+    },
+    {
+      "route_id": "grants_metrics",
+      "method": "GET",
+      "path": "/ext/grants/metrics",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "运营指标四项（P3 只读聚合：审批卡弹出率/grant 命中率（省弹次数）/撤销→生效耗时/未分类拦截数；取不到的数据源降级 null + 说明）"
+    }
+  ]
+}

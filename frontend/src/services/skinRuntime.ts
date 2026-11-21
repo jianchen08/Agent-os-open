@@ -114,6 +114,7 @@ function disposeCurrentSkin(): void {
     .querySelectorAll(`style[${STYLE_ID_ATTR}^="skin-"]`)
     .forEach((el) => el.remove())
   disposeSkinHooks()
+  stopChromeInsetSync()
   document.documentElement.style.removeProperty('--skin-chrome-top')
   document.documentElement.style.removeProperty('--skin-chrome-bottom')
 }
@@ -178,7 +179,10 @@ export async function applyPluginSkin(theme: PluginTheme & { skin: string }): Pr
     // 加载不得有顶层副作用——fetch 文本 → blob 导入（同源带 Bearer 无法通过
     // import() 头传递）。任何失败只影响动态层，静态样式照常。
     if (applyGeneration === gen) await runSkinHooks(theme, scope, gen)
-    if (applyGeneration === gen) reserveChromeStrips()
+    if (applyGeneration === gen) {
+      reserveChromeStrips()
+      startChromeInsetSync()
+    }
   } catch (e) {
     loggers.websocket.warn(`[skinRuntime] ${scope} 加载失败: ${(e as Error)?.message ?? e}`)
   }
@@ -227,38 +231,136 @@ function clearSkinLayers(): void {
   }
 }
 
+/** chrome 条带判定高度上限（标题栏/状态栏/垂坠带；超过即非条带，如全屏立绘层） */
+const CHROME_STRIP_MAX_HEIGHT = 80
+
+/** 图形垂坠纠位标记（量测落视口顶被我们钉回顶带下沿的条带；清理时按标记撤） */
+const GRAPHIC_CLAMP_ATTR = 'data-skin-clamped-top'
+
+/** 列让位目标标记（布局声明落点：聊天列/工作区列；皮肤运行时不认识具体组件） */
+const INSET_TARGET_ATTR = 'data-skin-inset-target'
+const INSET_TOP_VAR = '--skin-chat-inset-top'
+const INSET_BOTTOM_VAR = '--skin-chat-inset-bottom'
+
 /**
- * 槽位预留（注入不能挤掉/遮住现有 UI）：只预留**带文字内容的替代性条栏**
- * （如 miku 标题栏/状态栏——它们顶替了被我们删掉的顶栏/状态栏，内容需要让位）。
- * 纯图形垂坠装饰（maid 顶/底花边：pointer-events none、内容从下方穿过的
- * 覆盖层）原生零位移——预留会把侧栏/工作区顶出空白带+页面被挤到中间。
- * 判定=条带有非空文字内容。
+ * 槽位让位（注入不能遮住现有 UI）——两类 fixed 条带分开处理：
+ * 1. **带文字内容的替代性条栏**（miku 标题栏/状态栏：顶替被删的顶栏/状态栏）
+ *    → 整根让位 `--skin-chrome-top/bottom`（app 根下移/扣高）。
+ * 2. **纯图形垂坠**（maid 顶/底花边：无文字、pointer-events none）→ 不整根让位
+ *    （会把侧栏/工作区顶出空白带、页面被挤到中间），改为把与
+ *    `[data-skin-inset-target]` 列的重叠高度写进 `--skin-chat-inset-top/bottom`，
+ *    聊天/工作区内容避开垂坠带——花边悬在让位留白上，不压顶带标签行/输入卡底。
+ *    垂坠条带若落在视口顶且跨过顶带下沿（皮肤按"标题栏行高"挂顶饰，布局未
+ *    就绪时量到 0），钉回顶带下沿还原皮肤本意。
  * 条带允许横向偏移（maid 顶花边 translate 避让侧栏 left≠0）。
  */
 function reserveChromeStrips(): void {
   const rootStyle = document.documentElement.style
+  const vh = window.innerHeight
+  const halfWidth = window.innerWidth / 2
+  const bandEl = document.querySelector('[data-testid="chat-top-band"]')
+  const bandBottom =
+    bandEl instanceof HTMLElement ? Math.round(bandEl.getBoundingClientRect().bottom) : 0
   let top = 0
   let bottom = 0
-  const halfWidth = window.innerWidth / 2
+  const graphics: Array<{ top: number; bottom: number }> = []
   for (const el of document.body.children) {
     if (!(el instanceof HTMLElement)) continue
     const cs = getComputedStyle(el)
     if (cs.position !== 'fixed') continue
-    const rect = el.getBoundingClientRect()
-    if (rect.height <= 0 || rect.height > 80) continue
+    let rect = el.getBoundingClientRect()
+    if (rect.height <= 0 || rect.height > CHROME_STRIP_MAX_HEIGHT) continue
     if (rect.width < halfWidth) continue
-    // 纯图形垂坠（无文字）不预留——原生覆盖式装饰
-    if (!el.innerText.trim()) continue
-    if (cs.top === '0px') {
-      top = Math.max(top, Math.round(rect.height))
-    } else if (cs.bottom === '0px') {
-      bottom = Math.max(bottom, Math.round(rect.height))
+    if ((el.innerText ?? '').trim()) {
+      // 替代性条栏：整根让位（按 top/bottom 锚定边判向）
+      if (cs.top === '0px') top = Math.max(top, Math.round(rect.height))
+      else if (cs.bottom === '0px') bottom = Math.max(bottom, Math.round(rect.height))
+      continue
     }
+    // 图形垂坠：量测落视口顶且跨过顶带下沿 → 钉回顶带下沿（每次同步先撤旧
+    // 纠位再重量——皮肤自身量测恢复正确后交还其控制，幂等）
+    if (el.hasAttribute(GRAPHIC_CLAMP_ATTR)) {
+      el.style.removeProperty('top')
+      el.removeAttribute(GRAPHIC_CLAMP_ATTR)
+      rect = el.getBoundingClientRect()
+    }
+    if (bandBottom > 0 && rect.top < bandBottom && rect.bottom > bandBottom) {
+      el.style.top = `${bandBottom}px`
+      el.setAttribute(GRAPHIC_CLAMP_ATTR, '')
+      rect = el.getBoundingClientRect()
+    }
+    const visibleTop = Math.max(rect.top, 0)
+    const visibleBottom = Math.min(rect.bottom, vh)
+    if (visibleBottom - visibleTop <= 0) continue
+    graphics.push({ top: visibleTop, bottom: visibleBottom })
   }
   if (top > 0) rootStyle.setProperty('--skin-chrome-top', `${top}px`)
   else rootStyle.removeProperty('--skin-chrome-top')
   if (bottom > 0) rootStyle.setProperty('--skin-chrome-bottom', `${bottom}px`)
   else rootStyle.removeProperty('--skin-chrome-bottom')
+  // 列让位：只算垂坠带与目标列相交的那段高度（列顶=顶带下沿，退场条带不占位）
+  for (const target of document.querySelectorAll<HTMLElement>(`[${INSET_TARGET_ATTR}]`)) {
+    const tr = target.getBoundingClientRect()
+    if (tr.height <= 0) continue
+    const mid = tr.top + tr.height / 2
+    let insetTop = 0
+    let insetBottom = 0
+    for (const g of graphics) {
+      const overlap = Math.min(g.bottom, tr.bottom) - Math.max(g.top, tr.top)
+      if (overlap <= 0) continue
+      if (g.top < mid) insetTop = Math.max(insetTop, Math.round(overlap))
+      else insetBottom = Math.max(insetBottom, Math.round(overlap))
+    }
+    if (insetTop > 0) target.style.setProperty(INSET_TOP_VAR, `${insetTop}px`)
+    else target.style.removeProperty(INSET_TOP_VAR)
+    if (insetBottom > 0) target.style.setProperty(INSET_BOTTOM_VAR, `${insetBottom}px`)
+    else target.style.removeProperty(INSET_BOTTOM_VAR)
+  }
+}
+
+/** 让位重同步的延迟（皮肤状态机的 transform 过渡 .52s，落定后再量） */
+const CHROME_INSET_SETTLE_MS = 600
+
+let chromeInsetObserver: MutationObserver | null = null
+let chromeInsetTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 状态变化重同步：body 属性=皮肤状态机（对话态退场等）、childList=hooks 建条带、
+    顶带挂载=布局就绪（顶带在 #root 内，body childList 观察不到）。 */
+function scheduleChromeInsetSync(): void {
+  if (chromeInsetTimer !== null) clearTimeout(chromeInsetTimer)
+  chromeInsetTimer = setTimeout(() => {
+    chromeInsetTimer = null
+    reserveChromeStrips()
+  }, CHROME_INSET_SETTLE_MS)
+}
+
+function startChromeInsetSync(): void {
+  if (chromeInsetObserver === null && typeof MutationObserver !== 'undefined') {
+    chromeInsetObserver = new MutationObserver(scheduleChromeInsetSync)
+    chromeInsetObserver.observe(document.body, { attributes: true, childList: true })
+  }
+  window.addEventListener('resize', scheduleChromeInsetSync)
+  window.addEventListener('chat-top-band-mounted', scheduleChromeInsetSync)
+}
+
+/** 摘除重同步与全部让位/纠位写入（幂等） */
+function stopChromeInsetSync(): void {
+  chromeInsetObserver?.disconnect()
+  chromeInsetObserver = null
+  if (chromeInsetTimer !== null) {
+    clearTimeout(chromeInsetTimer)
+    chromeInsetTimer = null
+  }
+  window.removeEventListener('resize', scheduleChromeInsetSync)
+  window.removeEventListener('chat-top-band-mounted', scheduleChromeInsetSync)
+  for (const target of document.querySelectorAll<HTMLElement>(`[${INSET_TARGET_ATTR}]`)) {
+    target.style.removeProperty(INSET_TOP_VAR)
+    target.style.removeProperty(INSET_BOTTOM_VAR)
+  }
+  for (const el of document.querySelectorAll<HTMLElement>(`[${GRAPHIC_CLAMP_ATTR}]`)) {
+    el.style.removeProperty('top')
+    el.removeAttribute(GRAPHIC_CLAMP_ATTR)
+  }
 }
 
 /** 当前激活的 hooks 清理注册表（切换/摘除时按序执行，幂等） */

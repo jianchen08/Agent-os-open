@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>表格查看器（csv/tsv）</title>
+  <!-- 自包含契约（同 snippet_box）：单 script、无外链资源、无出网调用。
+       文件坐标由宿主经 file.open 下行事件注入（见 __agentos_webview 协议）；
+       内容取流由插件后端自理——沙箱是 opaque origin，拿不到宿主 token。 -->
+  <style>
+    body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 20px; color: #1d2539; background: #f5f7fb; }
+    h1 { font-size: 17px; margin: 0 0 6px; }
+    .meta { color: #667; font-size: 12px; margin-bottom: 12px; word-break: break-all; }
+    table { border-collapse: collapse; width: 100%; background: #fff; font-size: 13px; }
+    th, td { border: 1px solid #e2e7f0; padding: 4px 8px; text-align: left; }
+    th { background: #eef2f9; font-weight: 600; }
+    .empty { color: #667; border: 1px dashed #99a; padding: 16px; border-radius: 8px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>表格查看器</h1>
+  <div class="meta" id="meta">等待宿主注入文件坐标（file.open 事件）…</div>
+  <div id="body"><div class="empty">尚未收到文件</div></div>
+  <script>
+    // 下行协议：宿主 → iframe 的 widget.event 携带 {event:'file.open', data:{path, container_task_id}}
+    var metaEl = document.getElementById('meta');
+    var bodyEl = document.getElementById('body');
+    var lastPath = '';
+
+    function render(path, cid) {
+      if (!path) return;
+      lastPath = path;
+      metaEl.textContent = '文件：' + path + (cid ? '（工作区 ' + cid + '）' : '');
+      // 内容取流归插件后端：本样例只呈现坐标与取流入口，不假装已取到内容。
+      bodyEl.innerHTML = '<div class="empty">已收到文件坐标，表格内容由插件后端取流后渲染' +
+        '<br>（样例插件不实现取流端点：此处证明声明式路由与 file.open 下行已通）</div>';
+    }
+
+    window.addEventListener('message', function (ev) {
+      var d = ev.data;
+      if (!d || d.__agentos_webview !== true) return;
+      if (d.method !== 'widget.event') return;
+      var p = d.params || {};
+      if (p.event !== 'file.open') return;
+      var data = p.data || {};
+      render(data.path, data.container_task_id);
+    });
+
+    // 宿主可能在监听挂上之前就推过一次（openPluginViewerTab 立即推 + 1500ms 重推），
+    // 重推会覆盖首个窗口，故无需本地缓存。
+  </script>
+</body>
+</html>

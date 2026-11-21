@@ -93,6 +93,7 @@ fn llm_manifest() -> agentos_core::traits::PluginManifest {
             "track.llm_usage".to_string(),
         ],
         provides: None,
+        visibility: Default::default(),
     }
 }
 

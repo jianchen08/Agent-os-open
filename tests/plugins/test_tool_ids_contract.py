@@ -64,7 +64,7 @@ def test_discovery_surface_non_vacuous() -> None:
     # 抽查覆盖 tools 域（bash/task/task_evaluate 插件）与 system 域（review 插件）；
     # pipeline 域现状零 LLM 工具声明，不在抽查之列；
     # review_ops：工具面退役任务 C 合一件（trigger_review+review_get_report 二合一）
-    for probe in ("bash_execute", "task_manage", "task_evaluate", "review_ops"):
+    for probe in ("bash", "log", "task_manage", "task_evaluate", "review_ops"):
         assert probe in TOOL_REGISTRY, f"注册表缺抽查工具 {probe}（发现逻辑误伤或 manifest 漂移）"
 
 

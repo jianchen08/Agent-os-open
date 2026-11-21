@@ -4,7 +4,7 @@
 仓库**之外**：仓内 ``config/``（git 跟踪）与 ``data/`` 处于工作区还原的抹除风险
 面内，而用户空间不受影响。目录布局::
 
-    <USER_ROOT>/                  # 默认按 OS 不同（见 user_root）
+    <USER_ROOT>/                  # AGENTOS_USER_ROOT 显式交付（零回落，见 user_root）
     ├── plugins/                  # 用户插件根（双源 BuiltinFirst 版本裁决：semver 严格新版才接管）
     ├── config/                   # 用户配置层（镜像 factory config/ 相对路径）
     ├── data/                     # 运行时数据（多租户树 / uploads / DB）
@@ -28,13 +28,13 @@
 ``acp_quota_pool/tests/test_acp_ledger.py`` 各 ``*CopyAlignment`` 组）。
 
 不依赖第三方库：插件 sidecar 的 venv 不保证有 ``platformdirs``（它只是 dev 传递
-依赖），故 OS 目录推导用标准库手写，与 ``dirs::data_dir()`` 的语义逐一对齐。
+依赖），故副本内的 OS 目录推导用标准库手写（本体已零回落，OS 推导仅副本保留，
+见 ``diagnostics_settings`` 已裁定微差）。
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 __all__ = [
@@ -65,36 +65,17 @@ def _env_path(name: str) -> Path | None:
     return Path(stripped)
 
 
-def _os_data_dir() -> Path | None:
-    """OS 标准「用户数据目录」——对齐 ``dirs::data_dir()``。
-
-    - Windows：``%APPDATA%``（Roaming；**非** ``%LOCALAPPDATA%``——配置与密钥
-      应随用户漫游，与 Rust 侧同裁定）
-    - macOS：``~/Library/Application Support``
-    - 其他（Linux/BSD）：``$XDG_DATA_HOME``，未设时 ``~/.local/share``
-    """
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        return Path(appdata) if appdata else None
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support"
-    xdg = os.environ.get("XDG_DATA_HOME")
-    if xdg and xdg.strip():
-        return Path(xdg.strip())
-    return Path.home() / ".local" / "share"
-
-
 def user_root() -> Path | None:
-    """用户空间根：``AGENTOS_USER_ROOT`` > OS 标准目录下的 ``agentos/``。
+    """用户空间根：``AGENTOS_USER_ROOT`` 显式生效；未设（含空白值）= ``None``。
 
-    OS 目录不可得（极端环境）时返回 ``None``——调用方各自回退既有行为，
-    与 Rust 侧返回 ``Option<PathBuf>`` 同形。
+    **零回落**（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2，与 Rust 侧
+    ``user_space::user_root`` 同规则）：用户根一律来自实例启动配置的交付链，
+    不做 OS 标准目录推导——缺省回落 ``%APPDATA%\\agentos``（= 装机用户空间）
+    会让未交付用户根的 dev 内核 sidecar 读到装机用户层的陈旧副本
+    （2026-11-18 实证：agent_config_load 经旧回落被装机 executor 影子接管
+    工具面；Rust 侧同名事故机制根已先修，本侧对齐）。
     """
-    env = _env_path(USER_ROOT_ENV)
-    if env is not None:
-        return env
-    base = _os_data_dir()
-    return base / "agentos" if base is not None else None
+    return _env_path(USER_ROOT_ENV)
 
 
 def user_config_dir() -> Path | None:

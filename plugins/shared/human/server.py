@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,21 @@ from human.service import (  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 from agentos_plugin_sdk.approval_contract import InteractionErrorCode, is_valid_semantics  # noqa: E402
+
+# run 停止看门狗（与 bash 工具同一根因、同一插件侧解法）：交互等待默认
+# 86400s，run 卡在等待里时注入队列轮边界消费点（pipeline_loop.rs:814 →
+# :1101）永远走不到，消息无限期滞留。解析失败一律降级为「不启用」——
+# 看门狗是增强能力，缺它不改变交互本体行为。
+try:  # 生产：bootstrap 已把插件目录加入 sys.path（与 bash 同款解析）
+    from run_stop_watch import race_with_stop as _race_with_stop  # noqa: E402
+    from run_stop_watch import start_watcher as _start_run_stop_watch  # noqa: E402
+except ImportError:  # 测试装载/包布局：插件目录不在 sys.path，按包名解析
+    try:
+        from human.run_stop_watch import race_with_stop as _race_with_stop  # noqa: E402
+        from human.run_stop_watch import start_watcher as _start_run_stop_watch  # noqa: E402
+    except ImportError:  # pragma: no cover —— 模块缺失即关闭（缺一环不影响工具本体）
+        _race_with_stop = None  # type: ignore[assignment]
+        _start_run_stop_watch = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("human_interaction_tool")
@@ -175,6 +191,20 @@ async def _on_load(params: dict[str, Any]) -> None:
     global _service
     _service = HumanInteractionService()
     _service.set_notifier(_EventBusNotifier(plugin))
+
+    # 审批非阻塞 M1：装配 ticket 持久写面——经 pipeline-state.update 单一路径
+    # 落 approval.tickets.*（审计铁律：所有 state 变更经 update 留痕）。
+    # 能力缺席（测试装载/内核未注入）跳过装配：writer=None 时 service 侧
+    # 本就 best-effort 不写，插件本体行为不变。
+    try:
+        state_cap = plugin.get_capability("pipeline-state")
+
+        async def _write_ticket_state(pipeline_id: str, fields: dict[str, Any]) -> None:
+            await state_cap.call("update", {"pipeline_id": pipeline_id, "fields": fields})
+
+        _service.set_state_writer(_write_ticket_state)
+    except KeyError:
+        logger.info("[HumanInteraction] pipeline-state 未注入，ticket 持久化停用（writer=None）")
     logger.info("Human interaction service initialized (dual-role: tool + service)")
 
 
@@ -278,6 +308,11 @@ def _resolved_file_paths(kwargs: dict[str, Any]) -> list[str] | None:
                     'default': 86400,
                     'description': '超时时间（秒）',
                 },
+                'mode': {
+                    'type': 'string',
+                    'enum': ['async'],
+                    'description': '仅在带 options 的审批场景使用：mode="async" 提交后立即返回（status=submitted + ticket_id），不阻塞等待用户——用户稍后在审批页决定，决定内容下一轮经审批注入面送达。缺省（不带 mode）保持阻塞等待用户作答',
+                },
                 'priority': {
                     'type': 'string',
                     'enum': [
@@ -305,7 +340,7 @@ def _resolved_file_paths(kwargs: dict[str, Any]) -> list[str] | None:
                 'title',
             ],
         },
-    description="与用户交互（双态，无需选模式）：带 options=阻塞等待用户作答（点选选项、输入框自由回复，或点「进入对话」转到对话页继续聊——此时返回 user_arrived，等待用户下一条消息），把要问的问题写进 title/description、候选答案写进 options；不带 options=非阻塞通知，一次性送达（返回 status: sent 即已送达），一个回合至多调用一次，不要重复调用确认、不要换措辞重发",
+    description="与用户交互（双态，无需选模式）：带 options=阻塞等待用户作答（点选选项、输入框自由回复，或点「进入对话」转到对话页继续聊——此时返回 user_arrived，等待用户下一条消息），把要问的问题写进 title/description、候选答案写进 options；不带 options=非阻塞通知，一次性送达（返回 status: sent 即已送达）；决策类审批可再带 mode=\"async\"：提交即返回不阻塞，用户稍后在审批页决定。一个回合至多调用一次，不要重复调用确认、不要换措辞重发",
 )
 async def human_interaction(**kwargs: Any) -> dict[str, Any]:
     """LLM 工具入口——进程内直接调 service，零跨进程中转。"""
@@ -322,7 +357,8 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
         return {"success": False, "error": "service not initialized (on_load not finished in 10s)"}
 
     # 兼容 LLM 偶发的参数别名（message→title），避免参数名错配。
-    # mode/type 等历史参数已废（双态推断），传入即忽略不再误分派。
+    # type 等历史参数已废（双态推断），传入即忽略不再误分派；mode 仅认
+    # "async"（审批非阻塞 M1），其余历史值照旧忽略。
     if not kwargs.get("title") and kwargs.get("message"):
         kwargs["title"] = kwargs["message"]
 
@@ -338,6 +374,11 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
     try:
         if mode == InteractionMode.NOTIFICATION.value:
             return await _do_notification(kwargs, session_id)
+        # 审批非阻塞 M1（设计 §三 ①/G1）：mode=async 且有 options → 提交即返回，
+        # 决定经审批页写回 state、下一轮 approval.fold 注入（无 options 的 async
+        # 无票可提交，按历史忽略口径走 notification）。
+        if kwargs.get("mode") == "async" and kwargs.get("options"):
+            return await _do_conversation(kwargs, session_id, pipeline_id, timeout, blocking=False)
         return await _do_conversation(kwargs, session_id, pipeline_id, timeout)
     except InteractionTimeoutError as e:
         return {
@@ -353,6 +394,19 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
         }
     except InteractionDeniedError as e:
         return {"status": "denied", "selected_option": "用户拒绝", "reason": e.reason or "用户拒绝"}
+    except _RunStoppedDuringWait as e:
+        # 停止语义的如实结果（不是交互自身出错）：run 被停止/被强制注入打断，
+        # 交互已取消，工具立即返回让 run 回边界收尾，注入消息随派发链 drain 起跑。
+        return {
+            "success": False,
+            "error": (
+                "run 已停止（停止/强制注入），本次交互已取消并让出执行；"
+                "注入的消息将由新一轮 run 接手"
+            ),
+            "error_code": "RUN_STOPPED",
+            "run_stopped": True,
+            "request_id": e.request_id,
+        }
     except Exception as exc:
         logger.exception("[human_interaction] 执行失败")
         return {"success": False, "error": f"人类交互执行失败: {exc}"}
@@ -397,13 +451,74 @@ def _agent_level_from_kwargs(kwargs: dict[str, Any]) -> str | None:
         return None
 
 
+class _RunStoppedDuringWait(Exception):
+    """等待期检出 run 停止信号（停止 / 强制发送 / 注入的强制通道）。
+
+    携带被取消的交互 request_id：入口据此回传 RUN_STOPPED 显式结果——
+    这是停止语义的如实结果，不是交互本身出错。
+    """
+
+    def __init__(self, request_id: str, pipeline_id: str) -> None:
+        super().__init__(f"run 已停止，交互已取消: {request_id}")
+        self.request_id = request_id
+        self.pipeline_id = pipeline_id
+
+
+async def _await_choice_or_run_stop(
+    request_id: str, timeout: float, pipeline_id: str
+) -> dict[str, Any]:
+    """等待用户作答，并与 run 停止看门狗赛跑（注入送达的插件侧前提）。
+
+    脱困链：注入消息（chat.send_message force 通道）→ 内核暂停当前 run
+    （`run_status=suspended`）→ 本看门狗在轮询窗内检出 → 取消交互请求
+    （前端卡同步消失）→ 工具快速返回 → run 回 step 边界按既有停止语义收尾
+    → 派发链 drain 队列里的注入消息起跑新一轮。
+
+    看门狗缺席（无 pipeline_id / 能力未注入 / `AGENTOS_RUN_ABORT_POLL_SECS<=0`）
+    → 直通旧行为（单纯等待），不改变交互语义。
+    """
+    assert _service is not None, "_await_choice_or_run_stop 调用方已保证 service 初始化"
+    if _start_run_stop_watch is None or _race_with_stop is None:  # pragma: no cover
+        return await _service.wait_for_choice(request_id, timeout=timeout)
+
+    watcher = None
+    try:
+        watcher = _start_run_stop_watch(plugin, pipeline_id)
+        stopped, response = await _race_with_stop(
+            _service.wait_for_choice(request_id, timeout=timeout), watcher
+        )
+    finally:
+        if watcher is not None:
+            watcher.stop()
+
+    if stopped:
+        # 交互卡收口：卡片不消失会让用户对着一个已被抛弃的请求作答。
+        try:
+            await _service.cancel_request(request_id, reason="run_stopped")
+        except Exception:  # noqa: BLE001 —— 收口失败不得掩盖停止结果
+            logger.warning(
+                "[human_interaction] 停止收口时取消交互请求失败（卡片可能残留）| rid=%s",
+                request_id,
+                exc_info=True,
+            )
+        raise _RunStoppedDuringWait(request_id, pipeline_id)
+
+    return response
+
+
 async def _do_conversation(
-    kwargs: dict[str, Any], session_id: str, pipeline_id: str, timeout: int
+    kwargs: dict[str, Any], session_id: str, pipeline_id: str, timeout: int,
+    blocking: bool = True,
 ) -> dict[str, Any]:
     """统一交互卡——创建请求 + 阻塞等待用户作答（点选/自由回复/进入对话）。
 
     2026-10-19 用户裁定「选择=对话，没有两种交互态」：对话模式即超集
     （options + 文本 + 进入对话），LLM 工具的选择分支删除，收敛到本函数。
+
+    审批非阻塞 M1（设计 §三 ①）：``blocking=False``（mode=async）= 创建后
+    立即返回 ``{status: submitted, ticket_id}``，不等待用户——决定经审批页
+    写回 state，下一轮 approval.fold 注入（G1/G3）；ticket/category/blocking
+    语义与 choice 路径同契约。
     """
     assert _service is not None, "human_interaction 入口已保证 _service 初始化"
     rid = await _service.create_conversation_request(
@@ -422,8 +537,12 @@ async def _do_conversation(
         file_paths=_resolved_file_paths(kwargs),
         user_id=kwargs.get("user_id") or None,
         agent_level=_agent_level_from_kwargs(kwargs),
+        category=kwargs.get("category"),
+        blocking=blocking,
     )
-    response = await _service.wait_for_choice(rid, timeout=timeout)
+    if not blocking:
+        return {"status": "submitted", "ticket_id": rid, "request_id": rid}
+    response = await _await_choice_or_run_stop(rid, timeout, pipeline_id)
     resp_type = response.get("response_type", "")
     # 进入对话跳转，或在管道里直接发消息解除挂起（approved 且未选任何选项）
     # → user_arrived：agent 结束当前轮，等待用户下一条消息推进；选选项/自由
@@ -447,6 +566,122 @@ async def _do_conversation(
     if response.get("feedback"):
         result["feedback"] = response["feedback"]
     return result
+
+
+# ════════════════════════════════════════════════════════════════════
+# 角色 1.5：approval.fold 聚合注入步（审批非阻塞 M1，设计 §三 ③）
+# mode=async 提交的审批不阻塞工具——下一 LLM 轮由此步把待决项与已决结果
+# 并入 prompt.dynamic_vars 消息尾部（todo_fold 同款降级契约：dynamic_vars
+# 缺失零动作、能力缺席 warning 直通、任何异常不阻断管道）。
+# ════════════════════════════════════════════════════════════════════
+
+_TICKET_KEY_PREFIX = "approval.tickets."
+_DECISION_WORDS = {
+    "approved": "已批准",
+    "denied": "已拒绝",
+    "expired": "已过期",
+    "withdrawn": "已撤回",
+    "cancelled": "已取消",
+}
+
+
+async def _approval_fold_impl(state: dict[str, Any]) -> dict[str, Any]:
+    """fold 实现：读 pipeline-state 收集本管道 ticket → 注入 + 两阶段清理。"""
+    dvm = state.get("prompt.dynamic_vars")
+    if not isinstance(dvm, dict) or "content" not in dvm:
+        return {}  # dynamic_vars 缺失：零动作直通（todo_fold 同款降级契约）
+    pipeline_id = str(state.get("pipeline_id") or "")
+    try:
+        state_cap = plugin.get_capability("pipeline-state")
+        if state_cap is None:
+            raise KeyError("pipeline-state")
+        rows = await state_cap.call("list", {})
+    except KeyError:
+        logger.warning("[approval_fold] pipeline-state 未注入，零写入直通")
+        return {}
+    if not isinstance(rows, list):
+        return {}
+
+    pending: list[dict[str, Any]] = []
+    decided: list[tuple[str, dict[str, Any]]] = []
+    consumed_keys: list[str] = []
+    consumed_markers: list[str] = []  # 兄弟标记键（fold 置位形态），随批删除
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("pipeline_id") or "") != pipeline_id:
+            continue
+        for key, ticket in row.items():
+            if not key.startswith(_TICKET_KEY_PREFIX) or not isinstance(ticket, dict):
+                continue  # 兄弟 consumed_at 标记键非 dict，自然跳过
+            marker = f"{key}.consumed_at"
+            if ticket.get("consumed_at") or row.get(marker):
+                # 已消费双形态：ticket 字典内置位 / fold 兄弟键置位——
+                # 只补删，绝不重复注入（G7）
+                consumed_keys.append(key)
+                if row.get(marker):
+                    consumed_markers.append(marker)
+            elif ticket.get("status") == "pending":
+                pending.append(ticket)
+            elif isinstance(ticket.get("decision"), dict):
+                decided.append((key, ticket))
+    if not pending and not decided and not consumed_keys:
+        return {}  # 无审批 ticket：零写入
+
+    lines: list[str] = []
+    if pending:
+        lines.append("待决策的审批项（用户稍后在审批页决定，决定结果下轮注入）：")
+        for t in pending:
+            cat = str(t.get("category") or "generic")
+            blocking_mark = "【须当场处理】" if t.get("blocking") else ""
+            title = str(t.get("title") or t.get("ticket_id") or "")
+            lines.append(f"- {blocking_mark}{title}（{cat}）")
+    if decided:
+        lines.append("已收敛的审批决定：")
+        for _, t in decided:
+            status = str(t.get("status") or "")
+            word = _DECISION_WORDS.get(status, status)
+            sel = (t.get("decision") or {}).get("selected_option")
+            title = str(t.get("title") or t.get("ticket_id") or "")
+            lines.append(f"- {title}：{word}" + (f"（选项：{sel}）" if sel else ""))
+
+    new_content = dvm["content"]
+    if lines:
+        new_content = f"{new_content}\n\n" + "\n".join(lines)
+
+    # 两阶段清理（设计 §5.11）：先 consumed_at 置位（幂等闸，删除失败后
+    # 下轮不重复注入）→ delete_keys 真删（内核 pipeline-state.update 支持）。
+    # 置位 = 兄弟扁平键 ``<ticket键>.consumed_at``（state 行是扁平键列，
+    # timestamp 单值键独立于 ticket 字典）；两段独立 update：置位成功即落定，
+    # 删除失败只重试删除（G7 不丢决定）。已决键与标记键同批真删。
+    now_iso = datetime.now(UTC).isoformat()
+    mark_fields: dict[str, Any] = {f"{key}.consumed_at": now_iso for key, _ in decided}
+    delete_keys = (
+        [key for key, _ in decided]
+        + [f"{key}.consumed_at" for key, _ in decided]
+        + consumed_keys
+        + consumed_markers
+    )
+    if mark_fields:
+        await state_cap.call("update", {"pipeline_id": pipeline_id, "fields": mark_fields})
+    if delete_keys:
+        try:
+            await state_cap.call(
+                "update", {"pipeline_id": pipeline_id, "fields": {}, "delete_keys": delete_keys}
+            )
+        except Exception as exc:  # noqa: BLE001 — 删除失败下轮重试，不阻断注入
+            logger.warning(
+                "[approval_fold] delete_keys 失败（下轮仅重试删除，不重复注入）| err=%s", exc
+            )
+    return {"prompt.dynamic_vars": {"content": new_content}}
+
+
+@plugin.step("approval.fold")
+async def approval_fold(state: dict, config: dict | None = None) -> dict:
+    """输入阶段：审批 ticket 聚合注入动态变量消息尾部 + 已决条目两阶段清理。"""
+    try:
+        return {"state_updates": await _approval_fold_impl(state or {})}
+    except Exception as exc:  # noqa: BLE001 — 降级契约：失败不阻断管道
+        logger.warning("[approval_fold] 执行失败，零写入直通 | err=%s", exc)
+        return {"state_updates": {}}
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -516,6 +751,12 @@ async def interaction_send_notification(
                 "type": "string",
                 "description": "拒绝记忆作用域键（创建方声明，推荐 工具+指纹 精确键；缺省回退标题）",
             },
+            "category": {
+                "type": "string",
+                "enum": ["decision", "permission", "generic"],
+                "default": "generic",
+                "description": "审批分类（decision=决策审批 / permission=权限审批 / generic=其余交互缺省；由发起方显式声明，不由后端按标题猜测，落 ticket 供审批收件箱分栏）",
+            },
         },
         "required": ["session_id", "thread_id", "tab_id", "title"],
     },
@@ -526,7 +767,7 @@ async def interaction_create_choice(
     options: list[dict[str, Any]] | None = None,
     timeout_seconds: int = 86400, priority: str = "normal", user_id: str = "",
     agent_id: str = "", agent_level: str = "", pipeline_id: str = "", agent_name: str = "",
-    memory_key: str = "",
+    memory_key: str = "", category: str = "",
 ) -> dict[str, Any]:
     if _service is None:
         return {"error": "service not initialized"}
@@ -538,6 +779,7 @@ async def interaction_create_choice(
         agent_id=agent_id or None, agent_level=agent_level or None,
         pipeline_id=pipeline_id or None, agent_name=agent_name or None,
         memory_key=memory_key or None,
+        category=category or None,
     )
     return {"request_id": rid, "status": "pending"}
 

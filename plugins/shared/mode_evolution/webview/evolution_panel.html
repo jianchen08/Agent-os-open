@@ -141,6 +141,7 @@
       title="重新供页并注入最新账本与任务流量快照">重取快照</button>
   </div>
   <p class="status" id="statusLine" aria-live="polite"></p>
+  <p class="status" id="renderErrors" aria-live="polite" hidden></p>
 
   <!-- ① 日常体验循环（主线）：真实任务流量 + 信号 + 改进循环 + 进化日志 -->
   <div id="dailyPanel" role="tabpanel" aria-labelledby="tab-daily">
@@ -207,7 +208,7 @@
             <span class="step" role="listitem">T8 循环决策</span>
           </div>
           <div id="timeline"></div>
-          <p class="note">回边：T5 拒→回 T3；T8 假设耗尽→回 T1；连败 K 触发熔断→收尾。步骤级留痕待轮次状态落账接入（数据源缺口）。</p>
+          <p class="note">回边：T5 拒→回 T3；T8 假设耗尽→回 T1；连败 K 触发熔断→收尾。步骤级真实节点见下方「回顾工作流图」（由工具调用落账驱动）。</p>
         </div>
       </section>
       <section aria-label="scorecard 走势">
@@ -216,11 +217,17 @@
       </section>
     </div>
 
-    <section aria-label="进化循环状态机">
-      <h2>T1-T8 进化循环 · 状态机<span class="bindnote">轮状态写面（缺口）</span></h2>
+    <section aria-label="回顾工作流图">
+      <h2>回顾工作流图（骨架 · 本次实例 · 改进产物同图）<span class="bindnote">workflow.defs / instances / threads</span></h2>
       <div class="body">
-        <div id="ring"></div>
-        <p class="note">实线 = 正向循环；虚线 = 回边（T5 裁决拒→重提案；连败 K→熔断收尾）。中央游标随所选模式最新轮次示意点亮，步骤级留痕落账后改为实时位置。</p>
+        <div class="status" id="wfSummary" aria-live="polite"></div>
+        <div id="workflow"></div>
+        <div id="wfDetail" hidden></div>
+        <div id="wfThreads"></div>
+        <p class="note">骨架 = rules/flow_steps.yaml 的步骤声明（改声明即改图，面板不写死坐标）；
+          实例 = 工具 handler 落账的真实节点（eval_query / eval_summarize / eval_run_heldout / proposal 埋点；
+          T2 归因与 T7 记忆回填由 traces 派生）；改进产物 = 节点上的提案徽标 + 「提案·采纳·回退」计数。
+          无事件不出节点——「未发生」与「未完成」是两种事实。虚线 = 声明的回边（T5 拒→回 T3、T8 假设耗尽→回 T1）。</p>
       </div>
     </section>
 
@@ -480,7 +487,7 @@
         '<span>' + esc(h.motivation || '') + '</span>' +
         '<span class="cv" title="' + esc(h.target || '') + '">' + extra.join(' · ') + '</span></div>';
     }).join('') +
-    '<p class="note">只展示已生效提案（proposal(action='apply') 落账）；日常指标回退经保留率哨兵回滚后从本列表移除（outcome→reverted）。</p>';
+    '<p class="note">只展示已生效提案（proposal(action=\'apply\') 落账）；日常指标回退经保留率哨兵回滚后从本列表移除（outcome→reverted）。</p>';
   }
 
   var DAILY_BINDS = [
@@ -600,7 +607,7 @@
       '<p class="note">基线 = 该模式首轮通过率；灰菱形 = 对照轮（零变更参照）。</p>';
   }
 
-  // T1-T8 状态机（纯 SVG，箭头为手绘三角形——CSP 自包含契约禁 fill 的 fill 域外引用）
+  // 手绘箭头（SVG 纯 path 三角形：CSP 自包含契约禁 marker/fill 域外引用）
   function arrow(x1, y1, x2, y2, color, dash) {
     var dx = x2 - x1, dy = y2 - y1, len = Math.sqrt(dx * dx + dy * dy) || 1;
     var ux = dx / len, uy = dy / len, px = -uy, py = ux;
@@ -610,46 +617,296 @@
       '<path d="M' + x2 + ',' + y2 + ' L' + (bx + px * 4.5).toFixed(1) + ',' + (by + py * 4.5).toFixed(1) +
       ' L' + (bx - px * 4.5).toFixed(1) + ',' + (by - py * 4.5).toFixed(1) + ' Z" fill="' + color + '"/>';
   }
-  function renderRing() {
-    var el = document.getElementById('ring');
-    var steps = [
-      ['T1', '测量', 70, 36], ['T2', '归因', 200, 36], ['T3', '提案', 330, 36], ['T4', '试跑', 460, 36],
-      ['T5', '裁决', 460, 170], ['T6', '晋升/回滚', 330, 170], ['T7', '记忆回填', 200, 170], ['T8', '循环决策', 70, 170]
-    ];
-    var ph = 'var(--ph)', warn = 'var(--warn)', bad = 'var(--bad)';
-    var s = '<svg viewBox="0 0 560 262" style="width:100%;height:auto" role="img" aria-label="T1-T8 进化循环状态机">';
-    s += arrow(118, 36, 152, 36, ph) + arrow(248, 36, 282, 36, ph) + arrow(378, 36, 412, 36, ph);
-    s += arrow(460, 54, 460, 150, ph);
-    s += arrow(412, 170, 284, 170, ph) + arrow(282, 170, 154, 170, ph) + arrow(124, 170, 72, 170, ph);
-    s += arrow(70, 152, 70, 58, ph);
-    s += '<text x="82" y="112" font-size="11" fill="var(--muted)">循环（假设未耗尽）</text>';
-    s += arrow(412, 150, 384, 62, warn, true);
-    s += '<text x="396" y="112" font-size="11" fill="var(--warn)">裁决拒 → 重提案</text>';
-    s += arrow(70, 188, 70, 216, bad, true);
-    s += '<rect x="24" y="218" width="92" height="30" rx="7" fill="color-mix(in srgb, var(--bad) 12%, transparent)" stroke="' + bad + '"/>' +
-      '<text x="42" y="237" font-size="12" fill="' + bad + '">熔断收尾</text>';
-    // 游标：所选模式最新轮次落位（T4 试跑=对照轮；其余按最近终端状态示意 T6）
-    var cur = active && snap.modes[active] && snap.modes[active].series.length
-      ? snap.modes[active].series[snap.modes[active].series.length - 1] : null;
-    var cx = 234, cy = 86, cw = 172;
-    var label = cur
-      ? '游标: ' + esc(modeLabel(active)) + ' · ' + esc(String(cur.run_id).slice(-4)) +
-        (cur.round_type === 'control' ? ' · T4' : ' · T6')
-      : '游标: 选择模式卡后点亮';
-    s += '<rect x="' + cx + '" y="' + cy + '" width="' + cw + '" height="34" rx="8" ' +
-      'fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="5 3"/>' +
-      '<text x="' + (cx + 14) + '" y="' + (cy + 21) + '" font-size="11.5" fill="var(--accent)">' + label + '</text>';
-    steps.forEach(function(st) {
-      var isCursor = cur && ((cur.round_type === 'control' && st[0] === 'T4') ||
-                             (cur.round_type !== 'control' && st[0] === 'T6'));
-      s += '<rect x="' + (st[2] - 46) + '" y="' + (st[3] - 16) + '" width="92" height="34" rx="7" ' +
-        'fill="' + (isCursor ? 'var(--accent-soft)' : 'var(--card)') + '" stroke="' +
-        (isCursor ? 'var(--accent)' : 'var(--border)') + '"/>' +
-        '<text x="' + (st[2] - 34) + '" y="' + (st[3] + 4) + '" font-size="11" fill="var(--muted)">' + st[0] + '</text>' +
-        '<text x="' + (st[2] - 14) + '" y="' + (st[3] + 4) + '" font-size="12" fill="var(--fg)">' + esc(st[1]) + '</text>';
+
+  // ── 回顾工作流图：骨架 + 本次实例节点 + 改进产物（一张图，布点全数据驱动）──
+  // 列号 = flow_steps.yaml 声明的前向后继链序号（回边不参与排布），行号按列数
+  // 蛇形折行——面板不写死任何步骤坐标，改声明即改图。
+  var WF_CELL = {w: 108, h: 44, gap: 16, rowgap: 106, pad: 14, chip: 20, chipgap: 3};
+  var WF_STATUS = {running: 'var(--accent)', done: 'var(--ok)', failed: 'var(--bad)',
+                   skipped: 'var(--warn)', unavailable: 'var(--ph)'};
+  var WF_GLYPH = {running: '●', done: '✓', failed: '✕', skipped: '–', unavailable: '?'};
+  var WF_OUTCOME_CLS = {applied: 'ok', rejected: 'bad', reverted: 'warn', submitted: 'acc'};
+  var wfFocusInst = null;
+  var wfThreadMap = {};
+
+  function wfBackSet(edges) {
+    var back = {};
+    (edges || []).forEach(function(e) {
+      if (e.kind === 'back') back[e.from + '>' + e.to] = true;
     });
-    s += '</svg>';
-    el.innerHTML = s;
+    return back;
+  }
+  // 前向链：从「无前向上游」的步骤起沿 downstream（跳过回边）走到尽，再补未访问项
+  function wfChain(defs, byStep, back) {
+    var start = null;
+    defs.forEach(function(d) {
+      if (start) return;
+      var fwdUp = (d.upstream || []).some(function(u) {
+        return byStep[u] && !back[u + '>' + d.step];
+      });
+      if (!fwdUp) start = d.step;
+    });
+    if (!start && defs.length) start = defs[0].step;
+    var seen = {}, chain = [], cur = start;
+    while (cur && !seen[cur]) {
+      seen[cur] = true;
+      chain.push(cur);
+      var next = null;
+      ((byStep[cur] || {}).downstream || []).forEach(function(n) {
+        if (!next && byStep[n] && !back[cur + '>' + n]) next = n;
+      });
+      cur = next;
+    }
+    defs.forEach(function(d) {
+      if (!seen[d.step]) { seen[d.step] = true; chain.push(d.step); }
+    });
+    return chain;
+  }
+  function wfLayout(defs, edges) {
+    var byStep = {};
+    defs.forEach(function(d) { byStep[d.step] = d; });
+    var chain = wfChain(defs, byStep, wfBackSet(edges));
+    var n = chain.length || 1;
+    var perRow = Math.max(3, Math.ceil(Math.sqrt(n * 2)));
+    var pos = {};
+    chain.forEach(function(step, i) {
+      var row = Math.floor(i / perRow), col = i % perRow;
+      if (row % 2 === 1) col = perRow - 1 - col;
+      pos[step] = {row: row, col: col};
+    });
+    var rows = Math.ceil(n / perRow);
+    var C = WF_CELL;
+    return {
+      chain: chain, pos: pos, rows: rows, perRow: perRow,
+      W: C.pad * 2 + perRow * C.w + (perRow - 1) * C.gap,
+      H: C.pad * 2 + rows * C.h + (rows - 1) * C.rowgap + 32
+    };
+  }
+  function wfGeom(layout, step) {
+    var p = layout.pos[step];
+    if (!p) return null;
+    var C = WF_CELL;
+    return {x: C.pad + p.col * (C.w + C.gap), y: C.pad + p.row * (C.h + C.rowgap),
+            w: C.w, h: C.h};
+  }
+  // 节点产出的一句话摘要（取真实产出的第一顺位，没有就不编）
+  function wfArtifact(nd) {
+    var a = nd.artifacts || {};
+    if (a.commit) return '↑' + String(a.commit).slice(0, 7);
+    if (a.category) return String(a.category);
+    if (a.verdict) return String(a.verdict);
+    if (a.regressed_cases && a.regressed_cases.length) return '退化' + a.regressed_cases.length;
+    if (a.passed !== undefined && a.total !== undefined) return a.passed + '/' + a.total;
+    if (a.reason) return String(a.reason);
+    if (nd.status === 'running') return '进行中';
+    return '';
+  }
+  function wfProposalAgg(occ) {
+    var ids = {}, applied = 0, reverted = 0;
+    (occ || []).forEach(function(nd) {
+      (nd.proposal_ids || []).forEach(function(pid) {
+        ids[pid] = true;
+        var t = wfThreadMap[pid];
+        var outcome = t ? t.outcome : (nd.artifacts || {}).outcome;
+        if (outcome === 'applied') applied += 1;
+        else if (outcome === 'reverted') reverted += 1;
+      });
+    });
+    return {total: Object.keys(ids).length, applied: applied, reverted: reverted};
+  }
+  function wfChip(g, cy, nd) {
+    var col = WF_STATUS[nd.status] || 'var(--ph)';
+    var glyph = WF_GLYPH[nd.status] || '?';
+    var txt = '#' + nd.seq + ' ' + glyph + ' ' + wfArtifact(nd);
+    var dashed = (nd.status === 'skipped' || nd.status === 'unavailable')
+      ? ' stroke-dasharray="3 2"' : '';
+    return '<g class="wfnode" data-wf-seq="' + nd.seq + '" style="cursor:pointer">' +
+      '<rect x="' + g.x + '" y="' + cy + '" width="' + g.w + '" height="' + WF_CELL.chip +
+      '" rx="5" fill="var(--bg)" stroke="' + col + '" stroke-width="1.2"' + dashed + '/>' +
+      '<text x="' + (g.x + 6) + '" y="' + (cy + 13.5) + '" font-size="9.5" fill="' + col + '">' +
+      esc(txt) + '</text></g>';
+  }
+  function wfSvg(defs, edges, inst) {
+    var layout = wfLayout(defs, edges);
+    var C = WF_CELL;
+    var byStep = {};
+    if (inst) {
+      inst.nodes.forEach(function(nd) {
+        if (!byStep[nd.step]) byStep[nd.step] = [];
+        byStep[nd.step].push(nd);
+      });
+    }
+    var s = '<svg viewBox="0 0 ' + layout.W + ' ' + layout.H +
+      '" style="width:100%;height:auto" role="img" aria-label="回顾工作流图">';
+    // 前向边（骨架）
+    layout.chain.forEach(function(step, i) {
+      if (!i) return;
+      var a = wfGeom(layout, layout.chain[i - 1]), b = wfGeom(layout, step);
+      if (!a || !b) return;
+      if (a.y === b.y) {
+        var right = b.x > a.x;
+        s += arrow(right ? a.x + a.w : a.x, a.y + a.h / 2,
+                   right ? b.x - 2 : b.x + b.w + 2, b.y + b.h / 2, 'var(--ph)');
+      } else {
+        s += arrow(a.x + a.w / 2, a.y + a.h, b.x + b.w / 2, b.y - 2, 'var(--ph)');
+      }
+    });
+    // 回边（声明驱动，虚线走节点下沿，不压节点）
+    (edges || []).forEach(function(e) {
+      if (e.kind !== 'back') return;
+      var a = wfGeom(layout, e.from), b = wfGeom(layout, e.to);
+      if (!a || !b) return;
+      s += arrow(a.x + a.w / 2, a.y + a.h, b.x + b.w / 2, b.y + b.h, 'var(--warn)', true);
+    });
+    // 骨架单元（步骤声明）+ 该步的实例节点（按 seq 纵向堆叠，回边=第二个节点）
+    defs.forEach(function(d) {
+      var g = wfGeom(layout, d.step);
+      if (!g) return;
+      var occ = byStep[d.step] || [];
+      var agg = wfProposalAgg(occ);
+      var line2 = d.is_gate ? '门禁步骤' : '步骤';
+      if (agg.total) {
+        line2 = '提案' + agg.total + ' 采纳' + agg.applied +
+          (agg.reverted ? ' 回退' + agg.reverted : '');
+      }
+      s += '<g class="wfcell">' +
+        '<rect x="' + g.x + '" y="' + g.y + '" width="' + g.w + '" height="' + g.h +
+        '" rx="7" fill="var(--card)" stroke="' + (agg.total ? 'var(--accent)' : 'var(--border)') + '"/>' +
+        '<text x="' + (g.x + 8) + '" y="' + (g.y + 17) + '" font-size="11" fill="var(--muted)">' +
+        esc(d.step) + '</text>' +
+        '<text x="' + (g.x + 36) + '" y="' + (g.y + 17) + '" font-size="11.5" fill="var(--fg)">' +
+        esc(d.title) + '</text>' +
+        '<text x="' + (g.x + 8) + '" y="' + (g.y + 33) + '" font-size="9.5" fill="' +
+        (agg.total ? 'var(--accent)' : 'var(--ph)') + '">' + esc(line2) + '</text></g>';
+      occ.forEach(function(nd, k) {
+        s += wfChip(g, g.y + g.h + 3 + k * (C.chip + C.chipgap), nd);
+      });
+    });
+    return s + '</svg>';
+  }
+
+  function wfFocus(wf) {
+    if (!wf || !wf.instances || !wf.instances.length) return null;
+    for (var i = wf.instances.length - 1; i >= 0; i--) {
+      if (wf.instances[i].wf_id === wf.focus) return wf.instances[i];
+    }
+    return wf.instances[wf.instances.length - 1];
+  }
+  function closeNodeDrawer() {
+    var box = document.getElementById('wfDetail');
+    if (!box) return;
+    box.innerHTML = '';
+    box.hidden = true;
+  }
+  function openNodeDrawer(seq) {
+    var box = document.getElementById('wfDetail');
+    if (!box || !wfFocusInst) return;
+    var nd = null;
+    wfFocusInst.nodes.forEach(function(n) { if (String(n.seq) === String(seq)) nd = n; });
+    if (!nd) return;
+    var rows = [['步骤', nd.step + ' ' + (nd.title || '')],
+                ['状态', nd.status],
+                ['开始', nd.started_at || '—'],
+                ['结束', nd.ended_at || '—'],
+                ['驱动', nd.driven_by || '—']];
+    var props = (nd.proposal_ids || []).map(function(pid) {
+      var t = wfThreadMap[pid];
+      var tail = t ? (t.outcome + (t.category ? ' / ' + t.category : '')) : '未在提案账';
+      return '<li class="mono">' + esc(pid) + ' · ' + esc(tail) + '</li>';
+    }).join('');
+    box.innerHTML = '<div class="wfdrawer">' +
+      '<div class="wfdrawer-head"><b>节点 #' + esc(nd.seq) + ' · ' + esc(nd.step) + ' ' +
+      esc(nd.title || '') + '</b>' +
+      '<button class="btn" id="wfDetailClose" type="button">关闭</button></div>' +
+      '<table>' + rows.map(function(r) {
+        return '<tr><th>' + esc(r[0]) + '</th><td>' + esc(r[1]) + '</td></tr>';
+      }).join('') + '</table>' +
+      '<p class="note">输入（inputs）</p><pre class="wfjson">' +
+      esc(JSON.stringify(nd.inputs || {}, null, 1)) + '</pre>' +
+      '<p class="note">产出（artifacts）</p><pre class="wfjson">' +
+      esc(JSON.stringify(nd.artifacts || {}, null, 1)) + '</pre>' +
+      (props ? '<p class="note">关联改进产物</p><ul class="wfprops">' + props + '</ul>' : '') +
+      '</div>';
+    box.hidden = false;
+    var cb = document.getElementById('wfDetailClose');
+    if (cb) cb.addEventListener('click', closeNodeDrawer);
+  }
+
+  function renderWfThreads(wf) {
+    var el = document.getElementById('wfThreads');
+    if (!wf || !wf.threads || !wf.threads.length) {
+      el.innerHTML = placeholder('暂无改进产物',
+        '提案账为空——T3 提案落账后按节点触点显示（提案/采纳/回退）');
+      return;
+    }
+    var linked = wf.threads.filter(function(t) { return t.linked; });
+    var unlinked = wf.threads.length - linked.length;
+    var rows = linked.map(function(t) {
+      var touches = t.touches.map(function(x) {
+        return '<span class="wftouch" data-wf-seq="' + x.seq + '">' +
+          esc(x.step) + '#' + x.seq + '</span>';
+      }).join('<span class="arrow">→</span>');
+      return '<tr><td class="mono">' + esc(t.proposal_id) + '</td><td>' + touches + '</td>' +
+        '<td><span class="tag ' + (WF_OUTCOME_CLS[t.outcome] || '') + '">' +
+        esc(t.outcome) + '</span></td>' +
+        '<td class="mono">' + esc(t.round_id || '—') + '</td></tr>';
+    }).join('');
+    el.innerHTML = '<table><tr><th>提案</th><th>触点（图内真实节点）</th>' +
+      '<th>结论</th><th>所属轮</th></tr>' +
+      (rows || '<tr><td colspan="4">本轮尚无关联提案</td></tr>') + '</table>' +
+      (unlinked ? '<p class="note">另有 ' + unlinked + ' 条历史提案无轮次归属' +
+        '（账面无 round_id，不可回溯匹配），按「历史账 · 未关联」保留，不做时间就近推断。</p>' : '');
+  }
+
+  function renderWorkflow() {
+    var el = document.getElementById('workflow');
+    var summary = document.getElementById('wfSummary');
+    var wf = snap.workflow || null;
+    var defs = (wf && wf.defs) || [];
+    var edges = (wf && wf.edges) || [];
+    wfThreadMap = {};
+    ((wf && wf.threads) || []).forEach(function(t) { wfThreadMap[t.proposal_id] = t; });
+    if (!defs.length) {
+      wfFocusInst = null;
+      el.innerHTML = placeholder('步骤声明缺失',
+        'rules/flow_steps.yaml 未被服务端读到（workflow.defs 为空）——图无从布点');
+      document.getElementById('wfThreads').innerHTML = '';
+      summary.textContent = '';
+      closeNodeDrawer();
+      return;
+    }
+    wfFocusInst = wfFocus(wf);
+    el.innerHTML = wfSvg(defs, edges, wfFocusInst);
+    if (!wfFocusInst) {
+      summary.textContent = '本次回顾：尚无工作流记录——自下一轮 T1（eval_query suite）起自动生成，' +
+        '上面只画流程骨架，不出现状态节点';
+    } else {
+      var agg = wf.summary || {};
+      summary.textContent = '本次回顾 ' + wfFocusInst.wf_id + ' · ' +
+        (wfFocusInst.mode ? modeLabel(wfFocusInst.mode) : '未标模式') + ' · ' +
+        wfFocusInst.status + (wfFocusInst.close_reason ? '（' + wfFocusInst.close_reason + '）' : '') +
+        ' · 节点 ' + wfFocusInst.nodes.length + ' 个 · 改进产物 ' +
+        (agg.proposals_linked || 0) + ' 条已挂 / ' + (agg.proposals_unlinked || 0) + ' 条历史未关联';
+    }
+    renderWfThreads(wf);
+    closeNodeDrawer();
+  }
+
+  function bindWorkflow() {
+    var host = document.getElementById('workflow');
+    if (host) {
+      host.addEventListener('click', function(ev) {
+        var node = ev.target && ev.target.closest ? ev.target.closest('[data-wf-seq]') : null;
+        if (node) openNodeDrawer(node.getAttribute('data-wf-seq'));
+      });
+    }
+    var th = document.getElementById('wfThreads');
+    if (th) {
+      th.addEventListener('click', function(ev) {
+        var node = ev.target && ev.target.closest ? ev.target.closest('[data-wf-seq]') : null;
+        if (node) openNodeDrawer(node.getAttribute('data-wf-seq'));
+      });
+    }
   }
 
   function renderHypotheses() {
@@ -795,7 +1052,8 @@
 
   var EVAL_BINDS = [
     ['模式分组 / 走势 / 时间线', 'eval_summarize 落账 rounds[]', 'passed/total/round_type/repeat_detail', '已接（供页快照）'],
-    ['T1-T8 游标', '轮状态写面（未建）', '轮次状态机事件', '缺口 · 步骤级留痕未落账'],
+    ['回顾工作流节点', 'workflow_ledger 埋点 + traces 派生', 'workflow.instances[].nodes', '已接（供页快照）'],
+    ['改进产物挂节点', 'proposals 账 × 节点 artifacts', 'workflow.threads[].touches', '已接（供页快照）'],
     ['假设 / 杠杆 / 对照臂', 'proposals 账 + evolution_metrics', 'outcome/levers/controls', '已接（供页快照）'],
     ['轨迹库证据', 'harvest_trajectories.py', 'library_summary', '已接（缺失按缺口渲染）'],
     ['健康度后三项', 'eval_run_heldout / token 账', '判决一致率/归因有效度/循环经济性', '缺口 · 未落账'],
@@ -812,34 +1070,57 @@
       }).join('') + '</table>';
   }
 
+  /**
+   * 区块渲染隔离：单个区块抛错不得连坐其它区块。
+   *
+   * 各区块（模式分组 / 走势 / 工作流图 / 假设 …）数据源互相独立，一处数据形状异常
+   * 不该让后续区块（尤其工作流图）整块不出——历史实测里「图上不出」正是这种连坐的
+   * 表现形式之一。隔离后失败区块留可读痕迹（控制台 + 区块内占位），不静默吞掉。
+   */
+  function safeRender(name, fn) {
+    try {
+      fn();
+    } catch (err) {
+      if (window.console && console.error) {
+        console.error('[evolution_panel] 区块渲染失败: ' + name, err);
+      }
+      var host = document.getElementById('renderErrors');
+      if (host) {
+        host.hidden = false;
+        host.textContent = '区块渲染失败：' + name + '（详见控制台）';
+      }
+    }
+  }
+
   function renderEval() {
-    renderModes();
-    renderTimeline();
-    renderTrend();
-    renderRing();
-    renderHypotheses();
-    renderLevers();
-    renderControls();
-    renderLibrary();
-    renderMetrics();
-    renderBreaker();
-    renderEvolution();
+    safeRender('modes', renderModes);
+    safeRender('timeline', renderTimeline);
+    safeRender('trend', renderTrend);
+    safeRender('workflow', renderWorkflow);
+    safeRender('hypotheses', renderHypotheses);
+    safeRender('levers', renderLevers);
+    safeRender('controls', renderControls);
+    safeRender('library', renderLibrary);
+    safeRender('metrics', renderMetrics);
+    safeRender('breaker', renderBreaker);
+    safeRender('evolution', renderEvolution);
   }
 
   function renderDaily() {
-    renderDailyKpi();
-    renderSignals();
-    renderPipeline();
-    renderChangelog();
-    renderDailyBinds();
+    safeRender('dailyKpi', renderDailyKpi);
+    safeRender('signals', renderSignals);
+    safeRender('pipeline', renderPipeline);
+    safeRender('changelog', renderChangelog);
+    safeRender('dailyBinds', renderDailyBinds);
   }
 
   bindTabs();
-  renderHead();
+  bindWorkflow();
+  safeRender('head', renderHead);
   renderDaily();
   renderEval();
-  renderToolFace();
-  renderEvalBinds();
+  safeRender('toolFace', renderToolFace);
+  safeRender('evalBinds', renderEvalBinds);
   </script>
 </body>
 </html>

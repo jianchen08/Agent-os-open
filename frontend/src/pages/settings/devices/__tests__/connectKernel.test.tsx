@@ -10,6 +10,7 @@
  *    （消灭「填 127.0.0.1:9300 被判自定义后端 → 停本机栈+本机免填凭据失效」死路）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { connectKernel } from '../connectKernel'
 
 const probeMock = vi.hoisted(() => ({ probeConnection: vi.fn() }))
 const shellMode = vi.hoisted(() => ({ applyShellBackendMode: vi.fn() }))
@@ -32,7 +33,6 @@ vi.mock('@/services/connectionProbe', () => ({
 }))
 vi.mock('@/services/shellBackendMode', () => shellMode)
 
-import { connectKernel } from '../connectKernel'
 
 describe('connectKernel 探活闸', () => {
   beforeEach(() => {
@@ -58,12 +58,12 @@ describe('connectKernel 探活闸', () => {
   it('探活通过：写设置 + 上报 remote + 刷新收尾', async () => {
     probeMock.probeConnection.mockResolvedValue({ ok: true, status: 200, kernelVersion: '0.2.2', latencyMs: 30 })
 
-    const r = await connectKernel('http://162.14.69.153')
+    const r = await connectKernel('http://203.0.113.153')
 
     expect(r.ok).toBe(true)
-    expect(localStorage.getItem('server_base_url')).toBe('http://162.14.69.153')
+    expect(localStorage.getItem('server_base_url')).toBe('http://203.0.113.153')
     expect(shellMode.applyShellBackendMode).toHaveBeenCalledWith('remote')
-    expect(probeMock.probeConnection).toHaveBeenCalledWith('http://162.14.69.153')
+    expect(probeMock.probeConnection).toHaveBeenCalledWith('http://203.0.113.153')
   })
 
   it('空地址切回本机档：不探活，清除设置并上报 local', async () => {

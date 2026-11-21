@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentos_api::plugin_watcher::PluginWatcher;
+use agentos_api::plugin_watcher::{PluginWatcher, WatcherHandle};
 use agentos_core::traits::{CapabilityRegistry, PluginInvoker, PluginLoader};
 use agentos_invoker::PluginInvokerImpl;
 use agentos_plugin_loader::{CapabilityRegistryImpl, PluginLoaderImpl};
@@ -514,5 +514,127 @@ async fn mode_resources_aggregate_on_demand_from_discovered_packages() {
         pipelines,
         vec!["mode_e2e/main"],
         "编排键 + task_kinds 随盘上现状派生"
+    );
+}
+
+// ── 同步冷却（1c 风暴降噪）行为冒烟：真实短时钟（与既有 debounce 测试同习语）──
+
+/// 风暴连发对照：波次间隔 > 防抖窗（各成波）但 < 冷却窗 → sync 频率被冷却钳住。
+/// 对照组（冷却 ≈0）波次各跑一整轮；处理组（冷却 250ms）合并显著降频。
+#[tokio::test]
+#[serial]
+async fn storm_burst_coalesced_by_sync_cooldown() {
+    pin_temp_user_root();
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+
+    let make_watcher = |cooldown: Duration| {
+        let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+        let invoker = Arc::new(PluginInvokerImpl::new(loader));
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        PluginWatcher::new(
+            tmp.path().to_path_buf(),
+            invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+            registry,
+            HashSet::new(),
+        )
+        .with_debounce(Duration::from_millis(10))
+        .with_sync_cooldown(cooldown)
+        .spawn()
+    };
+
+    // 波次间隔 50ms：> 防抖 10ms（各成一波）< 冷却 250ms（应被合并）。
+    async fn send_burst(handle: &WatcherHandle) {
+        for _ in 0..6 {
+            handle.trigger.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    // 对照组：冷却 ≈0 → 波次各跑一整轮（≥5 次）。
+    let without = make_watcher(Duration::from_millis(1));
+    send_burst(&without).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let without_count = without.sync_count.load(Ordering::Relaxed);
+    assert!(
+        without_count >= 5,
+        "对照组（无冷却）应波波全量重扫，实得 {without_count}"
+    );
+
+    // 处理组：冷却 250ms → 风暴合并，sync 次数显著低于波数（300ms 窗口 ≤ 3 轮）。
+    let with = make_watcher(Duration::from_millis(250));
+    send_burst(&with).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let with_count = with.sync_count.load(Ordering::Relaxed);
+    assert!(
+        with_count <= 4,
+        "处理组（冷却 250ms）应把 6 波合并到 ≤4 轮，实得 {with_count}"
+    );
+    assert!(with_count >= 1, "冷却不吞事件：至少执行一轮");
+}
+
+/// 单事件：一次触发恰一次 sync（冷却不延迟首次执行）。
+#[tokio::test]
+#[serial]
+async fn single_event_still_syncs_once_promptly() {
+    pin_temp_user_root();
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+
+    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let handle = PluginWatcher::new(
+        tmp.path().to_path_buf(),
+        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+        registry,
+        HashSet::new(),
+    )
+    .with_debounce(Duration::from_millis(10))
+    .with_sync_cooldown(Duration::from_millis(250))
+    .spawn();
+
+    handle.trigger.send(()).unwrap();
+    // 首轮无 last_sync_done → 不等待冷却，防抖后立即执行。
+    let appeared = timeout(Duration::from_secs(3), async {
+        while handle.sync_count.load(Ordering::Relaxed) < 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        appeared.is_ok(),
+        "单事件应在 3s 内完成首轮 sync（冷却不吞首波）"
+    );
+}
+
+/// 无变化轮询退避：连续无变化轮冷却拉长，但上限 = 轮询间隔——轮询节奏不被吞。
+#[tokio::test]
+#[serial]
+async fn idle_polls_keep_polling_rhythm() {
+    pin_temp_user_root();
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+
+    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let handle = PluginWatcher::new(
+        tmp.path().to_path_buf(),
+        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+        registry,
+        HashSet::new(),
+    )
+    .with_debounce(Duration::from_millis(10))
+    .with_poll_interval(Duration::from_millis(150))
+    .with_sync_cooldown(Duration::from_millis(300))
+    .spawn();
+
+    // 800ms ≥ 3 个 poll tick（150ms）：退避封顶 = poll 间隔，节奏不被吞。
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let count = handle.sync_count.load(Ordering::Relaxed);
+    assert!(
+        count >= 2,
+        "无变化期轮询节奏不被冷却吞（800ms/150ms ≥ 3 tick，实得 {count} 轮）"
     );
 }

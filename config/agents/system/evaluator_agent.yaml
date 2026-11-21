@@ -1,6 +1,6 @@
 config_id: evaluator_agent
 name: 通用评估专家
-model_tier: large
+model_tier: small
 display_name: 通用评估专家
 description: '通用评估专家，负责对任务产出物进行语义级别的质量评估。
 
@@ -12,7 +12,6 @@ description: '通用评估专家，负责对任务产出物进行语义级别的
 agent_type: system
 category: system
 level: L3
-model_name: minimax-m3
 tags:
 - evaluation
 - evaluator
@@ -24,6 +23,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
+  - '任务ID: {{state:context.task_id}}'
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
@@ -101,16 +101,23 @@ system_prompt: |-
 tool_ids:
 - file_read
 - file_write
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 version: 2.1.0
 is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-plugins:
-  disabled: []
-  enabled:
-    task_reminder:
-      evaluation_mode: true
 hard_constraints:
 - 评估必须基于实际内容，禁止空洞评价
 - 判定必须有依据，问题清单须落到具体位置，反馈要具体
@@ -124,14 +131,14 @@ soft_constraints:
 deliverables:
 - name: evaluation_report
   description: JSON格式的评估结论
-  output_path: '{{workspace}}/docs/working/evaluation_report.json'
+  output_path: '{{workspace}}/docs/working/{{task_id}}_evaluation_report.json'
   type: json
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/working/evaluation_report.json'
+    path: '{{workspace}}/docs/working/{{task_id}}_evaluation_report.json'
 metadata:
   author: System
   created_at: '2026-05-20'

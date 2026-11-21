@@ -3,7 +3,12 @@
 import { useMemo } from 'react'
 import { deriveToolCallActivityStatus } from '@/types/activity'
 import { buildDefaultActions } from '@/utils/activityConverter'
-import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import {
+  enhanceActivityWithToolConfig,
+  enhanceTruncatedContentCard,
+  getGlobalOpenFileCallback,
+  isContentDependentRenderCard,
+} from '@/utils/toolCardRegistry'
 import { expandTruncatedToolResult } from '@/utils/toolResultBackfill'
 import {
   buildTruncatedResultDetailBlock,
@@ -114,14 +119,22 @@ function toolCallPartStatus(
   )
 }
 
-/** 从 ToolCallPart 构建 ActivityData（parts[] 路径专用） */
+// 「在途」资格 = 消息级流式上下文（2026-11-18 用户裁定：活动指示必须如实反映
+// 实时状态，终态事件到达前不得变完成态）。无结果工具卡在流式期间恒为 running
+// （转圈持续到 tool_result 到达）；只有 run 结束（非流式上下文）仍无结果才收口
+// interrupted。原启发式（其后出现模型推送即收口）会在「工具仍在执行、下一轮思考
+// 已开始」时把执行中的卡误判为中断——用户实测「结果还没到转圈就没了」。
+
+
+/** 从 ToolCallPart 构建 ActivityData（parts[] 路径专用）。`inFlight` =
+ * 消息级流式上下文（无结果工具卡据此推导 running，终态只认 tool_result）。 */
 function buildActivityFromToolPart(
   part: ToolCallPart,
   toolCall: MessageToolCall,
   index: number,
-  inStreamingContext: boolean,
+  inFlight: boolean,
 ): ActivityData {
-  const status = toolCallPartStatus(part, inStreamingContext)
+  const status = toolCallPartStatus(part, inFlight)
   return {
     type: 'tool_call',
     id: part.callId || `tool-${index}`,
@@ -144,22 +157,16 @@ function buildActivityFromToolPart(
 function makeStablePartKey(part: MessagePart, index: number): string {
   const seq = part.sequence ?? index
   switch (part.type) {
-    case 'text': {
-      const content = part.content
-      const contentPrefix = content.substring(0, 16)
-      return `part-text-${seq}-${contentPrefix}`
-    }
-    case 'thinking': {
-      const content = part.content
-      const contentPrefix = content.substring(0, 16)
-      return `part-thinking-${seq}-${contentPrefix}`
-    }
+    case 'text':
+    case 'thinking':
+    case 'system':
+      // 键里禁放内容（前 N 字也不行）：流式追加时内容逐 token 变化，键跟着变
+      // 就是整棵 markdown 重挂——@lobehub/ui 高亮状态随卸载清零，代码块每
+      // token 闪一帧无高亮纯文本。seq（缺省数组下标）在同消息 parts 内唯一，
+      // 且流式只追加不改写，已足够稳定。
+      return `part-${part.type}-${seq}`
     case 'tool_call':
       return `part-tool-${part.callId}`
-    case 'system': {
-      const contentPrefix = (part.content || '').substring(0, 16)
-      return `part-system-${seq}-${contentPrefix}`
-    }
     default:
       return `part-${seq}-${index}`
   }
@@ -171,7 +178,9 @@ export function buildFragmentsFromParts(
   opts?: { streaming?: boolean },
 ): RenderFragment[] {
   const fragments: RenderFragment[] = []
-  const parts = message.parts!
+  // 缺省空数组（parts 缺失=无 part 可渲染，与全量遍历等价；替代非空断言——
+  // 断言在缺 parts 输入上直接崩溃，棘轮清偿 2026-11-19）
+  const parts = message.parts ?? []
   // 活跃流式上下文（显式传入，缺省=非流式）：工具卡状态推导据此区分
   // 「真在途」与「历史孤儿」（无结果工具调用在非流式上下文渲染中断终态）。
   const inStreamingContext = opts?.streaming === true
@@ -216,6 +225,9 @@ export function buildFragmentsFromParts(
       }
 
       case 'tool_call': {
+        // 该卡的在途资格 = 消息级流式上下文（见上方注释）。两处 status
+        // （toolCall/activity）必须同源。
+        const inFlight = inStreamingContext
         // 截断标记解析（数据面瘦身批次 1.2）：part 的 result/resultData 超阈值时
         // 是「预览+标记」对象，直接进渲染分支会产出垃圾视图——标记字段剔除、
         // 截断信息收敛为详情块，展开经 expandTruncatedToolResult 单条回取回填。
@@ -226,7 +238,7 @@ export function buildFragmentsFromParts(
           call_id: part.callId,
           tool_name: part.name,
           tool_args: part.args,
-          status: toolCallPartStatus(part, inStreamingContext),
+          status: toolCallPartStatus(part, inFlight),
           result: resolved.result,
           resultData: resolved.resultData,
           error: part.error,
@@ -238,26 +250,33 @@ export function buildFragmentsFromParts(
         }
         // 构建 ActivityData 并应用工具卡片注册表增强。
         let activity = enhanceActivityWithToolConfig(
-          buildActivityFromToolPart(part, toolCall, i, inStreamingContext),
+          buildActivityFromToolPart(part, toolCall, i, inFlight),
           toolCall,
           {
             onOpenFile: (filePath, _recordCtid) =>
               getGlobalOpenFileCallback()(filePath, taskId || _recordCtid),
           },
         )
-        if (resolved.mark) {
+        if (resolved.mark && isContentDependentRenderCard(part.name)) {
+          // 内容依赖声明卡（file_card）截断态：不走 junk 级联，详情区替换为
+          // 一级「差异对比（展开加载全文）」块，展开经既有单条回取回填，成功后
+          // 重渲染自然落回标准 file_card 管线（彩色 diff + 全文页签 + 打开入口）
+          activity = enhanceTruncatedContentCard(activity, toolCall, resolved.mark, () =>
+            expandTruncatedToolResult({
+              messageId: message.id,
+              partIndex: i,
+              callId: part.callId,
+              sequence: resolved.mark?.sequence,
+            }),
+          )
+        } else if (resolved.mark) {
+          // 2026-11-18 用户裁定：通用工具卡展开只显示与 LLM 所见一致的预览
+          // （写入面已截断），不回取全文——展开纯渲染，不改工具状态、无网络。
           activity = {
             ...activity,
             details: [
               ...(activity.details ?? []),
-              buildTruncatedResultDetailBlock(resolved.mark, () =>
-                expandTruncatedToolResult({
-                  messageId: message.id,
-                  partIndex: i,
-                  callId: part.callId,
-                  sequence: resolved.mark?.sequence,
-                }),
-              ),
+              buildTruncatedResultDetailBlock(resolved.mark),
             ],
           }
         }

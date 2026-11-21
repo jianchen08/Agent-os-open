@@ -84,6 +84,8 @@ interface PersistedNotificationEntry {
   timestamp: string
   taskId?: string
   sessionId?: string
+  /** 合并键随摘要落盘：刷新恢复的常驻条目保持同键合并/清除能力 */
+  mergeKey?: string
 }
 
 /** notification-storage 持久化 state 形状（partialize 输出 / merge 输入） */
@@ -109,6 +111,7 @@ function toPersistedEntry(n: NotificationItem): PersistedNotificationEntry {
     timestamp: n.timestamp,
     ...(n.taskId ? { taskId: n.taskId } : {}),
     ...(n.sessionId ? { sessionId: n.sessionId } : {}),
+    ...(n.mergeKey ? { mergeKey: n.mergeKey } : {}),
   }
 }
 
@@ -240,6 +243,15 @@ interface NotificationState {
   executeAction: (notificationId: string, action: NotificationAction) => void
   /** 切换面板展开/收起 */
   togglePanel: () => void
+  /**
+   * 清除连接类错误存量通知（系统清除，2026-11-18 装机事故批次 3）：
+   * WS 重连成功时调用。覆盖两类：连接条件同步条目（id 前缀 `connection#`，
+   * 含刷新后无同步属主恢复的孤儿条目）+ 连接类常驻错误（svc-request-failed /
+   * conn-self-heal 合并键）。直接过滤不走 removeNotification——那是用户移除
+   * 语义会记 dismissedIds，稳定合并键会被永久静默、连接条件新 episode 的
+   * 合法重报会被误挡（P-144 同款取舍）。
+   */
+  clearConnectionErrorNotifications: () => void
   /** 打开面板 */
   openPanel: () => void
   /** 关闭面板 */
@@ -314,7 +326,16 @@ export const useNotificationStore = create<NotificationState>()(
 
   addNotification: (data) => {
     const now = new Date()
-    const id = data.id ?? generateNotificationId()
+    // 合并键优先（2026-11-18 装机事故批次 3）：带 mergeKey 的高频重复投递
+    // （连接/服务类常驻错误在 77 次重连风暴期逐次上报）沿用在列同键条目 id
+    // 走下方同 id 更新路径，合并为单条更新不刷屏。用户手动关闭后同键条目
+    // 不在列，下一次新失败以新 id 重新入列——不被 dismissed 记忆永久静默。
+    let id = data.id
+    if (!id && data.mergeKey) {
+      const sameKey = get().notifications.find((n) => n.mergeKey === data.mergeKey)
+      if (sameKey) id = sameKey.id
+    }
+    id = id ?? generateNotificationId()
 
     // 无 id 通知兜底闸：同正文短窗内只入一条（重连重放/轮询重入/同一失败
     // 多层上报等重复投递不携带稳定 id 时按内容指纹挡住刷屏）。命中时返回首次
@@ -612,6 +633,18 @@ export const useNotificationStore = create<NotificationState>()(
 
   togglePanel: () => {
     set((state) => ({ isPanelOpen: !state.isPanelOpen }))
+  },
+
+  clearConnectionErrorNotifications: () => {
+    set((state) => {
+      const kept = state.notifications.filter((n) => {
+        if (n.id.startsWith('connection#')) return false
+        if (n.mergeKey === 'svc-request-failed' || n.mergeKey === 'conn-self-heal') return false
+        return true
+      })
+      if (kept.length === state.notifications.length) return state
+      return { notifications: kept }
+    })
   },
 
   openPanel: () => {

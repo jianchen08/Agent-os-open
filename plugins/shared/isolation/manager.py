@@ -9,8 +9,10 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath  # noqa: F401
@@ -19,8 +21,11 @@ from typing import Any, cast
 from decider import IsolationDecider, IsolationUnrecoverableError
 from providers.base import IsolationProvider
 from providers.docker_provider import DockerProvider
+from providers.external_docker_provider import PROVIDER_TYPE as EXTERNAL_PROVIDER_TYPE
+from providers.external_docker_provider import ExternalDockerProvider
 from providers.host_provider import HostProvider
 from providers.linux_native_provider import LinuxNativeProvider
+from providers.mxc_native_provider import MxcNativeProvider
 from providers.wsl_native_provider import WslNativeProvider
 from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
@@ -34,6 +39,35 @@ from agentos_plugin_sdk.isolation_types import (
 
 logger = logging.getLogger(__name__)
 
+# 外部绑定注册表持久化文件名（R15）：绑定登记必须跨 sidecar 实例/重启存活。
+# 之前注册表纯进程内存——light 宿主组按负载多实例 + 空闲回收/整组重建时，
+# 持有注册表的实例与接收查询的实例分离 → 同一 workspace 键间歇 bound=False
+# （终跑 57 查 7 miss 实证），fs 族工具静默回落宿主路径语义（模型侧表现为
+# 路径时好时坏）。持久化后任何实例启动/查询未命中即从文件自愈。
+_EXTERNAL_BINDINGS_STORE_SUBDIR = "isolation"
+_EXTERNAL_BINDINGS_STORE_NAME = "external_bindings.json"
+
+
+def _external_bindings_store_path() -> Path | None:
+    """外部绑定注册表持久化文件路径（数据根解析同 tenant_data 约定）。
+
+    env ``AGENTOS_DATA_DIR`` 优先；否则用户空间数据根（shared root 由
+    server bootstrap 注入后 ``user_space`` 可达）；再不可得返回 None
+    （持久化退化为内存-only，行为同修复前，不崩）。
+    """
+    env = os.environ.get("AGENTOS_DATA_DIR")
+    if env:
+        return Path(env) / _EXTERNAL_BINDINGS_STORE_SUBDIR / _EXTERNAL_BINDINGS_STORE_NAME
+    try:
+        from _root_api import user_data_dir  # noqa: PLC0415
+
+        base = user_data_dir()
+        if base:
+            return Path(base) / _EXTERNAL_BINDINGS_STORE_SUBDIR / _EXTERNAL_BINDINGS_STORE_NAME
+    except Exception:
+        pass
+    return None
+
 
 def _is_linux_platform() -> bool:
     """linux_native 平台门谓词：bwrap/namespace 是 Linux 内核机制，仅 Linux 生效。
@@ -43,28 +77,6 @@ def _is_linux_platform() -> bool:
     双端一致（跨插件不可 import，一致性由接线测试钉死，ADR 2026-10-12）。
     """
     return sys.platform == "linux"
-
-
-def _load_provider_config() -> dict[str, Any]:
-    """加载提供者配置：ConfigCenter 单源（override 注入缺席时的进程内通路）。
-
-    wsl_native 后端开关经此通路对宿主进程内的 IsolationManager 生效。sidecar
-    内 ConfigCenter 不可达 → 返回空（默认提供者集）；直读仓库 yaml 的回退
-    分支已退役（state 单一真相源审查 F11：配置经 sidecar 注入一次到位，
-    生产调用方一律传 providers_config_override，禁止仓库布局假设的静默
-    兜底——2026-09-14 实锤过「yaml 已启用 wsl_native 而落地仍走 cua 容器」
-    的同型事故，根因即 config.config_center 在 sidecar 不可达）。
-    """
-    try:
-        from config.config_center import get_config_center  # noqa: PLC0415
-
-        config = get_config_center().get("plugins/isolation/isolation_config.yaml") or {}
-        providers_config = config.get("providers", {})
-        logger.debug("[IsolationManager] 从 ConfigCenter 加载提供者配置")
-        return providers_config
-    except Exception as exc:
-        logger.warning(f"[IsolationManager] ConfigCenter 提供者配置不可得（用默认提供者集）: {exc}")
-        return {}
 
 
 def extract_providers_config(full_config: dict[str, Any]) -> dict[str, Any]:
@@ -91,25 +103,46 @@ def extract_providers_config(full_config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _create_providers_from_config(
-    providers_config: dict[str, Any] | None = None,
+    providers_config: dict[str, Any],
     profile: dict[str, Any] | None = None,
 ) -> dict[IsolationLevel, IsolationProvider]:
     """根据配置创建提供者实例。
 
     Args:
-        providers_config: providers 配置字典（来自 isolation_config.yaml）
+        providers_config: providers 配置字典（来自 isolation_config.yaml 注入
+            或显式 override；必填——2026-11-13 裁定删除 None→隐藏二次读取的
+            静默兜底面，空配置 = 显式默认集，缺省后端语义见 wsl_native 分支）。
         profile: 硬件自适应资源配额（来自 hardware_profile.compute_resource_profile）。
                  非 None 时，其值优先于 providers_config 的 limits（自适应覆盖配置）。
     """
-    if providers_config is None:
-        providers_config = _load_provider_config()
-
     providers: dict[IsolationLevel, IsolationProvider] = {}
 
     # 宿主机提供者
     host_config = providers_config.get("host", {})
     if host_config.get("enabled", True):
         providers[IsolationLevel.HOST] = HostProvider()
+
+    # mxc_native 提供者：Windows 上的 MXC 原生后端（ProcessContainer/WSLC），
+    # 槽位顺序在 wsl_native 之前（显式 opt-in 才先占）。profile→backend 由
+    # providers.mxc_native.backends 注册表静态决定（选择真值），运行期探测
+    # 只做健康检查、不改选后端（ADR 2026-10-09；设计草案 §4）。平台门与
+    # wsl_native 同谓词（os.name == "nt"）：非 Windows 不注册。默认关闭
+    # （enabled 缺省 false），关闭时槽位竞争回落到 wsl_native。
+    mxc_native_config = providers_config.get("mxc_native", {})
+    if (
+        IsolationLevel.CONTAINER not in providers
+        and bool(mxc_native_config.get("enabled", False))
+        and os.name == "nt"
+    ):
+        providers[IsolationLevel.CONTAINER] = MxcNativeProvider(mxc_native_config)
+        logger.info(
+            "[IsolationManager] 创建 MxcNativeProvider（MXC 原生后端，profile 注册表=%s）",
+            providers[IsolationLevel.CONTAINER].registered_profiles(),
+        )
+    elif bool(mxc_native_config.get("enabled", False)):
+        logger.info(
+            "[IsolationManager] mxc_native 已启用但平台非 Windows，不参与 CONTAINER 槽位竞争"
+        )
 
     # wsl_native 提供者：启用时占据 CONTAINER 槽位（与 docker/linux_native 互斥）。
     # 隔离级别语义不变（仍 IsolationLevel.CONTAINER="isolated"），decider/policy/
@@ -120,10 +153,21 @@ def _create_providers_from_config(
     # 该配置不参与槽位竞争（装载期平台适配，非 F11 禁止的运行期静默兜底——
     # 选择结果经 info 日志显式留痕，与 isolation_guard 装载端同一谓词，双端
     # 一致）。
+    # Windows 缺省启用（2026-11-13 用户裁定：隔离技术栈 Codex 式原生优先，
+    # 无论哪个系统——Windows=wsl_native、Linux=linux_native，Docker 仅显式
+    # opt-in）：「providers 段在而 wsl_native 缺席」在 Windows 上不再视作
+    # docker 合法缺省，而是缺省启用 wsl_native。动因=2026-11-13 装机实测：
+    # 内核启动时资源树处于换包中间态，配置快照丢 wsl_native 段 → 旧缺省
+    # 语义下 Docker 静默补位（无镜像/无 Dockerfile/Hub 不通 → 全部隔离
+    # bash 被 fail-closed 拦截）；缺省启用后注入链断裂也无法把 Windows
+    # 静默降到 Docker。显式 enabled: false 仍尊重。
     wsl_native_config = providers_config.get("wsl_native", {})
-    if wsl_native_config.get("enabled", False) and os.name == "nt":
+    wsl_enabled = bool(wsl_native_config.get("enabled", os.name == "nt"))
+    # 同槽先占者生效：mxc_native 已占 CONTAINER 时本段不覆盖（槽位注册表
+    # 「先注册者生效」语义，全部原生后端分支共用此守卫）。
+    if IsolationLevel.CONTAINER not in providers and wsl_enabled and os.name == "nt":
         providers[IsolationLevel.CONTAINER] = WslNativeProvider(wsl_native_config)
-    elif wsl_native_config.get("enabled", False):
+    elif wsl_enabled and os.name != "nt":
         logger.info(
             "[IsolationManager] wsl_native 已启用但平台非 Windows（wsl.exe 不存在），"
             "不参与 CONTAINER 槽位竞争（Linux 默认落 linux_native，其余落 Docker）"
@@ -148,11 +192,14 @@ def _create_providers_from_config(
                 "（bwrap/namespace 为 Linux 机制），CONTAINER 槽位按既有顺序落 Docker 后端"
             )
 
-    # Docker 提供者（wsl_native/linux_native 未接管时的 CONTAINER 后端；
-    # Linux 上显式 opt-out 或 macOS/Windows 兜底）
+    # Docker 提供者（仅显式 opt-in：2026-11-13 用户裁定隔离技术栈 Codex 式
+    # 原生优先——Windows=wsl_native、Linux=linux_native；Docker 不再缺省补位，
+    # 配置须显式 enabled: true（出厂 yaml 已带）。 macOS 无原生后端，出厂
+    # 配置的显式 cua 段即其通路。原生后端缺席时 CONTAINER 槽位留空 →
+    # fail-closed 拒绝并给指引，绝不静默降 Docker（F11）。）
     if IsolationLevel.CONTAINER not in providers:
         docker_config = providers_config.get("docker", providers_config.get("cua", {}))
-        if docker_config.get("enabled", True):
+        if docker_config.get("enabled", False):
             # 配额来源优先级：yaml 显式 limits > hardware_profile 自适应 > 默认 512m。
             # 显式配置优先：写了就是用户明确指定（自适应是低配机保护兜底）；
             # AO_CONTAINER_* 环境变量在 hardware_profile 内层应用（优先级最高）。
@@ -191,7 +238,7 @@ def _create_providers_from_config(
                     # 默认 dockerfile_path/build_context 相对仓库根；超时默认 600s
                     # （镜像含 apt+pip+playwright 下载，分钟级）。
                     "auto_build": docker_config.get("auto_build", True),
-                    "dockerfile_path": docker_config.get("dockerfile_path", "docker/agentos/Dockerfile"),
+                    "dockerfile_path": docker_config.get("dockerfile_path", "docker_assets/agentos/Dockerfile"),
                     "build_context": docker_config.get("build_context", "."),
                     "build_timeout": docker_config.get("build_timeout", 1800),
                 },
@@ -279,7 +326,6 @@ class IsolationManager:
         if providers is not None:
             self._providers = providers
         else:
-            providers_config: dict[str, Any] | None = None
             if providers_config_override is not None:
                 # override 约定形状 {"providers": {...}}（与 extract_providers_config
                 # 对齐）；解包后交给 _create_providers_from_config。
@@ -298,7 +344,14 @@ class IsolationManager:
                     config = get_config_center().get(rel) or {}
                     providers_config = config.get("providers", {})
                 except Exception as e:
+                    # 加载失败 = 显式默认集（2026-11-13 裁定：无隐藏二次兜底
+                    # 读取面；缺省后端语义由 _create_providers_from_config
+                    # 的平台缺省决定，不再有 None→隐藏读取的静默路径）。
                     logger.warning(f"[IsolationManager] 加载配置文件失败: {e}")
+                    providers_config = {}
+            else:
+                # 无注入 = 显式默认集（缺省后端语义见 wsl_native 分支注释）。
+                providers_config = {}
             self._providers = _create_providers_from_config(providers_config, profile=self._resource_profile)
 
         self._decider = decider or IsolationDecider()  # 内部自动创建 IsolationPolicyLoader
@@ -313,6 +366,14 @@ class IsolationManager:
         self._reuse_map: dict[str, str] = {}
         # workspace 标识 → env_id，同 workspace 复用同一容器
         self._workspace_env_map: dict[str, str] = {}
+        # 外部容器绑定注册表（Terminal-Bench 参赛通道）：ws_key/task_id →
+        # 绑定记录。绑定由适配器经服务面 bind_external_env 显式登记，
+        # get_or_create_environment 命中即收养外部容器（不创建）；
+        # 容器生命周期归外部所有，销毁面只解登记不删容器。
+        self._external_bindings: dict[str, dict[str, Any]] = {}
+        # container_ref → ExternalDockerProvider 实例缓存（同一容器复用同一
+        # provider，环境登记随 provider 持有）。
+        self._external_providers: dict[str, ExternalDockerProvider] = {}
         # workspace 标识 → 专属锁，串行化同一 workspace 的「查找→创建→写缓存」，
         # 防止并发任务重复创建同名容器（docker create 报 Conflict）。
         self._ws_locks: dict[str, asyncio.Lock] = {}
@@ -329,6 +390,10 @@ class IsolationManager:
             return
 
         self._running = True
+
+        # R15：持久化注册表自愈加载（sidecar 重启/多实例起步即恢复绑定面，
+        # 消除「登记实例与查询实例分离」的间歇 bound=False）。
+        self._load_external_bindings_from_disk()
 
         await self._resume_containers()
 
@@ -690,10 +755,39 @@ class IsolationManager:
         # 1. 按 workspace 生成容器名（同 workspace 共享一个容器）
         ws_key = PurePath(workspace).name if workspace else task_id
         container_name = self._workspace_to_container_name(workspace, task_id)
+        # 1.1 后端声明的环境名作用域后缀：同一 workspace 在不同
+        # execution_profile（如 linux-bash / native-win）下必须落到不同环境，
+        # 否则先建者被后者收养（后端机制不兼容）。无后缀声明的 provider
+        # （host/docker/wsl_native/linux_native）行为零变化。
+        suffix = self._env_name_suffix(metadata)
+        if suffix:
+            ws_key = f"{ws_key}{suffix}"
+            container_name = f"{container_name}{suffix}"
 
         logger.debug(f"[IsolationManager] 任务 {task_id} 的 workspace={workspace}，容器名称: {container_name}")
 
         async with self._get_ws_lock(ws_key):
+            # 1.5 外部容器绑定拦截（Terminal-Bench 参赛通道）：命中绑定的
+            # 请求一律走外部收养路径，绝不落下方自建流程——通用复用/收养
+            # 路径会把外部容器登记成 provider_type="docker" 的自有环境
+            # （_adopt_found_env），销毁面随之 docker rm 外部容器（判分现场
+            # 被毁）。外部环境生命周期归 Harbor 所有，本系统只借用执行。
+            external = self._external_binding_for(task_id, ws_key)
+            if external is not None:
+                return await self._get_or_create_external_env(
+                    external,
+                    ws_key=ws_key,
+                    task_id=task_id,
+                    task_type=task_type,
+                    operation_type=operation_type,
+                    parent_env_id=parent_env_id,
+                    workspace=workspace,
+                    parent_workspace=parent_workspace,
+                    is_root_task=is_root_task,
+                    isolation_level=isolation_level,
+                    metadata=metadata,
+                )
+
             # 2. 检查是否已有该 workspace 的容器（优先复用；复用前 daemon 验活）
             if ws_key in self._workspace_env_map:
                 env_id = self._workspace_env_map[ws_key]
@@ -854,6 +948,376 @@ class IsolationManager:
         self._state_rows_provider = provider
         logger.debug("[IsolationManager] state_rows_provider 已注入，销毁面走 state 坐标")
 
+    # ── 外部容器绑定（Terminal-Bench 参赛通道） ─────────────────
+
+    async def bind_external_env(
+        self,
+        task_id: str,
+        workspace: str,
+        container: str,
+        workdir: str = "/workspace",
+    ) -> dict[str, Any]:
+        """登记外部容器绑定：此后该 task/workspace 的隔离请求收养该容器。
+
+        bind 时即 docker inspect 验证容器存在——不可达显式失败（success=False
+        携带原因），绝不降级。绑定键两把（ws_key 与 task_id），命中任一即走
+        外部通道；同容器重复 bind 幂等（provider 实例缓存复用）。
+
+        Args:
+            task_id: 绑定的任务 id（会话面任务可用 "session" 兜底键）。
+            workspace: 任务工作空间（宿主真实存在路径；ws_key 取 basename）。
+            container: 外部容器名或 id（cua- 前缀拒绝——该前缀命名空间归
+                本系统自建容器，停机清点/按名兜底删除路径会碰它）。
+            workdir: 容器内工作目录（isolation.execute 默认 cwd 与审计记录）。
+
+        Returns:
+            {"success": bool, "container_name": str, "error": str}。
+        """
+        if not container or not str(container).strip():
+            return {"success": False, "container_name": "", "error": "container 不能为空"}
+        container = str(container).strip()
+        if container.startswith(self.CONTAINER_NAME_PREFIX):
+            return {
+                "success": False,
+                "container_name": "",
+                "error": f"拒绝绑定 cua- 前缀容器（该命名空间归本系统自建容器）: {container}",
+            }
+        if not task_id:
+            return {"success": False, "container_name": "", "error": "task_id 不能为空"}
+        if not workspace:
+            return {"success": False, "container_name": "", "error": "workspace 不能为空"}
+
+        provider = self._external_providers.get(container)
+        if provider is None:
+            provider = ExternalDockerProvider(container, workdir=workdir)
+        rc, container_id, resolved_name, err_tail = await provider.inspect_target()
+        if rc != 0:
+            # bind 时即验证：容器不可达显式失败（不降级、不登记无效绑定）
+            logger.error(
+                "[IsolationManager] 外部容器绑定失败（容器不可达）"
+                " | ref=%s | task=%s | err=%s",
+                container,
+                task_id,
+                err_tail,
+            )
+            return {
+                "success": False,
+                "container_name": "",
+                "error": f"外部容器不可达: {err_tail}",
+            }
+
+        provider = ExternalDockerProvider(resolved_name or container, workdir=workdir)
+        self._external_providers[container] = provider
+        self._external_providers[resolved_name or container] = provider
+        ws_key = PurePath(workspace).name if workspace else task_id
+        canonical_workspace = self._materialize_workspace_anchor(workspace, ws_key, task_id)
+        record = {
+            "task_id": task_id,
+            "ws_key": ws_key,
+            "container_name": resolved_name or container,
+            "container_id": container_id,
+            "workdir": workdir,
+            "workspace": canonical_workspace,
+        }
+        self._external_bindings[record["ws_key"]] = record
+        self._external_bindings[task_id] = record
+        # R15：登记即落盘（跨实例/重启权威面；失败仅留痕，内存面先行生效）
+        self._save_external_bindings_to_disk()
+        logger.info(
+            "[IsolationManager] 外部容器已绑定 | task=%s | ws_key=%s | container=%s | workdir=%s | workspace=%s",
+            task_id,
+            record["ws_key"],
+            record["container_name"],
+            workdir,
+            canonical_workspace,
+        )
+        return {
+            "success": True,
+            "container_name": record["container_name"],
+            "container_id": container_id,
+            "workdir": workdir,
+            "workspace": canonical_workspace,
+            "error": "",
+        }
+
+    def _materialize_workspace_anchor(self, workspace: str, ws_key: str, task_id: str) -> str:
+        """外部绑定的内核侧工作空间锚（R7）：编排器宿主路径在本侧不存在时落空锚。
+
+        外部编排器（Harbor）的 trial 工作空间在本编排宿主（如 Ubuntu 侧），
+        内核侧不存在——isolation_guard 的悬空挂载预检
+        （Path(workspace).exists()）会在绑定查找**之前**拒绝，bash 全线
+        container_create_failed（真内核实证：失败管道 workspace =
+        "jobs-agentos/.../tb-xxx" 纯编排器相对路径）。外部容器无挂载源，
+        workspace 在此仅承担绑定键 + 预检存在性两个职责：内核侧不存在即落
+        空锚目录（<workspace_base>/external-bind/<ws_key>）并作为规范
+        workspace 返回（调用方据此下发 execution_context；basename 不变，
+        绑定键两端一致）。
+        """
+        workspace_str = str(workspace)
+        if Path(workspace_str).exists():
+            return workspace_str
+        try:
+            from workspace import get_workspace_base_dir  # noqa: PLC0415
+
+            anchor = get_workspace_base_dir() / "external-bind" / ws_key
+            anchor.mkdir(parents=True, exist_ok=True)
+            logger.info(
+                "[IsolationManager] 外部绑定工作空间锚已落（编排器宿主路径本侧不存在）"
+                " | original=%s | anchor=%s",
+                workspace_str,
+                anchor,
+            )
+            return str(anchor)
+        except Exception as exc:  # noqa: BLE001 — 锚落地失败保留原值（行为同修复前）
+            logger.warning(
+                "[IsolationManager] 工作空间锚落地失败（保留原 workspace）"
+                " | workspace=%s | err=%s",
+                workspace_str,
+                exc,
+            )
+            return workspace_str
+
+    def unbind_external_env(self, task_id: str | None = None, workspace: str | None = None) -> int:
+        """解除外部容器绑定（只删绑定记录，不碰容器；找不到 = 幂等成功）。
+
+        Returns:
+            解除的绑定记录数（同一记录可能同时占 task_id/ws_key 两键）。
+        """
+        removed: set[int] = set()
+        for key in (PurePath(workspace).name if workspace else None, task_id):
+            if not key:
+                continue
+            record = self._external_bindings.pop(key, None)
+            if record is not None:
+                removed.add(id(record))
+        if removed:
+            # R15：解登记同刀落盘（与 bind 对称，持久化面同步收敛）
+            self._save_external_bindings_to_disk()
+        return len(removed)
+
+    def lookup_external_binding(self, task_id: str | None = None, workspace: str | None = None) -> dict[str, Any]:
+        """查询外部绑定（R11 fs 工具路由的判据面）：按 task_id / ws_key 双键。
+
+        R15 自愈：内存未命中时从持久化文件重载一次再查（登记实例与查询实例
+        分离/本实例晚于登记启动的场景，文件是跨实例权威面）——重载后命中即
+        恢复路由恒定；仍未命中才回 bound=False（真未绑定会话，宿主路径语义
+        合法保留）。
+
+        Returns:
+            {"bound": bool, "container_name": str, "workdir": str}——bound=False
+            时后两键为空。guard 据此把 fs 族工具重分类进容器路径并注入
+            锚定工作目录（相对路径锚 bound workdir）。
+        """
+        ws_key = PurePath(workspace).name if workspace else ""
+        record = self._external_binding_for(task_id or "", ws_key)
+        if record is None:
+            if self._load_external_bindings_from_disk():
+                record = self._external_binding_for(task_id or "", ws_key)
+            if record is not None:
+                logger.info(
+                    "[IsolationManager] 外部绑定查询未命中经持久化自愈命中"
+                    " | task_id=%s | ws_key=%s",
+                    task_id,
+                    ws_key,
+                )
+        if record is None:
+            if self._external_bindings:
+                # 注册表非空但键未命中（诊断面）：在册键一并留痕
+                logger.info(
+                    "[IsolationManager] 外部绑定查询未命中（注册表非空）"
+                    " | task_id=%s | ws_key=%s | keys=%s",
+                    task_id,
+                    ws_key,
+                    list(self._external_bindings.keys()),
+                )
+            return {"bound": False, "container_name": "", "workdir": ""}
+        return {
+            "bound": True,
+            "container_name": str(record.get("container_name") or ""),
+            "workdir": str(record.get("workdir") or "/workspace"),
+        }
+
+    # ── 外部绑定注册表持久化（R15）─────────────────────────────
+
+    def _save_external_bindings_to_disk(self) -> None:
+        """注册表落盘（原子写：tmp + os.replace）。失败仅留痕不阻断内存面。"""
+        store = _external_bindings_store_path()
+        if store is None:
+            return
+        records: dict[str, dict[str, Any]] = {}
+        for record in self._external_bindings.values():
+            # 双键别名指向同一记录：按 ws_key 去重（每记录一份）
+            records[str(record.get("ws_key") or "")] = record
+        payload = json.dumps(
+            {"version": 1, "records": records}, ensure_ascii=False, indent=1
+        )
+        try:
+            store.parent.mkdir(parents=True, exist_ok=True)
+            tmp = store.with_suffix(".json.tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(store)
+        except OSError as exc:
+            logger.warning(
+                "[IsolationManager] 外部绑定注册表落盘失败（内存面不受影响）"
+                " | path=%s | err=%s",
+                store,
+                exc,
+            )
+
+    def _load_external_bindings_from_disk(self) -> bool:
+        """从持久化文件恢复注册表（启动/查询未命中自愈）。有新数据载入 = True。"""
+        store = _external_bindings_store_path()
+        if store is None or not store.is_file():
+            return False
+        try:
+            payload = json.loads(store.read_text(encoding="utf-8"))
+            records = payload.get("records")
+            if not isinstance(records, dict):
+                return False
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "[IsolationManager] 外部绑定注册表读取失败（保留内存面）"
+                " | path=%s | err=%s",
+                store,
+                exc,
+            )
+            return False
+        loaded = 0
+        for ws_key, record in records.items():
+            if not isinstance(record, dict) or record.get("ws_key") != ws_key:
+                continue
+            if ws_key in self._external_bindings:
+                continue
+            self._external_bindings[ws_key] = record
+            task_id = str(record.get("task_id") or "")
+            if task_id:
+                self._external_bindings[task_id] = record
+            loaded += 1
+        if loaded:
+            logger.info(
+                "[IsolationManager] 外部绑定注册表自愈加载 %d 条（持久化面）"
+                " | keys=%s",
+                loaded,
+                list(self._external_bindings.keys()),
+            )
+        return loaded > 0
+
+    def _external_binding_for(self, task_id: str, ws_key: str) -> dict[str, Any] | None:
+        """按 task_id / ws_key 查外部绑定（命中任一即用）。"""
+        record = self._external_bindings.get(task_id) or self._external_bindings.get(ws_key)
+        return record if isinstance(record, dict) else None
+
+    async def _get_or_create_external_env(
+        self,
+        binding: dict[str, Any],
+        *,
+        ws_key: str,
+        task_id: str,
+        task_type: TaskType,
+        operation_type: OperationType | None,
+        parent_env_id: str | None,
+        workspace: str | None,
+        parent_workspace: str | None,
+        is_root_task: bool,
+        isolation_level: IsolationLevel | None,
+        metadata: dict | None,
+    ) -> IsolationEnvironment:
+        """外部绑定请求的环境获取/收养（幂等；错误显式登记，不降级自建）。
+
+        复用登记的外部环境前经其 provider 验活（绝不走通用 docker 查找路径
+        ——那会把外部容器登记成 provider_type="docker"，销毁面误删）。失联
+        登记清掉后重收养；容器确已不在时返回 ERROR 环境（调用方按
+        provider_error 显式失败转 blocked，与自建路径的失败信封同约定）。
+        """
+        container_name = str(binding.get("container_name") or "")
+        env_id = container_name
+
+        # 1. 复用已登记的外部环境（验活走外部 provider，按容器名实时探）
+        existing = self._environments.get(env_id)
+        if (
+            existing is not None
+            and existing.provider_type == EXTERNAL_PROVIDER_TYPE
+            and existing.status == EnvironmentStatus.READY.value
+        ):
+            provider = self._provider_for_env(existing)
+            if provider is not None:
+                try:
+                    status = await provider.get_environment_status(env_id)
+                except Exception:
+                    status = EnvironmentStatus.ERROR
+                if status == EnvironmentStatus.READY:
+                    existing.last_used_at = datetime.now(UTC).isoformat()
+                    self._ws_env_fail_counts.pop(ws_key, None)
+                    return existing
+            logger.warning(
+                "[IsolationManager] 外部环境已失活，清登记重收养 | env_id=%s",
+                env_id,
+            )
+            self._forget_env(env_id)
+
+        # 2. 收养（provider.inspect_target 复验容器存在；失败=ERROR 环境）
+        provider = self._external_providers.get(container_name)
+        if provider is None:
+            provider = ExternalDockerProvider(
+                container_name, workdir=str(binding.get("workdir") or "/workspace")
+            )
+            self._external_providers[container_name] = provider
+        context = IsolationContext(
+            task_id=task_id,
+            task_type=task_type,
+            operation_type=operation_type,
+            parent_env_id=parent_env_id,
+            workspace=workspace,
+            parent_workspace=parent_workspace,
+            is_root_task=True,
+            isolation_level=isolation_level or IsolationLevel.CONTAINER,
+            requires_approval=False,
+            metadata=metadata or {},
+        )
+        env = await provider.create_environment(context)
+        self._environments[env.env_id] = env
+        self._workspace_env_map[ws_key] = env.env_id
+        self._ws_env_fail_counts.pop(ws_key, None)
+        if env.status == EnvironmentStatus.ERROR.value:
+            logger.error(
+                "[IsolationManager] 外部容器收养失败（显式失败） | env_id=%s | error=%s",
+                env.env_id,
+                (env.provider_info or {}).get("error", ""),
+            )
+        else:
+            logger.debug(
+                "[IsolationManager] 外部容器环境就绪 | env_id=%s | ws_key=%s",
+                env.env_id,
+                ws_key,
+            )
+        return env
+
+    def _external_provider_for_container(self, container_name: str) -> ExternalDockerProvider | None:
+        """按容器名取已登记的外部 provider（环境执行/销毁分流用）。"""
+        for provider in self._external_providers.values():
+            if container_name in (provider.container_ref,):
+                return provider
+        return None
+
+    def _provider_for_env(self, env: IsolationEnvironment) -> IsolationProvider | None:
+        """按环境取执行/销毁 provider：外部环境走其绑定的 provider，其余按级。"""
+        if env.provider_type == EXTERNAL_PROVIDER_TYPE:
+            container_name = str(
+                (env.provider_info or {}).get("container_name") or env.env_id
+            )
+            provider = self._external_provider_for_container(container_name)
+            if provider is not None:
+                return provider
+            # provider 缓存丢失（理论不可达：绑定与 env 同生命周期）：返回
+            # None 让调用方按「找不到提供者」显式失败，绝不借道 level provider
+            # （那会把外部容器当自有容器销毁/重建）。
+            logger.error(
+                "[IsolationManager] 外部环境缺少对应 provider 实例 | env=%s",
+                env.env_id,
+            )
+            return None
+        return self._providers.get(env.level)
+
     def _get_ws_lock(self, ws_key: str) -> asyncio.Lock:
         """获取 workspace 专属锁（同 ws_key 恒返回同一把锁）。
 
@@ -862,6 +1326,25 @@ class IsolationManager:
         不同 ws_key 互不阻塞。
         """
         return self._ws_locks.setdefault(ws_key, asyncio.Lock())
+
+    def _env_name_suffix(self, metadata: dict | None) -> str:
+        """CONTAINER 槽位 provider 声明的工作空间作用域后缀（缺省为空）。
+
+        供应商可选的 ``env_name_suffix(metadata)`` 钩子：同一 workspace 在不
+        同执行档（如 MXC 的 execution_profile）下需要不同环境名时，由 provider
+        决定后缀；manager 只负责把它同时作用到 ws_key 与容器名（复用登记/
+        锁/按名收养三处一致）。未实现钩子的 provider 行为零变化。
+        """
+        provider = self._providers.get(IsolationLevel.CONTAINER)
+        resolver = getattr(provider, "env_name_suffix", None)
+        if not callable(resolver):
+            return ""
+        try:
+            suffix = str(resolver(metadata or {}))
+        except Exception as exc:  # noqa: BLE001 - 后缀解析失败不阻断环境获取
+            logger.warning("[IsolationManager] env_name_suffix 解析失败（按空后缀处理） | error=%s", exc)
+            return ""
+        return suffix if re.fullmatch(r"[A-Za-z0-9_.-]*", suffix) else ""
 
     @staticmethod
     def _workspace_to_container_name(workspace: str | None, task_id: str) -> str:
@@ -899,7 +1382,7 @@ class IsolationManager:
         return f"{IsolationManager.CONTAINER_NAME_PREFIX}{sanitized}"
 
     def _container_backend_is_native(self) -> bool:
-        """CONTAINER 槽位是否由原生无常驻后端（wsl_native/linux_native）承载。
+        """CONTAINER 槽位是否由原生无常驻后端（wsl_native/linux_native/mxc_native）承载。
 
         manager 内所有 docker 直连路径（收养扫描/停机清点/按名删/镜像清理）
         以此为分流条件：原生后端无常驻容器/镜像可清点——清点/清理跳过、
@@ -907,7 +1390,7 @@ class IsolationManager:
         docker 直连路径。
         """
         backend = self._providers.get(IsolationLevel.CONTAINER)
-        return isinstance(backend, (WslNativeProvider, LinuxNativeProvider))
+        return isinstance(backend, (WslNativeProvider, LinuxNativeProvider, MxcNativeProvider))
 
     async def _find_existing_container(self, container_name: str) -> IsolationEnvironment | None:
         """查找已存在的容器（异步外壳：线程池+硬超时防 daemon 假死阻塞）。
@@ -1267,8 +1750,22 @@ class IsolationManager:
 
         logger.debug(f"销毁隔离环境: {env_id}")
 
-        provider = self._providers.get(env.level)
+        # 外部环境按 provider_type 分流到其绑定的 provider（销毁=仅解登记，
+        # 绝不 docker rm 外部容器）；缺 provider 实例显式失败，绝不借道
+        # level provider（会把外部容器当自有容器删）。
+        provider = self._provider_for_env(env)
         destroyed_ok = True
+        if env.provider_type == EXTERNAL_PROVIDER_TYPE and provider is None:
+            # 登记仍在但 provider 丢失：仅清内存登记（容器不可删也不该删）
+            logger.warning(
+                "[IsolationManager] 外部环境 provider 缺失，仅清内存登记 | env=%s",
+                env_id,
+            )
+            self._environments.pop(env_id, None)
+            ws_keys_to_remove = [k for k, v in self._workspace_env_map.items() if v == env_id]
+            for key in ws_keys_to_remove:
+                del self._workspace_env_map[key]
+            return True
         if provider:
             try:
                 destroyed_ok = await provider.destroy_environment(env_id, success=success)
@@ -1375,8 +1872,8 @@ class IsolationManager:
 
         logger.debug(f"在环境 {env.env_id} 中执行操作: {operation.get('type', 'unknown')}")
 
-        # 在环境中执行
-        provider = self._providers.get(env.level)
+        # 在环境中执行（外部环境按 provider_type 分流到其绑定 provider）
+        provider = self._provider_for_env(env)
         if not provider:
             return ExecutionResult(
                 success=False,
@@ -1396,9 +1893,12 @@ class IsolationManager:
             # 仅 command 操作纳入：file_operation 走不同 exec 组装路径，暂不覆盖。
             # 标记识别（runc 特征串）与 provider 实例无关，直接用静态方法判定，
             # 故不绑 isinstance——只对 CONTAINER 层（env.level）的 docker 容器路径有意义。
+            # 外部环境（external_docker）跳过：自愈语义=销毁重建容器，外部容器
+            # 归 Harbor/verifier 所有，销毁即毁掉判分现场——错误如实回传。
             if (
                 not result.success
                 and operation.get("type") == "command"
+                and env.provider_type != EXTERNAL_PROVIDER_TYPE
                 and self._is_namespace_desync_result(result)
             ):
                 result = await self._rebuild_and_retry_exec(
@@ -1413,10 +1913,12 @@ class IsolationManager:
             # 必须先 umount+mount 修宿主挂载，再重建容器。仅 command 操作纳入
             # （与 setns 自愈覆盖范围对齐，file_operation 走不同 exec 组装路径）。
             # 放在 setns 自愈之后：两者 marker 不重叠，不会互相吞掉；若 setns 自愈
-            # 已成功（result.success=True），本分支自然跳过。
+            # 已成功（result.success=True），本分支自然跳过。外部环境跳过（同 setns：
+            # 销毁重建毁判分现场，错误如实回传）。
             if (
                 not result.success
                 and operation.get("type") == "command"
+                and env.provider_type != EXTERNAL_PROVIDER_TYPE
                 and self._is_io_error_result(result)
             ):
                 result = await self._remount_and_retry_exec(
@@ -1726,6 +2228,9 @@ class IsolationManager:
         单次调用最多重建一次：重建返回的新 env 不再二次检查，直接交付执行；
         重建失败返回原 env，执行将以错误告终，不形成循环。
 
+        外部环境（external_docker）只做状态复核、不重建：容器归外部所有，
+        「销毁重建」等于毁掉判分现场。非 READY 时原样返回，执行报明确错误。
+
         Args:
             env: 当前环境
             rebuild_kwargs: get_or_create_environment 的入参（用于重建）
@@ -1733,8 +2238,20 @@ class IsolationManager:
         Returns:
             READY 的环境；重建失败时返回原 env。
         """
-        provider = self._providers.get(env.level)
+        provider = self._provider_for_env(env)
         if provider is None:
+            return env
+        if env.provider_type == EXTERNAL_PROVIDER_TYPE:
+            try:
+                status = await provider.get_environment_status(env.env_id)
+            except Exception as e:
+                logger.warning(f"[IsolationManager] 外部环境健康检查失败，按原环境执行: {e}")
+                return env
+            if status != EnvironmentStatus.READY:
+                logger.warning(
+                    f"[IsolationManager] 外部环境非就绪（不重建，容器归外部所有）"
+                    f" | env={env.env_id} | status={status.value}"
+                )
             return env
         try:
             status = await provider.get_environment_status(env.env_id)

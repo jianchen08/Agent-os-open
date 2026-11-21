@@ -91,7 +91,8 @@ impl PluginInvokerImpl {
         // state/config/_log_ctx 各自一遍 to_writer 进同一缓冲，帧语义不变。
         // state.reads 切片投喂（组装单点 shared.rs）：声明非空 → 白名单控制键
         // ∪ 声明键切片；未声明 = 全量借用（零拷贝，迁移期默认字节不变）。
-        let state_payload = crate::shared::state_feed_payload(manifest, ctx.state);
+        let state_payload =
+            crate::shared::state_feed_payload_with_base(manifest, ctx.state, ctx.base_state);
         // M3b：三段序列化直写 client 复用缓冲（闭包借用 state_payload/config/
         // log_ctx——均活到本调用结束），arguments String 独立分配清零。
         let result = match client
@@ -160,8 +161,36 @@ impl PluginInvokerImpl {
         // { "content": [{ "type": "text", "text": "<json_string>" }], "isError": false }
         // 提取 content[0].text 并反序列化为 PluginResult
         let inner = extract_mcp_content(&result);
+        // isError 信封（{"success": false, "error": <text>}，extract 在 isError=true
+        // 提取点的产物）→ PluginResult 形再反序列化：PluginResult.error 是
+        // PluginError 结构体（message/code/source），信封的字符串 error 直塞必败
+        // （invalid type: string, expected struct PluginError——2026-11-18 管道
+        // 7fb38fe8 实证：LLM 上游故障经 SDK isError 出口，步骤失败丢结构化错误
+        // 卡成 PARSE_ERROR）。success 判别键无碰撞面（PluginResult 无 success
+        // 字段）；error 文本优先剥 SDK JSON 信封外壳取内层 error，非 JSON 回退原文。
+        let plugin_value = if inner.get("success").and_then(|v| v.as_bool()) == Some(false) {
+            let raw_err = inner
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("MCP pipeline step returned isError=true");
+            let msg = serde_json::from_str::<serde_json::Value>(raw_err)
+                .ok()
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.as_str())
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or_else(|| raw_err.to_string());
+            serde_json::json!({
+                "state_updates": {},
+                "skip_remaining": false,
+                "error": {"message": msg}
+            })
+        } else {
+            inner
+        };
         let plugin_result: PluginResult =
-            serde_json::from_value(inner).map_err(|e| PluginError {
+            serde_json::from_value(plugin_value).map_err(|e| PluginError {
                 message: format!("failed to parse MCP response as PluginResult: {e}"),
                 code: Some("PARSE_ERROR".to_string()),
                 source: Some("plugin-invoker".to_string()),
@@ -171,6 +200,14 @@ impl PluginInvokerImpl {
     }
 
     /// sidecar tool 调用**单次尝试**（B1：与 [`Self::attempt_sidecar_pipeline`] 同构）。
+    ///
+    /// 派发前置面挂死护栏（run 生命周期防线②，ADR
+    /// 2026-11-17-run-lifecycle-defense-lines）：宿主获取（含 spawn 锁排队/冷
+    /// 启动握手）与客户端读锁等待是「进入 sidecar 传输前」的内核侧等待段，
+    /// 各罩 300s 固定护栏（分类学 ipc 档，不可豁免——业务豁免只豁免执行时长，
+    /// 不重开派发挂死驻留）。到点返回结构化 `PRE_DISPATCH_TIMEOUT`，按派发
+    /// 失败处理（结构化错误回 agent，可重试）。台账第 183/186/202 轮实证：
+    /// 该段单点挂死 2.5h、零运输层日志、无超时机制。
     pub(super) async fn attempt_sidecar_tool(
         &self,
         plugin_id: &str,
@@ -178,8 +215,17 @@ impl PluginInvokerImpl {
         tool_name: &str,
         inputs: &Value,
     ) -> Result<ToolExecutionResult, PluginError> {
-        let client_arc = self.get_or_create_mcp_client(manifest).await?;
-        let client = client_arc.read().await;
+        let client_arc = with_pre_dispatch_timeout(
+            plugin_id,
+            tool_name,
+            self.get_or_create_mcp_client(manifest),
+        )
+        .await?;
+        let client = with_pre_dispatch_timeout_opt(client_arc.read())
+            .await
+            .ok_or_else(|| {
+                pre_dispatch_timeout_error(PRE_DISPATCH_TIMEOUT_MS, plugin_id, tool_name)
+            })?;
 
         // ① 调用前存活检查（B1：死亡 → PLUGIN_CRASHED，可透明恢复）
         if Self::is_dead_sidecar(&client).await {
@@ -294,7 +340,8 @@ impl PluginInvokerImpl {
 
         // state.reads 切片投喂（与 sidecar 路径同一组装语义，shared.rs 单点）：
         // 声明非空 → 白名单控制键 ∪ 声明键切片；未声明 = 全量（迁移期默认）。
-        let state_json = crate::shared::pipeline_state_json(manifest, ctx.state);
+        let state_json =
+            crate::shared::pipeline_state_json_with_base(manifest, ctx.state, ctx.base_state);
 
         // PluginCtx 在 blocking worker 内构造：config 序列化与字符串释放都留在
         // 同一常驻 worker；config buffer 从线程本地 scratch 取还，跨调用复用容量。
@@ -343,6 +390,7 @@ impl PluginInvokerImpl {
                 task_id,
                 pipeline_id,
                 tool_call_json: None,
+                hook_json: None,
             };
             let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
                 .as_ref()
@@ -470,6 +518,7 @@ impl PluginInvokerImpl {
                 tool_call_json: Some(
                     String::from_utf8(tool_bytes).unwrap_or_else(|_| "{}".to_string()),
                 ),
+                hook_json: None,
             };
             let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
                 .as_ref()

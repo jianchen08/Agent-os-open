@@ -31,6 +31,7 @@ from _root_api import (  # noqa: E402
     ok as _ok,
 )
 from pim_focus_timer import PimFocusTimer  # noqa: E402
+from pim_governance import govern  # noqa: E402
 from pim_store import PimStore  # noqa: E402
 from pim_tool import handle_pim  # noqa: E402
 from pim_trigger_sync import PimTriggerSync  # noqa: E402
@@ -120,7 +121,7 @@ def set_store(store: PimStore | None) -> None:
                 "enum": ["capture", "query", "op"],
                 "description": "capture=建卡（零确认直建，回执含 op_id 可撤销）；query=读聚合；op=状态机执行",
             },
-            "payload": {"type": "object", "description": "capture: {title, domain?, due?, priority?, repeat?, direction?, status?, kind?: 'event', at?} 或 {text: '- [ ] 明天 #工作 !P1 交周报'}（行语法，与页面快速添加同一解析）；query: {scope: today|todo|event|habit|partner|journal|preference, id?, status?, domain?, month?, key?, from?, to?}；op: {op: accept|complete|defer|split|wait|fail|cancel|focus_start|focus_stop|undo, entity?: todo|event, id?, todo_id?(别名), op_id?(undo), new_time?/new_due?(defer), parts?(split), duration_minutes?(focus_start，缺省取配置)}。capture 可带 pipeline_id（当前会话主管道 id）= 日程到点提醒的承载管道锚（ADR 2026-11-03-pim-trigger-anchor：提醒挂创建会话，不随活跃会话漂移）"},
+            "payload": {"type": "object", "description": "capture: {title, domain?, due?, priority?, repeat?, direction?, status?, reminder_mode?: 'direct'|'agent_classified'（建卡时判定：到点只需看到卡片（纯时间提醒）→direct（缺省）；到点需你介入处理/组织信息→agent_classified，到点耗1次调用注入事实消息）, kind?: 'event', at?} 或 {text: '- [ ] 明天 #工作 !P1 交周报'}（行语法，与页面快速添加同一解析）；query: {scope: today|todo|event|habit|partner|journal|preference, id?, status?, domain?, month?, key?, from?, to?}；op: {op: accept|complete|defer|split|wait|fail|cancel|focus_start|focus_stop|undo, entity?: todo|event, id?, todo_id?(别名), op_id?(undo), new_time?/new_due?(defer), parts?(split), duration_minutes?(focus_start，缺省取配置)}。capture 可带 pipeline_id（当前会话主管道 id）= 日程到点提醒的承载管道锚（ADR 2026-11-03-pim-trigger-anchor：提醒挂创建会话，不随活跃会话漂移）"},
         },
         "required": ["action"],
     },
@@ -286,12 +287,30 @@ def _on_config_changed(config: dict[str, Any]) -> None:
         _store.set_focus_default_minutes(_focus_default_minutes(config))
 
 
+def _run_startup_governance(store: Any) -> dict[str, Any]:
+    """启动期幂等数据治理（9 卡补 due + 遗留卡清理）；有动作才记日志。"""
+    governance = govern(store)
+    if governance["due_filled"] or governance["legacy_removed"]:
+        logger.info(
+            "[mode_personal] 启动数据治理 | due_filled=%d legacy_removed=%d",
+            len(governance["due_filled"]),
+            len(governance["legacy_removed"]),
+        )
+    return governance
+
+
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
-    """sidecar 启动：事项变更观察者 + 到点触发器同步层 + 番茄定向计时上线。"""
+    """sidecar 启动：数据治理（幂等）+ 事项变更观察者 + 到点触发器同步层 + 番茄计时上线。"""
     global _trigger_sync, _focus_timer
     store = get_store()
     store.set_focus_default_minutes(_focus_default_minutes())
+    try:
+        _run_startup_governance(store)
+    except Exception:
+        # M2：治理失败不得打断启动（触发器同步层/番茄计时器仍要上线）；
+        # 治理幂等，下轮 on_load/重启自动重试，此处留痕即可。
+        logger.exception("[mode_personal] 启动数据治理失败（不阻断启动）")
     sync = PimTriggerSync(
         store,
         _trigger_control_caller(),

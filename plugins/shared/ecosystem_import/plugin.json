@@ -5,7 +5,7 @@
   ],
   "name": "Ecosystem Import",
   "description": "外部 Agent 生态导入：Codex 与 Claude Code 插件清单翻译成 IR + 技能落地用户根 + 来源/版本/许可证治理。MCP 默认只报告；ecosystem_apply 加 apply_mcp=true 时把非 OAuth 条目合并进当前配置根（OAuth 条目需授权能力，暂不写）。",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",

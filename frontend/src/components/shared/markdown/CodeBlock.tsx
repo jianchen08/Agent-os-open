@@ -8,8 +8,8 @@
 import { type FC, memo, useState } from 'react'
 import { Check, Copy, Loader2 } from '@/assets/icons'
 import { cn } from '@/lib/utils'
-import { PrismSyntaxHighlighter, resolveHighlightLanguage } from './prismLanguages'
 import { codeHighlightStyle } from './codeHighlightStyle'
+import { PrismSyntaxHighlighter, resolveHighlightLanguage } from './prismLanguages'
 
 export interface CodeBlockProps {
   /** 代码内容 */
@@ -56,7 +56,7 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
         {isStreaming && (
           <span className="text-muted-foreground flex items-center gap-1 text-xs">
             <Loader2 className="h-icon-xs w-icon-xs animate-spin" />
-            输出中...
+            执行中
           </span>
         )}
         <button

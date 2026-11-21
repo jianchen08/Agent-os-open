@@ -98,6 +98,9 @@ ws_events:
     INTERACTION_TIMEOUT_REMINDER: interaction_timeout_reminder
     # 人类交互请求
     INTERACTION_REQUEST: interaction_request
+    # 通知出队冲刷（notify_judge 判定 worthy 打标晚于 new_message 帧的补发面，
+    # 2026-11-18 批次 5：管道空闲即冲刷，前端 systemNotifier 唯一弹出依据不变）
+    NOTIFY_FLUSH: notify_flush
     # 系统通知（chat.send_message 后台派发失败补报，统一错误模型）
     SYSTEM_NOTIFICATION: system_notification
     # 迭代事件（管道引擎迭代开始/结束）
@@ -148,3 +151,7 @@ ws_events:
     # 错误帧，载荷 {message_type, thread_id, client_message_id, error}；前端
     # 收到即通知中心高优告警——fail-closed 拒绝不得对用户静默
     ROUTE_ERROR: route_error
+    # UI 命令（ui_bridge 插件 ui_act 出站，ADR 2026-11-18-sidebar-ui-object-model）：
+    # 载荷 {command_id, region, action, params}；前端 commandExecutor 消费执行，
+    # 回执走 REST POST /ext/ui_bridge/command_result（不加 inbound 帧型，零内核改动）
+    UI_COMMAND: ui_command

@@ -130,8 +130,19 @@ def _payload_diag_dir() -> str:
 
 
 def capture_payload_diag(model: str, body: dict[str, Any]) -> None:
-    """按开关落盘真实发出的请求体（默认关；200 份惰性轮转；失败不外抛）。"""
+    """按开关落盘真实发出的请求体（默认关；200 份惰性轮转；失败不外抛）。
+
+    文件名/内容契约对端 = monitoring `_parse_payload_diag_filename` 与前端
+    「LLM 请求」页：文件名 ``{ts毫秒}__{model}__{msgs_hash}__{N}msg.json``
+    （``__`` 分隔、msg 结尾，model 段净化后单下划线保留），内容顶层即真实
+    HTTP body（model/messages 在顶层，字段序原样不重排——前缀缓存诊断按
+    字节）。回归锚：网关化迁移初版文件名/内容偏离此契约致读端全数解析
+    失败、调试页恒空（2026-11-12）。
+    """
+    import hashlib  # noqa: PLC0415
     import pathlib as _pl  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
 
     from agentos_plugin_sdk.diagnostics_settings import read_diagnostics  # noqa: PLC0415
 
@@ -144,10 +155,11 @@ def capture_payload_diag(model: str, body: dict[str, Any]) -> None:
         files = sorted(diag_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
         for old in files[: max(0, len(files) + 1 - _PAYLOAD_KEEP)]:
             old.unlink(missing_ok=True)
-        import time as _time  # noqa: PLC0415
-
-        path = diag_dir / f"{_time.strftime('%Y%m%d_%H%M%S')}_{abs(hash(model)) % 10**8}.json"
-        path.write_text(json.dumps({"model": model, "body": body}, ensure_ascii=False, default=str), encoding="utf-8")
+        msgs = body.get("messages") or []
+        msgs_hash = hashlib.md5(json.dumps(msgs, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+        model_safe = _re.sub(r"[^A-Za-z0-9_-]", "_", str(model or "unknown"))[:48] or "unknown"
+        path = diag_dir / f"{int(_time.time() * 1000)}__{model_safe}__{msgs_hash}__{len(msgs)}msg.json"
+        path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 —— 诊断面失败不影响主路径
         logger.debug("[wire_client] payload 诊断落盘失败: %s", exc)
 
@@ -311,6 +323,7 @@ async def post_chat(
     client = _get_client()
     url = base_url.rstrip("/") + "/chat/completions"
     wire_body = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
+    capture_payload_diag(str(wire_body.get("model", "")), wire_body)
     response = await client.post(
         url,
         json=wire_body,

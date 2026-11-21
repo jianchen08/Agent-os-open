@@ -5,11 +5,12 @@
     "agent.list",
     "agent.get",
     "skill.list",
-    "skill.get"
+    "skill.get",
+    "tool-executor"
   ],
-  "name": "Resource Search Tool",
-  "description": "搜索系统内 Agent、工具、Skill 资源的 MCP 工具",
-  "version": "1.0.3",
+  "name": "Resource Search & Dynamic Tool",
+  "description": "搜索系统内 Agent、工具、Skill 资源，并转发调用搜索引入的动态工具",
+  "version": "1.2.1",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -19,7 +20,7 @@
     "tools": [
       {
         "name": "resource_search",
-        "description": "搜索系统内 Agent、工具、Skill 资源",
+        "description": "搜索系统内 Agent、工具、Skill 资源。工具两步法：mode='detailed' 检索拿 tool_defs 定义（含真实 input_schema）→ 经 call_tool(tool=<目标工具名>, arguments={...}) 转发执行——动态工具不进原生工具列表，每次调用按目标工具名判定权限；查无此工具则反馈调度方",
         "render": {
           "card": "table"
         },
@@ -47,7 +48,7 @@
                 "detailed"
               ],
               "default": "simple",
-              "description": "simple=列出匹配资源；detailed=返回完整描述（skill 返回 SKILL.md 内容，agent 返回 recommended_metrics）。注意：精简实现不支持动态工具注入，detailed 模式下 tool 类型不会真正加载到会话。"
+              "description": "simple=列出匹配资源；detailed=返回完整描述（skill 返回 SKILL.md 内容，agent 返回 recommended_metrics；tool 返回含真实 input_schema 的 tool_defs 可执行定义）。注意：搜到的工具不会自动加载进工具面，须用 detailed 拿到 tool_defs 后经 call_tool 调用。"
             },
             "filters": {
               "type": "object",
@@ -85,7 +86,7 @@
         },
         "output_schema": {
           "type": "object",
-          "description": "三类资源（agent/tool/skill）表格式结果；全部键条件出现（无命中即缺席）",
+          "description": "三类资源（agent/tool/skill）表格式结果 + 工具结构化定义族（tool_defs/tool_defs_count/tool_defs_errors）；全部键条件出现（无命中即缺席）",
           "properties": {
             "agent_h": {
               "type": "array",
@@ -119,6 +120,24 @@
             "tool_c": {
               "type": "integer"
             },
+            "tool_defs": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "工具可执行定义项数组：name/description/input_schema（type=object）/plugin_id/source（code=插件声明工具，mcp=external MCP 目标），可选 output_schema/render；据以经 call_tool 调用"
+            },
+            "tool_defs_count": {
+              "type": "integer",
+              "description": "与 tool_c 对称的定义项计数"
+            },
+            "tool_defs_errors": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "被 fail-closed 拒收的定义条目 + 原因（name/reason）；缺 input_schema 或非 object 一律拒收，不补空对象"
+            },
             "skill_h": {
               "type": "array",
               "items": {
@@ -136,6 +155,54 @@
             }
           }
         }
+      },
+      {
+        "name": "call_tool",
+        "description": "调用资源搜索引入的动态工具：先用 resource_search(mode='detailed') 拿 tool_defs 定义，再按该定义传工具名与参数（参数直接透传，合法性由目标工具终审）。动态工具不进原生工具列表，每次调用按目标工具走权限判定。定义长期有效：引入一次即可反复调用（跨轮与跨 run 持久），无需重复搜索。",
+        "render": {
+          "card": "generic"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "目标工具名，须是已由 resource_search(mode='detailed') 引入过的动态工具之一（引入一次长期有效，跨轮与跨 run 持久，不必重搜）"
+            },
+            "arguments": {
+              "type": "object",
+              "description": "目标工具参数对象，结构遵循该工具 tool_defs 里的 input_schema"
+            }
+          },
+          "required": [
+            "tool",
+            "arguments"
+          ],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "目标工具执行结果（成功透传其输出并补 tool_name）；失败为 {success: false, error, error_code} 显式失败信封",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "error_code": {
+              "type": "string"
+            },
+            "tool_name": {
+              "type": "string"
+            }
+          }
+        },
+        "tags": [
+          "tool",
+          "dynamic",
+          "system"
+        ]
       }
     ],
     "lifecycle_hooks": [

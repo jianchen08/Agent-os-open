@@ -9,7 +9,7 @@ import React, {
   useEffect,
   useRef,
 } from 'react'
-import { FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
+import { FolderOpen, Menu, PanelRightIcon } from '@/assets/icons'
 import { FullscreenComposer } from '@/components/chat/FullscreenComposer'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 // 插件查看器 webview 沙箱（声明驱动查看器路由，ADR 2026-10-24）：静态引入——
@@ -25,7 +25,6 @@ import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.generated'
 import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
 import {
-  EDITABLE_FILE_MAX_BYTES,
   FILE_OPEN_CHUNK_BYTES,
   loadMoreFileContent,
   openPluginViewerTab,
@@ -35,7 +34,7 @@ import { safeLoadLayout } from '@/services/layout/resolver'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { openFolderWithFeedback } from '@/services/workspaceFolderOpener'
-import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
+import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -53,12 +52,16 @@ import {
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { useLayoutAlertNotifications } from './LayoutAlertNotifications'
+import { useFileEditorAutoRefresh } from './useFileEditorAutoRefresh'
 import { WorkspaceHost } from './WorkspaceHost'
 // CodeEditor/FilePreview 懒加载：仅工作区文件页签首开时加载——其静态边
 // （CodeEditor→LobeChatMarkdown→@lobehub/ui、prismLanguages→refractor）会把
 // vendor-lobehub（≈1.1MB）+vendor-syntax（≈116KB）拖进首屏 modulepreload。
 // NoLoaderPreview/HtmlPreviewWidget 零重依赖，留静态。
+import { BacklinksPanel } from '../shared/markdown/BacklinksPanel'
 import { NoLoaderPreview } from '../workspace/NoLoaderPreview'
+// 反向链接侧栏（双链 P1）：轻组件（apiClient/fileOpener 均已在装配层依赖链内），
+// 静态导入零额外 bundle 成本；仅 markdown 预览分支挂载
 import type { WorkspaceTab  } from '@/types/layout'
 
 const CodeEditor = lazy(() =>
@@ -66,6 +69,11 @@ const CodeEditor = lazy(() =>
 )
 const FilePreview = lazy(() =>
   import('../workspace/FilePreview').then((m) => ({ default: m.FilePreview })),
+)
+// 文档查看器（PDF/Word/PPT + 批注）：渲染件 pdfjs-dist/docx-preview/pptx-preview
+// 体积大且非首屏必需，与 FilePreview 同款懒加载
+const DocumentViewer = lazy(() =>
+  import('../workspace/docViewer/DocumentViewer').then((m) => ({ default: m.DocumentViewer })),
 )
 
 /** Props for the FiveSpaceLayout component */
@@ -120,6 +128,11 @@ export function FiveSpaceLayout({
   // Store state
   const floatingWindows = useLayoutModeStore((s) => s.floatingWindows)
   const workspaceTabs = useLayoutModeStore((s) => s.workspaceTabs)
+  /** 当前激活的工作区页签：只读看板页签（task_scene）据此收窄全屏输入浮窗作用域 */
+  const activeWorkspaceTab = useMemo(
+    () => workspaceTabs.find((t) => t.isActive),
+    [workspaceTabs],
+  )
   const visitedTabIds = useLayoutModeStore((s) => s.visitedTabIds)
   const fullscreenActive = useLayoutModeStore((s) => s.fullscreenActive)
   const fullscreenTitle = useLayoutModeStore((s) => s.fullscreenTitle)
@@ -142,52 +155,7 @@ export function FiveSpaceLayout({
     [connectionStatus?.lastConnectedAt, workspaceDataVersion],
   )
 
-  /** 文件编辑器自动刷新逻辑 每 3 秒轮询检查已打开的文件编辑器 Tab 对应的文件是否被外部修改， */
-  useEffect(() => {
-    const intervalMs = 3000
-    const timer = setInterval(async () => {
-      const tabs = useLayoutModeStore.getState().workspaceTabs
-      const fileEditorTabs = tabs.filter(
-        (t) => t.moduleId === '__file_editor__' && t.isActive
-      )
-
-      for (const tab of fileEditorTabs) {
-        const editorData = getFileEditorData(tab.id)
-        if (!editorData || !editorData.containerTaskId) continue
-        // 部分加载（按需加载未读完）与大只读文件跳过外部修改轮询：轮询全量
-        // 拉取会冲掉分页状态、造成周期性大流量；轮询只为防编辑冲突，
-        // partial 禁编辑、超阈值只读，均无冲突面（阈值与 CodeEditor 同源）
-        const isPartial =
-          editorData.loadedBytes !== undefined &&
-          editorData.size !== undefined &&
-          editorData.loadedBytes < editorData.size
-        if (isPartial || (editorData.size ?? 0) > EDITABLE_FILE_MAX_BYTES) continue
-
-        try {
-          const resp = await apiClient.get(
-            W.workspaces_file_content_get.replace('{container_task_id}', editorData.containerTaskId),
-            { params: { path: editorData.filePath } }
-          )
-          if (resp.data?.success && resp.data.content !== undefined) {
-            const newContent = resp.data.content
-            const newSize = resp.data.size
-            // 仅当内容真正变化时才更新
-            if (newContent !== editorData.content) {
-              updateFileEditorData(tab.id, {
-                content: newContent,
-                size: newSize,
-              })
-              emitFileChange(tab.id, newContent, newSize)
-            }
-          }
-        } catch {
-          // 静默失败，不影响用户体验
-        }
-      }
-    }, intervalMs)
-
-    return () => clearInterval(timer)
-  }, [])
+  useFileEditorAutoRefresh()
 
   /** 处理工作区 Tab 关闭，清理 fileEditorRegistry 中对应的文件内容缓存 */
   const handleCloseTab = useCallback((tabId: string) => {
@@ -302,6 +270,7 @@ export function FiveSpaceLayout({
     const container = document.querySelector('[data-region="chat"]')
     const avail = container?.getBoundingClientRect().width ?? window.innerWidth
     return Math.round(avail * 0.42)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- viewportWidth 是 resize 重算触发器（有意依赖）：窗口变化后默认宽度跟随，删了即行为回归
   }, [viewportWidth, sidebarRatio, workspacePanelRatio])
 
   /** 工作区最大宽度：主内容区 50%（拖拽上限，防挤压聊天区） */
@@ -310,6 +279,7 @@ export function FiveSpaceLayout({
     const container = document.querySelector('[data-region="chat"]')
     const avail = container?.getBoundingClientRect().width ?? window.innerWidth
     return Math.max(360, Math.round(avail * 0.5))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 同上：viewportWidth 驱动 resize 重算（有意依赖）
   }, [viewportWidth, sidebarRatio, workspacePanelRatio])
 
 
@@ -345,7 +315,7 @@ export function FiveSpaceLayout({
       setWorkspaceFullscreenStore(false)
       setWorkspaceCollapsed(true)
     }
-  }, [activeSessionId, isMobile, setWorkspaceFullscreenStore])
+  }, [isMobile, setMobileWorkspaceOpen, setWorkspaceCollapsed, setWorkspaceFullscreenStore])
 
   /** 渲染工作区 Tab 内容 连接 Schema 渲染链路 */
   const renderTabContent = useCallback(
@@ -431,7 +401,59 @@ export function FiveSpaceLayout({
         // 懒加载保持）。未知 widget 名兜底 CodeEditor（坏声明不白屏）。
         const viewerWidget = resolveFileViewer(editorData.filePath).viewer.render.widget
 
-        if (viewerWidget === 'image_preview' || viewerWidget === 'pdf_preview') {
+        if (viewerWidget === 'document_viewer') {
+          // 文档查看器（方案 §3.6）：pdf/docx/pptx 统一走可批注查看器。
+          // 取流优先用附件 blob url，其次 workspace file-content 拼接（同 FilePreview 拼法）；
+          // 批注键 = 任务坐标 + 文件路径（artifacts 批注按 artifact_id 关联，此处以
+          // 文件路径作稳定键——无产物登记时同样能批注，局限见实施报告）。
+          const docUrl =
+            editorData.url ??
+            (editorData.containerTaskId
+              ? `${W.workspaces_file_content_get.replace('{container_task_id}', editorData.containerTaskId)}?path=${encodeURIComponent(editorData.filePath)}`
+              : undefined)
+          return (
+            <Suspense fallback={LazyFallback}>
+              <DocumentViewer
+                filePath={editorData.filePath}
+                content={editorData.content}
+                url={docUrl}
+                artifactId={`file:${editorData.containerTaskId}:${editorData.filePath}`}
+              />
+            </Suspense>
+          )
+        }
+
+        // 预览类 widget 全部落 FilePreview（声明表路由产出，组件内按扩展名再分流）：
+        // image_preview / pdf_preview / markdown_preview / media_preview /
+        // excel_preview / binary_notice。
+        // 新增预览形态只加声明表一条 + FilePreview 一个分支，装配层不改路由逻辑。
+        if (viewerWidget === 'markdown_preview') {
+          // md 预览挂反向链接侧栏（双链 P1，用户裁定 2026-11-21 授权最小挂载）：
+          // 侧栏数据来自仓库根 backlinks.json 投影（_local 只读端点），任务工作区
+          // 文件路径不在仓库索引 → 组件内自裁决"无反向链接"空态，装配层不判路径归属
+          return (
+            <div className="flex h-full min-w-0">
+              <Suspense fallback={LazyFallback}>
+                <FilePreview
+                  filePath={editorData.filePath}
+                  content={editorData.content}
+                  size={editorData.size}
+                  containerTaskId={editorData.containerTaskId}
+                  url={editorData.url}
+                  className="min-w-0 flex-1"
+                />
+              </Suspense>
+              <BacklinksPanel filePath={editorData.filePath} className="w-56 shrink-0" />
+            </div>
+          )
+        }
+        if (
+          viewerWidget === 'image_preview' ||
+          viewerWidget === 'pdf_preview' ||
+          viewerWidget === 'media_preview' ||
+          viewerWidget === 'excel_preview' ||
+          viewerWidget === 'binary_notice'
+        ) {
           return (
             <Suspense fallback={LazyFallback}>
               <FilePreview
@@ -648,17 +670,22 @@ export function FiveSpaceLayout({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [fullscreenActive, exitFullscreen, workspaceFullscreen, mobileWorkspaceOpen, setWorkspaceFullscreenStore])
+  }, [fullscreenActive, exitFullscreen, workspaceFullscreen, mobileWorkspaceOpen, setMobileWorkspaceOpen, setWorkspaceFullscreenStore])
 
   return (
     <div
       className="bg-background text-foreground flex w-screen flex-col overflow-hidden"
+      // eslint-disable-next-line no-restricted-syntax -- 运行时动态值：皮肤/安全区/键盘缺口 CSS 变量 calc 拼接，Tailwind 类无法表达
       style={{
         fontFamily: 'var(--font-ui, var(--font-family))',
         // 皮肤装饰条槽位：仅"带文字的替代性条栏"（miku 标题栏/状态栏类，
         // skinRuntime 按文字内容判定）让位——整根下移/高度扣减；纯图形
         // 垂坠装饰（maid 花边）原生覆盖式零位移，变量恒 0 不占位
-        height: 'calc(100dvh - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px))',
+        // 键盘缺口补偿（imeFocusScroll 写 --ime-keyboard-gap）：iOS Safari 键盘不缩
+        // 布局视口时靠该值把根高度抬上去，钉底输入区随之上移到键盘上沿；
+        // Android/壳侧已缩视口的环境 gap=0，本项恒 0 零改变
+        height:
+          'calc(100dvh - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px) - var(--ime-keyboard-gap, 0px))',
         paddingTop: 'var(--skin-chrome-top, 0px)',
         paddingBottom: 'var(--skin-chrome-bottom, 0px)',
       }}
@@ -674,6 +701,7 @@ export function FiveSpaceLayout({
             type="button"
             onClick={() => useUIStore.getState().setSidebarCollapsed(false)}
             className="text-muted-foreground hover:bg-muted hover:text-foreground absolute left-1 z-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+            // eslint-disable-next-line no-restricted-syntax -- 安全区顶距 calc(var(--safe-area-top))，运行时变量
             style={{ top: 'calc(0.5rem + var(--safe-area-top, 0px))' }}
             title="展开侧边栏"
             aria-label="展开侧边栏"
@@ -682,19 +710,22 @@ export function FiveSpaceLayout({
             <Menu className="h-4 w-4" />
           </button>
         )}
-        {/* 移动端顶栏右上角工作区入口：与左上汉堡同排对称（同一安全区顶距，
-            安全区避让沿用 --safe-area-top 单源）。行为=抽屉内工作区按钮同款
-            打开逻辑：先收抽屉（抽屉 z-40 盖工作区覆盖层 z-30，不收则覆盖层
-            被自家抽屉遮蔽、表现为点击无反应）再点亮覆盖层；覆盖层开着时再点
-            =返回对话（与桌面顶栏工作区开关同语义的移动端形态）。 */}
-        {isMobile && !workspaceFullscreen && (
+        {/* 移动端对话页右上角工作区入口（仅覆盖层关闭态渲染）：与左上汉堡同排
+            对称（同一安全区顶距，安全区避让沿用 --safe-area-top 单源）。行为=
+            抽屉内工作区按钮同款打开逻辑：先收抽屉再点亮覆盖层。覆盖层打开后
+            本钮卸载，返回对话改由覆盖层标签行末尾槽位的 band 原生按钮承载
+            （同款同排，与 + / 只看当前会话 尺寸位置一致，见覆盖层 WorkspaceHost
+            的 bandTrailingSlot）——绝对定位浮钮与标签行控件坐标重叠的根因
+            （2026-11-14 真机 M332BF 两轮实测）就此从构造上消除。 */}
+        {isMobile && !workspaceFullscreen && !mobileWorkspaceOpen && (
           <button
             type="button"
             onClick={() => {
               useUIStore.getState().setSidebarCollapsed(true)
-              setMobileWorkspaceOpen(!mobileWorkspaceOpen)
+              setMobileWorkspaceOpen(true)
             }}
             className="text-muted-foreground hover:bg-muted hover:text-foreground absolute right-1 z-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+            // eslint-disable-next-line no-restricted-syntax -- 安全区顶距 calc(var(--safe-area-top))，运行时变量
             style={{ top: 'calc(0.5rem + var(--safe-area-top, 0px))' }}
             title={mobileWorkspaceOpen ? '返回对话' : '工作区'}
             aria-label={mobileWorkspaceOpen ? '返回对话' : '工作区'}
@@ -707,6 +738,7 @@ export function FiveSpaceLayout({
         {sidebarContent && isMobile && !sidebarCollapsed && (
           <div
             className="fixed inset-0 z-40"
+            // eslint-disable-next-line no-restricted-syntax -- 标题栏高度变量 var(--layout-titlebar-height)，运行时变量
             style={{ top: 'var(--layout-titlebar-height, 32px)' }}
             data-testid="mobile-sidebar-drawer"
           >
@@ -717,6 +749,7 @@ export function FiveSpaceLayout({
             />
             <aside
               className="absolute bottom-0 left-0 top-0 z-50 flex w-[78%] max-w-[320px] flex-col shadow-xl safe-area-pb"
+              // eslint-disable-next-line no-restricted-syntax -- 主题区域背景变量链（--region-sidebar-bg 三级回退），运行时变量
               style={{ background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))' }}
             >
               <div className="min-h-0 flex-1 overflow-hidden">{sidebarContent}</div>
@@ -789,6 +822,7 @@ export function FiveSpaceLayout({
                   'app-drag-region flex h-full shrink-0 items-center',
                   BAND_EDGE_PADDING_CLASS,
                 )}
+                // eslint-disable-next-line no-restricted-syntax -- 面板宽度运行时计算（panelWidth 拖拽比例），动态值
                 style={{ width: sidebarContent && !sidebarCollapsed && !workspaceFullscreen ? panelWidth('sidebar', 248, 200, 360) : 44 }}
               >
                 <button
@@ -821,6 +855,7 @@ export function FiveSpaceLayout({
                   BAND_EDGE_PADDING_CLASS,
                   workspaceFullscreen && 'flex-1',
                 )}
+                // eslint-disable-next-line no-restricted-syntax -- 面板宽度运行时计算（panelWidth 拖拽比例），动态值
                 style={workspaceFullscreen ? undefined : { width: workspaceCollapsed ? 176 : panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth) }}
               >
                 <div
@@ -865,6 +900,7 @@ export function FiveSpaceLayout({
                       'flex shrink-0 flex-col overflow-hidden',
                       workspaceFullscreen && 'hidden',
                     )}
+                    // eslint-disable-next-line no-restricted-syntax -- 面板宽度运行时计算 + 主题背景变量链，动态值
                     style={{
                       width: panelWidth('sidebar', 248, 200, 360),
                       background: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
@@ -922,15 +958,23 @@ export function FiveSpaceLayout({
                           ? 'min-h-0 min-w-0 flex-1'
                           : 'shrink-0 border-l border-border/50',
                       )}
+                      // eslint-disable-next-line no-restricted-syntax -- 全屏/让位两态：皮肤 inset 变量 + panelWidth 运行时计算
                       style={
                         workspaceFullscreen
-                          ? undefined
+                          ? {
+                              paddingTop: 'var(--skin-chat-inset-top, 0px)',
+                              paddingBottom: 'var(--skin-chat-inset-bottom, 0px)',
+                            }
                           : {
                               width: panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth),
+                              // 皮肤垂坠带让位（同聊天列）：花边不压工作区顶栏/底栏
+                              paddingTop: 'var(--skin-chat-inset-top, 0px)',
+                              paddingBottom: 'var(--skin-chat-inset-bottom, 0px)',
                             }
                       }
                       data-region="workspace"
                       data-testid="workspace-column"
+                      data-skin-inset-target="workspace"
                     >
                       <WorkspaceHost
                         tabs={workspaceTabs}
@@ -941,8 +985,10 @@ export function FiveSpaceLayout({
                         isFullscreen={workspaceFullscreen}
                         visitedTabIds={visitedTabIds}
                       />
-                      {/* 全屏简化 composer 浮窗（非全屏渲染 null；真实输入框 CSS 隐藏保同源镜像） */}
-                      <FullscreenComposer />
+                      {/* 全屏简化 composer 浮窗：仅聊天类页签需要（真实输入框全屏时被
+                          CSS 隐藏，浮窗是其镜像）。现场面板是只读看板，浮窗挂在右下角
+                          会压住产物文件区——故按激活页签收窄作用域，切回聊天页签照常出现。 */}
+                      {activeWorkspaceTab?.component !== 'task_scene' && <FullscreenComposer />}
                     </div>
                   </>
                 )}
@@ -957,28 +1003,23 @@ export function FiveSpaceLayout({
 
       {/* 移动端工作区全屏覆盖层：移动端工作区唯一宿主（聊天区全屏时 hidden
           让位），全屏态必须保持挂载——卸载即黑屏死路（ESC 是唯一出口而移动端
-          无键盘）；全屏=覆盖层占满，顶栏「返回对话」与全屏钮（取反）均可退出 */}
+          无键盘）；inset-0 真全屏（顶带也让位，2026-11-14 用户裁定「打开工作区
+          就该是全屏、不留顶带」），仅内衬安全区顶距避系统状态栏。内部不设操作
+          栏——返回对话唯一出口=顶栏右上工作区浮钮（打开态 z-40 恒在覆盖层之上，
+          见上方按钮渲染处注释）。覆盖层亦不传 onFullscreen：WorkspaceHost 的
+          「铺满全屏」钮在真全屏下冗余，且与返回浮钮在顶栏右端重叠（2026-11-14
+          真机 M332BF 实测重叠误触），移动面只留返回浮钮一个。 */}
       {isMobile && mobileWorkspaceOpen && (
         <div
           className="fixed inset-0 z-30 flex flex-col bg-background"
-          style={{ top: 'var(--layout-titlebar-height, 32px)' }}
           data-testid="mobile-workspace-overlay"
         >
-          {/* 工作区顶部操作栏 */}
-          <div className="border-border flex h-9 shrink-0 items-center justify-between border-b px-2">
-            <span className="text-foreground text-xs font-medium">面板</span>
-            <button
-              onClick={() => setMobileWorkspaceOpen(false)}
-              className="hover:bg-muted text-muted-foreground flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors"
-              title="返回对话"
-              data-testid="mobile-workspace-back"
-            >
-              <Minimize2 className="h-3.5 w-3.5" />
-              <span>返回对话</span>
-            </button>
-          </div>
-          {/* 工作区内容 */}
-          <div className="safe-area-pb min-h-0 flex-1 overflow-hidden">
+          {/* 工作区内容（safe-area-top 避系统状态栏；底部避手势条） */}
+          <div
+            className="safe-area-pb min-h-0 flex-1 overflow-hidden"
+            // eslint-disable-next-line no-restricted-syntax -- 安全区顶距 var(--safe-area-top)，运行时变量
+            style={{ paddingTop: 'var(--safe-area-top, 0px)' }}
+          >
             <WorkspaceHost
               tabs={workspaceTabs}
               onTabChange={setActiveTab}
@@ -990,9 +1031,19 @@ export function FiveSpaceLayout({
                 }
               }}
               renderTabContent={renderTabContent}
-              onFullscreen={toggleWorkspaceFullscreen}
-              isFullscreen={false}
               visitedTabIds={visitedTabIds}
+              bandTrailingSlot={
+                <button
+                  type="button"
+                  onClick={() => setMobileWorkspaceOpen(false)}
+                  className={`${BAND_ICON_BUTTON_CLASS} ${BAND_BUTTON_IDLE_CLASS}`}
+                  title="返回对话"
+                  aria-label="返回对话"
+                  data-testid="workspace-expand-float"
+                >
+                  <PanelRightIcon className={BAND_BUTTON_ICON_CLASS} />
+                </button>
+              }
             />
           </div>
         </div>
@@ -1001,6 +1052,7 @@ export function FiveSpaceLayout({
       {/* ---- Floating Windows Container ---- */}
       <div
         className="pointer-events-none fixed inset-0"
+        // eslint-disable-next-line no-restricted-syntax -- 层级来自布局配置 layoutConfig.zIndex，运行时值
         style={{ zIndex: layoutConfig.zIndex.floatingWindow }}
       >
         <FloatingWindowManager

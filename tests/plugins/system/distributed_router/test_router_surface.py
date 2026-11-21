@@ -64,5 +64,11 @@ class TestRouterSurfaceZeroNewTools:
         assert tool not in _config_tool_ids()
 
     def test_config_tool_ids_nonempty(self) -> None:
-        """白名单解析自检：收集器必须收集到实质条目（防解析静默空集假绿）。"""
-        assert len(_config_tool_ids()) >= 20
+        """白名单解析自检：收集器必须收集到实质条目（防解析静默空集假绿）。
+
+        下限随 2026-11-19 用户裁定重校：main agentos.yaml 直接面与
+        general_agent 同口径缩减（desktop_*/ui_*/ecosystem_*/oauth 等改经
+        resource_search 两步法动态可达），条目 20+ → 12；自检底线取 10
+        （再低即解析面断裂而非白名单演进）。
+        """
+        assert len(_config_tool_ids()) >= 10

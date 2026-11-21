@@ -1,15 +1,17 @@
 # @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
-"""continue 等待循环跨过退出时点后的三条终局分支补测。
+"""log(block=true) 等待循环跨过退出时点后的三条终局分支补测。
 
-靶行（plugins/shared/bash/tool.py:746-778）：等待循环结束后
+靶行（plugins/shared/bash/tool.py read_log block=true 分支）：等待循环结束后
 ``proc_info is None``（记录已被 _on_output_task_done 在「置终态→清内存」
-同瞬间移除）时的磁盘回读（746-748）与无日志显式失败（749-752），以及记录
-仍在但已转终态时的正常完成路径（766-767/774-775）与非零退出失败路径。
+同瞬间移除）时的磁盘回读与无日志显式失败，以及记录仍在但已转终态时的
+正常完成路径与非零退出失败路径。
 
-时序构造：进程在 continue 入口为 ``running``（进入等待循环），循环首轮
+时序构造：进程在 log(block=true) 入口为 ``running``（进入等待循环），循环首轮
 ``asyncio.sleep(0.5)`` 用**真实** sleep 推进，期间记录转终态/被清理，循环
 下一拍即观察终局。用真实时钟而非零延迟 mock——判据是「循环跨过终态」，
 不依赖墙钟精度，慢机器上同样稳定。
+
+2026-11-07 四工具重构（ADR T2）：continue action 退役 → log(block=true)。
 """
 
 from __future__ import annotations
@@ -18,9 +20,9 @@ import time
 from pathlib import Path
 
 import pytest
-from agentos_plugin_sdk.process_runtime import ProcessInfo
-from agentos_plugin_sdk.process_runtime import ProcessManager
-from tool import BashTool
+from tool import BashTool, encode_handle
+
+from agentos_plugin_sdk.process_runtime import ProcessInfo, ProcessManager
 
 pytestmark = pytest.mark.unit
 
@@ -87,14 +89,14 @@ async def test_wait_loop_record_cleared_reads_exit_code_from_disk(tool, tmp_path
     """等待循环跨过清理时点（proc_info=None）+ 磁盘日志可读 → 回读退出码成功。
 
     判据：不得把真实退出码兜成 0 之外的失败态，也不得报 PROCESS_NOT_FOUND
-    ——磁盘日志是唯一真值源（746-748）。
+    ——磁盘日志是唯一真值源。
     """
     pid = 501
     log_file = _write_log(tool.process_manager, pid, "sleep 1; echo done", "done from disk")
     _register(tool, pid, log_file, "sleep 1; echo done")
     _stage_after_first_poll(tool, pid, lambda: tool.process_manager.active_processes.pop(pid, None))
 
-    result = await tool.execute({"action": "continue", "pid": pid, "timeout": 3})
+    result = await tool.read_log({"handle": encode_handle(pid, None), "block": True})
 
     assert result.success, result.error
     assert result.output["status"] == "completed"
@@ -105,12 +107,12 @@ async def test_wait_loop_record_cleared_reads_exit_code_from_disk(tool, tmp_path
 
 @pytest.mark.asyncio
 async def test_wait_loop_record_cleared_without_log_fails_explicitly(tool, tmp_path):
-    """等待循环跨过清理时点且磁盘无日志 → 显式 PROCESS_NOT_FOUND（749-752）。"""
+    """等待循环跨过清理时点且磁盘无日志 → 显式 PROCESS_NOT_FOUND。"""
     pid = 502
     _register(tool, pid, tool.process_manager.log_dir / f"bash_{pid}.log", "gone")
     _stage_after_first_poll(tool, pid, lambda: tool.process_manager.active_processes.pop(pid, None))
 
-    result = await tool.execute({"action": "continue", "pid": pid, "timeout": 3})
+    result = await tool.read_log({"handle": encode_handle(pid, None), "block": True})
 
     assert not result.success
     assert result.error_code == "PROCESS_NOT_FOUND"
@@ -119,7 +121,7 @@ async def test_wait_loop_record_cleared_without_log_fails_explicitly(tool, tmp_p
 
 @pytest.mark.asyncio
 async def test_completed_after_wait_loop_returns_output_and_elapsed(tool, tmp_path):
-    """等待循环正常跨到终态（记录仍在）→ 成功态带 output 与 elapsed（766-775）。"""
+    """等待循环正常跨到终态（记录仍在）→ 成功态带 output 与 elapsed。"""
     pid = 503
     log_file = _write_log(tool.process_manager, pid, "echo hi", "hello after wait loop")
     info = _register(tool, pid, log_file, "echo hi")
@@ -130,13 +132,13 @@ async def test_completed_after_wait_loop_returns_output_and_elapsed(tool, tmp_pa
 
     _stage_after_first_poll(tool, pid, _complete)
 
-    result = await tool.execute({"action": "continue", "pid": pid, "timeout": 3})
+    result = await tool.read_log({"handle": encode_handle(pid, None), "block": True})
 
     assert result.success, result.error
     assert result.output["status"] == "completed"
     assert "hello after wait loop" in result.output["output"]
     assert result.output["elapsed"] >= 1.0, "elapsed 由 summary.elapsed_seconds 补回"
-    assert result.metadata["action"] == "continue"
+    assert result.metadata["tool"] == "log"
 
 
 @pytest.mark.asyncio
@@ -152,7 +154,7 @@ async def test_completed_after_wait_loop_nonzero_exit_reports_failure(tool, tmp_
 
     _stage_after_first_poll(tool, pid, _fail)
 
-    result = await tool.execute({"action": "continue", "pid": pid, "timeout": 3})
+    result = await tool.read_log({"handle": encode_handle(pid, None), "block": True})
 
     assert not result.success
     assert result.error_code == "COMMAND_FAILED"

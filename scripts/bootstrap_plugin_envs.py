@@ -194,6 +194,10 @@ def main() -> int:
         print(f"共享环境缺失：{SHARED_ENV}（先 uv sync --project plugins/shared/_host）", file=sys.stderr)
         return 1
     shared = shared_env_packages()
+    # venv 身份文件：解释器目录在 ≠ venv 生效（2026-11-10 装机实证：缺 pyvenv.cfg
+    # 时启动器退回外部 Python，venv 内包全部失效，aiohttp 命中外部命名空间包 →
+    # sync_agent 上行永久失败 → cohost 心跳停滞自杀循环）
+    shared_env_broken = not (SHARED_ENV / "pyvenv.cfg").is_file()
 
     rows: list[Row] = []
     for pattern in PLUGIN_GLOBS:
@@ -235,6 +239,15 @@ def main() -> int:
             elif row.cls == "independent" and row.venv == "junction":
                 venv.unlink()
                 warnings.append(f"依赖已超出共享环境，junction摘除，请回独立环境: uv sync --project {row.dir}")
+
+    if shared_env_broken:
+        warnings.append(
+            f"共享环境失效：{SHARED_ENV} 缺 pyvenv.cfg——解释器会退回外部 Python，"
+            "venv 内包全部失效；重建：uv sync --project plugins/shared/_host"
+        )
+        if args.apply:
+            print(f"共享环境失效（fail-closed）：{SHARED_ENV / 'pyvenv.cfg'} 缺失", file=sys.stderr)
+            return 1
 
     freed = sum(r.size_mb for r in rows if r.cls in ("light", "linkable") and r.venv == "real")
     if args.json:

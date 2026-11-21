@@ -70,6 +70,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 
@@ -292,19 +293,17 @@ async fn dispatch_success_pushes_new_message_and_stream_end() {
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-ok-1",
-            "u1",
-            "嗨",
-            "",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "cmid-ok-1",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-ok-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("嗨").to_string(),
+            client_message_id: ("cmid-ok-1").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -338,19 +337,17 @@ async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-silent-1",
-            "u1",
-            "回显探针-用户原文",
-            "",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-silent-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("回显探针-用户原文").to_string(),
+            client_message_id: ("").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -395,19 +392,17 @@ async fn dispatch_engine_failure_pushes_stream_error() {
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-fail-1",
-            "u1",
-            "会失败",
-            "",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-fail-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("会失败").to_string(),
+            client_message_id: ("").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -459,20 +454,19 @@ async fn seed_admin_bearer(store_dyn: &Arc<dyn agentos_core::traits::StorageBack
 fn pending_record(pid: &str, id: &str, content: &str) -> PendingInputRecord {
     PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: pid.to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: content.to_string(),
-        thread: format!("thread-{pid}"),
-        source: PendingInputSource::Trigger,
-        agent_id: "agentos".to_string(),
-        route_id: pid.to_string(),
-        thinking_strength: String::new(),
-        client_message_id: String::new(),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: format!("thread-{pid}"),
+            user_id: "u1".to_string(),
+            pipeline_id: pid.to_string(),
+            content: content.to_string(),
+            client_message_id: String::new(),
+            source: PendingInputSource::Trigger,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     }
 }
 
@@ -486,7 +480,7 @@ async fn endpoint_update_emits_pending_inputs_changed() {
     let bearer = seed_admin_bearer(&store_dyn).await;
     let pid = "pipe-evt-1";
     store_dyn
-        .enqueue_pending_input("default", pid, &pending_record(pid, "p_evt_1", "旧内容"))
+        .enqueue_pending_input("default", &pending_record(pid, "p_evt_1", "旧内容"))
         .await
         .unwrap();
     store_dyn
@@ -546,11 +540,11 @@ async fn endpoint_delete_emits_deleted_action_and_keeps_remaining() {
     let bearer = seed_admin_bearer(&store_dyn).await;
     let pid = "pipe-del-1";
     store_dyn
-        .enqueue_pending_input("default", pid, &pending_record(pid, "p_del_1", "甲"))
+        .enqueue_pending_input("default", &pending_record(pid, "p_del_1", "甲"))
         .await
         .unwrap();
     store_dyn
-        .enqueue_pending_input("default", pid, &pending_record(pid, "p_del_2", "乙"))
+        .enqueue_pending_input("default", &pending_record(pid, "p_del_2", "乙"))
         .await
         .unwrap();
     store_dyn
@@ -613,11 +607,11 @@ async fn endpoint_clear_emits_cleared_action_and_empties_queue() {
     let bearer = seed_admin_bearer(&store_dyn).await;
     let pid = "pipe-clr-1";
     store_dyn
-        .enqueue_pending_input("default", pid, &pending_record(pid, "p_clr_1", "甲"))
+        .enqueue_pending_input("default", &pending_record(pid, "p_clr_1", "甲"))
         .await
         .unwrap();
     store_dyn
-        .enqueue_pending_input("default", pid, &pending_record(pid, "p_clr_2", "乙"))
+        .enqueue_pending_input("default", &pending_record(pid, "p_clr_2", "乙"))
         .await
         .unwrap();
     store_dyn
@@ -686,19 +680,17 @@ async fn dispatch_idle_chain_runs_direct_without_pending_frames() {
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-idle-1",
-            "u1",
-            "直跑探针",
-            "",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "cmid-idle-1",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-idle-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("直跑探针").to_string(),
+            client_message_id: ("cmid-idle-1").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -741,19 +733,17 @@ async fn dispatch_busy_chain_enqueues_then_consumes_after_release() {
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
-        .dispatch_user_input(
-            "thread-busy-1",
-            "u1",
-            "排队探针",
-            "",
-            "",
-            None,
-            None,
-            "agentos",
-            None,
-            "cmid-busy-1",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-busy-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("排队探针").to_string(),
+            client_message_id: ("cmid-busy-1").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -855,19 +845,17 @@ async fn dispatch_agent_id_lands_as_persistent_state_key_and_overrides() {
 
     // 第 1 条：帧带 agent_id=persona_a → 身份落持久键。
     dispatcher
-        .dispatch_user_input(
-            "thread-agent-1",
-            "u1",
-            "第一条",
-            "",
-            "",
-            None,
-            Some(&json!({"agent.id": "persona_a"})),
-            "persona_a",
-            None,
-            "cmid-agent-1",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-agent-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("第一条").to_string(),
+            client_message_id: ("cmid-agent-1").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: Some(json!({"agent.id": "persona_a"}).clone()),
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     wait_for_rounds(&frames, 1).await;
@@ -882,19 +870,17 @@ async fn dispatch_agent_id_lands_as_persistent_state_key_and_overrides() {
 
     // 第 2 条：切换身份 persona_b → 消息级覆盖（overlay 在恢复合并之后应用）。
     dispatcher
-        .dispatch_user_input(
-            "thread-agent-1",
-            "u1",
-            "第二条",
-            "",
-            "",
-            None,
-            Some(&json!({"agent.id": "persona_b"})),
-            "persona_b",
-            None,
-            "cmid-agent-2",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-agent-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("第二条").to_string(),
+            client_message_id: ("cmid-agent-2").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: Some(json!({"agent.id": "persona_b"}).clone()),
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     wait_for_rounds(&frames, 2).await;
@@ -909,19 +895,17 @@ async fn dispatch_agent_id_lands_as_persistent_state_key_and_overrides() {
 
     // 第 3 条：不带 agent_id → 不写键，沿用最后写入值（缺省零变化）。
     dispatcher
-        .dispatch_user_input(
-            "thread-agent-1",
-            "u1",
-            "第三条",
-            "",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cmid-agent-3",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("thread-agent-1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("第三条").to_string(),
+            client_message_id: ("cmid-agent-3").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     wait_for_rounds(&frames, 3).await;

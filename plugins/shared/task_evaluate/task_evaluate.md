@@ -17,11 +17,19 @@ status: current
 - **agent 型指标**（evaluator_type=agent，如 semantic_check）：经 chat 派发评估
   子管道（评估者 agent 对照工作区产出判定），继承任务工作区。
 - **验证证据独立**：验收测试与验证证据不得由实现方自产；签发的验收测试对实现方只读。
-- **完赛交付证据（commit 面）**：完赛落 completed 前校验任务工作空间在任务创建基线
-  之后有新 commit；无 git 记录 → 拒绝完赛（result=retry，回执要求 agent 先
-  `git commit` 再完赛）。声明 `metadata.required_files` 的任务另加文件面（文件存在
-  且 mtime 晚于基线）AND 校验，两面共享同一次 git 探测。取证环境不可用（工作空间
-  坐标/创建基线缺失、非 git 仓、git 不可用或超时）降级放行并 warning 留痕。
+- **完赛交付证据（双轨）**（ADR `docs/decisions/2026-11-11-evidence-gate-dual-track.md`）：
+  - **豁免轨**：任务声明 `acceptance_criteria.files`（task_submit 白话字段，存储为
+    `file_check::<路径>` 实例键或字面 files 键）且工作空间非 worktree 模式 → 文件面
+    替代 commit 面：清单取 `metadata.required_files` 与 acceptance files 并集（都声明
+    都查），逐一核对文件存在且 mtime 晚于任务创建基线，commit 面整体跳过（零 git
+    探测）。动因：无 bash 命令工具的 agent（novel/research/orchestrator 家族）执行
+    不了 git commit，commit 面恒查 = 结构性死锁；回执按闸分流，只给文件面补救提示。
+  - **既有轨**：未声明 acceptance files 或 worktree 挂靠项目任务（交付语义 = commit
+    后合并回项目仓库，不豁免）→ 基线后须有新 commit；无 git 记录 → 拒绝完赛
+    （result=retry，回执要求 agent 先 `git commit` 再完赛）。声明 `metadata.required_files`
+    的任务另加文件面 AND 校验，两面共享同一次 git 探测。
+  - 取证环境不可用（工作空间坐标/创建基线缺失、既有轨下非 git 仓、git 不可用或超时）
+    降级放行并 warning 留痕（豁免轨纯文件面，无 git 降级形态）。
 
 ## 逻辑
 

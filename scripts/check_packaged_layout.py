@@ -52,7 +52,7 @@ PLUGIN_GLOBS = [
 
 @dataclasses.dataclass
 class Finding:
-    level: str  # "error" | "info"
+    level: str  # "error" | "warn" | "info"
     code: str
     path: str
     detail: str
@@ -193,7 +193,168 @@ def check_host_venv_deps(shared: Path, host_venv: Path) -> list[Finding]:
     return findings
 
 
-def check_resources(root: Path) -> list[Finding]:
+# 随包解释器（非 venv，无 pyvenv.cfg）：editable 指向同样须落在资源根内
+PREREQS_PYTHON_REL = Path("prereqs") / "python"
+# editable 安装的路径载体（uv/pip 同款命名）
+EDITABLE_PTH_GLOB = "__editable__*.pth"
+
+
+def check_venv_home(root: Path, venv_dir: Path, *, will_relocate: bool = True) -> list[Finding]:
+    """断言 venv 基座指针（pyvenv.cfg home）形态合法。
+
+    背景（2026-11-12 实证，随包 venv 三形态全灭）：home 绝对=产物挪位后死链
+    （打包位/worktree 绝对路径，第四犯同型）；home 相对=CWD 依赖（bash venv
+    全量 exe 实测从异 cwd 启动即 ``No Python at``）；uv trampoline python.exe
+    另烘创建机基座路径（cfg 修复也不生效）。结论：**随包 venv 无防挪位形态**，
+    现役设计=resources 不带 venv（strip_packaged_venvs 出包剥离），装后由
+    boot autoprovision 按包内 prereqs/python + wheelhouse 在安装位原地自建
+    （基座指针天然正确）。装后位（will_relocate=False）包内绝对 home = 合法
+    （autoprovision 原地生成形态）。
+    """
+    cfg = venv_dir / "pyvenv.cfg"
+    if not cfg.is_file():
+        return []  # 缺 cfg 的判据由调用方承载（host=HOST_VENV_CFG_MISSING；独立 venv 无 cfg=非 venv 形态）
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [Finding("error", "VENV_CFG_UNREADABLE", str(cfg), "pyvenv.cfg 不可读——venv 基座无从校验")]
+    home = next(
+        (value.strip() for line in text.splitlines() for name, sep, value in [line.partition("=")]
+         if sep and name.strip().lower() == "home"),
+        None,
+    )
+    if not home:
+        return [Finding("error", "VENV_HOME_MISSING", str(cfg), "pyvenv.cfg 无 home 行——venv 解释器无法定位基座（非标准 venv）")]
+    candidate = Path(home)
+    if not candidate.is_absolute():
+        return [Finding(
+            "error",
+            "VENV_HOME_RELATIVE_UNSUPPORTED",
+            str(cfg),
+            f"相对 home={home}——CWD 依赖（getpath 按 cwd 解析，异 cwd 启动即 "
+            "``No Python at``，2026-11-12 实测）；venv 基座指针必须绝对且在包内，"
+            "装后由 boot autoprovision 原地生成",
+        )]
+    if not is_within(candidate, root):
+        return [Finding(
+            "error",
+            "VENV_HOME_OUT_OF_PACKAGE",
+            str(cfg),
+            f"venv 基座指向包外：{home}——净机无此路径，解释器找不到 stdlib（2026-11-12 "
+            "装机实证：_host venv home 指向用户机 uv python）；随包 venv 属违规形态，"
+            "由 strip_packaged_venvs 出包剥离、装后 autoprovision 自建",
+        )]
+    if will_relocate:
+        return [Finding(
+            "warn",
+            "VENV_HOME_ABSOLUTE_IN_PACKAGE",
+            str(cfg),
+            f"随包 venv 基座为打包位绝对路径：{home}——产物挪位后即死链，且 uv "
+            "trampoline 可能另烘创建机基座路径（cfg 修复也不生效）；随包 venv 属"
+            "违规形态，应由 strip_packaged_venvs 出包剥离、装后 boot autoprovision "
+            "在安装位原地自建（HOST_VENV_MISSING 载荷阶段已豁免）",
+        )]
+    return []
+
+
+def site_packages_dirs(venv_dir: Path) -> list[Path]:
+    """venv/解释器目录下的 site-packages 全集（Windows Lib/ 与 POSIX lib/pythonX.Y/）。"""
+    candidates = [venv_dir / "Lib" / "site-packages", *sorted(venv_dir.glob("lib/python*/site-packages"))]
+    return [candidate for candidate in candidates if candidate.is_dir()]
+
+
+def is_within(path: Path, root: Path) -> bool:
+    """path 是否落在 root 之内（解析后按公共前缀判；非法路径按越界处理）。"""
+    try:
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+        return resolved_path == resolved_root or resolved_root in resolved_path.parents
+    except OSError:  # 非法/不可解析路径：按越界处理（fail-closed）
+        return False
+
+
+def check_editable_targets(root: Path, site_packages: Path, *, will_relocate: bool = True) -> list[Finding]:
+    """断言 editable 安装可随产物挪位解析（不可挪位 = 裸机必炸的部署缺陷）。
+
+    背景（2026-10-29 第三犯 + 2026-11-10 复核 + 2026-11-12 第四犯）：仓内 venv
+    被整目录照搬进包，``__editable__*.pth`` 里写的是**绝对路径**——开发机路径，
+    或**打包位/worktree 绝对路径**（第四犯：打包机上原地存在所以原地校验全绿，
+    NSIS 装机挪位/打包树清理后即死链）。用户机 import agentos_plugin_sdk 直接
+    失败——全部 sidecar 插件起不来。
+
+    合法形态：相对 site-packages 的相对路径行（site.addpackage 按 .pth 所在
+    目录解析，随树挪位成立）或 import 行。绝对路径行仅在装后位校验
+    （``will_relocate=False``，树不再挪动、路径由装机侧原地生成）合法。
+    """
+    findings: list[Finding] = []
+    for pth in sorted(site_packages.glob(EDITABLE_PTH_GLOB)):
+        try:
+            lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#") or line.startswith("import "):
+                continue  # 空行/注释/可执行行不是路径行
+            candidate = Path(line)
+            if candidate.is_absolute():
+                if not is_within(candidate, root):
+                    findings.append(
+                        Finding(
+                            "error",
+                            "EDITABLE_TARGET_OUT_OF_ROOT",
+                            str(pth),
+                            f"editable 安装指向打包资源根之外：{line}——用户机无此路径，"
+                            "该发行包 import 必失败（SDK 尤甚：全部 sidecar 插件连坐）；"
+                            "打包前把 .pth 重定位到包内 plugins/sdk/src（或改非 editable 安装）",
+                        )
+                    )
+                    break
+                if will_relocate:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "EDITABLE_ABSOLUTE_IN_PACKAGE",
+                            str(pth),
+                            f"editable 安装写死打包位绝对路径：{line}——产物安装挪位/"
+                            "打包树清理后即死链（2026-11-12 第四犯：_host venv 指向打包 "
+                            "worktree，删树后全部合宿宿主 spawn 即 ModuleNotFoundError，"
+                            "crash loop）；出包前由 relocate_packaged_editable.py 改写为"
+                            "相对 site-packages 的相对路径行",
+                        )
+                    )
+                    break
+                continue
+            # 相对路径行（重定位后形态）：按 site-packages 解析后必须落在包内且真实存在
+            resolved = (site_packages / candidate).resolve()
+            if not is_within(resolved, root):
+                findings.append(
+                    Finding(
+                        "error",
+                        "EDITABLE_TARGET_OUT_OF_ROOT",
+                        str(pth),
+                        f"相对路径行解析越界：{line} -> {resolved}——逃出资源根，"
+                        "用户机 import 必失败",
+                    )
+                )
+                break
+            if not resolved.exists():
+                findings.append(
+                    Finding(
+                        "error",
+                        "EDITABLE_TARGET_MISSING",
+                        str(pth),
+                        f"相对路径行解析目标不存在：{line} -> {resolved}——运行期该行被"
+                        " site 静默跳过，SDK import 必失败",
+                    )
+                )
+                break
+    return findings
+
+
+def check_resources(root: Path, *, will_relocate: bool = True) -> list[Finding]:
+    """检查打包资源根。will_relocate=True（默认，打包位）拦绝对路径行；False
+    （装后位 --installed）只拦越界，包内绝对路径合法（树不再挪动）。"""
     findings: list[Finding] = []
     shared = root / SHARED_REL
     if not shared.is_dir():
@@ -224,8 +385,31 @@ def check_resources(root: Path) -> list[Finding]:
             )
         )
     else:
+        # 2b. venv 身份文件在位（解释器文件 ≠ 可用 venv）
+        if not (host_venv / "pyvenv.cfg").is_file():
+            findings.append(
+                Finding(
+                    "error",
+                    "HOST_VENV_CFG_MISSING",
+                    str(host_venv / "pyvenv.cfg"),
+                    "共享 venv 缺 pyvenv.cfg——venv 的 python.exe 启动器据此解析基座，"
+                    "缺失即静默退回外部 Python，venv 内 site-packages 全部失效"
+                    "（2026-11-10 装机实证：aiohttp 命中外部命名空间包 → sync_agent "
+                    "上行永久失败 → outbox 触顶 → cohost 心跳停滞自杀循环）；"
+                    "重建：uv sync --project plugins/shared/_host",
+                )
+            )
+        # 2c. editable 安装可随产物挪位解析（打包位绝对路径/越界 = 裸机必炸）
+        for site_packages in site_packages_dirs(host_venv):
+            findings.extend(check_editable_targets(root, site_packages, will_relocate=will_relocate))
+        # 2c'. venv 基座指针（pyvenv.cfg home）同口径：净机无开发机基座即死
+        findings.extend(check_venv_home(root, host_venv, will_relocate=will_relocate))
         # 6. 成员依赖闭包 ⊆ 包内共享 venv（解释器在位 ≠ 依赖完整）
         findings.extend(check_host_venv_deps(shared, host_venv))
+
+    # 2d. 随包解释器的 editable 指向（无 venv 身份，只有越界/挪位判据）
+    for site_packages in site_packages_dirs(root / PREREQS_PYTHON_REL):
+        findings.extend(check_editable_targets(root, site_packages, will_relocate=will_relocate))
 
     # 3/4/5. 定深扫描插件目录
     for pattern in PLUGIN_GLOBS:
@@ -267,6 +451,9 @@ def check_resources(root: Path) -> list[Finding]:
                             "independent 类插件真实 .venv（合法：与共享环境同卷硬链接或装机自愈重建所得）",
                         )
                     )
+                    # 独立 venv 基座指针同口径校验（合宿成员/模式包自带 venv 本身即
+                    # error，不重复报 home 面）
+                    findings.extend(check_venv_home(root, venv, will_relocate=will_relocate))
             # 残留半成品 venv（.venv-*）同口径检查
             for stale in sorted(plugin_dir.glob(".venv-*")):
                 if stale.exists() and not is_link(stale):
@@ -291,6 +478,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("resources", type=Path, help="打包资源根（含 plugins/shared）")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
+    parser.add_argument(
+        "--installed",
+        action="store_true",
+        help="装后位校验（树不再挪位：只拦越界，包内绝对路径合法）",
+    )
     args = parser.parse_args()
 
     root = args.resources.resolve()
@@ -298,7 +490,7 @@ def main() -> int:
         print(f"资源根不存在：{root}", file=sys.stderr)
         return 1
 
-    findings = check_resources(root)
+    findings = check_resources(root, will_relocate=not args.installed)
     errors = [f for f in findings if f.level == "error"]
     if args.json:
         print(
@@ -317,12 +509,13 @@ def main() -> int:
         if not findings:
             print("  结构合格：_host 共享 venv 在位，模式包/合宿成员已瘦身")
         for f in findings:
-            mark = "ERROR" if f.level == "error" else "info "
+            mark = {"error": "ERROR", "warn": "WARN "}.get(f.level, "info ")
             print(f"  [{mark}] {f.code}: {f.path}")
             print(f"          {f.detail}")
+        warn_count = sum(1 for f in findings if f.level == "warn")
         print(
             f"\n结论：{'不合格（存在 error）' if errors else '合格'}"
-            f"（error={len(errors)} info={len(findings) - len(errors)}）"
+            f"（error={len(errors)} warn={warn_count} info={len(findings) - len(errors) - warn_count}）"
         )
     return 1 if errors else 0
 

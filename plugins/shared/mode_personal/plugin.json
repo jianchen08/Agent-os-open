@@ -6,7 +6,7 @@
     "trigger-control"
   ],
   "name": "Mode Personal",
-  "version": "0.3.2",
+  "version": "0.3.6",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
@@ -42,7 +42,7 @@
             },
             "payload": {
               "type": "object",
-              "description": "capture: {title, domain?, due?, priority?, repeat?, direction?, status?, kind?: 'event', at?} 或 {text: '- [ ] 明天 #工作 !P1 交周报'}（行语法，与页面快速添加同一解析）；query: {scope: today|todo|event|habit|partner|journal|preference, id?, status?, domain?, month?, key?, from?, to?}；op: {op: accept|complete|defer|split|wait|fail|cancel|focus_start|focus_stop|undo, entity?: todo|event, id?, todo_id?(别名), op_id?(undo), new_time?/new_due?(defer), parts?(split), duration_minutes?(focus_start，缺省取配置)}。capture 可带 pipeline_id（当前会话主管道 id）= 日程到点提醒的承载管道锚（ADR 2026-11-03-pim-trigger-anchor：提醒挂创建会话，不随活跃会话漂移）"
+              "description": "capture: {title, domain?, due?, priority?, repeat?, direction?, status?, reminder_mode?: 'direct'|'agent_classified'（建卡时判定：到点只需看到卡片（纯时间提醒）→direct（缺省）；到点需你介入处理/组织信息→agent_classified，到点耗1次调用注入事实消息）, kind?: 'event', at?} 或 {text: '- [ ] 明天 #工作 !P1 交周报'}（行语法，与页面快速添加同一解析）；query: {scope: today|todo|event|habit|partner|journal|preference, id?, status?, domain?, month?, key?, from?, to?}；op: {op: accept|complete|defer|split|wait|fail|cancel|focus_start|focus_stop|undo, entity?: todo|event, id?, todo_id?(别名), op_id?(undo), new_time?/new_due?(defer), parts?(split), duration_minutes?(focus_start，缺省取配置)}。capture 可带 pipeline_id（当前会话主管道 id）= 日程到点提醒的承载管道锚（ADR 2026-11-03-pim-trigger-anchor：提醒挂创建会话，不随活跃会话漂移）"
             }
           },
           "required": [
@@ -345,6 +345,26 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "habit 打卡（history 追加今天；幂等——同日重复打卡零变化 op_id=null）"
+    },
+    {
+      "route_id": "personal_pim_todo_ack_reminder",
+      "method": "POST",
+      "path": "/ext/mode_personal/todos/{id}/ack_reminder",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "direct 弹卡确认（P0④）：确认坐标 <=now 最近一次发生；未到点 noop；同坐标重复确认幂等"
+    },
+    {
+      "route_id": "personal_pim_event_ack_reminder",
+      "method": "POST",
+      "path": "/ext/mode_personal/events/{id}/ack_reminder",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "event 弹卡确认（P0④）：确认坐标 <=now 最近一次发生；未到点 noop；同坐标重复确认幂等"
     },
     {
       "route_id": "personal_pim_undo",

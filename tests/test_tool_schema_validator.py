@@ -1739,3 +1739,68 @@ class TestActionStatsObservability:
         assert stats["file_write|write|pass"] == 1
         assert stats["file_write|write|prefill_rejected"] == 1
         assert stats["file_write|write|schema_fixed"] == 1
+
+    def test_stats_isolated_between_pipelines(self) -> None:
+        """两管道交错执行：各自快照只含本管道键（跨管道泄漏回归 2026-11-12）。
+
+        实证：模块级进程计数器把另一管道的 todo 原文作为 Counter 键带进本
+        管道 ``tool_action_stats``。两条管道用不同工具面 + 不同 outcome，
+        泄漏存在即键面直接穿透。
+        """
+        import asyncio
+
+        read_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"action": {"type": "string"}},
+            "required": ["action"],
+        }
+        write_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"action": {"type": "string"}, "path": {"type": "string"}},
+            "required": ["action", "path"],
+        }
+        registry = _FakeRegistry(
+            [_FakeTool("file_read", read_schema), _FakeTool("file_write", write_schema)]
+        )
+        plugin = _make_plugin()
+
+        def _ctx_for(pipeline_id: str) -> PluginContext:
+            return PluginContext(
+                state={
+                    StateKeys.CORE_TYPE: "tool_execute",
+                    "pipeline_id": pipeline_id,
+                    StateKeys.RAW_TOOL_CALLS: [],
+                    "messages": [],
+                },
+                _services={"tool_registry": registry},
+            )
+
+        async def _round(ctx: PluginContext, calls: list[dict[str, Any]]) -> dict[str, Any]:
+            ctx.state[StateKeys.RAW_TOOL_CALLS] = calls
+            result = await plugin.execute(ctx)
+            ctx.state.update(result.state_updates)
+            return result.state_updates["tool_action_stats"]
+
+        ctx_a = _ctx_for("pipe_stats_a")
+        ctx_b = _ctx_for("pipe_stats_b")
+
+        stats_a1 = asyncio.run(_round(ctx_a, [
+            {"name": "file_read", "id": "a1", "args": {"action": "read"}},
+            {"name": "file_read", "id": "a2", "args": {"action": "read"}},
+        ]))
+        stats_b = asyncio.run(_round(ctx_b, [
+            {"name": "file_write", "id": "b1", "args": {"action": "write", "path": "a.txt"}},
+            {"name": "file_write", "id": "b2", "args": {"action": "write"}},
+        ]))
+        stats_a2 = asyncio.run(_round(ctx_a, [
+            {"name": "file_read", "id": "a3", "args": {"action": "read"}},
+        ]))
+
+        assert stats_a1 == {"file_read|read|pass": 2}
+        assert stats_b == {
+            "file_write|write|pass": 1,
+            "file_write|write|prefill_rejected": 1,
+        }, "B 快照不得携带 A 的键"
+        assert stats_a2 == {"file_read|read|pass": 3}, "A 跨轮累加，基线来自自身 state"
+        assert not any(k.startswith("file_write") for k in stats_a2)
+        assert not any(k.startswith("file_read") for k in stats_b)

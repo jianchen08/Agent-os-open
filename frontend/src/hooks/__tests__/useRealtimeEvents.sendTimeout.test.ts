@@ -3,11 +3,12 @@
  *
  * user_input_send_timeout 透传链（2026-08-21 用户裁决：任何错误都必须让用户看见）：
  * WS 断线期间发送的消息排队超 TTL 被撤回时，UI 层必须——撤除对应"思考中"占位
- * 气泡、停止该管道流式态、原位置插入 system 错误消息、通知中心高优告警。
+ * 气泡、停止该管道流式态、通知中心高优告警；错误不在消息流里插气泡（用户裁定
+ * 2026-11-10：消息流只承载对话与生成结果，发送失败的气泡会显示误导性的
+ * 「生成失败」），失败反馈归操作点（输入框）与通知中心。
  *
  * 2026-08-22 单一消息数组（ADR）：乐观 user 在主数组（status='sending'），超时
- * 将其标记 failed（消息保留、位置不丢、可重试复用 cmid 幂等重发），同刻插入
- * system 错误气泡——不再有 pending 区（已退役）。
+ * 将其标记 failed（消息保留、位置不丢、可重试复用 cmid 幂等重发）。
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'
@@ -31,7 +32,7 @@ describe('useRealtimeEvents: user_input_send_timeout 错误透传', () => {
     useNotificationStore.getState().clearAll()
   })
 
-  it('超时事件应标记发送中消息 failed、停流式、插 system 错误消息、发高优通知', () => {
+  it('超时事件应标记发送中消息 failed、停流式、不在流内插错误气泡、发高优通知', () => {
     const { unmount } = renderHook(() => useRealtimeEvents())
     try {
       const ps = usePipelineMessageStore.getState()
@@ -68,12 +69,10 @@ describe('useRealtimeEvents: user_input_send_timeout 错误透传', () => {
       const optimistic = msgs.find((m) => m.id === CMID)
       expect(optimistic).toBeDefined()
       expect(optimistic?.status).toBe('failed')
-      // 原位置插入 system 错误消息
-      const err = msgs.find((m) => m.id === `send_failed_${CMID}`)
-      expect(err).toBeDefined()
-      expect(err?.role).toBe('system')
-      expect(err?.status).toBe('error')
-      expect(err?.content).toContain('消息没有发到服务器')
+      // 消息流不插失败气泡：流内只剩那条乐观 user 消息（无 system 错误消息）
+      expect(msgs.find((m) => m.id === `send_failed_${CMID}`)).toBeUndefined()
+      expect(msgs.some((m) => m.role === 'system')).toBe(false)
+      expect(msgs).toHaveLength(1)
       // 流式态已停
       expect(after.streamingState[PIPELINE_ID]).toBeUndefined()
       // 通知中心高优告警

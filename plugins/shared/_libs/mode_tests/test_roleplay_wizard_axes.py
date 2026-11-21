@@ -136,11 +136,9 @@ def test_axes_endpoint_static_axes_have_labels(rp: Any, axis_id: str) -> None:
 # ── 候选集端点：fail-soft ─────────────────────────────────────────────────────
 
 
-def test_axes_endpoint_styles_dir_missing_degrades_empty(rp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_axes_endpoint_styles_dir_missing_degrades_empty(rp: Any, patch_shared: Any) -> None:
     """styles/ 目录缺失 = 文风轴空列表不炸；静态三轴不受影响。"""
-    monkeypatch.setattr(
-        rp, "_STYLES_DIR", str(Path(rp._STYLES_DIR).parent / "no_such_styles_dir")
-    )
+    patch_shared("_STYLES_DIR", str(Path(rp._STYLES_DIR).parent / "no_such_styles_dir"))  # 消费点在 rp_cards 自持绑定
     axes = _axes_payload(rp)
     style = next(a for a in axes if a["id"] == "style")
     assert style["options"] == [], "目录缺失 = 文风轴空列表（无文风注入常态）"
@@ -149,14 +147,14 @@ def test_axes_endpoint_styles_dir_missing_degrades_empty(rp: Any, monkeypatch: p
 
 
 def test_axes_endpoint_skips_corrupt_style_file(
-    rp: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    rp: Any, tmp_path: Any, patch_shared: Any
 ) -> None:
     """单档损坏/非映射 = 该档跳过不崩面板（与 packs 扫描同款容错口径）。"""
     styles_copy = tmp_path / "styles"
     shutil.copytree(rp._STYLES_DIR, styles_copy)
     (styles_copy / "webnovel_paced.yaml").write_text("id: [截断\n", encoding="utf-8")
     (styles_copy / "non_mapping.yaml").write_text("- a\n- b\n", encoding="utf-8")
-    monkeypatch.setattr(rp, "_STYLES_DIR", str(styles_copy))
+    patch_shared("_STYLES_DIR", str(styles_copy))  # 消费点在 rp_cards 自持绑定
 
     options = _axes_payload(rp)[0]["options"]
     ids = {o["id"] for o in options}

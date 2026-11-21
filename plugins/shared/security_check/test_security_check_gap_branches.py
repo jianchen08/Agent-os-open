@@ -380,7 +380,10 @@ class TestExecuteShortCircuits:
         """执行门只认 raw_tool_calls 非空：遗留 core_type 键不再拦截检查
         （core_type 随管道静态化退役，ADR 2026-10-02-loopconfig-parallel-foreach）。"""
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RM})
-        ctx = _tool_ctx("bash_execute", {"command": "rm -rf /x"})
+        # 工具名用现行命令面单工具 ``bash``（bash_execute 已随 ADR 2026-11-07 T2
+        # 四单词重构退役，落 isolation_policy 默认 host_direct 不进轨道 1，
+        # 本用例须走规则匹配面）。
+        ctx = _tool_ctx("bash", {"command": "rm -rf /x"})
         ctx.state["core_type"] = "llm_call"
         r = await plugin.execute(ctx)
         assert r.state_updates != {}, "有调用即检查（core_type 不再是门）"
@@ -424,8 +427,10 @@ class TestDegradedNoticeEmitFailure:
         assert plugin._rules_degraded is True
 
         with caplog.at_level(logging.WARNING, logger=_mod.__name__):
+            # 工具名用现行命令面单工具 ``bash``（bash_execute 已退役，落默认
+            # host_direct 不进轨道 1 危险分类，见 ADR 2026-11-07 T2）。
             r = await plugin.execute(
-                _tool_ctx("bash_execute", {"command": "rm -rf /gap-emit-probe"})
+                _tool_ctx("bash", {"command": "rm -rf /gap-emit-probe"})
             )
 
         entries = r.state_updates["pre_decided_results"]

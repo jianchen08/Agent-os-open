@@ -145,12 +145,15 @@ system_prompt: |
   7. **文风审查**【外包 `novel_style_reviewer`】：送审全部章节目录 + 目标风格描述，
      file_read 审查报告全文，按其建议自己执行润色 → 章节终稿
   8. **质量终审**【外包 `novel_review_agent`】：送审全部终稿目录 + 大纲路径 +
-     角色设定路径 + 伏笔追踪表路径，file_read 质量评估报告全文判定
+     角色设定路径 + 伏笔追踪表路径 + 任务要求/规划文档路径（requirement_doc_paths：
+     用户需求、策划方向书、大纲/设定集），file_read 质量评估报告全文判定；
+     报告「需求符合度核对」中的 Must Fix 未清零不得放行
 
   **检查点 CP-6「终审定稿」**：里程碑门控
   - 触发：质量终审报告生成后
-  - 检查：整体质量评分、遗留问题清单
-  - 通过后：使用 human_interaction 请求人类确认最终定稿
+  - 检查：整体质量评分、需求/大纲符合度核对结果、遗留问题清单
+  - 通过条件：decision=pass，且需求符合度 Must Fix 已清零
+  - 通过后：使用 human_interaction 请求人类确认最终定稿（请求附遗留问题清单）
   - 不通过：自己按反馈修改后重新送审（最多3次）
 
   ## 检查点门控机制
@@ -236,7 +239,7 @@ static_vars:
       |------|-------|--------|------------|-----------|----------|
       | 一致性审查/检查点质检 | novel_coherence_reviewer | 法定独立（检查点必选） | 待检内容路径 + 参考设定路径 | coherence_review_章节号.md（工作空间根；章节号=送审章节编号；goal 指定 output_path 时以指定为准） | file_check |
       | 文风审查 | novel_style_reviewer | 法定独立（文环节点必选） | 全部章节路径 + 目标风格描述 | reviews/章节标题_style_review.md（工作空间 reviews/ 目录，逐章一份；章节标题=送审章节标题） | file_check |
-      | 质量终审 | novel_review_agent | 法定独立（终审必选） | 全部终稿路径 + 大纲路径 + 角色设定路径 + 伏笔追踪表路径 + 终审报告输出路径（output_path） | 以 goal 指定的 output_path 为准（下游必传输入）；建议 docs/working/{title}_final_review.md | file_check |
+      | 质量终审 | novel_review_agent | 法定独立（终审必选） | 全部终稿路径 + 大纲路径 + 角色设定路径 + 伏笔追踪表路径 + 任务要求/规划文档路径（requirement_doc_paths）+ 终审报告输出路径（output_path） | 以 goal 指定的 output_path 为准（下游必传输入）；建议 docs/working/{title}_final_review.md | file_check |
       | 素材/资料调研 | research_agent | 条件触发（仅写作需要外部事实支撑） | 调研问题 + 期望的信源类型 | docs/working/{title}_research_report.md（未另行指定时默认；{title}=goal 任务名原文） | file_check |
   - name: 创作流程参考
     type: reference
@@ -253,30 +256,33 @@ dynamic_vars:
   - '{{path:config/rules/execution_review_rules.md}}'
   - '{{path:config/rules/dispatcher_rules_exec.md}}'
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：enhanced_search/create_directory 经两步法动态
+# 可达；任务工具保留（L2 调度权）──
 - file_read
 - file_write
-- enhanced_search
 - task_submit
 - task_manage
 - task_evaluate
 - human_interaction
 - memory
-- create_directory
+- resource_search
+- call_tool
 hard_constraints:
 - 必须按五层流水线顺序执行：策划→设定→情节→写作→审核，不得跳过任何层
 - 内容生产（世界观/角色/大纲/体系/细纲/伏笔/章节写作/润色）必须自己执行，禁止派发给 L3；只有一致性审查、文风审查、质量终审、素材调研四类环节可外包
 - 一致性审查/文风审查/质量终审为法定外包（novel_coherence_reviewer / novel_style_reviewer / novel_review_agent），不可跳过，不可自己审自己
+- 质量终审必须携带任务要求/规划文档路径，报告「需求符合度核对」Must Fix 未清零不得放行（CP-6 不得提交人类确认）
 - 每份外包审查报告必须 file_read 全文后判定通过/回退，禁止只看通知中的结论字段
 - 每个检查点必须执行并记录结果，检查点不可跳过
 - 里程碑门控检查点（CP-1/CP-2/CP-4/CP-6）必须获得人类确认才能继续
 - 设定锁定后基础设定不可修改，除非走异常上报流程
 - 审查不通过时自己修改后重新送审：质检类最多2轮，门控类最多3轮，超过必须升级（异常上报 / human_interaction），禁止无限送审
-- 重派审查做回归时，必须使用 inherit pipe（from=原任务ID, mode=pipe）继承上轮上下文，goal 必须包含"复验上轮问题 + 修改范围说明"两点
+- 重派审查做回归时，必须用 `task_manage(action="continue", task_id=原任务ID, message=...)` 保留同一管道与上下文；验收标准变更带 `acceptance_criteria`；message 必须包含"复验上轮问题 + 修改范围说明"两点。仅换 agent/换目标才 `task_submit` + `inherit_from`
 - research_agent 只能在写作需要外部事实支撑时触发，禁止作为默认环节每次都派
 - 回退修改时必须附带具体审查意见（引用审查报告条目），禁止凭印象改
 - 所有创作产出必须保存为markdown格式
 - 下级 Agent 映射表已列出所有外包成员，提交任务时直接用映射表中的 Agent ID，禁止用 resource_search 搜索 Agent
-- 上下文继承约束（L1/L2通用）：新任务与已有任务有上下文关联时必须继承（inherit_pipeline_from/inherit_workspace_from），禁止不继承而新建隔离空间致上下文断裂（详见 dispatcher_rules_exec）
+- 上下文继承约束（L1/L2通用）：同一任务链续作/回归/复跑一律 `task_manage(action="continue", task_id=原任务ID, message=...)`，禁止新开任务致上下文断裂；仅换 agent、换目标或原上下文不可用时才 `task_submit` + `inherit_from`（详见 dispatcher_rules_exec）
 - 任务完成后必须使用 memory 工具将有价值的创作经验（文风要点、设定陷阱、结构方法）存储到知识库
 soft_constraints:
 - 优先保持创作风格的连贯性
@@ -312,7 +318,7 @@ recommended_metrics:
   default_params:
     action: read
     path: '{{workspace}}/docs/working/novel_orchestration_report.md'
-version: 6.0.0
+version: 6.0.1
 is_active: true
 status: active
 max_iterations: 250

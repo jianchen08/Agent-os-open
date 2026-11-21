@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-deployment
+type: standard
+status: active
+---
+
 # 部署指南（0.2）
 
 > 适用对象：把 AgentOS 0.2（Rust 微内核 + Python 插件 + React 前端）部署到
@@ -155,6 +161,28 @@ docker run -d --name agentos-web --restart unless-stopped --network host \
   - 空闲 300s 软卸载会让独立 sidecar 工具从 LLM 工具面脱落，模板建议
     `AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS=86400`。
   - DB 与仓库必须在**本地文件系统**：网络盘上 SQLite 锁坏死（disk I/O error）。
+
+### 部署后回读校验（本次发版是否真的到位）
+
+发版链在云包内随 `deploy/` 下发 `deploy/deploy-manifest.json`（逐文件 sha256 +
+版本 + build_head，ADR 2026-11-10-deploy-freshness-verification）。`init.sh` 的
+4/4 步与 `start_server.sh` 启动前会自动回读比对，也可手工执行：
+
+```bash
+bash deploy/verify_deploy.sh                                         # 清单回读 + 内核/cdylib 断言
+bash deploy/verify_deploy.sh --runtime-base http://127.0.0.1:9100    # 追加 /health.version 比对
+bash deploy/verify_deploy.sh --strict                                # 追加「旧版残留文件」判定
+```
+
+- 关键项（各 `plugin.json`、`frontend/dist/index.html`、`config/kernel/*.yaml`）
+  缺失或哈希不符 → 退出 1；`start_server.sh` 同口径拒绝启动（与 Windows 装机版
+  首启一致）。非关键文件差异只告警。
+- 旧包（无清单）自动 SKIP，不阻断历史部署。手工改过部署位（换插件/补配置）后
+  要重刷清单：`python3 deploy/verify_deploy_manifest.py build --root <部署根>
+  --out <部署根>/deploy/deploy-manifest.json --profile linux --version <VERSION>`；
+  临时放行用 `AGENTOS_DEPLOY_VERIFY=warn`（只报告）/ `=off`（完全跳过）。
+- Windows 装机版对应面：安装/升级后首启做关键项对账（不符 → 「启动失败」错误框
+  + 退出）；CI pack-windows 车道在静默安装后跑同一回读（`--strict`）。
 
 ### 手工构建（脚本化路径的等价展开）
 

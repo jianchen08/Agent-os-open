@@ -10,6 +10,7 @@
 
 import { create } from 'zustand'
 import { readAgents } from '@/hooks/queries/useAgentsQuery'
+import { readPipelineRuns, updatePipelineRunsCache } from '@/hooks/queries/usePipelineRunsQuery'
 import { readSessions, updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
 import {
   createSession as createSessionApi,
@@ -527,12 +528,25 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
     )
     try {
       await updateSessionApi(sessionId, { title: trimmedTitle })
-      // 主标签名/面包屑随会话标题走（ADR 2026-10-16-subagent-tab-naming）：
-      // 改名成功即同步已开的主标签（自动改名也经本函数，单点覆盖）
-      useAgentTabStore.getState().updateTab(`main-${sessionId}`, {
-        agentName: trimmedTitle,
-        path: [trimmedTitle],
-      })
+      // 主标签名随主管道标题走（2026-11-11 用户裁定：标签名只显示管道标题）：
+      // 内核改名即传播主管道 state.title（ADR 2026-10-27-pipeline-title-field），
+      // 前端对注册表缓存乐观同写（有行才写不造桩，真值随下次快照对账），标签名
+      // 从注册表单字段消费即时刷新；注册表无行（缓存未就绪）不动标签——缺数据
+      // 不是改名依据（自动改名也经本函数，单点覆盖）
+      const mainPid = mainPipelineIdOf(readSessions().find((s) => s.id === sessionId) ?? {})
+      if (mainPid) {
+        updatePipelineRunsCache((runs) => {
+          const existing = runs[mainPid]
+          return existing ? { ...runs, [mainPid]: { ...existing, title: trimmedTitle } } : runs
+        })
+        const registryTitle = readPipelineRuns()[mainPid]?.title
+        if (registryTitle) {
+          useAgentTabStore.getState().updateTab(`main-${sessionId}`, {
+            agentName: registryTitle,
+            path: [registryTitle],
+          })
+        }
+      }
     } catch (error) {
       logger.error('重命名会话失败:', error)
       updateSessionsCache((prev) =>

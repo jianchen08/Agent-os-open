@@ -1,0 +1,50 @@
+web.rs uses it, yes.
+**Patch 2 — build() 京畿 replacement:**
+old:
+```
+// 走账铁律 MF#1：consume 销国库侧 + spawn 记接收方——两半同额可核对
+let paid = w.material.consume_from_cell("京畿", "库银", spec.cost);
+if paid + 1e-9 < spec.cost {
+if paid > 0.0 {
+w.material.spawn_at("库银", paid, "京畿", None, None, Some("朝廷"));
+}
+return Err(format!("库银不足：需 {} 实有 {:.1}", spec.cost, paid));
+}
+```
+new:
+```
+// 走账铁律 MF#1：consume 销国库侧 + spawn 记接收方——两半同额可核对
+// MF-18：国库格经 treasury_cell 场景自适应（standard=京畿 / qing=首区）
+let treasury = treasury_cell(w);
+let paid = w.material.consume_from_cell(&treasury, "库银", spec.cost);
+if paid + 1e-9 < spec.cost {
+if paid > 0.0 {
+w.material.spawn_at("库银", paid, &treasury, None, None, Some("朝廷"));
+}
+return Err(format!("库银不足：需 {} 实有 {:.1}", spec.cost, paid));
+}
+```
+And ledger line: `"BUILD {building_id}@{cell} 银={:.2}（Transfer 国库@京畿→营造银@{cell}，两半同额走账）"` → `（Transfer 国库@{treasury}→营造银@{cell}，两半同额走账）`.
+**Patch 3 — grain_gift:**
+```
+w.material.spawn_at("库银", 300.0, "京畿", None, None, Some("天命"));
+w.material.ledger.push("SPAWN 库银@京畿 n=300 owner=天命（词条：点石成金）".into());
+```
+→
+```
+let treasury = treasury_cell(w);
+w.material.spawn_at("库银", 300.0, &treasury, None, None, Some("天命"));
+w.material.ledger.push(format!(
+"SPAWN 库银@{treasury} n=300 owner=天命（词条：点石成金）"));
+```
+**Patch 4 — recruit:**
+```
+let aid = w.entities.spawn("代理人", Some("京畿"), None);
+```
+→ `let home = treasury_cell(w);` then spawn with Some(&home); and `e.ctx.insert("region".into(), "京畿".into());` → home.clone(). Block:
+```
+"recruit" => {
+let aid = w.entities.spawn("代理人", Some("京畿"), None);
+if let Some(e) = w.entities.get_mut(&aid) {
+e.fields.insert("操守".into(), 0.95);
+e.fields.insert("带宽".into(), 0.9);

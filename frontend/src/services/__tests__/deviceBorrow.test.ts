@@ -10,6 +10,7 @@
  *  - 失败闭面：本机不可达/目标拒绝/协议违约 → 不切换，回传可手动兜底标记。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { borrowAndConnect, borrowSession, borrowViaShellDevice, mintLocalKernelToken } from '../deviceBorrow'
 
 const postMock = vi.hoisted(() => vi.fn())
 const connectMock = vi.hoisted(() => vi.fn())
@@ -27,7 +28,6 @@ vi.mock('@/services/shellLocalAuth', () => ({
   shellAutoLoginDisabled: vi.fn(() => false),
 }))
 
-import { borrowAndConnect, borrowSession, borrowViaShellDevice, mintLocalKernelToken } from '../deviceBorrow'
 
 function b64(obj: unknown): string {
   return btoa(unescape(encodeURIComponent(JSON.stringify(obj))))
@@ -35,7 +35,7 @@ function b64(obj: unknown): string {
 
 /** 壳层配对设备凭据线格式（app-mobile/src/sync/credential.ts 契约同款） */
 const SHELL_SYNC_CRED = {
-  relay_url: 'http://162.14.69.153/ext/sync_relay',
+  relay_url: 'http://203.0.113.153/ext/sync_relay',
   device_id: 'dev-1',
   device_token: 'pdtk-1',
   tenant_id: 't1',
@@ -95,12 +95,12 @@ describe('borrowSession', () => {
       data: { body: b64({ access_token: 'at', refresh_token: 'rt' }) },
     })
 
-    const r = await borrowSession('http://162.14.69.153', 'local-token', true)
+    const r = await borrowSession('http://203.0.113.153', 'local-token', true)
     expect(r.ok).toBe(true)
     expect(r.refreshToken).toBe('rt')
     expect(postMock).toHaveBeenCalledWith(
       '/ext/sync_agent/borrow',
-      { target_base: 'http://162.14.69.153', target_is_hub: true },
+      { target_base: 'http://203.0.113.153', target_is_hub: true },
       { headers: { Authorization: 'Bearer local-token' } },
     )
   })
@@ -125,10 +125,10 @@ describe('borrowAndConnect', () => {
       .mockResolvedValueOnce({ data: { access_token: 'local-at' } })
       .mockResolvedValueOnce({ data: { body: b64({ access_token: 'at', refresh_token: 'rt' }) } })
 
-    const r = await borrowAndConnect('http://162.14.69.153', true)
+    const r = await borrowAndConnect('http://203.0.113.153', true)
     expect(r.ok).toBe(true)
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt')
-    expect(connectMock).toHaveBeenCalledWith('http://162.14.69.153')
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBe('rt')
+    expect(connectMock).toHaveBeenCalledWith('http://203.0.113.153')
   })
 
   it('借权失败 → 不落盘不切换，回传可手动兜底', async () => {
@@ -137,10 +137,10 @@ describe('borrowAndConnect', () => {
       .mockResolvedValueOnce({ data: { access_token: 'local-at' } })
       .mockRejectedValueOnce({ response: { status: 403 } })
 
-    const r = await borrowAndConnect('http://162.14.69.153', true)
+    const r = await borrowAndConnect('http://203.0.113.153', true)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.canRetryManual).toBe(true)
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBeNull()
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBeNull()
     expect(connectMock).not.toHaveBeenCalled()
   })
 })
@@ -152,11 +152,11 @@ describe('borrowViaShellDevice（移动壳配对设备直借·远端免登腿）
       data: { access_token: 'at-relay', refresh_token: 'rt-relay', expires_in: 3600 },
     })
 
-    const r = await borrowViaShellDevice('http://162.14.69.153')
+    const r = await borrowViaShellDevice('http://203.0.113.153')
     expect(r.ok).toBe(true)
     expect(r.refreshToken).toBe('rt-relay')
     expect(postMock).toHaveBeenCalledWith(
-      'http://162.14.69.153/ext/sync_relay/borrow_auth',
+      'http://203.0.113.153/ext/sync_relay/borrow_auth',
       null,
       { headers: { Authorization: 'Bearer pdtk-1' } },
     )
@@ -168,13 +168,13 @@ describe('borrowViaShellDevice（移动壳配对设备直借·远端免登腿）
       data: { access_token: 'at-relay', refresh_token: 'rt-relay' },
     })
 
-    const r = await borrowViaShellDevice('http://162.14.69.153')
+    const r = await borrowViaShellDevice('http://203.0.113.153')
     expect(r.ok).toBe(true)
     expect(postMock).toHaveBeenCalledTimes(1)
   })
 
   it('未配对（两通道皆空）→ null 且不发起请求', async () => {
-    const r = await borrowViaShellDevice('http://162.14.69.153')
+    const r = await borrowViaShellDevice('http://203.0.113.153')
     expect(r.ok).toBe(false)
     expect(postMock).not.toHaveBeenCalled()
   })
@@ -184,7 +184,7 @@ describe('borrowViaShellDevice（移动壳配对设备直借·远端免登腿）
       'lingxi_sync_credential',
       JSON.stringify({ ...SHELL_SYNC_CRED, device_token: '' }),
     )
-    const r = await borrowViaShellDevice('http://162.14.69.153')
+    const r = await borrowViaShellDevice('http://203.0.113.153')
     expect(r.ok).toBe(false)
     expect(postMock).not.toHaveBeenCalled()
   })
@@ -195,7 +195,7 @@ describe('borrowViaShellDevice（移动壳配对设备直借·远端免登腿）
       response: { status: 403, data: { error: { message: 'unrecognized per-device token' } } },
     })
 
-    const r = await borrowViaShellDevice('http://162.14.69.153')
+    const r = await borrowViaShellDevice('http://203.0.113.153')
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.canRetryManual).toBe(true)
   })
@@ -213,8 +213,8 @@ describe('borrowViaShellDevice（移动壳配对设备直借·远端免登腿）
     stubPreferences(async () => ({ value: JSON.stringify(SHELL_SYNC_CRED) }))
     postMock.mockResolvedValueOnce({ data: { verified_device: 'dev-1' } })
 
-    const r = await borrowViaShellDevice('http://162.14.69.153')
+    const r = await borrowViaShellDevice('http://203.0.113.153')
     expect(r.ok).toBe(false)
-    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBeNull()
+    expect(localStorage.getItem('refresh_token@http://203.0.113.153')).toBeNull()
   })
 })

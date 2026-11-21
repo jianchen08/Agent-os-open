@@ -5,6 +5,12 @@ description = "Lingxi AgentOS 0.2 plugin — oauth_broker（MCP 服务器 OAuth 
 requires-python = ">=3.11"
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
+    # OAuth 协议引擎（CA-P0 协议机退役自研，2026-11-19）：PKCE/授权 URL/token
+    # 兑换/刷新唯一实现面；requests = authlib requests_client 集成的运行依赖
+    # （authlib 1.9 起无 [requests] extra，显式声明）——元数据 GET 与
+    # OAuth2Session 同栈
+    "authlib>=1.6,<2",
+    "requests>=2.31",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：

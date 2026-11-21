@@ -9,7 +9,7 @@ SearXNG 默认引擎大量报 HTTP connection error。经探测 baidu/bing/sogou
 但官方默认禁用了它们，需显式启用。
 
 用法:
-  python scripts/searxng_config.py docker/searxng/settings.yml
+  python scripts/searxng_config.py docker_assets/searxng/settings.yml
 
 幂等：可重复运行。
 """
@@ -149,7 +149,7 @@ def patch_config(path: Path) -> None:
 
 
 if __name__ == "__main__":
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("docker/searxng/settings.yml")
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("docker_assets/searxng/settings.yml")
     if not target.exists():
         print(f"ERROR: {target} 不存在", file=sys.stderr)
         sys.exit(1)

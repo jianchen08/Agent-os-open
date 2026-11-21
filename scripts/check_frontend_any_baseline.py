@@ -6,8 +6,8 @@
    endpoints.generated.ts）中 `: any` / `as any` 命中行数，对照
    .github/frontend-any-baseline.txt 只减不增；超基线非零退出并打印命中位置，
    低于基线提示下调（下调走 commit 留归因）。存量 any 消化另行立项，本闸只防增。
-2. >1000 行文件冻结：巨型文件拆分在活跃演化期需独立行为验证门槛（第三/四轮
-   全仓扫描裁定：单独立项分批），本轮以冻结基线管控——
+2. >1000 行文件分档（2026-11-08 用户裁定校准）：1000-1500 警告带（新越线/
+   清单内增长只留痕不拦截），>1500 红=强制拆；冻结清单作警告带留痕账本——
    .github/frontend-large-files-baseline.txt 清单内文件行数增长即红、
    新出现 >1000 行文件即红；缩短仅提示下调（不红）。
 
@@ -31,6 +31,8 @@ ANY_BASELINE_FILE = ROOT / ".github" / "frontend-any-baseline.txt"
 LARGE_FILES_BASELINE_FILE = ROOT / ".github" / "frontend-large-files-baseline.txt"
 
 LINE_LIMIT = 1000
+# 硬拆线（2026-11-08 用户裁定：1000 行仅警告，1500 行才强制拆——分档执法）。
+LINE_HARD_LIMIT = 1500
 ANY_PATTERN = re.compile(r": any|as any")
 GENERATED_FILE = "endpoints.generated.ts"
 
@@ -107,7 +109,10 @@ def check_any_baseline(scan_dir: Path, baseline_file: Path) -> bool:
 
 
 def check_large_files(scan_dir: Path, baseline_file: Path) -> bool:
-    """巨型文件冻结：清单内增长红、新入列 >1000 行文件红；缩短仅提示。"""
+    """巨型文件分档执法（2026-11-08 用户裁定校准）：≤1000 无事；1000-1500
+    警告带（新越线/清单内增长只留痕不拦截——活跃演化期折中，用户令
+    「1000 行警告而已，1500 行才强制拆」）；>1500 红 = 强制拆。冻结清单
+    保留作警告带的留痕账本（增长可见、缩短提示收紧），入册语义不变。"""
     frozen = read_large_files_baseline(baseline_file)
     failed = False
 
@@ -116,14 +121,16 @@ def check_large_files(scan_dir: Path, baseline_file: Path) -> bool:
         lines = count_lines(path)
         if lines <= LINE_LIMIT:
             continue
-        if rel not in frozen:
-            print(f"❌ 新增 >{LINE_LIMIT} 行文件未入冻结清单：{rel}（{lines} 行）")
-            print("   拆分需独立行为验证门槛（单独立项分批）；入清单 = 承认新债，需 ADR 归因。")
+        if lines > LINE_HARD_LIMIT:
+            if rel not in frozen:
+                print(f"❌ 新增 >{LINE_HARD_LIMIT} 行文件未入冻结清单：{rel}（{lines} 行）——超硬拆线，强制拆分")
+            else:
+                print(f"❌ 冻结文件行数增长超硬拆线：{rel} {frozen[rel]} → {lines}（+{lines - frozen[rel]}）——强制拆分")
             failed = True
+        elif rel not in frozen:
+            print(f"⚠️ 新增 >{LINE_LIMIT} 行文件（警告，不拦截）：{rel}（{lines} 行）——超硬拆线 {LINE_HARD_LIMIT} 才强制拆")
         elif lines > frozen[rel]:
-            print(f"❌ 冻结文件行数增长：{rel} {frozen[rel]} → {lines}（+{lines - frozen[rel]}）")
-            print("   巨型文件只许缩小不许增长；拆分单独立项分批（第三/四轮裁定）。")
-            failed = True
+            print(f"⚠️ 冻结文件行数增长（警告，不拦截）：{rel} {frozen[rel]} → {lines}（+{lines - frozen[rel]}）——超硬拆线 {LINE_HARD_LIMIT} 才强制拆")
 
     shrunk = []
     for rel, cap in frozen.items():
@@ -136,7 +143,7 @@ def check_large_files(scan_dir: Path, baseline_file: Path) -> bool:
         for rel, cap, now in shrunk:
             print(f"  {rel} {cap} → {now}")
     if not failed and not shrunk:
-        print(f"\n[大文件冻结] 清单 {len(frozen)} 项全部受控（≤{LINE_LIMIT} 行冻结上限内）")
+        print(f"\n[大文件分档] 清单 {len(frozen)} 项全部受控（警告带 {LINE_LIMIT}-{LINE_HARD_LIMIT}，硬拆线 {LINE_HARD_LIMIT}）")
     return failed
 
 

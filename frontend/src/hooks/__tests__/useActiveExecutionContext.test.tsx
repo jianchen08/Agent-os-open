@@ -8,15 +8,15 @@
  */
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { useAgentTabStore } from '@/stores/agentTabStore'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import {
   readActiveSessionId,
   useActivePipelineId,
   useActiveSessionId,
   useActiveTabPipelineId,
 } from '@/hooks/useActiveExecutionContext'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { AgentTab } from '@/types/task'
 
 function makeTab(overrides: Partial<AgentTab> & { id: string }): AgentTab {

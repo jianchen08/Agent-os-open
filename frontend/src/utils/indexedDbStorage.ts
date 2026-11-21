@@ -14,6 +14,7 @@ import { get, set, del, createStore } from 'idb-keyval'
 import { createJSONStorage } from 'zustand/middleware'
 import { createPersistThrottle } from './persistThrottle'
 import { userScopedKey } from './userScopedStorage'
+import type { PersistStorage, StorageValue } from 'zustand/middleware'
 
 /** 复用的 IndexedDB keyval store 句柄（库名 / store 名固定） */
 const idbStore = createStore('app-db', 'kv')
@@ -98,3 +99,37 @@ export const indexedDbStorage = createJSONStorage(() => ({
     void safeDel(name)
   },
 }))
+
+/**
+ * 延迟序列化的 PersistStorage（大快照 store 专用，2026-11-12 内存修复）。
+ *
+ * zustand persist 在每次 setState 都会调 storage.setItem，经 createJSONStorage
+ * 的路径会同步 JSON.stringify 整个快照——流式高频写入（每帧文本追加 +
+ * tool_progress 直写）下每秒数十次全量序列化，GB 级短命大字符串分配是渲染
+ * 进程内存突刺（250MB→2.4GB）的主因。本 factory 把序列化挪到节流 flush 时：
+ * setItem 只登记最新快照引用（零拷贝零序列化），到点统一 finalize（快照
+ * 裁剪等重活也延迟到这里执行）+ stringify + 落盘。
+ *
+ * 每 store 各建一个实例（节流状态按实例隔离）；finalize 默认恒等。
+ */
+export function createDeferredIndexedDbStorage<S>(
+  finalize: (value: StorageValue<S>) => StorageValue<S> = (value) => value,
+): PersistStorage<S> {
+  const throttle = createPersistThrottle((name: string, value: StorageValue<S>) => {
+    void safeSet(name, JSON.stringify(finalize(value)))
+  })
+  return {
+    getItem: async (name: string) => {
+      const raw = await safeGet(name)
+      return raw === null ? null : (JSON.parse(raw) as StorageValue<S>)
+    },
+    setItem: (name: string, value: StorageValue<S>) => {
+      // 只登记引用：序列化与落盘延迟到节流 flush（见函数头注释）
+      throttle.schedule(name, value)
+    },
+    removeItem: (name: string) => {
+      throttle.cancel()
+      void safeDel(name)
+    },
+  }
+}

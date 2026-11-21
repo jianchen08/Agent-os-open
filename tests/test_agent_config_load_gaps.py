@@ -64,6 +64,39 @@ def config_root(tmp_path, monkeypatch):
     return tmp_path
 
 
+# ── 0. 零回落回归：dev 不得读到装机用户层影子（2026-11-18 事故）──
+
+
+def test_user_root_unset_never_reads_installed_shadow(tmp_path, monkeypatch):
+    """事故回归：用户根未交付（dev 形态）+ %APPDATA% 有 agent 影子 → factory 胜。
+
+    2026-11-18 实测事故：Python 侧 user_space 残留 %APPDATA% 回落，dev 内核
+    agent_config_load 把装机用户层的 general_agent.yaml 陈旧影子当用户层
+    接管，工具面注入 28 件（缩减后应为 12 件）。零回落（ADR 2026-11-07 §2.2）
+    后：用户层不可得 → 只读 factory。本测试钉死该链路（CI 防回退）。
+    """
+    # factory：仓内形态配置（AGENTOS_CONFIG_ROOT 指向它）
+    factory_root = tmp_path / "factory"
+    _write_agent(factory_root / "agents", "shadow_probe", "display_name: 出厂版\n")
+    # 装机用户层影子：%APPDATA%/agentos/config/agents/<同 id>.yaml
+    fake_appdata = tmp_path / "Roaming"
+    _write_agent(
+        fake_appdata / "agentos" / "config" / "agents",
+        "shadow_probe",
+        "display_name: 装机影子\n",
+    )
+    monkeypatch.setenv("APPDATA", str(fake_appdata))
+    monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
+    monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(factory_root))
+
+    cb = agent_config_load_mod.AgentConfigLoadPlugin(config={})
+    loaded = cb._load_agent_config("shadow_probe")
+    assert loaded.get("display_name") == "出厂版", (
+        "用户根未交付时必须回落 factory——装机影子不得接管 dev 工具面"
+    )
+
+
 # ── 1. config_id 回退匹配（_find_agent_yaml fallback 扫描）──
 
 

@@ -17,6 +17,18 @@ market:
       package: dsh-plugin-catalog
       version: "2026.1104.14928"
 
+# manager 段（2026-11-09 起安装/卸载/启停委托官方 @deepseek-ai/dsh-plugin-manager）：
+#   registry / fallback_registries = 官方 inspect/installBundle 的 registry 顺序；
+#   install_timeout_s = 单次 pnpm 安装的桥 RPC 上限（同时作 manager idleTimeout）；
+#   inspect_timeout_ms = registry 查询上限。
+# pnpm 由工作区 bootstrap 内置 @pnpm/exe（精确 pin 见 runtime_workspace），
+# 不要求系统 pnpm；Node 版本要求 >= 22。
+manager:
+  registry: "https://registry.npmmirror.com"
+  fallback_registries: []
+  install_timeout_s: 900
+  inspect_timeout_ms: 20000
+
 # 当前装载（显式列出以便设置中心可见可操作）：
 plugins:
   dsh-tool-calculator:

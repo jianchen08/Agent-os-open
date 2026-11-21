@@ -1,17 +1,12 @@
 /** 统一的聊天输入组件 支持三种模式： */
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import {
-  AlertCircle,
-  Maximize2,
-  Minimize2,
-  Paperclip,
-  X,
-} from '@/assets/icons'
+import { Paperclip } from '@/assets/icons'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
 import { Button } from '@/components/ui/button'
 import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
+import { useHoldToTalk } from '@/hooks/useHoldToTalk'
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
 import { useSendOutcomeConsumer } from '@/hooks/useSendOutcomeConsumer'
@@ -31,9 +26,12 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { type ThinkingStrength } from '@/types/thinkingMode'
 import { ChatInputActions } from './ChatInputActions'
-import { AttachmentPreview } from './ChatInputAttachmentPreview'
+import { ChatInputErrorAlert } from './ChatInputErrorAlert'
 import { ChatInputPossessChip } from './ChatInputPossessChip'
 import { CitationCardRow } from './CitationCardRow'
+import { ComposerAttachmentList } from './ComposerAttachmentList'
+import { ComposerExpandToggle } from './ComposerExpandToggle'
+import { ComposerModelEntry } from './ComposerModelEntry'
 import { ComposerRecordingBanner } from './ComposerRecordingBanner'
 import { composerPlaceholder, composeSendParams } from './composerSend'
 import { ComposerSendButton } from './ComposerSendButton'
@@ -112,8 +110,8 @@ export const ChatInput = ({
   /** 语音实时识别：临时文字在 text 中的起始偏移量，-1 表示无未确认临时文字 */
   const interimVoiceStartRef = useRef(-1)
 
-  /** 思考选择：优先使用外部传入值（随标签路由自动变化），'' = 未选择（消息
-   *  不带思考参数，模型按 default_params 运行） */
+  /** 思考选择：优先使用外部传入值（随标签路由自动变化），'' = 本轮未选择
+   *  （消息不带覆盖参数，内核继承管道上次选择 / 无则模型默认运行） */
   const currentThinkingStrength: ThinkingStrength = _externalThinkingStrength ?? ''
   const handleStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
@@ -315,6 +313,25 @@ export const ChatInput = ({
     onError: (error) => {
       setInputError(error.message)
     },
+  })
+
+  /**
+   * 长按说话（仅触屏 pointerType=touch/pen）：空白输入框按住达到阈值起录，
+   * 上滑 60px 松手取消；有文字时长按保持文本选择。桌面鼠标不启用（走按钮点击）。
+   * 音频模型录制落附件，其余走服务端 ASR 转写（与按钮路径同一链路）。
+   */
+  const holdToTalk = useHoldToTalk({
+    enabled: voiceInput.isSupported,
+    canStart: () =>
+      textRef.current.trim() === '' && !voiceInput.isRecording && !voiceInput.isTranscribing,
+    onStart: () => {
+      textareaRef.current?.blur()
+      // 统一走通道决策入口（startRecording 按 supportsAudio/native/server-asr 选路；
+      // 非音频模型在桌面与原 startServerASR 直录等价，壳内则原生优先）
+      return voiceInput.startRecording()
+    },
+    onStop: voiceInput.stopRecording,
+    onCancel: voiceInput.cancelRecording,
   })
 
   /** 处理文本变化 */
@@ -767,25 +784,8 @@ export const ChatInput = ({
       onDragLeave={enableDragDrop && inputCapabilities.canDragDrop ? handleDragLeave : undefined}
       onDrop={enableDragDrop && inputCapabilities.canDragDrop ? handleDrop : undefined}
     >
-      {/* 输入区错误提示（上传失败/发送未受理/发送判死） */}
       {inputError && (
-        <div
-          id="input-error"
-          role="alert"
-          className="text-destructive bg-destructive/10 mb-3 flex items-center gap-2 rounded-xl p-2 text-sm"
-        >
-          <AlertCircle className="h-icon-md w-icon-md flex-shrink-0" />
-          <span className="flex-1">{inputError}</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 w-6 rounded-lg p-0"
-            onClick={() => setInputError(null)}
-            aria-label="关闭错误提示"
-          >
-            <X className="h-icon-md w-icon-md" />
-          </Button>
-        </div>
+        <ChatInputErrorAlert message={inputError} onClose={() => setInputError(null)} />
       )}
 
       {/* 输入框容器：输入区域与下方图标工具栏一体，不显示分割边框 */}
@@ -806,47 +806,32 @@ export const ChatInput = ({
             共存不合并 */}
         <CitationCardRow draftKey={draftKey} className="pr-10" />
 
-        {/* 展开/收起编辑器按钮：固定在输入框右上角，悬浮于文本之上 */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="text-muted-foreground hover:text-foreground hover:bg-muted absolute top-2 right-2 z-10 h-8 w-8 rounded-lg"
-          onClick={() => setIsExpanded((v) => !v)}
-          aria-label={isExpanded ? '收起编辑器' : '展开编辑器'}
-          aria-expanded={isExpanded}
-          title={isExpanded ? '收起 (Esc)' : '展开为大编辑器'}
-          data-testid="chat-input-expand-toggle"
-        >
-          {isExpanded ? <Minimize2 className="h-icon-md w-icon-md" /> : <Maximize2 className="h-icon-md w-icon-md" />}
-        </Button>
+        {/* 展开/收起浮钮与录音横幅互斥（P0-3，MuMu 实测 shots/06）：横幅右端
+            「取消」按钮与浮钮同占容器右上角，录音/识别中浮钮退场让位，横幅
+            消失后恢复 */}
+        {!(voiceInput.isRecording || voiceInput.isTranscribing) && (
+          <ComposerExpandToggle isExpanded={isExpanded} onToggle={() => setIsExpanded((v) => !v)} />
+        )}
 
         {/* 权限模式等输入区选择器由声明驱动渲染于底部工具栏
             （chat-input 空间附加式 DeclaredWidgetLayer），见下方工具栏 */}
 
         {(attachments.length > 0 || pendingFiles.length > 0) && (
-          <div className="flex flex-wrap gap-2 px-3 pt-3 pb-2">
-            {attachments.map((attachment) => (
-              <AttachmentPreview
-                key={attachment.id}
-                attachment={attachment}
-                onRemove={() => handleRemoveAttachment(attachment.id)}
-              />
-            ))}
-            {pendingFiles.map((pendingFile) => (
-              <AttachmentPreview
-                key={pendingFile.id}
-                attachment={pendingFile}
-                onRemove={() => handleRemoveAttachment(pendingFile.id)}
-              />
-            ))}
-          </div>
+          <ComposerAttachmentList
+            attachments={attachments}
+            pendingFiles={pendingFiles}
+            onRemove={handleRemoveAttachment}
+          />
         )}
 
-        {/* 录音状态条（容器内顶部，与附件预览区结构对称） */}
+        {/* 录音/转写状态条（容器内顶部，与附件预览区结构对称）：录音中、长按
+            取消态、转写中都常驻，右侧取消按钮丢弃本次语音 */}
         <ComposerRecordingBanner
           isRecording={voiceInput.isRecording}
-          mode={voiceInput.mode}
+          isTranscribing={voiceInput.isTranscribing}
+          isCancelling={holdToTalk.state === 'cancelling'}
           seconds={voiceInput.recordingDuration}
+          onCancel={voiceInput.cancelRecording}
         />
 
         {/* 文本输入框 */}
@@ -856,6 +841,11 @@ export const ChatInput = ({
           onChange={handleTextChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          onPointerDown={holdToTalk.onPointerDown}
+          onPointerMove={holdToTalk.onPointerMove}
+          onPointerUp={holdToTalk.onPointerUp}
+          onPointerCancel={holdToTalk.onPointerCancel}
+          onContextMenu={holdToTalk.onContextMenu}
           placeholder={composerPlaceholder({
             sendInFlight,
             isExecuting,
@@ -878,13 +868,17 @@ export const ChatInput = ({
             isExpanded ? 'max-h-[80vh] min-h-[44px]' : 'max-h-[33vh] min-h-[44px]',
             'text-foreground placeholder:text-muted-foreground/40',
             'bg-transparent',
+            // 长按生效期间临时禁用文本选择与系统长按菜单，结束后自动恢复
+            holdToTalk.isSelectionLocked && 'select-none [-webkit-touch-callout:none]',
           )}
         />
 
         {/* 底部工具栏：左组可收缩可换行（min-w-0 flex-1 flex-wrap），发送按钮
             shrink-0——大字体主题/插件动作多/窄栏（右面板展开压缩中栏）时左组
-            按钮换行排布而非叠压溢出，发送按钮不被挤出容器 */}
-        <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-3">
+            按钮换行排布而非叠压溢出，发送按钮不被挤出容器。
+            items-start（P1-1 发送键对齐）：左组换行成多行时发送键顶行对齐
+            （与图标行垂直对齐），不再悬在两行中间；单行时与 items-center 等价 */}
+        <div className="flex min-w-0 items-start justify-between gap-2 px-3 pb-3" data-testid="chat-input-footer">
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
             {/* 附件按钮 */}
             {enableFileUpload && !isCompactMode && inputCapabilities.showAttachmentButton && (
@@ -929,6 +923,20 @@ export const ChatInput = ({
                       voiceInput.startRecording()
                     }
                   },
+                  // 触屏按住说话（微信式）：按下即录，松手提交临时文字并转写
+                  onPressStart: () => {
+                    interimVoiceStartRef.current = -1
+                    voiceInput.startRecording()
+                  },
+                  onPressEnd: () => {
+                    if (interimVoiceStartRef.current !== -1) {
+                      commitInterimVoice()
+                      if (draftKey) {
+                        useChatInputStore.getState().saveDraft(draftKey, textRef.current)
+                      }
+                    }
+                    voiceInput.stopRecording()
+                  },
                 }}
                 className="flex-row items-center min-w-0"
               />
@@ -957,30 +965,58 @@ export const ChatInput = ({
           className="flex-row items-center min-w-0"
           excludeIds={['voice_input', 'context_usage', 'thinking_strength', 'task_mode', 'model_id']}
         />
-            {/* 思考选择槽位（chat-input 空间，数据归属 llm_core）：渲染 llm_core
-                声明的 form（select），值/回调由宿主注入；选项由声明 fieldsUri
-                数据源下发（当前模型 thinking_strength_params 参数组，配置空时
-                声明层整体不渲染） */}
-            {enableThinkingMode && !isCompactMode && (
-              <DeclaredWidgetLayer
-                space="chat-input"
-                slotId="thinking_strength"
-                overrideProps={thinkingStrengthBridge}
-                contextVars={{ model: modelName ?? '' }}
-                className="flex-row items-center min-w-0"
+            {/* 思考强度 + 模型选择槽位（chat-input 空间，数据归属 llm_core）：
+                移动端收进单一入口（ComposerModelEntry，P1-1 作曲器瘦身——
+                「默认」chip 旁思考 chip + 底部整行模型名三处冗余合并为一处，
+                作曲器总高省一行还给消息区）；桌面维持两槽位内联平铺。
+                槽位渲染层（DeclaredWidgetLayer）原样搬运，值/回调宿主注入、
+                声明 fieldsUri 数据源与插件覆盖能力均不变。 */}
+            {isMobile ? (
+              <ComposerModelEntry
+                modelSlot={
+                  <DeclaredWidgetLayer
+                    space="chat-input"
+                    slotId="model_id"
+                    overrideProps={modelIdBridge}
+                    className="flex-row items-center min-w-0"
+                  />
+                }
+                thinkingSlot={
+                  enableThinkingMode && !isCompactMode ? (
+                    <DeclaredWidgetLayer
+                      space="chat-input"
+                      slotId="thinking_strength"
+                      overrideProps={thinkingStrengthBridge}
+                      contextVars={{ model: modelName ?? '' }}
+                      className="flex-row items-center min-w-0"
+                    />
+                  ) : undefined
+                }
               />
-            )}
+            ) : (
+              <>
+                {/* 思考选择槽位：选项由声明 fieldsUri 数据源下发（当前模型
+                    thinking_strength_params 参数组，配置空时声明层整体不渲染） */}
+                {enableThinkingMode && !isCompactMode && (
+                  <DeclaredWidgetLayer
+                    space="chat-input"
+                    slotId="thinking_strength"
+                    overrideProps={thinkingStrengthBridge}
+                    contextVars={{ model: modelName ?? '' }}
+                    className="flex-row items-center min-w-0"
+                  />
+                )}
 
-            {/* 模型选择槽位（chat-input 空间，数据归属 llm_core）：渲染 llm_core
-                声明的 model_select（frame_field=model_id 传输声明）；值/回调由宿主
-                注入，显式选择随消息 model_id 字段透传（最高优先级覆盖管道配置），
-                '' = 未选择（占位显示配置模型名，帧不带字段） */}
-            <DeclaredWidgetLayer
-              space="chat-input"
-              slotId="model_id"
-              overrideProps={modelIdBridge}
-              className="flex-row items-center min-w-0"
-            />
+                {/* 模型选择槽位：显式选择随消息 model_id 字段透传（最高优先级
+                    覆盖管道配置），'' = 未选择（占位显示配置模型名，帧不带字段） */}
+                <DeclaredWidgetLayer
+                  space="chat-input"
+                  slotId="model_id"
+                  overrideProps={modelIdBridge}
+                  className="flex-row items-center min-w-0"
+                />
+              </>
+            )}
 
             {/* token 用量槽位（chat-input 空间）：默认件 = 插件声明同款
                 ContextUsageWidget（数据从管道 state 读：llm_model /

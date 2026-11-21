@@ -1,0 +1,65 @@
+# 学习曲线评测示例题集（P0 结构示例，非正式题库）
+# 协议：同一 case 顺序跑 trials 次；环境每次全新，经验 bank 由 campaign 共享。
+name: learning-curve-example-v1
+mode: coding
+protocol: sequential_trials
+split: train
+settle_timeout_seconds: 600
+cases:
+- id: lc_file_create
+  source:
+    kind: local
+    note: 最小文件创建，硬判据 file_check
+  category: coding
+  target: general_agent
+  trials: 3
+  difficulty: easy
+  budget:
+    max_rounds: 10
+    max_tokens: 20000
+  messages:
+  - 在当前工作空间创建 note.txt，内容包含 hello experience。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: note.txt
+        check: contains
+        pattern: hello experience
+- id: lc_two_line_report
+  source:
+    kind: local
+    note: 两行报告，检查结构与内容
+  category: writing
+  target: general_agent
+  trials: 3
+  difficulty: easy
+  budget:
+    max_rounds: 10
+    max_tokens: 20000
+  messages:
+  - 在当前工作空间创建 summary.md，写两行：第一行以 # 开头，第二行包含 AgentOS。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: summary.md
+        check: contains
+        pattern: AgentOS
+- id: lc_numbers_file
+  source:
+    kind: local
+    note: 多行数字文件，检查第三行
+  category: coding
+  target: general_agent
+  trials: 3
+  difficulty: easy
+  budget:
+    max_rounds: 10
+    max_tokens: 20000
+  messages:
+  - 在当前工作空间创建 numbers.txt，写三行，依次是 11、22、33。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: numbers.txt
+        check: contains
+        pattern: "33"

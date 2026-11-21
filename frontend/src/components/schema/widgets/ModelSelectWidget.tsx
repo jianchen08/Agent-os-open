@@ -20,12 +20,11 @@
  * 新造 option）。
  */
 
-import { useMemo } from 'react'
 import { Select } from 'antd'
-
+import { useMemo } from 'react'
 import { useLlmConfigQuery } from '@/hooks/queries/useLlmQueries'
-import { useActiveTabPipelineId } from '@/hooks/useActiveExecutionContext'
 import { usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
+import { useActiveTabPipelineId } from '@/hooks/useActiveExecutionContext'
 import { mapStateInfoToViewModel } from '@/services/api/pipelines'
 
 interface ModelOption {

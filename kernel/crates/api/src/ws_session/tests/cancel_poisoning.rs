@@ -57,20 +57,19 @@ async fn has_pending_cancel(store: &Arc<dyn StorageBackend>, pipeline_id: &str) 
 fn pending_record(id: &str, pipeline_id: &str, cmid: &str, at: &str) -> PendingInputRecord {
     PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: pipeline_id.to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: format!("内容-{id}"),
-        thread: "T1".to_string(),
-        source: PendingInputSource::User,
-        agent_id: String::new(),
-        route_id: pipeline_id.to_string(),
-        thinking_strength: String::new(),
-        client_message_id: cmid.to_string(),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: at.to_string(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "T1".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: pipeline_id.to_string(),
+            content: format!("内容-{id}"),
+            client_message_id: cmid.to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     }
 }
 
@@ -170,7 +169,6 @@ async fn dispatch_force_after_stop_does_not_cancel_target() {
     store
         .enqueue_pending_input(
             "default",
-            "P-force-stop",
             &pending_record(
                 "p_target",
                 "P-force-stop",
@@ -190,7 +188,6 @@ async fn dispatch_force_after_stop_does_not_cancel_target() {
     store
         .enqueue_pending_input(
             "default",
-            "P-force-stop",
             &pending_record(
                 "p_resend",
                 "P-force-stop",
@@ -269,7 +266,6 @@ async fn enqueue_same_client_message_id_is_idempotent() {
     store
         .enqueue_pending_input(
             "default",
-            "P-idem",
             &pending_record("p_first", "P-idem", "cmid-same", "2026-10-29T00:00:01Z"),
         )
         .await
@@ -277,7 +273,6 @@ async fn enqueue_same_client_message_id_is_idempotent() {
     store
         .enqueue_pending_input(
             "default",
-            "P-idem",
             &pending_record("p_retry", "P-idem", "cmid-same", "2026-10-29T00:00:02Z"),
         )
         .await

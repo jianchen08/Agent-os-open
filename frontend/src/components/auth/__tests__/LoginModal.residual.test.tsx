@@ -1,15 +1,16 @@
 /** @feature FP-T12 前端组件补测 | @ci: frontend-test */
 /**
- * LoginModal 免填自动登录链的残余分支：
+ * LoginModal 免填自动登录链的残余分支 + 手动提交等待条：
  * - 上一发仍在路上（isLoading）→ 本轮让路不叠加并发登录，间隔后重试
  * - 用户手动编辑后链挂起（不再轮询），等待秒数越过硬上限 → 强制裁断等待态
  *   并落「本机内核未能启动」终态（放弃机制不可被绕过的兜底）
+ * - 手动提交等待条：提交 ≥3s 出现「已等待 N 秒」、秒数递增、登录结束清零
  *
  * mock 边界：authStore（登录网络动作）、壳本地凭据桥（原生壳能力）。计时全走
  * fake timers（等待秒数/重试间隔）。
  */
 
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginModal } from '../LoginModal'
@@ -138,4 +139,44 @@ describe('LoginModal — 免填链自身超窗', () => {
     await vi.advanceTimersByTimeAsync(20_000)
     expect(authState.login.mock.calls.length).toBe(callsAtGiveUp)
   }, 20_000)
+})
+
+describe('LoginModal — 手动提交等待条', () => {
+  it('提交 ≥3s 出现「内核启动中…已等待 N 秒」、秒数递增、登录结束清零', async () => {
+    vi.useFakeTimers()
+    // 无免填凭据（无自动链）+ 登录在飞（store 面 isLoading）＝手动提交等待态
+    shellAuth.loadShellLocalCredential.mockResolvedValue(null)
+    authState.login.mockReturnValue(new Promise(() => {}))
+    authState.isLoading = true
+    renderModal()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    // <3s：正常往返不打扰
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_999)
+    })
+    expect(screen.queryByTestId('login-submit-waiting')).not.toBeInTheDocument()
+
+    // 满 3s：等待条出现，秒数=3
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    const bar = screen.getByTestId('login-submit-waiting')
+    expect(bar).toHaveAttribute('role', 'status')
+    expect(bar).toHaveTextContent('内核启动中或繁忙，正在等待响应')
+    expect(bar).toHaveTextContent('已等待 3 秒')
+
+    // 秒数递增
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000)
+    })
+    expect(screen.getByTestId('login-submit-waiting')).toHaveTextContent('已等待 5 秒')
+
+    // 登录结束（isLoading 落下）→ 清零消失（改输入触发重渲染读最新 store 面）
+    authState.isLoading = false
+    fireEvent.change(screen.getByTestId('login-modal-username'), { target: { value: 'u' } })
+    expect(screen.queryByTestId('login-submit-waiting')).not.toBeInTheDocument()
+  })
 })

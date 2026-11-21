@@ -16,9 +16,11 @@ spawn 契约（内核 invoker 注入）：::
   ``CohostServer`` 聚合为单个 MCP stdio server（工具带 ``{plugin_id}.``
   前缀，initialize/生命周期通知扇出，共享反向调用通道）；
 - 事件循环 watchdog：独立线程监控主 asyncio 循环心跳打点，停滞超过
-  ``AGENTOS_HOST_WATCHDOG_SECS``（默认 30s）先有界（≤2s）尽力杀掉成员
-  登记的活跃子进程（防 os._exit 留无主孤儿），再 ``os._exit(1)`` 自杀，
-  交由内核既有 crash-respawn 自愈（把"事件循环被阻塞"转化为可自愈崩溃）；
+  ``AGENTOS_HOST_WATCHDOG_SECS``（默认 30s）先把全部线程 Python 栈落盘取证
+  （``_dump_stall_stacks``，目录 ``AGENTOS_STALL_DUMP_DIR`` > 用户空间 logs），
+  再有界（≤2s）尽力杀掉成员登记的活跃子进程（防 os._exit 留无主孤儿），
+  最后 ``os._exit(1)``，交由内核既有 crash-respawn 自愈（把"事件循环被阻塞"
+  转化为可自愈崩溃）；
 - 成员加载失败 fail-soft：单成员失败（未找到 / import・init 抛错）跳过该
   成员并打 ``[cohost][member-offline]`` 结构性行上报，其余成员照常服务；
   仅成员表为空/重复或全部成员失败才退出非零码（内核按崩溃处理重试）。
@@ -41,6 +43,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import faulthandler
 import importlib.util
 import json
 import logging
@@ -85,6 +88,10 @@ _HEARTBEAT_INTERVAL_SECS = 5.0
 # 自杀退出前的子进程清理预算（秒）：os._exit 跳过 atexit（bash server.py 的
 # shutdown_all 挂在那里），退出前必须以同步方式有界尽力杀掉活跃子进程
 _EXIT_CLEANUP_BUDGET_SECS = 2.0
+# 停滞取证栈落盘：目录优先级 AGENTOS_STALL_DUMP_DIR > <用户空间>/logs（Windows
+# 即 %APPDATA%\agentos\logs）> ~/.agentos/logs；文件名 host_stall_<UTC>_<pid>.log
+_STALL_DUMP_DIR_ENV = "AGENTOS_STALL_DUMP_DIR"
+_STALL_DUMP_PREFIX = "host_stall_"
 
 
 class CohostError(Exception):
@@ -581,7 +588,15 @@ def _build_reload_handler(
     """
 
     async def _reload(plugin_id: str) -> AgentOSPlugin:
-        by_manifest_id, by_dir_name = _scan_plugin_dirs(_member_roots(shared_root))
+        # 清单扫描卸线程（2026-11-18 装机事故 1b）：os.walk 全量走 100+ 插件
+        # 目录（慢盘实测停滞 30.5s），本回调直跑在合宿事件循环线程上——同步
+        # 扫描会堵死全部并发请求；watcher 热重载风暴期每波 load_request 都
+        # 触发全量重扫，卸载后循环仅 await。不走缓存面：每次扫描即最新视图，
+        # 插件热发现（新增/移动）天然被下一轮定位感知（与「不缓存首载索引」
+        # 的既有注释口径一致）。
+        by_manifest_id, by_dir_name = await asyncio.to_thread(
+            _scan_plugin_dirs, _member_roots(shared_root)
+        )
         plugin_dir = _resolve_member_dir(plugin_id, by_manifest_id, by_dir_name)
         if plugin_dir is None:
             raise CohostError(f"成员 {plugin_id} 未找到（reload 定位失败）")
@@ -648,6 +663,24 @@ def _kill_tracked_children(budget_secs: float = _EXIT_CLEANUP_BUDGET_SECS) -> in
     return killed
 
 
+def _stall_dump_dir(env: Mapping[str, str] | None = None) -> Path:
+    """停滞取证栈落盘目录：``AGENTOS_STALL_DUMP_DIR`` > 用户空间 logs > ``~/.agentos/logs``。
+
+    用户空间 logs：Windows 取 ``%APPDATA%\\agentos\\logs``（与
+    ``user_space.user_root`` 同源规则；APPDATA 缺失时回落 home）；其余平台
+    回退 ``~/.agentos/logs``。``env`` 缺省读 ``os.environ``（注入面测试用）。
+    """
+    source = os.environ if env is None else env
+    raw = source.get(_STALL_DUMP_DIR_ENV, "")
+    if raw.strip():
+        return Path(raw.strip())
+    if sys.platform == "win32":
+        appdata = source.get("APPDATA", "")
+        if appdata.strip():
+            return Path(appdata.strip()) / "agentos" / "logs"
+    return Path.home() / ".agentos" / "logs"
+
+
 class _Heartbeat:
     """主事件循环心跳打点（watchdog 判活依据）。"""
 
@@ -664,9 +697,11 @@ class _LoopWatchdog:
     """独立线程 watchdog：主事件循环心跳停滞超阈值即自杀退出。
 
     心跳由 ``_heartbeat_loop`` 在主循环内打点；若成员工具的同步阻塞调用
-    冻住事件循环，打点停滞，本线程到点先有界清理成员活跃子进程（防
-    ``os._exit`` 留无主孤儿），再 ``os._exit(1)``，进程退出由内核
-    crash-respawn 自愈。``clock``/``exit_fn``/``cleanup_fn`` 可注入（测试用）。
+    冻住事件循环，打点停滞，本线程到点先把全部线程 Python 栈落盘取证
+    （``_dump_stall_stacks``），再有界清理成员活跃子进程（防 ``os._exit``
+    留无主孤儿），最后 ``os._exit(1)``，进程退出由内核 crash-respawn 自愈。
+    ``clock``/``exit_fn``/``cleanup_fn``/``dump_dir``/``host_name`` 可注入
+    （测试用）。
     """
 
     def __init__(
@@ -678,6 +713,8 @@ class _LoopWatchdog:
         clock: Callable[[], float] = time.monotonic,
         exit_fn: Callable[[int], None] = os._exit,
         cleanup_fn: Callable[[], int] = _kill_tracked_children,
+        dump_dir: Path | None = None,
+        host_name: str | None = None,
     ) -> None:
         self._heartbeat = heartbeat
         self._stall_secs = stall_secs
@@ -685,6 +722,8 @@ class _LoopWatchdog:
         self._clock = clock
         self._exit_fn = exit_fn
         self._cleanup_fn = cleanup_fn
+        self._dump_dir = dump_dir
+        self._host_name = host_name
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -701,7 +740,7 @@ class _LoopWatchdog:
         self._stop.set()
 
     def _run(self) -> None:
-        """线程主体：周期检查心跳，停滞超阈值清理子进程后自杀。"""
+        """线程主体：周期检查心跳，停滞超阈值取证落盘、清理子进程后自杀。"""
         while not self._stop.wait(timeout=self._check_interval_secs):
             stalled = self._clock() - self._heartbeat.last_beat
             if stalled > self._stall_secs:
@@ -710,9 +749,54 @@ class _LoopWatchdog:
                     stalled,
                     self._stall_secs,
                 )
+                self._dump_stall_stacks(stalled)
                 self._cleanup_fn()
                 self._exit_fn(1)
                 return
+
+    def _dump_stall_stacks(self, stalled_secs: float) -> Path | None:
+        """自杀前取证：全部线程（含事件循环线程）Python 栈落盘，定位阻塞帧。
+
+        本方法在 watchdog 线程内运行且事件循环已停滞——只调 ``faulthandler``
+        （直接遍历线程帧，不经事件循环调度），不触碰任何 asyncio API。文件头
+        记录停滞量/阈值/pid/宿主名/UTC 时间/心跳最后打点，其后是
+        ``faulthandler.dump_traceback(all_threads=True)`` 的线程栈。
+
+        best-effort：落盘失败只告警，不改变自杀语义（返回 None）。
+
+        Returns:
+            落盘文件路径；失败返回 None。
+        """
+        directory: Path | None = None
+        path: Path | None = None
+        try:
+            directory = self._dump_dir if self._dump_dir is not None else _stall_dump_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            path = directory / f"{_STALL_DUMP_PREFIX}{stamp}_{os.getpid()}.log"
+            header = (
+                "[cohost][stall-dump] 事件循环心跳停滞取证\n"
+                f"time_utc={stamp}\n"
+                f"stalled_secs={stalled_secs:.3f}\n"
+                f"stall_threshold_secs={self._stall_secs:.3f}\n"
+                f"pid={os.getpid()}\n"
+                f"host={self._host_name or 'unknown'}\n"
+                f"heartbeat_last_beat={self._heartbeat.last_beat:.6f}\n"
+                "\n── 全部线程 Python 栈（faulthandler all_threads）──\n"
+            )
+            with path.open("wb") as handle:
+                handle.write(header.encode("utf-8"))
+                # faulthandler 直接写 fd，绕过文件对象缓冲：先 flush 保证头在栈前
+                handle.flush()
+                faulthandler.dump_traceback(file=handle, all_threads=True)
+                handle.flush()
+        except Exception as exc:  # noqa: BLE001 — 取证 best-effort，失败不阻断自杀
+            logger.warning(
+                "[cohost] 停滞取证栈落盘失败（继续自杀） | dir=%s err=%r", directory, exc
+            )
+            return None
+        logger.error("[cohost] 停滞取证栈已落盘 | path=%s", path)
+        return path
 
 
 async def _heartbeat_loop(heartbeat: _Heartbeat, interval_secs: float = _HEARTBEAT_INTERVAL_SECS) -> None:
@@ -742,11 +826,104 @@ def _graceful_hard_exit(
     exit_fn(0)
 
 
-async def _serve(server: CohostServer, stall_secs: float = _WATCHDOG_STALL_SECS_DEFAULT) -> None:
+# ── 共享 venv 身份自检 ────────────────────────────────────
+
+# 合宿成员依赖装在 plugins/shared/_host/.venv，内核以该 venv 的解释器 spawn
+# host.py。venv 缺 pyvenv.cfg（或启动器解析不到基座）时，解释器会静默退回外部
+# Python——venv 内 site-packages 全部失效，成员依赖退化成「导入得到但没属性」的
+# 残缺模块（2026-11-10 装机实证：aiohttp 命中外部环境的命名空间包 →
+# sync_agent 上行永久失败 → outbox 触顶 → 事件循环被同步阻塞 → watchdog 判
+# 心跳停滞自杀 → light_stable 组崩溃循环 17 次）。故引导期显式自检：venv
+# site-packages 在位却不在导入路径上时补挂并告警，不再静默降级。
+_VENV_CFG_NAME = "pyvenv.cfg"
+
+
+def _shared_venv_site_packages(venv_dir: Path) -> Path | None:
+    """venv 的 site-packages 目录（Windows ``Lib/`` 与 POSIX ``lib/pythonX.Y/`` 双形态）。"""
+    candidates = [venv_dir / "Lib" / "site-packages"]
+    candidates.extend(sorted((venv_dir / "lib").glob("python*/site-packages")))
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _declared_venv_version(venv_dir: Path) -> tuple[int, int] | None:
+    """pyvenv.cfg 声明的目标 Python 版本（缺文件/缺字段/格式异常返回 None）。"""
+    cfg = venv_dir / _VENV_CFG_NAME
+    if not cfg.is_file():
+        return None
+    try:
+        lines = cfg.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for raw in lines:
+        key, _, value = raw.strip().partition("=")
+        if key.strip() != "version_info":
+            continue
+        parts = value.strip().split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return int(parts[0]), int(parts[1])
+    return None
+
+
+def _ensure_shared_venv_active(venv_dir: Path | None = None, *, path: list[str] | None = None) -> bool:
+    """保证合宿共享 venv 的 site-packages 在导入路径上（返回是否补挂）。
+
+    venv 完好时无操作（site-packages 已在 path 上）；缺 pyvenv.cfg 导致解释器
+    退回外部 Python 时补挂并告警——只在声明版本与运行解释器一致时补挂，版本
+    不一致（二进制扩展 ABI 不匹配）拒绝补挂并报错，避免把静默降级换成更难查
+    的导入崩溃。
+    """
+    venv = venv_dir if venv_dir is not None else Path(__file__).resolve().parent / ".venv"
+    if not venv.is_dir():
+        return False
+    site_packages = _shared_venv_site_packages(venv)
+    if site_packages is None:
+        return False
+    search = sys.path if path is None else path
+    target = site_packages.resolve()
+    for entry in search:
+        if not entry:
+            continue
+        try:
+            if Path(entry).resolve() == target:
+                return False
+        except OSError:  # 非法路径条目：不视为命中
+            continue
+    declared = _declared_venv_version(venv)
+    if declared is not None and declared != sys.version_info[:2]:
+        logger.error(
+            "[cohost] 共享 venv 版本不匹配：venv=%s（声明 %s.%s）解释器=%s.%s，拒绝补挂 %s",
+            venv,
+            declared[0],
+            declared[1],
+            sys.version_info[0],
+            sys.version_info[1],
+            site_packages,
+        )
+        return False
+    search.insert(0, str(target))
+    logger.warning(
+        "[cohost] 共享 venv 未生效（解释器 %s 未落在 venv %s 内），已补挂 site-packages=%s——"
+        "请修 venv 本体（缺 pyvenv.cfg 时重建：uv sync --project plugins/shared/_host）",
+        sys.executable,
+        venv,
+        site_packages,
+    )
+    return True
+
+
+async def _serve(
+    server: CohostServer,
+    stall_secs: float = _WATCHDOG_STALL_SECS_DEFAULT,
+    *,
+    host_name: str | None = None,
+) -> None:
     """主循环编排：心跳任务 + watchdog + 聚合 MCP 服务（至 stdin EOF）。"""
     heartbeat = _Heartbeat()
     beat_task = asyncio.create_task(_heartbeat_loop(heartbeat))
-    watchdog = _LoopWatchdog(heartbeat, stall_secs)
+    watchdog = _LoopWatchdog(heartbeat, stall_secs, host_name=host_name)
     watchdog.start()
     try:
         await server.serve()
@@ -767,6 +944,7 @@ def main(argv: Sequence[str] | None = None, *, shared_root: Path | None = None) 
     """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     root = shared_root if shared_root is not None else _default_shared_root()
+    _ensure_shared_venv_active()
     member_ids = [m.strip() for m in args.members.split(",") if m.strip()]
     stall_secs = _watchdog_stall_secs()
     loader = _MemberLoader()
@@ -792,7 +970,7 @@ def main(argv: Sequence[str] | None = None, *, shared_root: Path | None = None) 
         f"offline={len(failures)} tools={len(server.tool_names)}",
         file=sys.stderr,
     )
-    asyncio.run(_serve(server, stall_secs))
+    asyncio.run(_serve(server, stall_secs, host_name=f"{args.group}:{args.slot}"))
     _graceful_hard_exit()
 
 

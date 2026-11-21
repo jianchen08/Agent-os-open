@@ -49,6 +49,31 @@ TASK_CONTROL_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+#: 动态工具薄转发壳（plugins/shared/search 的 call_tool）：动态引入的工具不在
+#: `tool_ids` 白名单里，若层级闸只按 `call_tool` 这个名字判定，动态面就成了绕过
+#: L1→L2→L3 委托链的通道（动态引入 task_submit 即越权派发）。故与 security_check
+#: 同口径展开：**按目标工具名**判定。
+DYNAMIC_FORWARD_TOOL = "call_tool"
+_TARGET_TOOL_ARG = "tool"
+
+
+def _effective_tool_name(tc: dict[str, Any]) -> str:
+    """取层级闸判定用的工具名：动态转发壳调用展开为目标工具名。
+
+    只对 `name == DYNAMIC_FORWARD_TOOL` 且声明了非空目标名的条目展开（白名单式，
+    防任意工具伪造 `tool` 字段冒充任务类工具）；目标名缺失按本工具原样判定。
+    """
+    name = str(tc.get("name", "") or "")
+    if name != DYNAMIC_FORWARD_TOOL:
+        return name
+    args = tc.get("args", tc.get("arguments", {}))
+    if isinstance(args, str):
+        return name
+    if not isinstance(args, dict):
+        return name
+    target = str(args.get(_TARGET_TOOL_ARG) or "").strip()
+    return target or name
+
 
 class LevelGuardPlugin(IInputPlugin):
     """Agent 层级权限守卫 Input 插件。
@@ -126,7 +151,8 @@ class LevelGuardPlugin(IInputPlugin):
         # 只检查任务类工具的授权。其它工具软放行——
         # 可见性由 tool_schema 控制（LLM 看不到未授权工具），
         # 职责由 yaml 提示词约束，无需本插件硬拦。
-        task_tool_calls = [tc for tc in tool_calls if tc.get("name", "") in TASK_CONTROL_TOOLS]
+        # 判定键展开：动态转发壳（call_tool）的目标工具名同样参与筛选
+        task_tool_calls = [tc for tc in tool_calls if _effective_tool_name(tc) in TASK_CONTROL_TOOLS]
         if not task_tool_calls:
             return {}
 
@@ -146,11 +172,11 @@ class LevelGuardPlugin(IInputPlugin):
 
         # tool_ids 是任务类工具授权的唯一事实源
         allowed_tools = set(tool_ids)
-        blocked = [tc for tc in task_tool_calls if tc.get("name", "") not in allowed_tools]
+        blocked = [tc for tc in task_tool_calls if _effective_tool_name(tc) not in allowed_tools]
         if not blocked:
             return {}
 
-        names = ", ".join(tc.get("name", "") for tc in blocked)
+        names = ", ".join(_effective_tool_name(tc) for tc in blocked)
         reason = f"Agent level {agent_level} not allowed to call task tools: {names}"
         logger.warning(
             "[%s] Blocked by level guard | level=%s | tools=%s",
@@ -168,13 +194,19 @@ class LevelGuardPlugin(IInputPlugin):
         agent_level: str,
     ) -> dict[str, Any]:
         """对被拦调用直出预定拒绝结果（有 id 按 call_id，无 id 名字兜底）。"""
+        # 条目名保留**原调用名**（tool_core 按调用整形配对消息）；目标工具名进
+        # metadata，便于归因「哪个动态引入的任务类工具被层级闸拦下」。
         entries = [
             tool_result_entry(
-                tc.get("name", ""),
+                str(tc.get("name", "") or ""),
                 call_id=tc.get("id"),
                 success=False,
                 error=f"工具被权限策略拦截: {reason}",
-                metadata={"decided_by": "level_guard", "agent_level": agent_level},
+                metadata={
+                    "decided_by": "level_guard",
+                    "agent_level": agent_level,
+                    "target_tool": _effective_tool_name(tc),
+                },
             )
             for tc in calls
         ]

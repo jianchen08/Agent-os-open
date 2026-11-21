@@ -640,6 +640,8 @@ async def create_choice(
         "description": "",
         "options": built_options,
         "timeout_seconds": int(timeout),
+        # 审批非阻塞 M1：category 由发起方显式传（设计 §四），决策审批恒 decision
+        "category": "decision",
         "agent_id": origin.get("agent_id", ""),
         "agent_level": origin.get("agent_level", ""),
         "pipeline_id": origin.get("pipeline_id", ""),
@@ -993,11 +995,60 @@ def _get_human_interaction_service() -> Any | None:
 
 
 _INTERACTION_PREFIX = "/ext/approval_service/interaction"
+_APPROVAL_INBOX_PATH = "/ext/approval_service/approval/inbox"
+_TICKET_KEY_PREFIX = "approval.tickets."
 
 
 def _interaction_not_found(path: str) -> dict[str, Any]:
     """404 响应信封（对齐源 routes_missing.interaction_router 的 {"detail":...} 口径外错误形态）。"""
     return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+
+async def _approval_inbox_payload(query: dict[str, str]) -> dict[str, Any]:
+    """审批 inbox 聚合读面（审批非阻塞 M1，设计 §5.7 数据来源）。
+
+    pipeline-state.list 全租户行 → 按 ``approval.tickets.*`` 键收集 ticket →
+    按 pipeline_id 分组。``?pipeline_id=`` 过滤单管道；缺省返回全部管道。
+    已消费（consumed_at 非空）不进 inbox；已决未消费仍在（fold 注入窗口，
+    前端按 status 呈现）。组内待决（pending）优先排序。pipeline-state 能力
+    缺席/读取失败降级空 inbox（读面不崩）。
+    """
+    empty: dict[str, Any] = {"pipelines": []}
+    try:
+        cap = _get_cap("pipeline-state")
+        if cap is None:
+            return empty
+        rows = await cap.call("list", {})
+    except Exception as exc:  # noqa: BLE001 — 读面降级不崩（M1 端点降级契约）
+        logger.warning("[approval_inbox] pipeline-state 读取失败，降级空 inbox | err=%s", exc)
+        return empty
+    if not isinstance(rows, list):
+        return empty
+    want = str(query.get("pipeline_id") or "")
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        pid = str(row.get("pipeline_id") or "")
+        if not pid or (want and pid != want):
+            continue
+        for key, ticket in row.items():
+            if not key.startswith(_TICKET_KEY_PREFIX) or not isinstance(ticket, dict):
+                continue
+            # 已消费双形态：ticket 字典内置位 / fold 兄弟标记键置位——均不进 inbox
+            if ticket.get("consumed_at") or row.get(f"{key}.consumed_at"):
+                continue
+            groups.setdefault(pid, []).append(ticket)
+    pipelines = [
+        {
+            "pipeline_id": pid,
+            "tickets": sorted(
+                tickets, key=lambda t: 0 if t.get("status") == "pending" else 1
+            ),
+        }
+        for pid, tickets in sorted(groups.items())
+    ]
+    return {"pipelines": pipelines}
 
 
 async def _route_submit_response(
@@ -1258,7 +1309,12 @@ async def http_handle(
     headers 携带内核注入的身份头（X-AgentOS-Tenant/User/Role），approve/deny
     归属校验据此判定。
     """
-    del plugin_id, query
+    del plugin_id
+
+    # 审批非阻塞 M1：inbox 聚合读面（在 interaction 前缀域之外，独立路由）
+    if path == _APPROVAL_INBOX_PATH and method == "GET":
+        payload = await _approval_inbox_payload(query or {})
+        return _ok(_json_response(payload, 200))
 
     if not path.startswith(_INTERACTION_PREFIX):
         return _interaction_not_found(path)

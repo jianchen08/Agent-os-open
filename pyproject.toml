@@ -39,6 +39,23 @@ dependencies = [
     # Windows 无系统 IANA 时区库，zoneinfo（prompt_build 动态变量时间注入等）
     # 缺 tzdata 会静默回退 UTC；Linux 走系统库不受影响。
     "tzdata>=2024.1; sys_platform == 'win32'",
+    # 流式退化循环检测引擎（plugins/shared/_llm_streaming.py：自研四信号
+    # RepetitionGuard 退役换成熟件，ADR 2026-11-12-degen-detector-simurg-adoption）。
+    # minor 封顶：检测行为经证据级 vetting 锚定 1.0.4（14 份真实留证零误杀 +
+    # 事故夹具全拦），检测器面/fusion 行为大版本可能漂移，升级须重跑回归矩阵。
+    "simurg>=1.0.4,<2",
+    # stub 兼容 pin（仅本检查环境生效）：numpy 2.3+ 的 .pyi 使用 PEP 695 `type`
+    # 语句，与本仓 mypy 检查目标 python_version=3.11 不兼容（stub 解析期 syntax
+    # 错误，disable/skip/override 均不可抑制——实测 2026-11-12）；经 pytest
+    # _pytest.python_api 链入 mypy 检查图。2.2.x stubs 无该语句。
+    "numpy>=1.26,<2.3",
+    # OAuth 协议引擎（oauth_broker CA-P0 协议机退役自研，2026-11-19）：PKCE/
+    # 授权 URL/token 兑换/刷新唯一实现面。插件自身 pyproject 同步声明（sidecar
+    # 运行面）；根声明服务 plugins-coverage 测试车道（根 uv 环境跑 pytest，
+    # aiohttp 同款口径）。与插件侧同上界；requests = authlib requests_client
+    # 集成的运行依赖（1.9 起无 [requests] extra，显式声明）。
+    "authlib>=1.6,<2",
+    "requests>=2.31",
 ]
 
 # [project.scripts]
@@ -61,6 +78,20 @@ dev = [
     # fastapi：tests/test_new_project_e2e.py import（TestClient/声明式
     # schema），运行测试才需要
     "fastapi>=0.110",
+    # websockets：tests/deploy 种子物化测试 import（2026-11-08 timing-gate
+    # uv 环境收集错误清偿——ad-hoc 安装被 frozen 同步裁掉的根因收口）
+    "websockets>=12.0",
+    # zstandard：tests/eval_bench 单测 import（同上清偿）
+    "zstandard>=0.22",
+    # docker：isolation docker 系测试（test_isolation_docker_timeout 等）
+    # import docker SDK——uv sync --extra dev 裁非锁包的循环清偿（2026-11-08）
+    "docker>=7.0",
+    # pypdf/python-docx：builtin_tools/doc_tools 插件测试 import（同上清偿）
+    "pypdf>=5.0",
+    "python-docx>=1.1",
+    # agentos-plugin-sdk：plugins 测试 conftest 面 import（editable 源，
+    # tool.uv.sources 钉位——uv sync 裁非锁包循环的最终收口）
+    "agentos-plugin-sdk",
     # e2e（tests/e2e_02）：WS 流式链路测试需要
     "websockets>=13.0",
     # zstandard：tests/deploy/test_materialize_seed.py（种子包压缩校验）import；
@@ -318,3 +349,6 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "@(abc\\.)?abstractmethod",
 ]
+
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "plugins/sdk", editable = true }

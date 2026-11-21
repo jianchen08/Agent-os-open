@@ -277,6 +277,10 @@ def test_startup_sweep_tolerates_unreadable_dir(caplog):
         def mkdir(self, parents: bool = True, exist_ok: bool = True) -> None:
             return None
 
+        def resolve(self) -> _UnreadableDir:
+            # __init__ 经 _ensure_log_dir 归一化绝对路径（日志根绝对化契约）
+            return self
+
         def glob(self, pattern: str):
             raise OSError("directory unreadable")
 
@@ -299,26 +303,16 @@ def test_startup_sweep_tolerates_unstatable_file(caplog):
         def mkdir(self, parents: bool = True, exist_ok: bool = True) -> None:
             return None
 
+        def resolve(self) -> _DirWithBrokenFile:
+            # __init__ 经 _ensure_log_dir 归一化绝对路径（日志根绝对化契约）
+            return self
+
         def glob(self, pattern: str):
             return [_BrokenStatFile()]
 
     with caplog.at_level(logging.WARNING, logger="agentos_plugin_sdk.process_runtime.manager"):
         ProcessManager(log_dir=_DirWithBrokenFile())
     assert any("过期日志删除失败" in r.getMessage() for r in caplog.records)
-
-
-def test_flush_deletes_tolerates_unlink_failure(tmp_path, caplog):
-    """宽限期删除：单文件 unlink 失败 → 告警保留现场，条目照常出队。"""
-    mgr = _make_manager(tmp_path, log_delete_grace_seconds=0.0)
-
-    class _LockedPath:
-        def unlink(self, missing_ok: bool = False) -> None:
-            raise PermissionError("file locked")
-
-    mgr._logs_pending_delete.append((_LockedPath(), time.monotonic() - 1.0))  # noqa: SLF001
-    mgr.flush_expired_log_deletes()
-    assert any("命令日志清理失败" in r.getMessage() for r in caplog.records)
-    assert mgr._logs_pending_delete == []
 
 
 def test_write_log_header_io_failure_is_tolerated(tmp_path, caplog):
@@ -922,8 +916,8 @@ async def test_watchdog_kill_without_backend_falls_back_to_terminate(tmp_path, m
     await mgr._watchdog_kill(2**28, info, "orphan")
 
     assert info.status == "terminated"
-    # 回退路径经 terminate_process 收尾，落"terminated by user"标记
-    assert "# Process terminated by user" in info.log_file.read_text(encoding="utf-8")
+    # 回退路径经 terminate_process 收尾：真实原因穿透，终止行 = watchdog+具体原因（ADR 2026-11-07 决策 3）
+    assert "# Process terminated by watchdog (orphan)" in info.log_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -939,7 +933,7 @@ async def test_reap_after_kill_force_kill_failure_keeps_status(tmp_path, fast_ti
     info.log_file.write_text("# Bash Command Log\n", encoding="utf-8")
 
     with pytest.raises(PermissionError), caplog.at_level(logging.WARNING):
-        await asyncio.wait_for(mgr._reap_after_kill(62, info), timeout=5.0)
+        await asyncio.wait_for(mgr._reap_after_kill(62, info, "unit_memory"), timeout=5.0)
 
     assert proc.kill_called == 1
     assert info.status == "running", "reap 失败不得谎报 terminated"

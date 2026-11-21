@@ -32,6 +32,8 @@ class OptionSemantics(StrEnum):
 
     - approve_once            : 批准，仅本次生效（最小授权）
     - approve_and_remember    : 批准并记忆（同指纹后续免审）
+    - approve_pipeline_scope  : 批准，并把本管道（含派发子树）权限档切为旁路
+    - approve_permanent_whitelist : 批准并把该命令指纹加入永久免审批白名单
     - deny                    : 显式拒绝（唯一武装拒绝记忆的语义）
     - grant_write             : 授权写入，仅本管道/会话级
     - grant_write_permanent   : 授权写入，永久（名单文件）
@@ -42,6 +44,8 @@ class OptionSemantics(StrEnum):
 
     APPROVE_ONCE = "approve_once"
     APPROVE_AND_REMEMBER = "approve_and_remember"
+    APPROVE_PIPELINE_SCOPE = "approve_pipeline_scope"
+    APPROVE_PERMANENT_WHITELIST = "approve_permanent_whitelist"
     DENY = "deny"
     GRANT_WRITE = "grant_write"
     GRANT_WRITE_PERMANENT = "grant_write_permanent"

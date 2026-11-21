@@ -486,7 +486,13 @@ class TestOnLoadBankCreation:
         # spec 加载模块的 logger（__name__ = 测试模块名）级默认 NOTSET，
         # 生效级继承 root（WARNING）——DEBUG 记录须整体放宽 root 才能被 caplog 捕获
         with caplog.at_level(logging.DEBUG):
-            _run(srv._on_load({}))
+            # 就绪等待后台化：on_load 只派发后台任务，须接跑任务到出结果再断言
+            async def drive() -> None:
+                await srv._on_load({})
+                assert srv._init_task is not None
+                await srv._init_task
+
+            _run(drive())
 
         assert srv._client is fake_client
         fake_client.acreate_bank.assert_awaited_once()

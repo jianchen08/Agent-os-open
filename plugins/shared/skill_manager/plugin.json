@@ -5,7 +5,7 @@
   ],
   "name": "Skill Manager",
   "description": "技能注册权威——四源并集 skills/*/SKILL.md 扫描解析单源（仓根/出厂模式包/用户模式包/用户根，source 标注实际胜出源，与快照侧同源优先序；元数据 name/description/languages + 单技能详情含正文），resource_search skill 面的服务提供方",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",

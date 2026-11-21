@@ -1,18 +1,18 @@
 # @feature: FP-0.2.ACP额度池 R6网关托管 | @ci: python-coverage
-"""acp_gateway 网关生命周期托管行为测试。
+"""acp_gateway 网关探活行为测试（2026-11-21 拉起面单点化后的探活-only 面）。
 
-覆盖三面：配置归一化（yaml 命名空间/env 覆盖/非法形态）、探活判据（任何
-HTTP 响应=在，连接失败=不在）、ensure 拉起分支（已在则不拉/拉起后复验/
-spawn 失败 fail-soft/未配置命令降级）。外部依赖全替身：HTTP 打桩在
-urlopen（外部边界，wb_signin 轮同口径）、进程 spawn 与等待经注入 fake，
-零真网络零真拉起。
+覆盖面：配置归一化（默认值/命名空间/env 覆盖/非法形态）、管理页 URL 拼接
+不变量、探活判据（任何 HTTP 响应=在，连接失败=不在）、ensure 探活分支
+（在则 none / 不在则 handoff 指向 llm_provider_gateway，绝不本机拉起）。
+外部依赖全替身：HTTP 打桩在 urlopen（外部边界，wb_signin 轮同口径），
+零真网络零真拉起——launch_gateway_process 已随拉起面退役，本测试面钉住
+「探活模块不再持有任何 spawn 面」。
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import subprocess
+import inspect
 import urllib.error
 from typing import Any
 
@@ -28,31 +28,63 @@ from acp_gateway import (
 pytestmark = pytest.mark.unit
 
 
+# ── 拉起面退役（钉住：探活模块零 spawn 面）─────────────────────────────────
+
+
+def test_launch_surface_retired() -> None:
+    """拉起面退役钉子：launch_gateway_process / start_command 解析 /
+    ENV_START_COMMAND / platform 路由 / {plugin_dir} 占位符全部不在模块面
+    （拉起职责单点化到 llm_provider_gateway，防旧病复发）。"""
+    for gone in (
+        "launch_gateway_process",
+        "_resolve_start_command",
+        "_expand_placeholders",
+        "ENV_START_COMMAND",
+        "platform_key",
+        "PLUGIN_DIR",
+    ):
+        assert not hasattr(gw, gone), f"退役面残留: {gone}"
+    assert not hasattr(GatewayConfig, "__dataclass_fields__") or set(
+        GatewayConfig.__dataclass_fields__
+    ) == {"base_url", "health_timeout_secs"}
+    assert "subprocess" not in inspect.getsource(gw)
+
+
 # ── 配置归一化 ────────────────────────────────────────────────────────────
 
 
 def test_read_config_none_injected_falls_back_defaults() -> None:
     config = read_gateway_config(None)
     assert config.base_url == gw.DEFAULT_BASE_URL
-    assert config.start_command == ""
     assert config.health_timeout_secs > 0
-    assert config.startup_grace_secs > 0
 
 
-def test_read_config_namespace_values_win_over_defaults() -> None:
-    config = read_gateway_config(
-        {"gateway": {"base_url": "http://127.0.0.1:9999/", "start_command": "run.bat"}}
-    )
-    assert config.base_url == "http://127.0.0.1:9999"
-    assert config.start_command == "run.bat"
+def test_read_config_namespace_value_wins_over_default() -> None:
+    config = read_gateway_config({"gateway": {"base_url": "http://127.0.0.1:9999/"}})
+    assert config.base_url == "http://127.0.0.1:9999"  # 尾斜杠归一
+    assert config.health_timeout_secs == 2.0
 
 
 def test_read_config_env_overrides_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(gw.ENV_BASE_URL, "http://127.0.0.1:7777")
-    monkeypatch.setenv(gw.ENV_START_COMMAND, "env.bat")
-    config = read_gateway_config({"gateway": {"base_url": "http://ignored:1", "start_command": "x.bat"}})
+    config = read_gateway_config({"gateway": {"base_url": "http://ignored:1"}})
     assert config.base_url == "http://127.0.0.1:7777"
-    assert config.start_command == "env.bat"
+
+
+def test_read_config_legacy_start_command_keys_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """存量用户副本里的 start_command_* 键（退役面）被归一化面忽略不报错。"""
+    monkeypatch.delenv(gw.ENV_BASE_URL, raising=False)
+    config = read_gateway_config(
+        {
+            "gateway": {
+                "base_url": "http://127.0.0.1:9200",
+                "start_command": "old-generic.sh",
+                "start_command_windows": "C:\\old\\start-gateway.bat",
+            }
+        }
+    )
+    assert config.base_url == "http://127.0.0.1:9200"
+    assert config.health_timeout_secs == 2.0
 
 
 @pytest.mark.parametrize(
@@ -81,12 +113,9 @@ def test_management_url_invariant_to_trailing_slash(base_url: str) -> None:
     assert management_url(base_url) == "http://h:1" + gw.MANAGEMENT_PAGE
 
 
-def test_read_config_nonpositive_timeouts_fall_back_to_defaults() -> None:
-    config = read_gateway_config(
-        {"gateway": {"health_timeout_secs": -1, "startup_grace_secs": "bogus"}}
-    )
+def test_read_config_nonpositive_timeout_falls_back_to_default() -> None:
+    config = read_gateway_config({"gateway": {"health_timeout_secs": -1}})
     assert config.health_timeout_secs == 2.0  # 负值回默认
-    assert config.startup_grace_secs == 3.0  # 不可解析回默认
 
 
 # ── 探活判据（urlopen 打桩 = 外部 HTTP 边界）────────────────────────────────
@@ -146,7 +175,7 @@ def test_probe_targets_management_page(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == ["http://127.0.0.1:8317/management.html"]
 
 
-# ── ensure 拉起分支（probe/launch/sleep 全注入 fake，零真拉起）───────────────
+# ── ensure 探活分支（probe 注入 fake；拉起面已退役，不在 = handoff）─────────
 
 
 def _fake_probe(sequence: list[tuple[bool, str]]) -> tuple[gw.Probe, list[tuple[str, float]]]:
@@ -160,132 +189,33 @@ def _fake_probe(sequence: list[tuple[bool, str]]) -> tuple[gw.Probe, list[tuple[
     return probe, calls
 
 
-def _fake_launch(
-    fail_with: OSError | None = None,
-) -> tuple[gw.Launcher, list[str]]:
-    commands: list[str] = []
-
-    def launch(command: str) -> None:
-        if fail_with is not None:
-            raise fail_with
-        commands.append(command)
-
-    return launch, commands
-
-
-def _fake_sleep() -> tuple[gw.Sleeper, list[float]]:
-    slept: list[float] = []
-
-    async def sleep(seconds: float) -> None:
-        slept.append(seconds)
-
-    return sleep, slept
-
-
 def _config(**overrides: Any) -> GatewayConfig:
     values: dict[str, Any] = {
         "base_url": "http://127.0.0.1:8317",
-        "start_command": "start-gateway.bat",
         "health_timeout_secs": 0.5,
-        "startup_grace_secs": 3.0,
     }
     values.update(overrides)
     return GatewayConfig(**values)
 
 
-async def test_ensure_already_running_skips_launch() -> None:
+async def test_ensure_running_reports_none() -> None:
     probe, probe_calls = _fake_probe([(True, "HTTP 200")])
-    launch, launched = _fake_launch()
-    sleep, slept = _fake_sleep()
 
-    result = await ensure_gateway_running(_config(), probe=probe, launch=launch, sleep=sleep)
+    result = await ensure_gateway_running(_config(), probe=probe)
 
     assert result["action"] == "none"
     assert result["running"] is True
-    assert launched == []  # 在运行绝不重复拉起（幂等判据）
-    assert slept == []
-    assert probe_calls == [("http://127.0.0.1:8317", 0.5)]  # 只探一次
+    assert probe_calls == [("http://127.0.0.1:8317", 0.5)]  # 只探一次（幂等入口）
 
 
-async def test_ensure_launches_then_reverifies_running() -> None:
-    probe, _ = _fake_probe([(False, "URLError: refused"), (True, "HTTP 200")])
-    launch, launched = _fake_launch()
-    sleep, slept = _fake_sleep()
-
-    result = await ensure_gateway_running(_config(), probe=probe, launch=launch, sleep=sleep)
-
-    assert result["action"] == "launched"
-    assert result["running"] is True
-    assert launched == ["start-gateway.bat"]
-    assert slept == [3.0]  # 拉起与复验之间按 grace 等待一次
-
-
-async def test_ensure_launch_spawn_failure_is_fail_soft() -> None:
+async def test_ensure_down_reports_handoff_without_launching() -> None:
+    """网关不在 → handoff 指向新拉起面（llm_provider_gateway）；绝不本机拉起。"""
     probe, probe_calls = _fake_probe([(False, "URLError: refused")])
-    launch, _ = _fake_launch(fail_with=OSError("bat 不存在"))
-    sleep, slept = _fake_sleep()
 
-    result = await ensure_gateway_running(_config(), probe=probe, launch=launch, sleep=sleep)
+    result = await ensure_gateway_running(_config(), probe=probe)
 
-    assert result["action"] == "launch_failed"
+    assert result["action"] == "handoff"
     assert result["running"] is False
-    assert "bat 不存在" in result["detail"]
-    assert slept == []  # spawn 失败不进复验
-    assert len(probe_calls) == 1  # 也只探一次
-
-
-async def test_ensure_reverify_still_down_reports_honestly() -> None:
-    probe, _ = _fake_probe([(False, "URLError: refused"), (False, "URLError: refused")])
-    launch, launched = _fake_launch()
-    sleep, _ = _fake_sleep()
-
-    result = await ensure_gateway_running(_config(), probe=probe, launch=launch, sleep=sleep)
-
-    assert result["action"] == "launched"  # 拉起动作用发生了
-    assert result["running"] is False  # 复验结论如实为未起（不硬凑成功）
-    assert launched == ["start-gateway.bat"]
-
-
-async def test_ensure_without_command_degrades_explicitly() -> None:
-    probe, probe_calls = _fake_probe([(False, "URLError: refused")])
-    launch, launched = _fake_launch()
-    sleep, slept = _fake_sleep()
-
-    result = await ensure_gateway_running(
-        _config(start_command=""), probe=probe, launch=launch, sleep=sleep
-    )
-
-    assert result["action"] == "launch_disabled"
-    assert result["running"] is False
-    assert launched == []
-    assert slept == []
+    assert "llm_provider_gateway" in result["detail"]
+    assert "URLError" in result["detail"]  # 病因不吞
     assert len(probe_calls) == 1
-
-
-# ── 真身拉起器（subprocess.Popen 打桩 = 进程 spawn 外部边界，零真拉起）──────
-
-
-def test_launch_gateway_process_spawns_detached(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class _FakePopen:
-        def __init__(self, command: str, **kwargs: Any) -> None:
-            calls.append({"command": command, **kwargs})
-
-    monkeypatch.setattr(gw.subprocess, "Popen", _FakePopen)
-    before = len(gw._LAUNCHED)
-
-    gw.launch_gateway_process("start-gateway.bat")
-
-    assert len(calls) == 1
-    spawned = calls[0]
-    assert spawned["command"] == "start-gateway.bat"
-    assert spawned["shell"] is True  # bat 经 shell 执行
-    assert spawned["stdin"] == subprocess.DEVNULL  # 流全断（不挂管道）
-    assert spawned["stdout"] == subprocess.DEVNULL
-    assert spawned["stderr"] == subprocess.DEVNULL
-    if os.name == "nt":
-        assert spawned["creationflags"] == subprocess.CREATE_NO_WINDOW  # 隐藏控制台
-    else:
-        assert spawned["creationflags"] == 0
-    assert len(gw._LAUNCHED) == before + 1  # 句柄留模块引用（防 ResourceWarning）

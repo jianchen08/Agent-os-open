@@ -36,12 +36,12 @@ import {
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { buildWebviewThemeTokens } from '@/services/webviewThemeTokens'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useUIStore } from '@/stores/uiStore'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { useUIStore } from '@/stores/uiStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { loggers } from '@/utils/logger'
 import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
@@ -62,6 +62,17 @@ export interface WebviewWidgetProps {
   pluginId?: string
   /** 插件提供的 HTML 资源路径（相对插件根，如 "webview/index.html"）；缺省取 "/webview" */
   htmlPath?: string
+  /**
+   * 外部站点内嵌（相对插件 ext 根，如 "/api/dsh/official-ui"）：端点返回
+   * `{available, url, starting, reason}`，就绪后按 `url` 渲染 iframe。
+   *
+   * 与 htmlPath 的差别是**渲染模型**：htmlPath 走沙箱 srcDoc（不可信插件页）；
+   * 本 prop 指向独立真实站点，需要顶层文档语义——iframe 带 `src`、不加
+   * sandbox、不注入 CSP，否则目标站点的同源脚本 / cookie / WebSocket 全部
+   * 不可用（DSH 官方 Web 应用即此形态：SPA + 签名 cookie + `/api` 网关）。
+   * 声明面来自插件 manifest（可审计），URL 由插件端点下发，前端不拼接。
+   */
+  externalFramePath?: string
   /** widget 实例 id（订阅 widgetEventStore.latest 用） */
   widgetId?: string
   /** 标题 */
@@ -101,14 +112,26 @@ export interface WebviewWidgetProps {
  * 同时预置 window.agentos.ctx（挂载时活跃会话）——后续变化靠宿主 ctx.sync 下行推。
  * 导出复用：ContentCardRenderer webview 卡体同款桥形态（content_cards 内联
  * 内容沙箱）。
+ *
+ * scheme（可选，transparent 悬浮件专用）：宿主生效主题的明暗。传值时把
+ * iframe 文档的 color-scheme 显式钉到与宿主一致——**宿主深色而 iframe 文档
+ * 未声明 color-scheme 时，Chromium 会把文档画布涂成近白实色**，透明底圆角
+ * 件四角随即出现方块底（实测：宿主 `color-scheme:dark` + 未声明 → 角部
+ * 残留近白画布底）。theme.sync 携 scheme 重推，主题切换即时纠正。
  */
-export function bootstrapJs(instanceToken: string, sessionId: string | null): string {
+export function bootstrapJs(
+  instanceToken: string,
+  sessionId: string | null,
+  scheme?: 'light' | 'dark',
+): string {
   const token = JSON.stringify(instanceToken)
   const sid = JSON.stringify(sessionId ?? '')
+  const initialScheme = JSON.stringify(scheme ?? null)
   return `<script>
 (function(){
   var seq = 0;
   var TOKEN = ${token};
+  var SCHEME = ${initialScheme};
   function post(method, params){
     var id = 'wv_' + (++seq) + '_' + Date.now();
     var msg = { __agentos_webview: true, __wv_token: TOKEN, id: id, method: method };
@@ -116,6 +139,16 @@ export function bootstrapJs(instanceToken: string, sessionId: string | null): st
     parent.postMessage(msg, '*');
     return id;
   }
+  function applyScheme(s){
+    if (s !== 'light' && s !== 'dark') return;
+    try { document.documentElement.style.colorScheme = s; } catch (e) {}
+  }
+  if (SCHEME) applyScheme(SCHEME);
+  window.addEventListener('message', function(ev){
+    var d = ev.data;
+    if (!d || d.__agentos_webview !== true || d.method !== 'theme.sync') return;
+    applyScheme(d.params && d.params.scheme);
+  });
   window.agentos = { postMessage: post, ctx: { sessionId: ${sid} } };
   // 通知宿主 webview 已就绪
   post('__ready', {});
@@ -200,20 +233,50 @@ function clampWebviewWidth(raw: unknown): number | null {
  *  即不让用户干等）。 */
 const PENDING_TIMEOUT_MS = 30_000
 
+/** 外部帧就绪轮询间隔：外部应用冷启动（首次装依赖可达数分钟）是常态，
+ *  2s 一探既能及时接上又不会把内核刷爆。 */
+const EXTERNAL_FRAME_POLL_MS = 2_000
+
+/** 外部帧就绪等待上限：与插件侧启动超时同量级，超窗落终态并展示对方 reason。 */
+const EXTERNAL_FRAME_TIMEOUT_MS = 180_000
+
+/** 外部帧端点契约（插件 http_endpoints 声明面）。 */
+export interface ExternalFrameState {
+  available: boolean
+  url?: string | null
+  starting?: boolean
+  reason?: string | null
+}
+
+/** 只接受 http(s) 绝对 URL：非法形态按错误处理，不把任意 scheme 塞进 iframe.src。 */
+export function normalizeExternalFrameUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw === '') return null
+  try {
+    const parsed = new URL(raw)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * 把原始 HTML 包装成安全 srcDoc：插 CSP meta（head 最前）+ bootstrap JS。
  * 有 head → 两者注入 head 开标签后（bootstrap 先于 body 脚本解析，桥不缺位）；
  * 只有 html → 注入合成 head；无结构 HTML → 包一层（bootstrap 在 body 末）。
  * sessionId 为挂载时活跃会话（bootstrap ctx 预置）。
  * cspExt：页面声明 CSP 扩展（img-src 白名单；fail-closed 归一后合成）。
+ * scheme：文档色彩方案（transparent 悬浮件专用，见 bootstrapJs）——非空时
+ * 同时注入 `<meta name="color-scheme">`（首帧即生效，不等 bootstrap 执行）。
  */
 function wrapHtml(
   html: string,
   instanceToken: string,
   sessionId: string | null,
   cspExt?: WebviewCspExtension | null,
+  scheme?: 'light' | 'dark',
 ): string {
-  const injected = `${buildCspMeta(cspExt)}${bootstrapJs(instanceToken, sessionId)}`
+  const schemeMeta = scheme ? `<meta name="color-scheme" content="${scheme}">` : ''
+  const injected = `${buildCspMeta(cspExt)}${schemeMeta}${bootstrapJs(instanceToken, sessionId, scheme)}`
   if (/<head[^>]*>/i.test(html)) {
     return html.replace(/<head[^>]*>/i, (m) => `${m}${injected}`)
   }
@@ -221,12 +284,13 @@ function wrapHtml(
     return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${injected}</head>`)
   }
   // 无结构 HTML：包一层
-  return `<!DOCTYPE html><html><head>${buildCspMeta(cspExt)}</head><body>${html}${bootstrapJs(instanceToken, sessionId)}</body></html>`
+  return `<!DOCTYPE html><html><head>${buildCspMeta(cspExt)}${schemeMeta}</head><body>${html}${bootstrapJs(instanceToken, sessionId, scheme)}</body></html>`
 }
 
 export function WebviewWidget({
   pluginId,
   htmlPath,
+  externalFramePath,
   widgetId,
   title,
   injectMessage,
@@ -256,6 +320,8 @@ export function WebviewWidget({
    *  null = 未回报保持 w-full——悬浮槽等 shrink-to-fit 容器需内容自报实宽） */
   const [autoWidthPx, setAutoWidthPx] = useState<number | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  /** 外部帧就绪地址（externalFramePath 形态；null = 尚未就绪） */
+  const [externalFrameUrl, setExternalFrameUrl] = useState<string | null>(null)
 
   // 实例级令牌（安全审查 B-4）：每次挂载生成，注入 iframe bootstrap，
   // 上行消息必须携带 — 封死"任意 null-origin 页面伪造消息调用宿主 REST"面
@@ -291,17 +357,28 @@ export function WebviewWidget({
   }, [activeSessionId, sessionStacks, globalThemeConfig, activePluginTheme])
 
   const endpoint = useMemo(() => {
-    if (!pluginId) return null
+    // 外部帧形态不取插件 HTML（渲染面是独立站点，见 externalFramePath）
+    if (!pluginId || externalFramePath) return null
     const path = htmlPath ?? '/webview'
     return extUrl(pluginId, path)
-  }, [pluginId, htmlPath])
+  }, [pluginId, htmlPath, externalFramePath])
+
+  /** 生效主题明暗（transparent 悬浮件的 iframe 文档 color-scheme）：深色宿主下
+   *  iframe 文档不声明就地变画布白底（悬浮件圆角四角出方块），见 bootstrapJs。
+   *  未知主题按深色（应用默认主题是 dark，themeService 缺省同口径）。 */
+  const themeScheme: 'light' | 'dark' =
+    effectiveTheme.config?.category === 'light' ? 'light' : 'dark'
+  // 取数时点量（wrapHtml 注入首帧 meta 用）：主题切换不重取 HTML——由
+  // theme.sync 下行桥即时纠正文档 color-scheme（bootstrap 监听器落地）
+  const themeSchemeRef = useRef(themeScheme)
+  themeSchemeRef.current = themeScheme
 
   // fetch 插件 HTML（带 Bearer token，token 不进 iframe URL）。
   // 状态机契约：终态显式可见——成功落 html；失败/挂起超时落 error（附重试
   // 按钮），绝不静默停留「加载 Webview...」占位。
   useEffect(() => {
     if (!endpoint) {
-      setError('WebviewWidget 缺少 pluginId')
+      if (!externalFramePath) setError('WebviewWidget 缺少 pluginId')
       return
     }
     let cancelled = false
@@ -333,6 +410,9 @@ export function WebviewWidget({
             useSessionStore.getState().activeSessionId,
             // 页面声明 CSP 扩展（声明面 props，fail-closed 归一）
             normalizeCspExtension(csp),
+            // 透明悬浮件才钉文档色彩方案：画布底形态（bg-[var(--web-canvas)]
+            // 恒白）不注入，保持既有观感零变化
+            transparent ? themeSchemeRef.current : undefined,
           ),
         )
       })
@@ -367,7 +447,7 @@ export function WebviewWidget({
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [endpoint, attempt, csp])
+  }, [endpoint, attempt, csp, transparent])
 
   // 收 iframe 上行消息（校验 origin + 协议 + 实例令牌）→ 按 method 路由到后端
   // handler 在 window 上注册，不依赖 iframeRef 是否就绪（实际 sendDown 用 optional chaining）
@@ -602,16 +682,18 @@ export function WebviewWidget({
 
   // 下行桥 theme.sync（面板-宿主融合协议）：就绪时推当前生效主题的 token map，
   // 主题变化（全局切换/会话出入栈/插件皮肤）时重推；未就绪不推（__ready/load
-  // 就绪后会以当时值补推，不丢终态）
+  // 就绪后会以当时值补推，不丢终态）。scheme 同批推：透明悬浮件的 iframe 文档
+  // color-scheme 随宿主明暗即时纠正（payload 字段只增不删）。
   useEffect(() => {
     if (!webviewReady) return
     iframeRef.current?.contentWindow?.postMessage(
       buildWebviewMessage('theme.sync', {
         tokens: buildWebviewThemeTokens(effectiveTheme.config, effectiveTheme.pluginVars),
+        scheme: themeScheme,
       }),
       '*', // sandbox iframe origin='null'，同上
     )
-  }, [webviewReady, effectiveTheme])
+  }, [webviewReady, effectiveTheme, themeScheme])
 
   // 下行桥 ctx.sync：就绪时推当前活跃会话与激活管道，会话/管道切换时重推
   // （无会话推空串）。pipelineId 供插件页按管道精确取数（如待办角标拉
@@ -637,6 +719,86 @@ export function WebviewWidget({
       '*', // sandbox iframe origin='null'，同上
     )
   }, [webviewReady, injectMessage])
+
+  // 外部帧：向插件端点轮询就绪地址。外部站点由另一个进程伺服，冷启动可达
+  // 数分钟，故轮询而非一次性取址；available 前不落错误态，除非端点给出原因
+  // 或超窗（此时如实展示对方 reason，不静默停留加载占位）。
+  useEffect(() => {
+    if (!externalFramePath || !pluginId) return
+    let cancelled = false
+    const deadline = Date.now() + EXTERNAL_FRAME_TIMEOUT_MS
+    const poll = async (): Promise<void> => {
+      while (!cancelled) {
+        try {
+          const res = await apiClient.get<ExternalFrameState>(
+            extUrl(pluginId, externalFramePath),
+          )
+          if (cancelled) return
+          const data = res.data
+          if (data?.available) {
+            const url = normalizeExternalFrameUrl(data.url)
+            if (!url) {
+              // 端点声称就绪却给出不可用地址（非 http/https 或缺值）：声明面错误，
+              // 落显式错误态——不静默重试，也不把坏 scheme 塞进 iframe.src
+              setError('外部页面地址不可用（仅支持 http/https 绝对 URL）')
+              return
+            }
+            setExternalFrameUrl(url)
+            setError(null)
+            return
+          }
+          if (!data?.starting && data?.reason) {
+            setError(String(data.reason))
+            return
+          }
+        } catch (e) {
+          if (cancelled) return
+          setError((e as Error).message || '外部页面探测失败')
+          return
+        }
+        if (Date.now() > deadline) {
+          if (!cancelled) setError('外部页面未在等待上限内就绪')
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, EXTERNAL_FRAME_POLL_MS))
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+    }
+  }, [externalFramePath, pluginId, attempt])
+
+  if (externalFramePath) {
+    return (
+      <div className="relative h-full w-full">
+        {externalFrameUrl ? (
+          <iframe
+            src={externalFrameUrl}
+            title={title ?? 'Webview'}
+            className="absolute inset-0 h-full w-full border-0"
+          />
+        ) : (
+          <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-2 text-sm">
+            <div>{error ? '外部页面不可用' : '正在启动外部页面…'}</div>
+            {error && <div className="max-w-xl text-center text-xs">{error}</div>}
+            {error && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setError(null)
+                  setAttempt((n) => n + 1)
+                }}
+              >
+                重试
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   if (error) {
     return (

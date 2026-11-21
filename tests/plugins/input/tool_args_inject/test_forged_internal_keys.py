@@ -59,7 +59,7 @@ def test_forged_underscore_keys_stripped() -> None:
     calls = _run(
         [
             {
-                "name": "bash_execute",
+                "name": "bash",
                 "args": {
                     "command": "ls",
                     "_isolation_provider": "docker",  # 伪造内部键不得影响危险命令黑名单判定

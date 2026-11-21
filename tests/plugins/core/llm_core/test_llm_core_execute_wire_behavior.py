@@ -39,6 +39,31 @@ from llm_core.plugin import LLMCore, set_capability_caller  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _llm_model_config(monkeypatch: Any) -> None:
+    """注入最小 llm.yaml 视图：模型空解析现在显式报错（本模块不测模型解析）。"""
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "gpt-test": {
+                        "provider": "openai",
+                        "model_name": "gpt-test",
+                        "api_base": "https://stub.example.com",
+                        "api_key": "stub-key",
+                        "context_window": 128000,
+                    }
+                },
+                "defaults": {"chat": "gpt-test"},
+            }
+        },
+    )
+
+
+@pytest.fixture(autouse=True)
 def _reset_capability_caller():
     """测后清空模块级能力调用器，防跨测试残留。"""
     yield

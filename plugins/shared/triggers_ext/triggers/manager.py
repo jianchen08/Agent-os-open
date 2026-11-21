@@ -68,6 +68,38 @@ _AUTO_NOTIFY_BREAK_THRESHOLD = 3
 # 熔断窗口键 LRU 上限（防键空间无界增长；逐出即状态重置，重新从首报起算）。
 _AUTO_NOTIFY_MAX_KEYS = 500
 
+# 父通知里上下文使用率提示的告警阈值（百分比）：使用率**超过**该值即不建议继续
+# 向该 Agent 继承提交（继承总是新任务、上下文重新开始，才留得下余量）。阈值与
+# 文案数字同源——提示语里的百分比由本值格式化得出，不存在第二处硬编码。
+# 运行期可经 env 覆盖（AGENTOS_TRIGGER_CONTEXT_INHERIT_WARN_PCT），缺省/非法回落默认。
+_CONTEXT_INHERIT_WARN_PCT_DEFAULT = 50.0
+_CONTEXT_INHERIT_WARN_PCT_ENV = "AGENTOS_TRIGGER_CONTEXT_INHERIT_WARN_PCT"
+
+
+def context_inherit_warn_pct() -> float:
+    """上下文继承告警阈值（百分比，判定式 ``pct > 阈值`` 即提示）。
+
+    单源读取：提示语里的百分比数字由同一个返回值格式化得出，改阈值即同步
+    文案。env 覆盖值必须是 0~100 的可解析数字，缺失/非法一律回落默认值
+    （提示语属非核心遥测，配置错误不阻断通知投递，WARNING 留痕可见）。
+    """
+    raw = (os.environ.get(_CONTEXT_INHERIT_WARN_PCT_ENV) or "").strip()
+    if not raw:
+        return _CONTEXT_INHERIT_WARN_PCT_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0 or value > 100:
+        logger.warning(
+            "[TriggerManager] %s=%r 非法（需 0~100 数字），回落默认 %g",
+            _CONTEXT_INHERIT_WARN_PCT_ENV,
+            raw,
+            _CONTEXT_INHERIT_WARN_PCT_DEFAULT,
+        )
+        return _CONTEXT_INHERIT_WARN_PCT_DEFAULT
+    return value
+
 # 条件触发器求值熔断参数（P1-16）：坏表达式触发器（注册期编译校验只拦 register
 # 写面，load_from_state 重灌不校验）每轮轮询重评、逐轮告警/吞 False 永不收敛。
 # 按 trigger id 连续失败计数，达阈熔断：暂停重评并按指数退避（首窗 5 分钟、
@@ -1894,10 +1926,12 @@ class TriggerManager:
             input_tokens = cu.get("input_tokens", 0)
             window = cu.get("context_window", 0)
             if pct and window:
-                if pct > 50:
-                    hint = "⚠️ 建议优先创建新任务（上下文已超过50%，继续派发可能触发压缩或截断）"
-                elif pct > 25:
-                    hint = "⚠️ 不建议继续向此 Agent 继承提交（上下文已超25%，建议新建任务以保留充足余量）"
+                warn_pct = context_inherit_warn_pct()
+                if pct > warn_pct:
+                    hint = (
+                        f"⚠️ 不建议继续向此 Agent 继承提交（上下文已超{warn_pct:g}%，"
+                        "建议优先创建新任务以保留充足余量；继续派发可能触发压缩或截断）"
+                    )
                 else:
                     hint = "✅ 可直接继续向此 Agent 派发任务（上下文充足）"
                 context_usage_text = (

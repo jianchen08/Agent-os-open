@@ -12,7 +12,7 @@
   "scripts": {
     "electron": "electron .",
     "electron:dev": "concurrently \"npm run dev --prefix frontend\" \"wait-on http://localhost:5188 && electron .\"",
-    "electron:build": "python scripts/check_ci_gate.py --kind package --local && node scripts/check_prereqs.mjs && npm run build:cdylibs && node scripts/sanitize_packaged_config.mjs && python scripts/check_kernel_freshness.py && python scripts/check_clean_tree.py && npm run build --prefix frontend && tsc -p electron/tsconfig.json && npm run check:cdylibs && electron-builder --publish never && python scripts/check_packaged_layout_gate.py && node scripts/place_release_artifacts.mjs",
+    "electron:build": "python scripts/check_ci_gate.py --kind package --local && node scripts/check_prereqs.mjs && npm run build:cdylibs && node scripts/sanitize_packaged_config.mjs && python scripts/check_kernel_freshness.py && python scripts/check_clean_tree.py && npm run build --prefix frontend && python scripts/fetch_mxc_runtime.py && tsc -p electron/tsconfig.json && npm run check:cdylibs && electron-builder --publish never && python scripts/check_packaged_layout_gate.py && node scripts/place_release_artifacts.mjs",
     "build:cdylibs": "node scripts/build_cdylibs.mjs",
     "check:cdylibs": "node scripts/check_cdylibs_carried.mjs",
     "electron:compile": "tsc -p electron/tsconfig.json",
@@ -21,6 +21,7 @@
     "test:coverage": "python scripts/run_gates.py --mode all"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.10.1",
     "@types/ws": "^8.18.2",
     "concurrently": "^9.1.0",
@@ -35,6 +36,7 @@
     "directories": {
       "output": "release"
     },
+    "afterPack": "scripts/electron-after-pack.cjs",
     "files": [
       "dist-electron/**/*",
       "frontend/dist/**/*",
@@ -85,6 +87,17 @@
         ]
       },
       {
+        "from": "mcp-servers",
+        "to": "mcp-servers",
+        "filter": [
+          "**/*",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc",
+          "!**/.pytest_cache{,/**}",
+          "!**/.ruff_cache{,/**}"
+        ]
+      },
+      {
         "from": "config",
         "to": "config"
       },
@@ -100,6 +113,10 @@
         {
           "from": "kernel/target/release/agentos-kernel.exe",
           "to": "kernel/agentos-kernel.exe"
+        },
+        {
+          "from": "build/mxc-runtime",
+          "to": "mxc"
         },
         {
           "from": "electron/prereqs/rclone.exe",
@@ -120,13 +137,18 @@
         {
           "from": "electron/prereqs/wheels",
           "to": "prereqs/wheels"
+        },
+        {
+          "from": "scripts/installer_env_bootstrap.py",
+          "to": "prereqs/installer_env_bootstrap.py"
         }
       ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "perMachine": true,
+      "perMachine": false,
+      "allowElevation": false,
       "include": "electron/nsis/installer-custom.nsh"
     },
     "mac": {
@@ -163,6 +185,7 @@
     "shell-quote": "1.9.0"
   },
   "dependencies": {
+    "js-yaml": "^4.1.0",
     "ws": "^8.22.0"
   }
 }

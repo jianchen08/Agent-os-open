@@ -7,6 +7,7 @@ tasks 域逻辑承载于 service.py（组合 _task_crud/_task_state/_task_cleanu
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from typing import Any
@@ -42,6 +43,39 @@ plugin = AgentOSPlugin("task_service")
 http_api.set_plugin_instance(plugin)
 
 _service: TaskService | None = None
+# 排空自动恢复的后台调度句柄（强引用防 GC；unload 时取消）
+_auto_resume_task: asyncio.Task[None] | None = None
+# 装载后延迟：内核 boot 期 pipeline-executor/能力面仍在装配，任务插件可能
+# 先于执行器装载——留 15s 让 resume_pipeline 通道就绪再读面恢复。
+_AUTO_RESUME_START_DELAY_SECS = 15
+
+
+def _schedule_drain_auto_resume() -> None:
+    """装载对账之后调度一次排空任务自动恢复（2026-11-11 用户裁定）。
+
+    只在装载时调度；热重载二次 on_load 已有在飞调度则不重复建。恢复对象
+    判别全部在 :func:`http_api.auto_resume_drained_tasks`（run 仍 suspended
+    + 排空归因 + 任务管道身份门），本函数只负责延迟与异常隔离。
+    """
+    global _auto_resume_task
+    if _auto_resume_task is not None and not _auto_resume_task.done():
+        return
+
+    async def _run() -> None:
+        await asyncio.sleep(_AUTO_RESUME_START_DELAY_SECS)
+        try:
+            resumed = await http_api.auto_resume_drained_tasks()
+        except Exception as exc:  # noqa: BLE001 — 自愈兜底，不阻断任务服务
+            logger.warning("[task_service] 排空任务自动恢复异常（不阻断服务） | err=%s", exc)
+            return
+        if resumed:
+            logger.info(
+                "[task_service] 排空任务自动恢复完成 | count=%d | ids=%s",
+                len(resumed),
+                ",".join(str(r.get("pipeline_id") or "") for r in resumed),
+            )
+
+    _auto_resume_task = asyncio.create_task(_run())
 
 
 def _get_service() -> TaskService:
@@ -188,12 +222,18 @@ async def _on_load(params: dict[str, Any]) -> None:
         "terminal_replayed=%d",
         purge_stats, len(divergences) - replayed, replayed,
     )
+    # 排空自动恢复（2026-11-11 用户裁定）：水位自愈/G8 重启排空的任务在
+    # reconcile 复位 stopped 后由本调度延迟拉起，不再需要人工 continue。
+    _schedule_drain_auto_resume()
 
 
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
     """Cleanup task service on unload."""
-    global _service
+    global _service, _auto_resume_task
+    if _auto_resume_task is not None and not _auto_resume_task.done():
+        _auto_resume_task.cancel()
+    _auto_resume_task = None
     _service = None
     import service_access  # noqa: PLC0415
 

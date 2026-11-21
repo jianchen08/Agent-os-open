@@ -159,7 +159,7 @@ describe('FullscreenComposer 终局反馈', () => {
     })
 
     expect(screen.getByTestId('fullscreen-composer-error')).toHaveTextContent(
-      '发送超时，已停止执行——请重新发送',
+      '发送超时，未收到送达确认——请重试',
     )
   })
 

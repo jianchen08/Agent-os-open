@@ -56,6 +56,37 @@ export function getShellKernelHost(): ShellKernelHostPlugin | null {
   return shellPlugin<ShellKernelHostPlugin>('KernelHost')
 }
 
+/** Capacitor 插件监听句柄（壳桩返回面；remove 兼容 Promise/void 两代桥） */
+interface ShellSpeechListenerHandle {
+  remove: () => Promise<void> | void
+}
+
+/** 壳自建插件（ShellSpeech）：Android 系统 SpeechRecognizer 桥（原生语音识别）。
+ * 事件词表：speechPartial/speechFinal（transcript）+ speechError（code，与
+ * Web Speech 错误码同形）；旧包壳无此桩 → 访问器返回 null，调用方回退 server-asr。 */
+export interface ShellSpeechPlugin {
+  available(): Promise<{ available?: boolean }>
+  start(args?: { language?: string }): Promise<void>
+  stop(): Promise<void>
+  cancel(): Promise<void>
+  addListener(
+    eventName: 'speechPartial',
+    listenerFunc: (data: { transcript?: string }) => void,
+  ): Promise<ShellSpeechListenerHandle>
+  addListener(
+    eventName: 'speechFinal',
+    listenerFunc: (data: { transcript?: string }) => void,
+  ): Promise<ShellSpeechListenerHandle>
+  addListener(
+    eventName: 'speechError',
+    listenerFunc: (data: { code?: string }) => void,
+  ): Promise<ShellSpeechListenerHandle>
+}
+
+export function getShellSpeech(): ShellSpeechPlugin | null {
+  return shellPlugin<ShellSpeechPlugin>('ShellSpeech')
+}
+
 /**
  * 通知权限状态统一查询：壳内走原生插件；浏览器回落 Web Notifications API
  * （'default' 与原生 'prompt' 同义 = 未请求）。两边都不可用 = unsupported。

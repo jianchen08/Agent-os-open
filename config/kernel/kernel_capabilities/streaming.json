@@ -57,6 +57,10 @@
             "type": "boolean",
             "description": "持久化语义：true=正式消息（引擎落库，刷新保留，对账认领）；缺省/false=纯展示（只进 store 不落库，刷新弃，不进对账）。缺省统一 false 不分路径——内核 LLM 路径发射时显式携带 true"
           },
+          "sequence": {
+            "type": "integer",
+            "description": "入口占位行保留槽位（ADR 2026-11-06-round-entry-slot-placeholder）：消息在管道内的权威排序坐标，与 message_slots.seq 同源。前端占位气泡据此落位；旧内核缺省时回落既有挂空路径"
+          },
           "client_message_id": {
             "type": "string",
             "description": "触发本轮的 user 消息幂等键（ADR 2026-08-21），供前端关联流式消息与触发轮次（认领动作由 new_message 执行，不在本事件）"
@@ -258,6 +262,10 @@
           "persist": {
             "type": "boolean"
           },
+          "sequence": {
+            "type": "integer",
+            "description": "工具卡宿主消息的权威槽位（引擎开轮保留，与 stream_start.sequence 同源）：前端据此建容器/补落排序坐标，工具卡不因缺 seq 恒排消息流末尾。旧内核缺省时省略"
+          },
           "thread_id": {
             "type": "string",
             "minLength": 1,
@@ -315,6 +323,10 @@
           },
           "persist": {
             "type": "boolean"
+          },
+          "sequence": {
+            "type": "integer",
+            "description": "工具卡宿主消息的权威槽位（引擎开轮保留，与 stream_start.sequence 同源）：结果先到/宿主缺失时前端按此补建宿主容器并落位，结果不丢、卡不垫底。旧内核缺省时省略"
           },
           "thread_id": {
             "type": "string",

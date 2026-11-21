@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -51,35 +50,22 @@ def _env_path(name: str) -> Path | None:
     return Path(raw.strip())
 
 
-def _os_data_dir() -> Path | None:
-    """OS 标准用户数据目录（对齐 user_space.py / dirs::data_dir）。
-
-    **对齐副本锚**：本体 = ``plugins/shared/user_space.py::_os_data_dir``。
-    本模块随技能载荷播种（``acp_seed.PAYLOAD_FILES``）到
-    ``<user_root>/skills/``，播种副本对共享根裸模块不可达（禁共享根跨包
-    import 铁律）——自包含副本合法存在，同输入同输出由对齐断言钉死
-    （``tests/test_acp_ledger.py::TestUserSpaceCopyAlignment``），改动须与
-    本体同刀。
-    """
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        return Path(appdata) if appdata else None
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support"
-    xdg = os.environ.get("XDG_DATA_HOME")
-    if xdg and xdg.strip():
-        return Path(xdg.strip())
-    return Path.home() / ".local" / "share"
-
-
 def _user_data_dir() -> Path | None:
+    """用户数据根：``AGENTOS_DATA_DIR`` > ``<AGENTOS_USER_ROOT>/data``。
+
+    **零回落**（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2，对齐
+    ``plugins/shared/user_space.py`` 本体——用户根未设 = None，不做 OS 标准
+    目录推导；``%APPDATA%\\agentos`` 回落 = dev 扫到装机目录陈旧副本的事故
+    机制根，本体已删）。本模块随技能载荷播种到 ``<user_root>/skills/``，
+    播种副本对共享根裸模块不可达（禁共享根跨包 import 铁律）——自包含副本
+    合法存在，同输入同输出由对齐断言钉死
+    （``acp_quota_pool/tests/test_acp_ledger.py::TestUserSpaceCopyAlignment``），
+    改动须与本体同刀。
+    """
     data_dir = _env_path(USER_DATA_DIR_ENV)
     if data_dir is not None:
         return data_dir
     user_root = _env_path(USER_ROOT_ENV)
-    if user_root is None:
-        base = _os_data_dir()
-        user_root = base / "agentos" if base is not None else None
     return user_root / "data" if user_root is not None else None
 
 
@@ -92,7 +78,7 @@ def default_ledger_path() -> Path:
     data_dir = _user_data_dir()
     if data_dir is None:
         raise RuntimeError(
-            f"用户空间不可得（{USER_ROOT_ENV}/{USER_DATA_DIR_ENV} 未设且 OS 数据目录不可推导）"
+            f"用户空间不可得（{USER_ROOT_ENV}/{USER_DATA_DIR_ENV} 均未设——零回落，无 OS 目录兜底）"
             "——额度账本无处落盘"
         )
     return data_dir / "acp_bridge" / "quota_ledger.json"

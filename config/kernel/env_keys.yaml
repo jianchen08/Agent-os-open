@@ -1,0 +1,164 @@
+# 内核 AGENTOS_* 环境变量登记索引（门禁真值；内核运行时不读本文件）。
+#
+# 契约（ADR 2026-11-17-kernel-env-key-registry-gate）：kernel/crates 里每读
+# 一个 AGENTOS_* 键必须在此登记，检查器 scripts/check_env_key_registry.py
+# 双向 fail-closed——源面未登记键红 / 索引过期条目红 / description 缺失红。
+# production = 部署面旋钮；test_only = 测试注入键（fixture 专用，非部署面）；
+# format! 模板构造的动态键登记进 dynamic_prefixes（仓内现状无条目）。
+# 描述只写现状契约；default 仅在源码语境有实证时给。
+production:
+  AGENTOS_ADMIN_PASSWORD:
+    description: 内核 admin 面 API 口令（认证链注入点；错口令触发内核断连而非 401，见连接安全铁律）。
+  AGENTOS_ALLOW_EMPTY_PLUGINS:
+    description: 空插件目录拒启的逃生门；=1 允许嵌入式/最小化部署零插件启动。
+  AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE:
+    description: cdylib 集合变更（G8）时内核自动重启的开关。
+  AGENTOS_PLUGIN_WATCHER_COOLDOWN_MS:
+    description: 插件 watcher 同步冷却基值（毫秒，默认 1000）——完整发现循环之间的最小间隔；连续无变化轮 ×2 退避（上限=轮询间隔），风暴期波次合并降频。
+  AGENTOS_BIND:
+    description: 内核 HTTP 监听地址；默认仅本地回环，=0.0.0.0 显式开启外网可达（打印绑定面告警）。
+  AGENTOS_CODE_FP_CONFIRMATIONS:
+    description: 插件代码指纹变更的确认次数（重启触发阈值），默认 2。
+  AGENTOS_COLLECT_FAST_SECS:
+    description: 内存采样循环 mi_collect 间隔的收紧值（秒），水位收紧态生效。
+  AGENTOS_CONFIG_ROOT:
+    description: 内核配置根目录覆盖（config/ 面）。
+  AGENTOS_CORS_ORIGINS:
+    description: CORS 放行 origin 白名单（本地源任意端口恒放行）。
+  AGENTOS_DATA_DIR:
+    description: 用户数据目录覆盖（user_space 常量注入点）。
+  AGENTOS_DB_AUTO_REBUILD:
+    description: 库 schema 不兼容时自动清零重建；默认拒启，=1 显式选择高危自动重建。
+  AGENTOS_DB_PATH:
+    description: SQLite 库文件路径覆盖（storage.yaml 的 env 覆盖位）。
+  AGENTOS_DEVICE_TIER:
+    description: 设备档位钉档；=cloud 显式硬件无关档。
+  AGENTOS_DISABLE_SELF_EXIT:
+    description: 内核自退出（drain_and_exit 面）开关；=1 关闭只记日志（调试逃生门）。
+  AGENTOS_DISABLE_SIDECAR_WARMUP:
+    description: =1 关闭 sidecar boot 预热（预热集合 boot 定型只增）。
+  AGENTOS_DISCOVERY_CACHE:
+    description: 插件发现缓存工件路径覆盖（loader/cache.rs SHA-256 种子面）。
+  AGENTOS_EVENT_BUS_BURST:
+    description: 事件总线令牌桶突发容量。
+  AGENTOS_EVENT_BUS_REFILL_PER_SEC:
+    description: 事件总线令牌桶每秒回填速率。
+  AGENTOS_G2_VERIFY_FAIL_THRESHOLD:
+    description: 新插件 G2 校验连续失败熔断阈值，默认 3（装机 2026-10-17 事故归因面）。
+  AGENTOS_HOST_EST_COMMIT_MB:
+    description: 新宿主预估内存提交 MB（D5 预算闸准入分子）覆盖。
+  AGENTOS_HOST_MEM_LIMIT_MB:
+    description: 单宿主内存上限 MB；未设/非法/0/负数 = 不限。
+  AGENTOS_HOST_POOL_KEEPWARM:
+    description: 宿主池全局保活数（LRU 配额，全部缓存宿主共享）。
+  AGENTOS_HOST_POOL_MAX_REQUESTS:
+    description: 宿主累计请求数轮换上限，默认 0 = 关闭轮换。
+  AGENTOS_HOST_POOL_TTL_SECS:
+    description: 池内宿主最长保活时长（秒），默认 900s。
+  AGENTOS_INFLIGHT_PIN_MAX_SECS:
+    description: in-flight GC 回收推迟上限（秒），0 = 关闭推迟。
+  AGENTOS_INSTANCE_CONFIG:
+    description: 实例配置文件路径覆盖（plugin-loader instance_config）。
+  AGENTOS_KERNEL_HOST:
+    description: 监听地址（弃用中的过渡别名，由 AGENTOS_BIND 接管）。
+  AGENTOS_KERNEL_PORT:
+    description: 内核 HTTP 监听端口，默认 9100。
+  AGENTOS_LLM_FAIL_LOOP_MAX:
+    description: 引擎 LLM 连败熔断阈值（metrics_class=llm 插件步连续失败达值即署名 llm_fail_loop 终态化），默认 5；0/非法按默认（无禁用出口，pipeline_loop.rs）。
+  AGENTOS_LIGHT_HOST_MAX_MEMBERS:
+    description: 轻宿主最大成员数（运维逃生口，值不变行为不变）。
+  AGENTOS_MAX_BLOCKING_THREADS:
+    description: 阻塞线程池上限（memory 线程治理）。
+  AGENTOS_MAX_CONCURRENT_RUNS:
+    description: 跨管道并发闸门上限（只计运行态 run，等待不占槽），默认 16；0 = 不限流（排队优先级与活跃抢占策略前提，run_chain.rs，ADR 2026-11-18）。
+  AGENTOS_MAX_CONNS_PER_USER:
+    description: 每用户 WS 连接数上限，超限 LRU 踢最旧。
+  AGENTOS_MAX_INFLIGHT_TOOLS:
+    description: 工具在飞请求上限（memory 面）。
+  AGENTOS_MCP_BLOCK_LOOPBACK:
+    description: =1 连环回环地址 MCP 目标一并禁止（加固部署）。
+  AGENTOS_MCP_PROTOCOL_VERSION:
+    description: MCP 协议版本协商临时覆盖（逃生口）。
+  AGENTOS_MCP_REVERSE_HANDLE_TIMEOUT_SECS:
+    description: MCP 反向调用单请求处理超时（秒）。
+  AGENTOS_MCP_REVERSE_MAX_CONCURRENT:
+    description: MCP 反向调用并发上限。
+  AGENTOS_MCP_REVERSE_QUEUE_WAIT_SECS:
+    description: MCP 反向调用排队等待上限（秒）。
+  AGENTOS_MCP_START_TIMEOUT_SECS:
+    description: sidecar/宿主 MCP 启动握手超时（秒）覆盖。
+  AGENTOS_MEM_BUDGET_MB:
+    description: 内存总预算 MB（D5 预算闸）。
+  AGENTOS_MEM_COLLECT_SECS:
+    description: 内存采样循环间隔（秒）。
+  AGENTOS_MEM_COMMIT_RATIO:
+    description: 内存提交比阈值（水位监控参与面）。
+  AGENTOS_MEM_HARD_LIMIT_MB:
+    description: 内存硬上限 MB（超限处置面）。
+  AGENTOS_MEM_RETENTION_FLOOR_MB:
+    description: 内存保留下限 MB。
+  AGENTOS_MEM_WATERMARK_MB:
+    description: 水位重启阈值 MB；正值才启用水位监控（打断业务，不得默认触发）。
+  AGENTOS_MEM_WATERMARK_MIN:
+    description: 水位监控参与的最小总内存 MB。
+  AGENTOS_PLUGINS_DIR:
+    description: 内置插件根目录覆盖。
+  AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS:
+    description: 插件空闲超时（秒，in-flight GC 面）。
+  AGENTOS_PLUGIN_TIER2_ROOT:
+    description: 二级插件根目录（tier2 扫描起点，找含 plugin.json 的目录）。
+  AGENTOS_PLUGIN_VENVS_DIR:
+    description: 插件 venv 目录覆盖（spawn 期按 manifest id 端到端解析）。
+  AGENTOS_PLUGIN_VENV_AUTOPROVISION:
+    description: =1 允许 venv 自动供给（electron buildKernelEnv 注入）。
+  AGENTOS_PURGE_DELAY_MS:
+    description: mimalloc 清扫延迟（毫秒）传递面，显式 0 = 立即。
+  AGENTOS_PY_SPY_BIN:
+    description: py-spy 可执行文件路径（宿主恢复栈采样用），默认 py-spy。
+  AGENTOS_SERVICE_DECL_CHECKER:
+    description: plugin_check 服务声明检查器路径覆盖。
+  AGENTOS_SPAWN_BREAKER_THRESHOLD:
+    description: sidecar spawn 连续失败熔断阈值，默认 5。
+  AGENTOS_STORAGE_DRIVER:
+    description: 存储驱动名（storage.yaml driver 化切换的 env 覆盖位）。
+  AGENTOS_THREAD_KEEP_ALIVE_SECS:
+    description: 阻塞线程保活时长（秒）。
+  AGENTOS_THREAD_MAP_TTL_SECS:
+    description: thread 映射 TTL（秒），默认 24h。
+  AGENTOS_THREAD_STACK_KIB:
+    description: 线程栈大小（KiB）。
+  AGENTOS_TOKEN_SECRET:
+    description: token 服务端签名密钥（部署者自定；默认不得随机的裁定见 http/auth.rs）。
+  AGENTOS_TOKEN_SECRET_EPHEMERAL:
+    description: =1 显式选择一次性密钥（重启即全量 token 失效）。
+  AGENTOS_TOOL_SCHEMA_CONTRACT_CHECKER:
+    description: plugin_check 工具 schema 契约检查器路径覆盖。
+  AGENTOS_TRACE_RETENTION_DAYS:
+    description: 追踪数据保留天数，0 = 禁用清扫。
+  AGENTOS_UPLOAD_MAX_BYTES:
+    description: 上传体积上限（字节），常量默认 + env 覆盖。
+  AGENTOS_USER_CONFIG_DIR:
+    description: 用户配置目录覆盖（用户空间隔离面）。
+  AGENTOS_USER_PLUGINS_DIR:
+    description: 用户插件目录覆盖。
+  AGENTOS_USER_ROOT:
+    description: 用户空间根目录覆盖（dev=user_root，装机=%APPDATA%\agentos）。
+  AGENTOS_UV_WHEELHOUSE:
+    description: 离线依赖库路径；设置时 venv sync 追加该来源。
+  AGENTOS_WORKER_THREADS:
+    description: tokio worker 线程数钉值（线程治理，显式钉值优先）。
+test_only:
+  AGENTOS_MCP_IT_DOTENV:
+    description: MCP 集成测试 .env 注入文件路径（测试自清理 remove_var 面）。
+  AGENTOS_MCP_IT_EXTRA:
+    description: MCP 集成测试附加注入变量（测试自清理 remove_var 面）。
+  AGENTOS_TEST_ENV_FILE_AMBIENT_KEY:
+    description: .env 引导装载测试 ambient 键（进程环境已有键不被文件覆盖断言用）。
+  AGENTOS_TEST_ENV_FILE_FRESH_KEY:
+    description: .env 引导装载测试未设键注入断言用。
+  AGENTOS_RT_TEST_OTHER:
+    description: HTTP handler 鉴权链测试注入变量（fixture 专用）。
+  AGENTOS_RT_TEST_TOKEN:
+    description: HTTP handler 鉴权链测试 token 键（fixture 专用）。
+  AGENTOS_RT_TEST_UNDEFINED_X:
+    description: HTTP handler 测试未定义变量路径用例（fixture 专用）。

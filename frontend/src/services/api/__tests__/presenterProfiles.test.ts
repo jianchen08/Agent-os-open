@@ -14,15 +14,15 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  modePresenterEndpoint,
-  resolvePresenterFromCards,
-  type PresenterCard,
-} from '@/services/api/presenterProfiles'
-import {
   modePresenterEndpointOf,
   presenterSourcesFromModes,
   type ModeDeclaration,
 } from '@/services/api/modes'
+import {
+  modePresenterEndpoint,
+  resolvePresenterFromCards,
+  type PresenterCard,
+} from '@/services/api/presenterProfiles'
 
 const SOURCES: Record<string, string> = {
   mode_roleplay: '/ext/mode_roleplay/data/cards',

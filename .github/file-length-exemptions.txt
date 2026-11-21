@@ -1,18 +1,12 @@
-# 文件长度豁免清单（scripts/check_file_length_baseline.py 消费）
-#
-# 用途：生成物、确有内聚理由的大文件，豁免后不进硬闸也不进基线。
-#       豁免同时覆盖「触碰即拆」维度（2026-10-15 增补）：显式豁免件被
-#       本次 diff 触碰不红（ADR 2026-10-12 同文「增补」节）。
-# 格式：每条一行「路径  # 归因理由」——理由必填，缺理由 = 闸红（账目必须真实）。
-# 棘轮：路径已不在扫描面 = 闸红并提示删除条目；豁免文件不得同时出现在
-#       file-length-baseline.txt（冲突 = 红）。
-# 默认为空：新豁免须在 commit message 与本文件注释中给归因。
-kernel/crates/api/src/auth.rs  # 离线窗(未推送153提交)增长超天花板2718>2577,内聚暂豁免;拆分候选记插件目录拍平迁移台账R6,下次触碰须拆或缩后移回基线
-kernel/crates/engine/src/pipeline_loop.rs  # 离线窗增长超天花板2952>2943,内聚暂豁免;拆分候选记台账R6,触碰即清
-kernel/crates/engine/src/pipeline_loop/tests.rs  # 离线窗跨存量触线5027>5000(测试档),暂豁免;拆分候选记台账R6
-kernel/crates/invoker/src/invoker/tests.rs  # 离线窗增长超天花板9973>9807(测试档),暂豁免;拆分候选记台账R6,触碰即清
-kernel/crates/plugin-loader/src/loader.rs  # 离线窗增长超天花板5404>5124,内聚暂豁免;拆分候选记台账R6,触碰即清
-plugins/shared/mode_roleplay/server.py  # 离线窗跨存量触线2971>2500(RP C1-C4主战场),暂豁免;拆分候选记台账R6,触碰即清
-plugins/shared/task_submit/tool.py  # 离线窗增长超天花板2648>2591,内聚暂豁免;拆分候选记台账R6,触碰即清
-kernel/crates/api/src/server.rs  # 离线窗增长超天花板3304>3222,内聚暂豁免;拆分候选记台账R6,触碰即清
-kernel/crates/core/src/traits.rs  # 离线窗增长超天花板3234>3211,内聚暂豁免;拆分候选记台账R6,触碰即清
+# 文件长度闸豁免（显式挂账：触碰不红；拆分/缩回线内后删除条目回棘轮）
+# 2026-11-17 推送前审查轮挂账：下列 8 件为 372 个未推送提交积累的超线存量
+# （该窗口本地门禁只跑变更面，全量闸面缺位；本轮回填全量自检发现）。
+# 处置：拆分候选记台账，触碰即清；豁免非永驻。
+kernel/crates/api/src/bin/agentos-kernel/main.rs  # 触线 2528>2500（启动装配内聚增长；拆分候选=boot 序列分组）
+kernel/crates/api/src/capability_router/tests.rs  # 触线 5128>5000（路由测试矩阵扩张；拆分候选=按域分文件）
+kernel/crates/api/src/ws_session.rs  # 冻结件越顶 3421>3178（会话治理功能增长；拆分候选=按消息面/生命周期分组）
+kernel/crates/engine/src/store.rs  # 冻结件越顶 5769>5190（水位监控/存储面增长；拆分候选=run 读写面分文件）
+plugins/shared/context_window_guard/plugin.py  # 冻结件越顶 2806>2631（裁剪证据源改造增长；拆分候选=裁剪策略分组）
+plugins/shared/security_check/plugin.py  # 触线 2535>2500（参数级危险判定扩展；拆分候选=规则面分文件）
+plugins/shared/task/tool.py  # 触线 2572>2500（前台派发防假成功+负耗时修复；拆分候选=action 分组）
+plugins/shared/tasks/http_api.py  # 触线 2547>2500（HTTP 面持续扩张；拆分候选=按资源域分路由文件）

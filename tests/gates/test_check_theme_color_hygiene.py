@@ -130,3 +130,50 @@ def test_monotonic_deleted_file_entry_is_red(env, capsys) -> None:
     mod, root = env
     assert _run_main(mod, root, "frontend/src/components/Gone.tsx 3\n", "--baseline-monotonic") == 1
     assert "待收紧" in capsys.readouterr().out
+
+
+# ── 2026-11-07 扩面：插件 web/webview 资产（.html/.htm/.css/.js）─────────────
+def test_plugin_webview_hardcoded_color_scanned(env) -> None:
+    mod, root = env
+    hit = _write(
+        root / "plugins/shared/demo/webview/panel.html",
+        "<style>\n:root { --ag-bg: #f6f8fb; }\n.x { color: rgba(0,0,0,.45); }\n</style>\n",
+    )
+    out = mod.collect()
+    rel = hit.relative_to(root).as_posix()
+    assert list(out) == [rel]
+    assert len(out[rel]) == 2
+
+
+def test_plugin_web_assets_suffixes_scanned(env) -> None:
+    mod, root = env
+    hits = []
+    for suffix, body in (
+        ("css", ".a { color: #123456; }\n"),
+        ("js", "const c = '#234567';\n"),
+        ("htm", "<b style=\"color: #345678\">x</b>\n"),
+    ):
+        hits.append(_write(root / f"plugins/shared/demo/web/asset.{suffix}", body))
+    _write(root / "plugins/shared/demo/web/notes.md", "文档不扫 #123456\n")  # 后缀白名单外
+    out = mod.collect()
+    assert sorted(out) == sorted(h.relative_to(root).as_posix() for h in hits)
+
+
+def test_plugin_webview_token_only_clean(env) -> None:
+    mod, root = env
+    _write(
+        root / "plugins/shared/demo/webview/panel.html",
+        "<style>.x { color: var(--ag-fg); background: var(--ag-bg); }</style>\n",
+    )
+    assert mod.collect() == {}
+
+
+def test_plugin_webview_baseline_ratchet(env, capsys) -> None:
+    mod, root = env
+    rel = "plugins/shared/demo/webview/panel.html"
+    _write(root / rel, "<style>\n.a { color: #111111; }\n.b { color: #222222; }\n</style>\n")
+    # 现 2 行命中 > 基线 1 → 红
+    assert _run_main(mod, root, f"{rel} 1\n", "--baseline-monotonic") == 1
+    assert "超 baseline" in capsys.readouterr().out
+    # 基线齐 → 绿
+    assert _run_main(mod, root, f"{rel} 2\n", "--baseline-monotonic") == 0

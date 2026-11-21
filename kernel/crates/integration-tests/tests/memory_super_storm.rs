@@ -44,7 +44,6 @@ use agentos_api::allocator::{collect_now, install_global_allocator, snapshot_sta
 use agentos_api::plugin_watcher::{ManifestsStore, PluginWatcher};
 use agentos_core::traits::StorageBackend;
 use agentos_core::traits::{HookContext, LifecycleHook, PluginInvoker, PluginManifest};
-use agentos_core::types::PendingInputSource;
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
 use agentos_engine::store::SqliteStore;
 use agentos_plugin_loader::registry::CapabilityRegistryImpl;
@@ -253,17 +252,7 @@ struct StormDispatcher;
 impl PipelineDispatcher for StormDispatcher {
     async fn dispatch_user_input(
         &self,
-        _thread_id: &str,
-        _user_id: &str,
-        _content: &str,
-        _pipeline_id: &str,
-        _thinking_strength: &str,
-        _execution_context: Option<&serde_json::Value>,
-        _state_overlay: Option<&serde_json::Value>,
-        _agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: PendingInputSource,
+        _request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         Ok(())
     }

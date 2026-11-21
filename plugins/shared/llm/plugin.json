@@ -1,14 +1,14 @@
 {
   "id": "llm_service",
-  "host_group": "light",
   "requires_services": [
     "packaging"
   ],
   "name": "LLM Service",
-  "version": "1.0.16",
+  "version": "1.0.27",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
+  "visibility": "private",
   "entry": "python server.py",
   "mcp": {
     "transport": "stdio",
@@ -30,7 +30,7 @@
     "services": [
       {
         "name": "llm.complete_stream",
-        "description": "Send a streaming completion request to LLM with messages and optional tools (stream events via event-bus)",
+        "description": "Send a streaming completion request to the LLM. Stream events are emitted via event-bus (block_start/text_delta/reasoning_delta/tool_call_delta/block_end/usage/finish/keepalive).",
         "input_schema": {
           "properties": {
             "model": {
@@ -53,11 +53,11 @@
             },
             "temperature": {
               "type": "number",
-              "default": 0.7
+              "description": "Sampling temperature; omitted = filled per llm.yaml model entry default_params, sent only if neither is configured"
             },
             "max_tokens": {
               "type": "integer",
-              "default": 4096
+              "description": "Maximum output tokens; omitted = filled per model config, sent only if neither is configured"
             }
           },
           "required": [

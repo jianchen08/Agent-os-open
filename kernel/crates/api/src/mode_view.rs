@@ -227,6 +227,7 @@ mod tests {
             contributes: None,
             http_endpoints: vec![],
             provides: None,
+            visibility: Default::default(),
             enabled: None,
             activation: None,
         }

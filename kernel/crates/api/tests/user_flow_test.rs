@@ -53,6 +53,7 @@ fn test_manifest(
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 
@@ -247,6 +248,7 @@ fn test_plugin_status_data_from_manifest() {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     };
 
     // 验证 status handler 会派生的字段（模拟 handler 逻辑）
@@ -324,6 +326,7 @@ fn test_eager_vs_lazy_distinction() {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     };
     let manifest_lazy = test_manifest("lazy_p", PluginType::Tool, None, vec![]);
 

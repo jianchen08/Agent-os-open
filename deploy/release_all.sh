@@ -298,12 +298,26 @@ seg_desktop() {
         log "desktop: 段标记在，跳过"
         return 0
     fi
+    # 插件种子新鲜度闸（ADR 2026-11-07-plugin-tiered-single-copy-model 刀 4，
+    # 与 ci-gate 同为 fail-closed 取证语义）：包内种子（worktree plugins/shared，
+    # electron-builder extraResources 的照搬源）↔ 仓内 BUILD_HEAD 逐插件版本
+    # 对账，不等/缺失即拦。置于 desktop 段链首（worktree@BUILD_HEAD 就位后、
+    # cargo/NSIS 烘烤前——preflight 段 worktree 尚不存在，而主仓工作树按
+    # prep 段「WIP 免疫」语义不作对账面）；--ref 钉 BUILD_HEAD，mid-run HEAD
+    # 漂移（混烘）同样被此闸捕获。
+    log "desktop: plugin-freshness：包内种子版本 ↔ 仓内 BUILD_HEAD 对账…"
+    "$PYTHON_BIN" "$(win_path "$REPO_ROOT/scripts/check_package_plugin_freshness.py")" \
+        --pack-root "$(win_path "$WT_ROOT")" \
+        --repo "$(win_path "$REPO_ROOT")" \
+        --ref "$BUILD_HEAD" \
+        || fail "desktop: 插件种子新鲜度闸红（差异表见上）——worktree checkout --force \$BUILD_HEAD 后重跑，勿手补种子"
     log "desktop: cargo build --release --bin agentos-kernel（worktree 冷烘=只烘 HEAD 已提交码）"
     (cd "$WT_ROOT/kernel" && cargo build --release --bin agentos-kernel) \
         || fail "desktop: 内核构建失败"
     [[ -f "$WT_ROOT/kernel/target/release/agentos-kernel.exe" ]] || fail "desktop: 内核 exe 缺失"
     log "desktop: npm run electron:build（cdylibs 链首自编+sanitize/freshness/clean-tree/layout 全闸+NSIS）"
     (cd "$WT_ROOT" && \
+        AGENTOS_BUILD_HEAD="$BUILD_HEAD" \
         ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" \
         ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/" \
         npm run electron:build) || fail "desktop: electron:build 链失败（闸红见上）"
@@ -390,6 +404,17 @@ seg_cloud() {
     log "cloud: frontend npm ci + build（快照内，npmmirror 缓存）"
     (cd "$src/frontend" && npm ci --prefer-offline --no-audit --no-fund --loglevel=error \
         && npm run build --loglevel=error) || fail "cloud: 前端构建失败"
+    # 部署回读清单（ADR 2026-11-10-deploy-freshness-verification）：对快照实际
+    # 部署面（plugins/shared、plugins/sdk、config、skills、frontend/dist、deploy）
+    # 逐文件 sha256，随 deploy/ 一起 rsync 到服务器；服务器侧由
+    # deploy/verify_deploy.sh / init.sh 回读比对「本次发版是否真的部署到位」。
+    log "cloud: 生成部署清单 deploy/deploy-manifest.json（profile=linux）"
+    "$PYTHON_BIN" "$(win_path "$REPO_ROOT/deploy/verify_deploy_manifest.py")" build \
+        --root "$(win_path "$src")" \
+        --out "$(win_path "$src/deploy/deploy-manifest.json")" \
+        --profile linux --version "$VERSION" --build-head "$BUILD_HEAD" \
+        || fail "cloud: 部署清单生成失败（清单缺失会让服务器侧回读静默降级）"
+    [[ -f "$src/deploy/deploy-manifest.json" ]] || fail "cloud: 部署清单未产出"
     log "cloud: tar czf（排除 node_modules/kernel target/__pycache__/.venv/app-mobile）"
     tar -czf "$STAGE_ROOT/cloud/agentos-cloud-$VERSION.tar.gz" \
         --exclude='frontend/node_modules' --exclude='kernel/target' \
@@ -440,6 +465,21 @@ with tarfile.open(os.environ["TAR_TARGET"], "r:gz") as tf:
 PYEOF
 }
 
+tar_has_deploy_manifest() { # $1 = 云 tar → 0 = 内含 deploy/deploy-manifest.json
+    TAR_TARGET="$1" "$PYTHON_BIN" <<'PYEOF'
+import os
+import sys
+import tarfile
+
+with tarfile.open(os.environ["TAR_TARGET"], "r:gz") as tf:
+    for member in tf:
+        name = member.name[2:] if member.name.startswith("./") else member.name
+        if name == "deploy/deploy-manifest.json":
+            sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
 seg_finalize() {
     maybe_fault finalize
     local seg
@@ -472,6 +512,8 @@ seg_finalize() {
     got="$(tar_version_entry "$cloud_tar")"
     [[ "$got" == "$VERSION" ]] || fail "版本断言: 云 tar 内嵌 VERSION 实测[$got] 期望[$VERSION]"
     log "断言 OK: 云 tar VERSION = $got"
+    tar_has_deploy_manifest "$cloud_tar" || fail "finalize: 云 tar 缺 deploy/deploy-manifest.json（服务器侧回读校验无清单可用）"
+    log "断言 OK: 云 tar 内嵌 deploy/deploy-manifest.json"
 
     # 集装 release/<版本>/（staging 原子改名进位）
     local final_dir="$STAGE_ROOT/final" target_dir="$REPO_ROOT/release/$VERSION"

@@ -13,8 +13,9 @@ mechanism_checks:
   - pattern: ["重启", "重试就好了"]
     ruling: 瞬时故障走重试与熔断防线，非改进空间
   - pattern: ["worktree", "工作空间找不到", "找不到文件", "plain 模式"]
-    ruling: 工作空间机制已覆盖——传 workspace+默认隔离=worktree 模式（从该路径
-      所属仓库分化分支副本）；workspace_mode=plain=直接在给定空间干活不分化；
+    ruling: 工作空间机制已覆盖——传 workspace 时默认 plain（直接在目标目录干活，
+      不分化分支副本）；workspace_mode=worktree=在所属仓库分化分支副本；
+      workspace_mode=plain=直接在给定空间干活不分化；
       不传=默认 isolated 出生自动分配。锚定原则：被测物料在哪，工作空间锚哪；
       worktree 里缺原空间文件=分化源锚错（如锚进 gitignore 空目录），先查
       分化源再谈改进

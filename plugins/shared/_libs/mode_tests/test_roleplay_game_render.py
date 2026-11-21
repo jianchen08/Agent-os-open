@@ -489,16 +489,20 @@ def test_game_page_served_assembles_sanitize_single_source(rp: Any) -> None:
     assert proc.returncode == 0, f"装配后脚本 node --check 失败: {proc.stderr}"
 
 
-def test_game_page_assembly_failclosed_missing_block(rp: Any, tmp_path: Any) -> None:
+def test_game_page_assembly_failclosed_missing_block(
+    rp: Any, tmp_path: Any, patch_shared: Any
+) -> None:
     """面板单源块缺失 = RuntimeError 上抛（包事实不静默降级为未消毒渲染面）。"""
     broken_panel = tmp_path / "broken_panel.html"
     broken_panel.write_text("<html>无消毒块</html>", encoding="utf-8")
-    rp._PANEL_HTML_PATH = str(broken_panel)
+    patch_shared("_PANEL_HTML_PATH", str(broken_panel))  # 消费点在 rp_game 自持绑定
     with pytest.raises(RuntimeError):
         rp._game_page_html_response()
 
 
-def test_game_page_assembly_failclosed_missing_bridge_block(rp: Any, tmp_path: Any) -> None:
+def test_game_page_assembly_failclosed_missing_bridge_block(
+    rp: Any, tmp_path: Any, patch_shared: Any
+) -> None:
     """面板桥单源块缺失（消毒块在场）= RuntimeError 上抛（装配清单逐项 fail-closed）。"""
     panel_src = _source(_PANEL_HTML)
     sanitize_block = _extract(_SANITIZE_MARK, panel_src, "rp-sanitize")
@@ -508,25 +512,29 @@ def test_game_page_assembly_failclosed_missing_bridge_block(rp: Any, tmp_path: A
         + "/* rp-sanitize:single-source-end */无桥块</html>",
         encoding="utf-8",
     )
-    rp._PANEL_HTML_PATH = str(broken_panel)
+    patch_shared("_PANEL_HTML_PATH", str(broken_panel))  # 消费点在 rp_game 自持绑定
     with pytest.raises(RuntimeError, match="rp-bridge"):
         rp._game_page_html_response()
 
 
-def test_game_page_assembly_failclosed_missing_marker(rp: Any, tmp_path: Any) -> None:
+def test_game_page_assembly_failclosed_missing_marker(
+    rp: Any, tmp_path: Any, patch_shared: Any
+) -> None:
     """游戏页装配标记缺失 = RuntimeError 上抛（装配契约 fail-closed）。"""
     broken_page = tmp_path / "broken_game.html"
     broken_page.write_text("<html>无装配标记</html>", encoding="utf-8")
-    rp._GAME_PAGE_HTML_PATH = str(broken_page)
+    patch_shared("_GAME_PAGE_HTML_PATH", str(broken_page))  # 消费点在 rp_game 自持绑定
     with pytest.raises(RuntimeError):
         rp._game_page_html_response()
 
 
-def test_game_page_http_error_shape_on_assembly_failure(rp: Any, tmp_path: Any) -> None:
+def test_game_page_http_error_shape_on_assembly_failure(
+    rp: Any, tmp_path: Any, patch_shared: Any
+) -> None:
     """装配失败经 http_handle 面返回 success:False + 500 可读错误（错误传播收口）。"""
     broken_page = tmp_path / "broken_game.html"
     broken_page.write_text("<html>无装配标记</html>", encoding="utf-8")
-    rp._GAME_PAGE_HTML_PATH = str(broken_page)
+    patch_shared("_GAME_PAGE_HTML_PATH", str(broken_page))  # 消费点在 rp_game 自持绑定
     result = asyncio.run(rp.http_handle(path="/ext/mode_roleplay/page/game-host", method="GET"))
     assert result["success"] is False
     assert "game page html unavailable" in result["error"]

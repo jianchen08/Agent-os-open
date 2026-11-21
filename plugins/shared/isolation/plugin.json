@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Isolation Service",
-  "version": "1.0.12",
+  "version": "1.0.18",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
@@ -124,6 +124,10 @@
               "type": "boolean",
               "default": true,
               "description": "任务是否成功完成"
+            },
+            "container_name": {
+              "type": "string",
+              "description": "容器名（state 真值直删，不依赖内存登记；与 task_id 同给时优先生效）"
             }
           },
           "type": "object"
@@ -223,9 +227,95 @@
           "properties": {},
           "type": "object"
         }
+      },
+      {
+        "name": "isolation.bind_external_env",
+        "description": "绑定外部指定容器（Terminal-Bench 通道）：此后该任务/工作空间的隔离请求收养该容器执行；bind 即验证容器存在，不可达显式失败",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "绑定的任务 ID（会话面可用 session 兜底键）"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "任务工作空间（宿主真实存在路径）"
+            },
+            "container": {
+              "type": "string",
+              "description": "外部容器名或 id（Harbor 任务容器）"
+            },
+            "workdir": {
+              "type": "string",
+              "description": "容器内工作目录（isolation.execute 默认 cwd，默认 /workspace）"
+            }
+          },
+          "required": [
+            "task_id",
+            "workspace",
+            "container"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "isolation.query_external_binding",
+        "description": "查询外部容器绑定（fs 工具路由判据面）：bound=True 时返回收养容器名与锚定工作目录",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "工作空间路径"
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "isolation.unbind_external_env",
+        "description": "解除外部容器绑定（只删绑定记录，不碰容器；幂等）",
+        "input_schema": {
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "任务 ID"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "工作空间路径"
+            }
+          },
+          "type": "object"
+        }
       }
     ]
   },
+  "http_endpoints": [
+    {
+      "route_id": "isolation_external_bind",
+      "method": "POST",
+      "path": "/ext/isolation_service/external/bind",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 4,
+      "description": "绑定外部指定容器（Terminal-Bench 通道正门）：body {task_id, workspace, container, workdir}；bind 即 docker inspect 验证，不可达 422 显式失败"
+    },
+    {
+      "route_id": "isolation_external_unbind",
+      "method": "POST",
+      "path": "/ext/isolation_service/external/unbind",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 4,
+      "description": "解除外部容器绑定（只删绑定记录不碰容器）：body {task_id?, workspace?}；幂等"
+    }
+  ],
   "permissions": {},
   "priority": 50,
   "requires_content": 5,

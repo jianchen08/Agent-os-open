@@ -258,3 +258,45 @@ export function taskPendingSubtaskParents(
   }
   return parents
 }
+
+/**
+ * 任务链活跃推导（面板状态聚合取数源）：返回「子孙中有显示为运行中的任务」的
+ * 祖先任务 id 集合。A 派 B、B 派 C，C 在跑而 A/B 自身停在「已暂停/等待子任务」
+ * 时，从用户视角这条链仍是活的——祖先行带「下辖运行中」标识，状态筛选「运行中」
+ * 也不再把它们滤掉（否则整条活链在面板上消失）。
+ *
+ * 活跃判据与 taskPanelDisplayKey 一词一义：折算为 running（running/evaluating/
+ * pending）即活跃；`stopped` 是否算活跃取决于子任务挂号，此处不猜——只用任务
+ * 列表能证明的父子关系与本任务状态。
+ */
+export function taskAncestorsWithRunningDescendant(
+  tasks: readonly Record<string, unknown>[],
+): Set<string> {
+  // 子 → 父（自挂守卫与建树同口径：parent 指向自身不算父子）
+  const parentOf = new Map<string, string>()
+  for (const task of tasks) {
+    const id = String(task.id ?? '')
+    const parent = String(task.parent_task_id ?? task.parentTaskId ?? '')
+    if (!id || !parent || parent === id) continue
+    parentOf.set(id, parent)
+  }
+  const ancestors = new Set<string>()
+  for (const task of tasks) {
+    const id = String(task.id ?? '')
+    if (!id) continue
+    const active = taskPanelDisplayKey(
+      typeof task.status === 'string' ? task.status : undefined,
+      false,
+    ) === 'running'
+    if (!active) continue
+    // 上溯祖先链（visited 自守：脏数据成环不死循环）
+    const visited = new Set<string>([id])
+    let cursor = parentOf.get(id)
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor)
+      ancestors.add(cursor)
+      cursor = parentOf.get(cursor)
+    }
+  }
+  return ancestors
+}

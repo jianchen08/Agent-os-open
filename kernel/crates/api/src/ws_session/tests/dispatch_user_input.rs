@@ -99,19 +99,17 @@ async fn dispatch_user_input_rejects_when_pipeline_missing_without_store() {
     // 无 store：无解析依据，前端空 pipeline_id 即协议违约，显式报错
     let dispatcher = EngineDispatcher::new(crate::routes::AppState::new());
     let err = dispatcher
-        .dispatch_user_input(
-            "T1",
-            "u1",
-            "hello",
-            "", // pipeline_id 空
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cm-noop",
-            agentos_core::types::PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("hello").to_string(),
+            client_message_id: ("cm-noop").to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap_err();
     assert!(err.contains("会话无可派发管道"), "实际: {err}");
@@ -134,19 +132,17 @@ async fn dispatch_user_input_direct_chain_notifies_waiter_with_failure_envelope(
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::server::EngineOutcome>();
     register_outcome_waiter(cmid.clone(), tx);
     dispatcher
-        .dispatch_user_input(
-            "T-dc",
-            "u-dc",
-            "hello",
-            "pipe-dc",
-            "",
-            None,
-            None,
-            "",
-            None,
-            &cmid,
-            agentos_core::types::PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T-dc").to_string(),
+            user_id: ("u-dc").to_string(),
+            pipeline_id: ("pipe-dc").to_string(),
+            content: ("hello").to_string(),
+            client_message_id: cmid.to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -289,19 +285,17 @@ async fn dispatch_user_input_busy_chain_persists_queue_then_drains() {
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::server::EngineOutcome>();
     register_outcome_waiter(cmid.clone(), tx);
     dispatcher
-        .dispatch_user_input(
-            "T1",
-            "u-bq",
-            "排队消息",
-            "", // 空 → 解析为主管道 pipe（与占链 key 一致）
-            "",
-            None,
-            None,
-            "",
-            None,
-            &cmid,
-            agentos_core::types::PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T1").to_string(),
+            user_id: ("u-bq").to_string(),
+            pipeline_id: ("").to_string(),
+            content: ("排队消息").to_string(),
+            client_message_id: cmid.to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -461,19 +455,17 @@ async fn user_message_confirmed_emitted_on_direct_run_start() {
 
     let dispatcher = EngineDispatcher::new(state);
     dispatcher
-        .dispatch_user_input(
-            "T-ea",
-            "u1",
-            "早回执验证",
-            "pipeEA",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cmid-ea-1",
-            agentos_core::types::PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T-ea").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("pipeEA").to_string(),
+            content: ("早回执验证").to_string(),
+            client_message_id: ("cmid-ea-1").to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
 
@@ -522,4 +514,218 @@ async fn user_message_confirmed_emitted_on_direct_run_start() {
             .expect("连接应仍注册")
             .id(),
     );
+}
+
+// ── 闸门满载降级 + 活跃抢占续跑（ADR 2026-11-18）─────────────────────────
+
+/// 闸门满载（注入受控注册表 limit=1、唯一槽位被占）：派发不得直跑（不可见
+/// 等待），必须降级持久化队列并发 enqueued 事件（队列条可见）；占链任务无
+/// Running 投影（无受害候选）→ 抢占降级，真实退化路径同测。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_user_input_gate_full_falls_back_to_pending_queue() {
+    let pipe = format!(
+        "pipe-gf-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    sqlite
+        .create_session(&session_record(Some(&pipe)))
+        .await
+        .unwrap();
+
+    let coord = Arc::new(agentos_session::SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register("u-gf", Arc::new(CapturingSink::with_frames(frames.clone())));
+    coord.register_thread("T1", "u-gf");
+    let mut state = crate::routes::AppState::new();
+    state.store = Some(store.clone());
+    seed_default_user(&*store, "u-gf").await;
+    state.session = Some(coord);
+    // 受控注册表：闸门上限 1，槽位被占链任务占满 → 派发必须降级队列。
+    let reg = crate::run_chain::RunChainRegistry::new_for_tests(1);
+    let dispatcher = EngineDispatcher::new(state).with_run_chain(reg.clone());
+
+    // 占住唯一槽位（admitted=true，但无 run 投影 → 抢占无候选）。
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    reg.enqueue(&pipe, "u-gf", async move {
+        let _ = release_rx.await;
+    });
+    // 等占链任务真正过闸（admitted）。
+    let mut admitted = false;
+    for _ in 0..100 {
+        if reg.gate_snapshot().0 >= 1 {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(admitted, "占链任务必须过闸");
+
+    let cmid = format!("cm-gf-{}", uuid::Uuid::new_v4().simple());
+    dispatcher
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: "T1".to_string(),
+            user_id: "u-gf".to_string(),
+            pipeline_id: String::new(),
+            content: "满载消息".to_string(),
+            client_message_id: cmid.clone(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
+        .await
+        .unwrap();
+
+    // 降级持久化队列（轮询等待写入可见）。
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let rows = store.list_pending_inputs("default", &pipe).await.unwrap();
+        if rows.len() == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "闸门满载派发必须落持久化队列（等待可见）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // 队列条事件先行（前端落定依据）。
+    let enqueued = frame_types(&frames).await;
+    assert!(
+        enqueued
+            .iter()
+            .any(|(t, v)| t == "pending_inputs_changed" && v["data"]["action"] == "enqueued"),
+        "满载入队必须发 pending_inputs_changed(enqueued): {:?}",
+        enqueued.iter().map(|(t, _)| t).collect::<Vec<_>>()
+    );
+    assert!(
+        !enqueued.iter().any(|(t, _)| t == "user_message_confirmed"),
+        "满载派发不得直跑（无早回执）"
+    );
+
+    // 放行占链 → drain 消费队列（无 invoker 降级 failed）→ 队列清空。
+    drop(release_tx);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let rows = store.list_pending_inputs("default", &pipe).await.unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "占链释放后队列必须被排空"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// 抢占续跑（ADR 2026-11-18）：preempt_suspend 标记置位时，run 收尾必须清
+/// 标记并自动重入链续跑（空 content 续跑轮 = 第二轮 round_finished、无第二条
+/// user 消息）；无标记的普通轮零续跑。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preempted_run_auto_resume_reenters_chain() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+
+    let tmp_root = std::env::temp_dir().join(format!("ea_test_{}", uuid::Uuid::new_v4().simple()));
+    let _user_space_guard = crate::test_env::pin_user_root(&tmp_root);
+    let cfg_dir = tmp_root.join("config").join("pipelines");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("autonomous.yaml"),
+        "name: test_preempt_resume\nloop_bodies:\n  - id: main\n    steps:\n      - id: llm\n        steps:\n          - mock_llm_core\n",
+    )
+    .unwrap();
+
+    let coordinator = Arc::new(agentos_session::SessionCoordinator::new());
+    let frames = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    coordinator.register_thread("T-pr", "u1");
+    coordinator.register("u1", Arc::new(CapturingSink::with_frames(frames.clone())));
+
+    let mut state = crate::routes::AppState::new();
+    state.store = Some(store.clone());
+    state.invoker = Some(Arc::new(MiniLlmInvoker));
+    state.project_root = Some(tmp_root);
+    state.db = Some(sqlite.clone());
+    state.manifests = Arc::new(tokio::sync::RwLock::new(vec![serde_json::from_value::<
+        agentos_core::traits::PluginManifest,
+    >(serde_json::json!({
+        "id": "mock_llm_core", "name": "mock_llm_core", "version": "1.0.0",
+        "plugin_type": "pipeline", "language": "python",
+        "host_type": "sidecar", "entry": "x", "capabilities": {},
+    }))
+    .unwrap()]));
+    state.session = Some(coordinator.clone());
+    seed_default_user(&*store, "u1").await;
+    store
+        .create_session(&session_record(Some("pipePR")))
+        .await
+        .unwrap();
+    store
+        .link_pipeline_session("pipePR", "T-pr", "default")
+        .await
+        .unwrap();
+    // 模拟抢占方已落地：管道置 preempt_suspend 标记。
+    let mut fields = serde_json::Map::new();
+    fields.insert("preempt_suspend".to_string(), serde_json::json!(true));
+    store
+        .upsert_state_fields("pipePR", "default", &fields)
+        .await
+        .unwrap();
+
+    let dispatcher = EngineDispatcher::new(state);
+    dispatcher
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: "T-pr".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: "pipePR".to_string(),
+            content: "被抢占的轮次".to_string(),
+            client_message_id: "cmid-pr-1".to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
+        .await
+        .unwrap();
+
+    // 轮询等两轮 round_finished（首轮 + 自动续跑轮，5s 上限）。
+    let mut finished = 0usize;
+    for _ in 0..100 {
+        finished = {
+            let emitted = frames.lock().unwrap();
+            emitted
+                .iter()
+                .filter(|f| f.contains("\"pipeline_round_finished\""))
+                .count()
+        };
+        if finished >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        finished >= 2,
+        "抢占标记必须触发自动续跑（第二轮 round_finished），实际 {finished} 轮"
+    );
+    // 标记已清（不残留给下一轮误触发续跑）。
+    let cleared = store
+        .load_pipeline_state("pipePR", "default")
+        .await
+        .unwrap()
+        .get("preempt_suspend")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(!cleared, "续跑入链后抢占标记必须清除");
+    // 续跑轮不落 user 消息（_skip_user_append）：user_message_confirmed 恰一次。
+    let confirmed = {
+        let emitted = frames.lock().unwrap();
+        emitted
+            .iter()
+            .filter(|f| f.contains("\"user_message_confirmed\""))
+            .count()
+    };
+    assert_eq!(confirmed, 1, "续跑轮不得追加 user 消息（早回执仅首轮一次）");
 }

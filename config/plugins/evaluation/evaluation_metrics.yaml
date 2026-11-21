@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# 内置评估指标配置
+# 内置评估指标配置（出厂播种资产：version 由 seedConfigTree 版本裁决消费）
+version: 2
 # 应用启动时自动同步到数据库
 
 metrics:
@@ -74,7 +75,7 @@ metrics:
     description: 自定义命令执行检查（通过退出码判定结果）
     category: command
     evaluator_type: tool
-    evaluator_id: bash_execute
+    evaluator_id: bash
     level: 2
     includes: [file_check]
     requires: []
@@ -138,7 +139,7 @@ metrics:
     description: 产物格式检查（tool 型：给 command 时在任务工作区真执行格式化器检查命令，退出码 0=通过；无 command 时按 path 存在性检查）
     category: file
     evaluator_type: tool
-    evaluator_id: bash_execute
+    evaluator_id: bash
     level: 2
     includes: [file_check]
     requires: []
@@ -205,7 +206,7 @@ metrics:
     description: L0 反模式扫描（空 except、调试残留 print/console.log、疑似硬编码密钥——bash 命令组合，命中即失败）
     category: antipattern
     evaluator_type: tool
-    evaluator_id: bash_execute
+    evaluator_id: bash
     level: 1
     includes: []
     requires: []

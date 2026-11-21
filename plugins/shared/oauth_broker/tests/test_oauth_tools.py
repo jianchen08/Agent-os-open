@@ -267,4 +267,68 @@ def test_oauth_manifest_lockstep(server_module) -> None:
     assert declared["name"] == "oauth"
     assert server_module._MANIFEST_TOOLS["oauth"]["input_schema"] == declared["input_schema"]
     one_of = declared["input_schema"]["oneOf"]
-    assert [b["properties"]["action"]["const"] for b in one_of] == ["authorize", "status"]
+    assert [b["properties"]["action"]["const"] for b in one_of] == ["authorize", "paste_callback", "status"]
+    # N3 双模式（CA-P0 件 2）：mode 枚举定义在顶层 properties（分支内为空占位），
+    # paste_callback 分支要求 callback_url 必填
+    assert declared["input_schema"]["properties"]["mode"]["enum"] == ["browser", "paste_callback"]
+    paste_branch = one_of[1]
+    assert paste_branch["required"] == ["action", "callback_url"]
+    assert "mode" in one_of[0]["properties"], "mode 归 authorize 分支"
+    assert "callback_url" not in one_of[0]["properties"], "callback_url 不归 authorize 分支"
+
+
+# ────────────────────────────────────────────────────────────
+# N3 粘贴回调双模式（CA-P0 件 2）：paste action 经 server.py 同一 handler 的分发面
+# ────────────────────────────────────────────────────────────
+
+
+async def test_paste_callback_tool_completes_authorization(server_module, fake_as, env_path) -> None:
+    pending = await server_module.oauth(
+        action="authorize", server_url=fake_as.resource_url, mode="paste_callback"
+    )
+    assert pending["status"] == "pending"
+    assert pending["browser_opened"] is False
+    pasted = await asyncio.to_thread(_fetch_redirect_target, pending["authorization_url"])
+
+    done = await server_module.oauth(action="paste_callback", callback_url=pasted)
+
+    assert done["status"] == "authorized"
+    assert done["method"] == "authorization_code"
+    assert done["browser_opened"] is False
+    stored = read_env(env_path)
+    assert stored[key_name(done["env_prefix"], "ACCESS_TOKEN")]
+
+
+async def test_paste_callback_tool_requires_callback_url(server_module, fake_as) -> None:
+    await server_module.oauth(action="authorize", server_url=fake_as.resource_url, mode="paste_callback")
+
+    result = await server_module.oauth(action="paste_callback")
+
+    assert result["success"] is False
+    assert result["error_code"] == "OPTION_INVALID"
+    assert "callback_url 必填" in result["error"]
+
+
+async def test_paste_callback_tool_reports_rejection_as_failure_envelope(server_module, fake_as, env_path) -> None:
+    await server_module.oauth(action="authorize", server_url=fake_as.resource_url, mode="paste_callback")
+    bogus = f"{flow.callback_url('http://127.0.0.1:9100')}?code=x&state=never-registered"
+
+    result = await server_module.oauth(action="paste_callback", callback_url=bogus)
+
+    assert result["success"] is False
+    assert result["error_code"] == "AUTHORIZATION_FAILED", "闸门被拒 = 授权失败（错误是值）"
+    assert not env_path.exists()
+
+
+async def test_authorize_tool_rejects_unknown_mode(server_module, fake_as) -> None:
+    result = await server_module.oauth(action="authorize", server_url=fake_as.resource_url, mode="clipboard")
+
+    assert result["success"] is False
+    assert result["error_code"] == "OPTION_INVALID"
+    assert "mode 只接受 browser/paste_callback" in result["error"]
+
+
+def _fetch_redirect_target(url: str) -> str:
+    from fake_auth_server import fetch_redirect_target
+
+    return fetch_redirect_target(url)

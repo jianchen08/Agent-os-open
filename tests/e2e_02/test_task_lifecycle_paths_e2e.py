@@ -155,6 +155,21 @@ def _build_tmp_config_root(base_dir: str, stub_api_base: str) -> str:
     dst = os.path.join(base_dir, "config")
     shutil.copytree(src, dst)
 
+    # 分级单副本（ADR 2026-11-07 §2.2）：instance.yaml 三根按配置文件所在目录
+    # 解析——副本迁移后相对根指向临时区（不存在）→ 启动守卫拒启。改写为仓内
+    # 插件真源绝对路径（Tier1/Tier2 dev 退化同指，与 dev 缺省位语义一致）。
+    inst_path = os.path.join(dst, "kernel", "instance.yaml")
+    if os.path.isfile(inst_path):
+        repo_shared = os.path.join(_REPO_ROOT, "plugins", "shared").replace(os.sep, "/")
+        with open(inst_path, encoding="utf-8") as fh:
+            inst = fh.read()
+        inst = inst.replace(
+            "../../plugins/shared",
+            repo_shared,
+        )
+        with open(inst_path, "w", encoding="utf-8") as fh:
+            fh.write(inst)
+
     llm_path = os.path.join(dst, "plugins", "llm", "llm.yaml")
     with open(llm_path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
@@ -510,11 +525,11 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "A1",
         _M_A1,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             tool_call_step(
                 "task_evaluate",
                 action="auto_complete",
-                summary="已用 bash_execute 生成 result.txt，任务完成。",
+                summary="已用 bash 生成 result.txt，任务完成。",
             ),
             text_step("A1：执行与评估均完成。"),
         ],
@@ -524,7 +539,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "A2C",
         _M_A2C,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             tool_call_step(
                 "task_evaluate",
                 action="auto_complete",
@@ -538,7 +553,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "A3",
         _M_A3,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             text_step("A3 第 1 轮：我已完成任务工作。"),
             text_step("A3 第 2 轮：工作确实已经全部完成。"),
             text_step("A3 第 3 轮：再次确认任务已全部完成。"),
@@ -552,7 +567,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         _M_B1,
         [
             tool_call_step(
-                "bash_execute", action="execute", command="ls e2e_b1_missing_dir"
+                "bash", action="execute", command="ls e2e_b1_missing_dir"
             ),
             text_step("B1 第 1 轮：命令执行失败了。"),
             text_step("B1 第 2 轮：失败原因无法修复。"),
@@ -578,7 +593,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "C2C",
         _M_C2C,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             tool_call_step(
                 "task_evaluate",
                 action="auto_complete",
@@ -592,7 +607,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "D1C",
         _M_D1C,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             tool_call_step(
                 "task_evaluate",
                 action="auto_complete",
@@ -612,7 +627,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "D2C",
         _M_D2C,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             tool_call_step(
                 "task_evaluate",
                 action="auto_complete",
@@ -631,7 +646,7 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
         "S2C",
         _M_S2C,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             tool_call_step(
                 "task_evaluate",
                 action="auto_complete",
@@ -655,7 +670,7 @@ def _register_rate_batch_scripts(stub: ScriptedLLMUpstream) -> None:
             marker,
             marker,
             [
-                tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+                tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
                 tool_call_step(
                     "task_evaluate",
                     action="auto_complete",
@@ -669,7 +684,7 @@ def _register_rate_batch_scripts(stub: ScriptedLLMUpstream) -> None:
         _M_RATE_F1,
         [
             tool_call_step(
-                "bash_execute", action="execute", command="ls e2e_rate_f1_missing_dir"
+                "bash", action="execute", command="ls e2e_rate_f1_missing_dir"
             ),
             text_step("RATE-F1 第 1 轮：命令执行失败了。"),
             text_step("RATE-F1 第 2 轮：失败原因无法修复。"),
@@ -681,7 +696,7 @@ def _register_rate_batch_scripts(stub: ScriptedLLMUpstream) -> None:
         _M_RATE_F2,
         _M_RATE_F2,
         [
-            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step("bash", action="execute", command=_BASH_ECHO_OK),
             text_step("RATE-F2 第 1 轮：我已完成任务工作。"),
             text_step("RATE-F2 第 2 轮：工作确实已经全部完成。"),
             text_step("RATE-F2 第 3 轮：再次确认任务已全部完成。"),
@@ -778,7 +793,7 @@ class TestPathMatrixPreconditions:
     """路径验证的前置成立性：工具面在位 + 脚本上游可编程。"""
 
     def test_task_domain_tools_visible(self, stub_kernel, matrix_token):
-        """task_evaluate/bash_execute/task_submit 必须在工具面注册（闸门的物质基础）。"""
+        """task_evaluate/bash/task_submit 必须在工具面注册（闸门的物质基础）。"""
         deadline = time.time() + 60
         names: list[str] = []
         while time.time() < deadline:
@@ -786,7 +801,7 @@ class TestPathMatrixPreconditions:
                 f"{stub_kernel.url}/api/v1/tools", token=matrix_token, timeout=30
             )
             names = [t.get("name") for t in body.get("items", [])] if status == 200 else []
-            if all(n in names for n in ("task_evaluate", "bash_execute", "task_submit")):
+            if all(n in names for n in ("task_evaluate", "bash", "task_submit")):
                 return
             time.sleep(3)
         pytest.fail(f"任务域工具未在 /api/v1/tools 全部可见，实际含: {names[:20]}...")
@@ -1213,7 +1228,7 @@ class TestD2FailedResubmitCompletes:
             "D2C",
             [
                 tool_call_step(
-                    "bash_execute", action="execute", command="echo E2E_D2_FIXED > e2e_d2_flag.txt"
+                    "bash", action="execute", command="echo E2E_D2_FIXED > e2e_d2_flag.txt"
                 ),
                 tool_call_step(
                     "task_evaluate",
@@ -1339,11 +1354,11 @@ class TestS1StopDuringRun:
             _M_S1,
             [
                 tool_call_step(
-                    "bash_execute", action="execute", command="echo E2E_S1 > s1.txt"
+                    "bash", action="execute", command="echo E2E_S1 > s1.txt"
                 )
             ],
             default=lambda body, idx: tool_call_step(
-                "bash_execute",
+                "bash",
                 action="execute",
                 command=f"echo E2E_S1_R{idx} > s1_r{idx}.txt",
             ),
@@ -1475,14 +1490,14 @@ class TestP1ProjectAttachWorkspace:
             _M_P1C,
             [
                 tool_call_step(
-                    "bash_execute",
+                    "bash",
                     action="execute",
                     command=_BASH_ECHO_OK + " && git add result.txt && git commit -m p1-output",
                 ),
                 tool_call_step(
                     "task_evaluate",
                     action="auto_complete",
-                    summary="已用 bash_execute 生成 result.txt，任务完成。",
+                    summary="已用 bash 生成 result.txt，任务完成。",
                 ),
                 text_step("P1 子任务：执行与评估均完成。"),
             ],

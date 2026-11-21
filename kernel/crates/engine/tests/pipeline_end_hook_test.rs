@@ -156,7 +156,7 @@ async fn test_run_dispatches_on_pipeline_end() {
     let _tmp = tempfile::tempdir().unwrap(); // tempdir 生命周期保持（fixture 依赖目录存在）
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
-    let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
+    let executor = make_executor(invoker.clone(), &["pipeline_end_hook_plugin"], store);
     let state = json!({"pipeline_id": "pipe-xyz", "message": "hi"});
     let compiled = compile_pipeline(
         &minimal_config(),
@@ -169,7 +169,7 @@ async fn test_run_dispatches_on_pipeline_end() {
         .await
         .expect("run ok");
     assert!(final_state.get("pipeline_id").is_some());
-    let calls = invoker.hook_calls("spill_retrieve_tool");
+    let calls = invoker.hook_calls("pipeline_end_hook_plugin");
     assert_eq!(
         calls,
         vec!["on_pipeline_end".to_string()],
@@ -204,8 +204,8 @@ async fn test_dispatch_is_best_effort() {
     let _tmp = tempfile::tempdir().unwrap(); // tempdir 生命周期保持（fixture 依赖目录存在）
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let invoker = Arc::new(HookRecordingInvoker::new());
-    invoker.fail_on("spill_retrieve_tool");
-    let executor = make_executor(invoker.clone(), &["spill_retrieve_tool"], store);
+    invoker.fail_on("pipeline_end_hook_plugin");
+    let executor = make_executor(invoker.clone(), &["pipeline_end_hook_plugin"], store);
     let compiled = compile_pipeline(
         &minimal_config(),
         &Default::default(),
@@ -216,5 +216,5 @@ async fn test_dispatch_is_best_effort() {
         .run_compiled(&compiled, json!({"pipeline_id": "p"}))
         .await;
     assert!(result.is_ok(), "钩子分发失败不得让 run 失败");
-    assert_eq!(invoker.hook_calls("spill_retrieve_tool").len(), 1);
+    assert_eq!(invoker.hook_calls("pipeline_end_hook_plugin").len(), 1);
 }

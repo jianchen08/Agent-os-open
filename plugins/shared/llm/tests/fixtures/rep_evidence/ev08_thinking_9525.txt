@@ -1,0 +1,17 @@
+islator if (613). These are all inside the `else` branch? Or common?
+From the sed 566-600 output:
+- slice line 17: `if st.scenario == "qing-v1" {` (line 582)
+- slice line 27: `} else {` (line 592)
+- slice line 28: `step_scenario(st.worlds.get_mut(&cur).unwrap(), &mut st.brew);` (593)
+The else branch contains step_scenario, series push, tick, and then... the org tick if (602) and AI legislator (613) and v5 block (620-626)? Then line 627 `}` closes the else, line 628 `}` closes the for loop.
+Hmm, that means the v5 standing block is INSIDE the else branch — only standard/world scenarios reach it, NOT qing! That matches the earlier review finding "qing 场景未接 v5 玩法层（tick_standing）" (§8-2 in the first function verify report) and INC review "qing 分支接入 tick_standing".
+Wait, but the first slice (596-656) showed the v5 block between AI legislator and the two closing braces. And the AI legislator block is inside else (it uses `st.legis.scenario` gate anyway). So yes: v5 block is inside the else branch. qing does NOT reach tick_standing currently.
+To fix MF-18 "qing 步进须接入 tick_standing": move the v5 standing block out of the else, so it's common after the if/else. I need to verify exact indentation. The else closes... let me count: line 627 `}` at 16 spaces (4 levels) closes `else`, line 628 `}` at 12 spaces (3 levels) closes `for _ in 0..n`. Actually from the slice: line 32 is `                }` (16 spaces) and line 33 is `            }` (12 spaces). So v5 block at 620-626 is at 20-space indent = inside else (which starts at 16-space `} else {`... wait no.
+Hold on. The `if/else` structure:
+```
+for _ in 0..n {              // 16 spaces
+let cur = st.current.clone();  // 20 spaces
+if st.scenario == "qing-v1" {  // 20 spaces
+...                  // 24 spaces
+} else {                 // 20 spaces
+step_scenario(...);  // 24 spaces

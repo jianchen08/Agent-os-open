@@ -1,11 +1,10 @@
 # @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
-"""completed 进程即时清理 + 命令日志保留上限测试。
+"""completed 进程即时清理 + 命令日志持久性测试。
 
 _on_output_task_done 在进程输出读完（=进程已退出）时，应立即从 active_processes
-清理内存记录；日志按退出形态分级保留：正常退出（rc==0）入宽限删除队列
-（宽限窗覆盖 execute 返回后 summary/read_log 的磁盘降级读取——竞态契约见
-test_summary_race），过窗由看门狗 tick flush 删除；非正常退出保留便于排障；
-历史残留由启动清扫兜底（>7 天 bash_*.log，带数量汇总）。
+清理内存记录；日志一律持久保留（ADR 2026-11-07 捕获契约：退出不删，宽限删除
+机制已退役——磁盘日志是 read_log/summary 降级路径的真理源，任何时候可读）；
+跨会话残留由启动清扫兜底（>7 天 bash_*.log，只扫孤儿，带数量汇总）。
 """
 
 from __future__ import annotations
@@ -115,13 +114,12 @@ def test_cleared_pid_get_summary_returns_none(pm, tmp_path):
     assert pm.get_summary(105) is None
 
 
-# ── 日志保留上限：正常退出宽限后删，非正常退出保留 ────────────────
+# ── 日志持久性：退出一律不删（ADR 2026-11-07 捕获契约，宽限删除退役）───
 
 
-def test_completed_log_deleted_after_grace(tmp_path):
-    """rc==0（completed）：宽限窗内日志保留（summary/read_log 磁盘降级靠它），
-    过窗后 flush 删除。"""
-    pm = ProcessManager(log_dir=tmp_path / "logs", log_delete_grace_seconds=0.0)
+def test_completed_log_kept_indefinitely(pm):
+    """rc==0（completed）：日志持久保留——summary/read_log 磁盘降级路径
+    任何时候可读，宽限删除机制已退役。"""
     log_file = pm.log_dir / "bash_200.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     log_file.write_text("# Bash Command Log\n# Process ended with exit code: 0\noutput", encoding="utf-8")
@@ -129,36 +127,12 @@ def test_completed_log_deleted_after_grace(tmp_path):
 
     pm._on_output_task_done(200, _DoneTask())
 
-    # 默认宽限（300s）下不删：磁盘降级路径仍可读
-    assert log_file.exists(), "宽限窗内日志必须保留（get_summary/read_log 降级真理源）"
+    assert log_file.exists(), "正常退出日志必须保留（capture 契约底线：任何时候都能读）"
     assert pm.read_log_by_pid(200) is not None
 
-    # 宽限归零 + flush（看门狗 tick 同款入口）→ 删除
-    pm.flush_expired_log_deletes()
-    assert not log_file.exists(), "宽限过窗后正常退出日志应被删除"
-    assert pm.read_log_by_pid(200) is None
 
-    # flush 幂等：队列为空后重复调用不报错
-    pm.flush_expired_log_deletes()
-
-
-def test_completed_log_within_default_grace_kept_after_flush(pm, tmp_path):
-    """默认宽限（300s）内 flush 不删（时间未到，非队首逐出误删）。"""
-    log_file = pm.log_dir / "bash_210.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    log_file.write_text("x", encoding="utf-8")
-    pm.active_processes[210] = _make_info(210, "completed", log_file, exit_code=0)
-
-    pm._on_output_task_done(210, _DoneTask())
-    pm.flush_expired_log_deletes()
-
-    assert log_file.exists(), "宽限窗内 flush 不得删除"
-    assert len(pm._logs_pending_delete) == 1  # noqa: SLF001 — 队列未清空的可观察态
-
-
-def test_error_and_terminated_logs_kept_even_after_flush(pm, tmp_path):
-    """非正常退出（error/terminated）：日志永久保留便于排障，flush 不触碰
-    （≥2 组区分输入）。"""
+def test_error_and_terminated_logs_kept(pm):
+    """非正常退出（error/terminated）：日志保留便于排障（≥2 组区分输入）。"""
     for pid, status in ((201, "error"), (202, "terminated")):
         log_file = pm.log_dir / f"bash_{pid}.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -166,11 +140,9 @@ def test_error_and_terminated_logs_kept_even_after_flush(pm, tmp_path):
         pm.active_processes[pid] = _make_info(pid, status, log_file, exit_code=1)
 
         pm._on_output_task_done(pid, _DoneTask())
-        pm.flush_expired_log_deletes()
 
         assert log_file.exists(), f"status={status} 的日志应保留排障"
         assert pm.read_log_by_pid(pid) is not None
-    assert pm._logs_pending_delete == []  # noqa: SLF001 — 非正常退出不入删除队列
 
 
 # ── 启动清扫：>7 天旧 bash_*.log 一次性清理 ───────────────────────

@@ -12,7 +12,9 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '@/services/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
+import { buildWebviewMessage } from '@/utils/postMessageSecurity'
 import { allDownByMethod, findDownMessage, postUp as bridgePostUp } from './webviewTestBridge'
+import { WebviewWidget } from '../WebviewWidget'
 import type { Mock } from 'vitest'
 
 vi.mock('@/services/api/client', () => ({
@@ -36,8 +38,6 @@ vi.mock('@/utils/postMessageSecurity', async (importOriginal) => {
   }
 })
 
-import { WebviewWidget } from '../WebviewWidget'
-import { buildWebviewMessage } from '@/utils/postMessageSecurity'
 
 const apiGet = apiClient.get as unknown as Mock
 

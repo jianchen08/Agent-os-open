@@ -27,6 +27,10 @@ class LLMResponse:
         finish_reason: LLM 返回的结束原因（stop/length/tool_calls…）。
             ``length`` 表示因命中 max_tokens 被截断，此时 tool_call 的
             arguments JSON 可能不完整，下游需据此识别并处理截断。
+        stream_repetition: 流式退化循环守卫判定并截断（输出原地重复）。
+            True 表示本次输出被主动掐断，``finish_reason`` 收敛为 length。
+        thinking_truncated: 思考内容因超过 max_thinking_chars 被截断
+            （适配服务面流式消费产物；网关聚合同构字段）。
     """
 
     text: str | None = None
@@ -34,3 +38,5 @@ class LLMResponse:
     thinking_text: str | None = None
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
+    stream_repetition: bool = False
+    thinking_truncated: bool = False

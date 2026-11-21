@@ -4,8 +4,8 @@
 主用例见 test_knowledge_base.py / test_routes_memory.py / test_hindsight_server_http.py；
 本文件补：
 1. knowledge_base：upload 纯空白内容 400、bank 异常（含 KBError）如实失败、
-   失败清理未竟告警、aretain 无 operation_id 不进清理面、search 无文本 chunk
-   跳过（chunks 与 results 双面）；
+   verbatim 失败降级告警（禁静默）、成功路径零清理调用、search 无文本 chunk
+   跳过（chunks 与 results 双面，双 bank 扇出）；
 2. routes_memory：list_episodes/list_semantic/search_memories_post 后端缺失降级、
    consolidate 的 int 分支。
 
@@ -101,32 +101,34 @@ class TestKbUploadEdges:
         assert ei.value.status_code == 500
         assert ei.value.error_code == "KNB_ING_8001"
 
-    def test_upload_cleanup_failure_warns_not_masks(self, kb: Any, caplog: pytest.LogCaptureFixture) -> None:
-        """失败清理未竟 → 告警留痕，不掩盖原始入库失败（500 保持）。"""
+    def test_upload_primary_failure_degrades_with_warning_not_masked(
+        self, kb: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """verbatim 落库失败 → 降级 kb_chunks 落库成功 + 告警留痕（如实上报，
+        不静默降级也不掩盖降级事实）。"""
+        monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
         client = MagicMock()
         client.acreate_bank = AsyncMock(return_value=None)
         client.documents = MagicMock()
-        client.documents.delete_document = AsyncMock(side_effect=RuntimeError("cleanup down"))
 
-        seq = {"n": 0}
-
-        async def retain_second_fails(**kw: Any) -> Any:
-            seq["n"] += 1
-            if seq["n"] == 2:
+        async def retain_primary_fails(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
                 raise RuntimeError("vector down")
-            return MagicMock(operation_id=f"c{seq['n']}", accepted=True)
+            return MagicMock(operation_id="c-fb", accepted=True)
 
-        client.aretain = AsyncMock(side_effect=retain_second_fails)
+        client.aretain = AsyncMock(side_effect=retain_primary_fails)
         kb.set_client(client)
 
-        with caplog.at_level("WARNING"), pytest.raises(kb.KBError) as ei:
-            _run(kb.upload_document("a.txt", ("x" * 5000).encode(), headers=_KB_HEADERS))
-        assert ei.value.status_code == 500
-        assert ei.value.error_code == "KNB_ING_8001"
-        assert any("失败清理" in r.getMessage() for r in caplog.records)
+        with caplog.at_level("WARNING"):
+            result = _run(kb.upload_document("a.txt", b"content", headers=_KB_HEADERS))
+        assert result["ingestion_mode"] == "chunks"
+        assert result["degraded"] is True
+        assert result["degradation_reason"]
+        assert any("降级" in r.getMessage() for r in caplog.records)
 
-    def test_upload_aretain_no_operation_id_never_enter_cleanup(self, kb: Any) -> None:
-        """aretain 返回无 operation_id → chunk 不可定位（成功路径零清理调用）。"""
+    def test_upload_success_zero_cleanup_calls(self, kb: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """整文档单次 aretain 成功路径：零清理调用（单写面无清理面）。"""
+        monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
         client = MagicMock()
         client.aretain = AsyncMock(return_value=MagicMock(operation_id="", accepted=True))
         client.acreate_bank = AsyncMock(return_value=None)
@@ -136,20 +138,28 @@ class TestKbUploadEdges:
 
         result = _run(kb.upload_document("a.txt", b"hello", headers=_KB_HEADERS))
         assert result["chunks_imported"] == 1
+        assert result["ingestion_mode"] == "verbatim"
         client.documents.delete_document.assert_not_called()
 
 
 class TestKbSearchEdges:
     def test_search_skips_chunk_without_text(self, kb: Any) -> None:
-        """chunks 集合含无文本条目 → 跳过（不产出空内容结果，不做无谓归属解析）。"""
+        """chunks 集合含无文本条目 → 跳过（不产出空内容结果，不做无谓归属解析）。
+        检索按调用方可见双 bank 扇出，主 bank 命中、降级 bank 空回。"""
         client = MagicMock()
-        resp = MagicMock()
-        resp.chunks = [
-            SimpleNamespace(model_dump=lambda: {"id": "c1", "text": "", "score": 0.9}),
-            SimpleNamespace(model_dump=lambda: {"id": "c2", "content": "有内容", "score": 0.8}),
-        ]
-        resp.results = []
-        client.arecall = AsyncMock(return_value=resp)
+
+        def recall_by_bank(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
+                resp = MagicMock()
+                resp.chunks = [
+                    SimpleNamespace(model_dump=lambda: {"id": "c1", "text": "", "score": 0.9}),
+                    SimpleNamespace(model_dump=lambda: {"id": "c2", "content": "有内容", "score": 0.8}),
+                ]
+                resp.results = []
+                return resp
+            return SimpleNamespace(chunks=[], results=[])
+
+        client.arecall = AsyncMock(side_effect=recall_by_bank)
         client.documents = MagicMock()
         client.documents.get_document = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {}))
         kb.set_client(client)
@@ -162,14 +172,20 @@ class TestKbSearchEdges:
 
     def test_search_results_fallback_skips_no_text(self, kb: Any) -> None:
         """results 兜底面：无文本条目跳过；dict 条目与 model_dump 条目混用。"""
+
+        def recall_by_bank(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
+                resp = MagicMock()
+                resp.chunks = []
+                resp.results = [
+                    {"id": "f1", "text": "事实", "score": 0.5},
+                    {"id": "f2", "content": "", "score": 0.4},
+                ]
+                return resp
+            return SimpleNamespace(chunks=[], results=[])
+
         client = MagicMock()
-        resp = MagicMock()
-        resp.chunks = []
-        resp.results = [
-            {"id": "f1", "text": "事实", "score": 0.5},
-            {"id": "f2", "content": "", "score": 0.4},
-        ]
-        client.arecall = AsyncMock(return_value=resp)
+        client.arecall = AsyncMock(side_effect=recall_by_bank)
         kb.set_client(client)
 
         result = _run(kb.search("q", headers=_KB_HEADERS))

@@ -174,3 +174,179 @@ describe('installImeFocusScroll', () => {
     expect(scrollIntoViewSpy).not.toHaveBeenCalled()
   })
 })
+
+
+/**
+ * visualViewport 键盘缺口补偿（本 describe 新增）
+ *
+ * 背景契约：布局视口（window.innerHeight）与视觉视口（visualViewport）的
+ * 差值 ≥ 阈值 = 软键盘占位（iOS Safari 新键盘模型不缩布局视口，Android
+ * Chrome interactive-widget=resizes-content 已缩 innerHeight——两种模型
+ * 下 gap 都在键盘弹出时增大）。补偿器把 gap 写入根节点 CSS 变量
+ * --ime-keyboard-gap，钉底输入条用它上移到键盘上沿；原生垫高健康的
+ * 环境（壳 ime padding 生效）innerHeight 已被缩掉键盘高度，gap≈0，
+ * 变量恒 0px，零叠加。
+ */
+describe('visualViewport 键盘缺口补偿', () => {
+  const GAP_VAR = '--ime-keyboard-gap'
+
+  /** 可控 fake visualViewport：gap=键盘占位高度，fire 模拟视口 resize */
+  function installFakeVV(initialGap: number) {
+    const listeners = new Set<() => void>()
+    let gap = initialGap
+    let topOffset = 0
+    const vv = {
+      get offsetTop() {
+        return topOffset
+      },
+      get offsetLeft() {
+        return 0
+      },
+      get height() {
+        return window.innerHeight - gap
+      },
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === 'resize') listeners.add(fn)
+      },
+      removeEventListener: (type: string, fn: () => void) => {
+        if (type === 'resize') listeners.delete(fn)
+      },
+    } as unknown as VisualViewport
+    Object.defineProperty(window, 'visualViewport', { value: vv, configurable: true })
+    return {
+      fire(nextGap: number) {
+        gap = nextGap
+        listeners.forEach((fn) => fn())
+      },
+      /** 视觉视口顶部偏移（iOS Safari 页面被键盘上推时 >0） */
+      setTopOffset(v: number) {
+        topOffset = v
+      },
+      listenerCount() {
+        return listeners.size
+      },
+      remove() {
+        Reflect.deleteProperty(window, 'visualViewport')
+      },
+    }
+  }
+
+  let cleanup: (() => void) | null = null
+  let fakeVV: ReturnType<typeof installFakeVV> | null = null
+  let scrollIntoViewSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    scrollIntoViewSpy = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    cleanup?.()
+    cleanup = null
+    fakeVV?.remove()
+    fakeVV = null
+    document.documentElement.style.removeProperty(GAP_VAR)
+    vi.restoreAllMocks()
+    document.body.textContent = ''
+  })
+
+  it('键盘弹出：gap 写入根节点变量，且随键盘高度变化跟踪（性质断言：var ≡ gap）', () => {
+    setViewportWidth(390)
+    fakeVV = installFakeVV(0)
+    cleanup = installImeFocusScroll()
+
+    fakeVV.fire(300)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('300px')
+
+    // 第二组输入：键盘高度变化（换输入法/悬浮键盘）→ 变量同步更新
+    fakeVV.fire(260)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('260px')
+  })
+
+  it('键盘收起：gap 归零 → 变量复位 0px', () => {
+    setViewportWidth(390)
+    fakeVV = installFakeVV(0)
+    cleanup = installImeFocusScroll()
+
+    fakeVV.fire(300)
+    fakeVV.fire(0)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('0px')
+  })
+
+  it('gap 低于键盘判定阈值（iOS Safari 地址栏伸缩差 ~60px）→ 不视为键盘，变量恒 0px', () => {
+    setViewportWidth(390)
+    fakeVV = installFakeVV(0)
+    cleanup = installImeFocusScroll()
+
+    fakeVV.fire(60)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('0px')
+
+    // 第二组输入：更小的 chrome UI 差值同样归零
+    fakeVV.fire(20)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('0px')
+  })
+
+  it('桌面视口：visualViewport 变化不写变量（门控同源 768 断点）', () => {
+    setViewportWidth(1280)
+    fakeVV = installFakeVV(0)
+    cleanup = installImeFocusScroll()
+
+    fakeVV.fire(300)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('')
+  })
+
+  it('无 visualViewport 环境（老浏览器/纯净 jsdom）→ 不写变量且不抛错', () => {
+    setViewportWidth(390)
+    cleanup = installImeFocusScroll()
+
+    window.dispatchEvent(new Event('resize'))
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('')
+  })
+
+  it('键盘弹出 + 已聚焦输入框 → 输入框滚入可视区（scrollIntoView 一次）', () => {
+    setViewportWidth(390)
+    fakeVV = installFakeVV(0)
+    cleanup = installImeFocusScroll()
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    input.focus()
+
+    fakeVV.fire(300)
+    // vv resize 的滚动与既有窗口 resize 一样收敛到 rAF
+    return new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1)
+        expect(scrollIntoViewSpy.mock.contexts[0]).toBe(input)
+        resolve()
+      }),
+    )
+  })
+
+  it('键盘高度公式：var = innerHeight − vv.height − vv.offsetTop（iOS Safari 键盘上推页面时 offsetTop>0）', () => {
+    setViewportWidth(390)
+    // 第一组：无上推，offsetTop=0，键盘 300 → var=300
+    fakeVV = installFakeVV(300)
+    cleanup = installImeFocusScroll()
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('300px')
+
+    // 第二组：同键盘但页面上推 50px（visual viewport 下缘=键盘上沿在布局坐标中上移）
+    fakeVV.setTopOffset(50)
+    fakeVV.fire(300)
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('250px')
+  })
+
+  it('卸载后 visualViewport resize 不再写变量', () => {
+    setViewportWidth(390)
+    fakeVV = installFakeVV(0)
+    cleanup = installImeFocusScroll()
+    // 安装时初始写入（键盘已在屏的冷启动场景）：gap=0 → '0px'
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('0px')
+    expect(fakeVV.listenerCount()).toBe(1)
+    cleanup()
+    cleanup = null
+
+    fakeVV.fire(300)
+    // 卸载后不再写入：变量停在卸载前的值，不随键盘事件变化
+    expect(document.documentElement.style.getPropertyValue(GAP_VAR)).toBe('0px')
+    expect(fakeVV.listenerCount()).toBe(0)
+  })
+})

@@ -64,7 +64,8 @@ describe("app:// 内核启动加载态页", () => {
 
   async function install(): Promise<(req: Request) => Promise<Response>> {
     const mod = await import("../app-protocol");
-    mod.installAppProtocolHandler();
+    // 本测试不触失败路径，观测面 sink 传 no-op（签名要求注入）
+    mod.installAppProtocolHandler(() => {});
     const handler = electronMock.state.handler;
     expect(handler).toBeTruthy();
     return handler as (req: Request) => Promise<Response>;

@@ -5,7 +5,7 @@
  *
  * 形态契约（对齐成熟 AI 编码产品的文件卡）：
  * - 折叠态：单行 chip = 文件名（主位）+ 完整路径摘要 + 大小 + +X -Y + 打开入口；
- * - 展开态·新建文件（无基线 old_content）：全文预览；
+ * - 展开态·新建文件（old_content 空串）：全新增 diff（绿色新增行）；
  * - 展开态·修改已有文件：改前/改后 diff 视图；
  * - 在途（result 无写后内容）：file_card 产不出块 → 级联回后续声明分支。
  */
@@ -90,17 +90,30 @@ describe('fileCardPayload — 字段族与排除面', () => {
   })
 })
 
-describe('renderIntentToBlocks(file_card) — 展开形态：新建预览 vs 修改 diff', () => {
-  it('新建文件（old_content 空串，无基线）→ 全文预览 code 块，默认展开', () => {
+describe('renderIntentToBlocks(file_card) — 展开形态：新建全绿 diff vs 修改 diff', () => {
+  it('新建文件（old_content 空串，无基线）→ 全新增 diff 块（与 chat_card 路径同口径）', () => {
     const blocks = renderIntentToBlocks(
       { card: 'file_card' },
       buildRenderContext(makeToolCall('file_write', { path: 'a.html' }, NEW_FILE_RESULT)),
     )
     expect(blocks).toHaveLength(1)
-    expect(blocks[0].contentType).toBe('code')
-    expect(blocks[0].content).toBe('<html>...</html>')
-    expect(blocks[0].defaultExpanded).toBe(true)
+    expect(blocks[0].contentType).toBe('diff')
+    expect(blocks[0].diffOld).toBe('')
+    expect(blocks[0].diffNew).toBe('<html>...</html>')
     expect(blocks[0].label).toBe('calculator.html')
+  })
+
+  it('result 无 old_content 字段（非空串缺失）→ 全文预览 code 块，默认展开', () => {
+    const blocks = renderIntentToBlocks(
+      { card: 'file_card' },
+      buildRenderContext(
+        makeToolCall('file_write', { path: 'a.html' }, { file: 'a.html', new_content: 'x' }),
+      ),
+    )
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].contentType).toBe('code')
+    expect(blocks[0].content).toBe('x')
+    expect(blocks[0].defaultExpanded).toBe(true)
   })
 
   it('修改已有文件（old_content 非空）→ 改前/改后 diff 块', () => {
@@ -173,7 +186,7 @@ describe('enhanceActivityWithToolConfig — file_card 端到端（折叠 chip �
     expect(out.size).toBe(2389)
     expect(out.diffStat).toEqual({ added: 57, removed: 0 })
     expect(out.customIcon).toBeTruthy()
-    expect(out.details?.[0]?.contentType).toBe('code')
+    expect(out.details?.[0]?.contentType).toBe('diff')
   })
 
   it('声明仍是旧词汇 diff 时行为不变（词汇扩展不回改既有卡）', () => {

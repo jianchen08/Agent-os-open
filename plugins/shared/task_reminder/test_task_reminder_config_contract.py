@@ -2,12 +2,14 @@
 """task_reminder 配置声明面契约测试——agent yaml 声明键与插件消费键对齐。
 
 插件真实消费的 ``plugins.enabled.task_reminder`` 配置键（plugin.py
-``__init__`` / ``_apply_runtime_config``）：
+``__init__`` / ``_max_reminders_for`` / ``_max_reminders_total_for``）：
 
 - ``max_reminders``：per-run 提醒预算上限；
 - ``max_reminders_total``：跨 run 任务级总预算上限；
-- ``evaluation_mode``：评估子管道派发标记；
 - ``priority``：输出插件优先级。
+
+评估者模式不再走配置键：路由键 = 管道 state 的 ``evaluation.mode`` /
+``evaluation.metric_id``（task_evaluate 派发评估子管道时写入）。
 
 本测试扫描声明面（config/agents/** 与 plugins/shared/**/agents/*.yaml），
 断言两件事：
@@ -31,7 +33,7 @@ pytestmark = pytest.mark.unit
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # 插件消费键白名单（与 plugin.py 消费面一一对应；改动消费面时同步本表）
-_CONSUMED_KEYS = {"max_reminders", "max_reminders_total", "evaluation_mode", "priority"}
+_CONSUMED_KEYS = {"max_reminders", "max_reminders_total", "priority"}
 
 # 声明面：agent 配置 yaml（含 mode 插件内置 agent 与模板规格）
 _DECLARATION_ROOTS = ["config/agents", "config/templates", "plugins/shared"]

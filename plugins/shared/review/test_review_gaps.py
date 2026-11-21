@@ -602,6 +602,25 @@ async def test_review_ops_get_report_missing_review_id(mod) -> None:
     assert "缺必填参数: review_id" in out["error"]
 
 
+async def test_review_ops_get_report_tolerates_injected_task_id(mod, monkeypatch) -> None:
+    """get_report 忽略环境注入的 task_id（tool_args_inject 任务管道恒注入）。
+
+    2026-11-18 矩阵实测：任务管道内 review_ops(get_report) 被「task_id 仅
+    action='trigger' 可用」拒绝——task_id 是原生注入的环境键、不是模型误用，
+    不能作为跨动作教学错误。仅 summary/artifacts/metrics/pipeline_ids 仍拒收。
+    """
+
+    async def _rows() -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(mod, "_list_state_rows", _rows)
+    out = await mod.review_ops(
+        action="get_report", review_id="review_missing", task_id="task-injected"
+    )
+    assert out["success"] is False
+    assert out["error"] == "review not found", "注入 task_id 不得触发跨动作拒收"
+
+
 async def test_review_ops_trigger_missing_summary(mod) -> None:
     """trigger 缺 summary（oneOf 必填）→ 实现体教学错误原样透出。"""
     out = await mod.review_ops(action="trigger")

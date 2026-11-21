@@ -7,10 +7,10 @@
  * 实证：pending console 关闭竞态），后续文件事件失效。
  */
 import { Suspense, type ReactNode } from 'react'
-import ErrorBoundary from '@/components/ErrorBoundary'
 import { AuthGate } from '@/components/auth/AuthGate'
 import { ChangePasswordGate } from '@/components/auth/ChangePasswordGate'
 import { GlobalInteractionOverlay } from '@/components/chat/GlobalInteractionOverlay'
+import ErrorBoundary from '@/components/ErrorBoundary'
 import { SchemaFullscreenHost } from '@/components/schema/SchemaFullscreenHost'
 import { useAuthStore } from '@/stores/authStore'
 import { LazyFallback } from './lazyFallback'

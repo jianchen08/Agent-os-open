@@ -40,7 +40,10 @@ const FULLSCREEN_TEXTAREA_MAX_HEIGHT = 160
 /** 发送终局 → 浮窗提示文案（与 useSendOutcomeConsumer 操作点文案一致） */
 function outcomeFeedback(outcome: SendOutcome): { kind: 'ok' | 'error'; message: string } | null {
   if (outcome.kind === 'landed') return { kind: 'ok', message: '已发送' }
-  if (outcome.kind === 'timeout') return { kind: 'error', message: '发送超时，已停止执行——请重新发送' }
+  if (outcome.kind === 'timeout') {
+    // 默认 = 未确认送达可重试；ack 已受理的超时（宽限耗尽）随 reason 透出
+    return { kind: 'error', message: outcome.reason ?? '发送超时，未收到送达确认——请重试' }
+  }
   return {
     kind: 'error',
     message: outcome.reason ? `消息发送失败：${outcome.reason}` : '消息发送失败，请重新发送',

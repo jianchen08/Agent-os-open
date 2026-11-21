@@ -348,3 +348,50 @@ class TestParityTwoEntriesOneFunction:
         through_rest_shape = pim_parse.parse_line(line, now=NOW)
         through_inbox_shape = pim_parse.parse_line(f"  {line}  \n", now=NOW)
         assert through_rest_shape == through_inbox_shape
+
+
+class TestValidateRepeatTargetWordlist:
+    """词表单点 helper：合法/非法双组输入 + 兜底分支（kind 不属 weekly/monthly 返 False）。
+
+    M6：兜底分支（pim_parse.py:76）此前无测试触达 → diff-coverage 99.00% 红。
+    防拟合：合法边界/越界双组 + 兜底 kind 多组参数化 + 性质断言（合法性随
+    target 单调、与词表常量一致），实现无法靠硬编码单值刷绿。
+    """
+
+    @pytest.mark.parametrize(
+        ("kind", "target"),
+        [
+            ("weekly", 0),
+            ("weekly", 6),
+            ("monthly", 1),
+            ("monthly", 31),
+        ],
+    )
+    def test_valid_targets_pass(self, kind: str, target: int) -> None:
+        assert pim_parse.validate_repeat_target(kind, target) is True
+
+    @pytest.mark.parametrize(
+        ("kind", "target"),
+        [
+            ("weekly", -1),
+            ("weekly", 7),
+            ("monthly", 0),
+            ("monthly", 32),
+        ],
+    )
+    def test_out_of_range_rejected(self, kind: str, target: int) -> None:
+        assert pim_parse.validate_repeat_target(kind, target) is False
+
+    @pytest.mark.parametrize("kind", ["bogus", "", "yearly", "WEEKLY"])
+    def test_unknown_kind_returns_false(self, kind: str) -> None:
+        # M6 兜底分支：kind 不属 weekly/monthly 一律 False（大小写敏感，词表只认小写）
+        assert pim_parse.validate_repeat_target(kind, 0) is False
+
+    def test_bounds_match_wordlist_constants(self) -> None:
+        # 性质断言：合法边界与词表常量同源（改常量此断言必变红，防两套真值漂移复发）
+        assert pim_parse.validate_repeat_target("weekly", pim_parse.WEEKDAY_MIN)
+        assert pim_parse.validate_repeat_target("weekly", pim_parse.WEEKDAY_MAX)
+        assert not pim_parse.validate_repeat_target("weekly", pim_parse.WEEKDAY_MAX + 1)
+        assert pim_parse.validate_repeat_target("monthly", pim_parse.MONTH_DAY_MIN)
+        assert pim_parse.validate_repeat_target("monthly", pim_parse.MONTH_DAY_MAX)
+        assert not pim_parse.validate_repeat_target("monthly", pim_parse.MONTH_DAY_MAX + 1)

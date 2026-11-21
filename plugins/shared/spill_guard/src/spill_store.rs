@@ -4,8 +4,9 @@
 //! 避免污染语义检索 + 避免 5MB 走 JSON-RPC/chunk）。
 //!
 //! 布局：`{base_path}/{pipeline_id}/{tool_call_id}` —— 按 pipeline 隔离，
-//! 管道结束整目录清理。gzip 压缩可选（读侧按 gzip magic `1f 8b` 自动识别，
-//! 读写两侧无需额外协商）。
+//! 管道结束整目录清理（on_pipeline_end 钩子），全局 max_files 封顶淘汰兜底
+//! 崩溃残留。gzip 压缩可选（读侧按 gzip magic `1f 8b` 自动识别）——默认关闭：
+//! 存档要供 file_read/enhanced_search 直接读，gzip 会被按二进制拒绝。
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,8 +20,7 @@ use flate2::Compression;
 pub struct SpillRef {
     /// 展示用定位符（相对 base 的 `pipeline_id/key` 形式，`/` 分隔便于跨平台显示）。
     pub locator: String,
-    /// 绝对路径（本机调试用）。
-    #[allow(dead_code)]
+    /// 绝对路径（替换文本的直读引导携带，ADR 2026-11-18-spill-file-face-direct-read）。
     pub absolute_path: PathBuf,
     /// 是否 gzip 压缩存储。
     pub compressed: bool,
@@ -30,8 +30,8 @@ pub struct SpillRef {
 
 /// spill 文件存储。
 ///
-/// read/cleanup 当前由测试与 Python 侧 spill_retrieve 对等实现使用（Rust 侧
-/// 保留 API 对称：存/读/清同一存储契约），绝对路径字段供定位符审计。
+/// 写侧 = spill_guard 本体；清理 = on_pipeline_end 钩子（`cleanup`）与全局
+/// 封顶（`enforce_max_files`）；`read` 由测试与未来消费方使用（存储契约对称）。
 pub struct SpillStore {
     pub(crate) base: PathBuf,
     compression: bool,
@@ -95,7 +95,6 @@ impl SpillStore {
     }
 
     /// 删除该 pipeline 的整个 spill 目录，返回删除的文件数。目录不存在返回 Ok(0)。
-    #[allow(dead_code)]
     pub fn cleanup(&self, pipeline_id: &str) -> Result<usize, String> {
         let dir = self.pipeline_dir(pipeline_id);
         if !dir.exists() {
@@ -104,6 +103,33 @@ impl SpillStore {
         let count = count_files(&dir);
         std::fs::remove_dir_all(&dir).map_err(|e| format!("spill 清理 {dir:?} 失败: {e}"))?;
         Ok(count)
+    }
+
+    /// 全局文件数上限淘汰（用户裁定 2026-11-18：存档要有上限，超限覆盖最老）。
+    ///
+    /// **跨 pipeline 全局统计** base 下全部存档文件——崩溃管道的残留（无人
+    /// 触发 on_pipeline_end 清理）也被兜住；超限按 mtime 最老先删，返回删除
+    /// 数。淘汰后顺手剪除空 pipeline 目录。best-effort：单文件删除失败跳过。
+    pub fn enforce_max_files(&self, max_files: usize) -> usize {
+        if max_files == 0 {
+            return 0; // 0 = 不限
+        }
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        collect_files(&self.base, &mut files);
+        if files.len() <= max_files {
+            return 0;
+        }
+        // mtime 升序（同刻并列按路径字典序，保证淘汰顺序确定）。
+        files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let excess = files.len() - max_files;
+        let mut removed = 0;
+        for (_, path) in files.iter().take(excess) {
+            if std::fs::remove_file(path).is_ok() {
+                removed += 1;
+            }
+        }
+        prune_empty_dirs(&self.base);
+        removed
     }
 
     /// pipeline 子目录（pipeline_id 同样消毒，防穿越）。
@@ -154,6 +180,33 @@ fn count_files(dir: &Path) -> usize {
         }
     }
     n
+}
+
+/// 递归收集 (mtime, path)（淘汰排序用；mtime 不可得退化为 UNIX_EPOCH）。
+fn collect_files(dir: &Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_files(&p, out);
+            } else if let Ok(meta) = entry.metadata() {
+                let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                out.push((mtime, p));
+            }
+        }
+    }
+}
+
+/// 剪除 base 下的空 pipeline 目录（remove_dir 仅空目录成功，非空自动跳过）。
+fn prune_empty_dirs(base: &Path) {
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let _ = std::fs::remove_dir(&p);
+            }
+        }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -271,5 +324,75 @@ mod tests {
         let r = s.save("p", "k", "v2-longer-value").expect("save");
         assert_eq!(r.original_bytes, "v2-longer-value".len());
         assert_eq!(s.read("p", "k").expect("read"), "v2-longer-value");
+    }
+
+    // ── enforce_max_files（全局淘汰，用户裁定 2026-11-18）──────────
+
+    /// 显式设 mtime 造确定时序（同秒写入无法分辨新老）。
+    fn set_mtime(path: &Path, secs: u64) {
+        let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn max_files_zero_means_unlimited() {
+        let (s, _dir) = store(false);
+        for i in 0..5 {
+            s.save("p", &format!("k{i}"), "x").expect("save");
+        }
+        assert_eq!(s.enforce_max_files(0), 0, "0 = 不限，不淘汰");
+        assert_eq!(count_files(&s.base), 5);
+    }
+
+    #[test]
+    fn over_cap_evicts_oldest_globally() {
+        let (s, dir) = store(false);
+        // 跨 pipeline 三文件，mtime 老→新：old-pipe/a < old-pipe/b < new-pipe/c
+        s.save("old-pipe", "a", "oldest").expect("save");
+        s.save("old-pipe", "b", "middle").expect("save");
+        s.save("new-pipe", "c", "newest").expect("save");
+        let a = dir.path().join("old-pipe").join("a");
+        let b = dir.path().join("old-pipe").join("b");
+        let c = dir.path().join("new-pipe").join("c");
+        set_mtime(&a, 100);
+        set_mtime(&b, 200);
+        set_mtime(&c, 300);
+
+        let removed = s.enforce_max_files(2);
+        assert_eq!(removed, 1, "超限 1 个，删最老 1 个");
+        assert!(!a.exists(), "最老的 a 被淘汰");
+        assert!(b.exists() && c.exists());
+        assert!(
+            !dir.path().join("old-pipe").exists() || count_files(&dir.path().join("old-pipe")) > 0,
+            "a 删空后 old-pipe 空目录被剪除"
+        );
+    }
+
+    #[test]
+    fn under_cap_no_eviction() {
+        let (s, _dir) = store(false);
+        s.save("p", "k1", "x").expect("save");
+        s.save("p", "k2", "y").expect("save");
+        assert_eq!(s.enforce_max_files(2), 0);
+        assert_eq!(s.enforce_max_files(10), 0);
+        assert_eq!(count_files(&s.base), 2);
+    }
+
+    #[test]
+    fn eviction_honors_crash_residue_across_pipelines() {
+        // 崩溃管道残留（无 on_pipeline_end 清理）也要被全局上限兜住。
+        let (s, dir) = store(false);
+        s.save("crashed-1", "r1", "x").expect("save");
+        s.save("crashed-1", "r2", "y").expect("save");
+        s.save("live", "k", "z").expect("save");
+        let r1 = dir.path().join("crashed-1").join("r1");
+        let r2 = dir.path().join("crashed-1").join("r2");
+        set_mtime(&r1, 50);
+        set_mtime(&r2, 60);
+        let removed = s.enforce_max_files(1);
+        assert_eq!(removed, 2);
+        assert!(dir.path().join("live").join("k").exists(), "最新保留");
+        assert!(!dir.path().join("crashed-1").exists(), "残留目录整体剪除");
     }
 }

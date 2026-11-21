@@ -1,9 +1,15 @@
 # @feature: FP-0.2.CFG user_space | @vision: V3 可嵌入 | @ci: python-coverage
-"""用户空间解析测试：分区覆盖优先级 + OS 默认位置 + 空白视为未设 + 兜底。
+"""用户空间解析测试：分区覆盖优先级 + 零回落 + 空白视为未设。
 
 与 ``kernel/crates/core/src/user_space.rs`` 同规则（共享真值源契约，与
 ``kernel_db.py`` ↔ ``storage_factory.rs`` 先例同构）——本文件锁 Python 侧，
 Rust 侧由 ``user_space::tests`` 锁，两侧断言的行为必须一致。
+
+**零回落**（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2）：
+``AGENTOS_USER_ROOT`` 未设/空白 = ``None``，不做 OS 标准目录推导。
+2026-11-18 事故回归：Python 侧曾滞后保留 ``%APPDATA%\\agentos`` 回落，
+dev 内核（未交付用户根）的 agent_config_load sidecar 经此读到**装机**用户层
+的 executor 影子，工具面被陈旧副本接管（实测注入 28 件而非缩减后 12 件）。
 """
 
 from __future__ import annotations
@@ -43,11 +49,15 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestSdkDiagnosticsCopyAlignment:
-    """SDK ``diagnostics_settings.user_root`` 副本与本体同输入同输出。
+    """SDK ``diagnostics_settings.user_root`` 副本与本体对齐断言。
 
     SDK 包边界不可 import user_space（user_space 是共享根裸模块，SDK 以
     site-packages 平拷贝布局装入各 venv 时无共享根可达）——副本合法存在，
     防漂移靠本组对齐断言；改动须与本体同刀（锚注释互链）。
+
+    已裁定微差（非漂移，2026-11-18 重裁）：本体零回落（env 未设 = None），
+    SDK 副本必须 ``never None``（settings.yaml 落位需要）——env 未设时副本
+    保留 OS 兜底，env 显式时两侧同根。
     """
 
     @pytest.fixture(autouse=True)
@@ -60,28 +70,14 @@ class TestSdkDiagnosticsCopyAlignment:
         monkeypatch.setenv(user_space.USER_ROOT_ENV, str(tmp_path))
         assert ds.user_root() == user_space.user_root() == tmp_path
 
-    def test_os_default_same_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """常规环境（win: APPDATA 在 / posix: XDG 或 home 兜底）两面同根。"""
-        assert ds.user_root() == user_space.user_root()
-
-    def test_os_data_dir_unavailable_documented_difference(
+    def test_env_unset_both_degrade_per_ruling(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OS 数据目录不可得时的**已知微差**（副本注释裁定，非漂移）：
-
-        SDK 侧 APPDATA 缺省回退 ``~/AppData/Roaming``（settings.yaml 必须
-        可落位，永不 None）；本体诚实返回 None（调用方自择回退）。
-        POSIX 两侧同走 home 兜底，无微差。
-        """
-        if sys.platform == "win32":
-            monkeypatch.delenv("APPDATA", raising=False)
-            assert user_space._os_data_dir() is None
-            assert user_space.user_root() is None
-            assert ds.user_root() == Path.home() / "AppData" / "Roaming" / "agentos"
-        else:
-            monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-            expected = Path.home() / ".local" / "share" / "agentos"
-            assert ds.user_root() == user_space.user_root() == expected
+        """env 未设：本体 None（零回落）；SDK 副本保持 never-None（微差裁定）。"""
+        assert user_space.user_root() is None
+        sdk_root = ds.user_root()
+        assert sdk_root is not None
+        assert sdk_root.name == "agentos", "副本兜底仍锚 <OS 数据目录>/agentos"
 
 
 # ── 分区默认位置（随用户根推导） ───────────────────────────────
@@ -97,18 +93,36 @@ def test_sub_roots_default_under_user_root(
     assert user_space.user_plugins_dir() == tmp_path / "plugins"
 
 
-def test_root_env_overrides_os_default(
+def test_root_env_switch_and_zero_fallback(
     clean_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # 两组区分度输入：显式根 vs 无显式根（后者必落 OS 标准目录下，不是 tmp）
+    """两组区分度输入：显式根生效；未设 → None（零回落，绝不推导 OS 目录）。"""
     monkeypatch.setenv(user_space.USER_ROOT_ENV, str(tmp_path))
     assert user_space.user_root() == tmp_path
 
     monkeypatch.delenv(user_space.USER_ROOT_ENV)
-    os_default = user_space.user_root()
-    assert os_default is not None, "本平台应能推导 OS 标准数据目录"
-    assert os_default.name == "agentos"
-    assert os_default != tmp_path, "无显式根时不得等于显式根（证明分支真的切换了）"
+    assert user_space.user_root() is None, "未设 = None（ADR 2026-11-07 §2.2 零回落）"
+
+
+def test_accident_regression_installed_shadow_must_not_leak_into_dev(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """2026-11-18 事故回归：dev（用户根未交付）不得读装机用户层陈旧副本。
+
+    构造 %APPDATA% 指向「装有 agent 影子的装机用户空间」；dev 内核不交付
+    AGENTOS_USER_ROOT——四个分区根必须全 None，消费方（agent_config_load）
+    因此回落 factory 配置，装机影子不可能接管 dev 工具面。
+    """
+    fake_appdata = tmp_path / "Roaming"
+    shadow = fake_appdata / "agentos" / "config" / "agents" / "executor"
+    shadow.mkdir(parents=True)
+    (shadow / "general_agent.yaml").write_text("tool_ids: [stale_shadow]\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(fake_appdata))
+
+    assert user_space.user_root() is None
+    assert user_space.user_config_dir() is None, "dev 不得把装机用户配置层当自己的"
+    assert user_space.user_data_dir() is None
+    assert user_space.user_plugins_dir() is None
 
 
 # ── 分区环境变量覆盖用户根 ────────────────────────────────────
@@ -151,44 +165,16 @@ def test_blank_env_treated_as_unset(
     assert user_space.user_config_dir() == tmp_path / "config"
 
 
-# ── OS 默认目录语义 ──────────────────────────────────────────
+# ── 零回落（OS 目录推导已删除）────────────────────────────────
 
 
-def test_os_default_follows_platform_convention(
+def test_os_env_vars_are_ignored_without_explicit_user_root(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OS 默认位置按平台约定（与 dirs::data_dir() 对齐）。"""
-    import sys as _sys
-
-    if _sys.platform == "win32":
-        monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
-        assert user_space.user_root() == Path(r"C:\Users\x\AppData\Roaming") / "agentos"
-        # 明示不用 %LOCALAPPDATA%：配置与密钥应随用户漫游
-        monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\x\AppData\Local")
-        assert "Local" not in str(user_space.user_root())
-    elif _sys.platform == "darwin":
-        assert user_space.user_root() == (
-            Path.home() / "Library" / "Application Support" / "agentos"
-        )
-    else:
-        monkeypatch.setenv("XDG_DATA_HOME", "/xdg/data")
-        assert user_space.user_root() == Path("/xdg/data") / "agentos"
-        # XDG 未设时回落 ~/.local/share
-        monkeypatch.delenv("XDG_DATA_HOME")
-        assert user_space.user_root() == Path.home() / ".local" / "share" / "agentos"
-
-
-def test_xdg_blank_falls_back_to_local_share(
-    clean_env: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """XDG_DATA_HOME 空白视为未设（Linux 分支）——空白目录名会拼出相对路径。"""
-    import sys as _sys
-
-    if _sys.platform != "linux":
-        pytest.skip("仅 Linux 分支涉及 XDG")
-
-    monkeypatch.setenv("XDG_DATA_HOME", "   ")
-    assert user_space.user_root() == Path.home() / ".local" / "share" / "agentos"
+    """APPDATA/XDG_DATA_HOME 存在也不参与推导——只认 AGENTOS_USER_ROOT。"""
+    monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
+    monkeypatch.setenv("XDG_DATA_HOME", "/xdg/data")
+    assert user_space.user_root() is None
 
 
 # ── 与 tenant_data 的接线 ────────────────────────────────────

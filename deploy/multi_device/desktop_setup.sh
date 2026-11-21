@@ -112,7 +112,7 @@ if [[ "$MODE" == "remote" ]]; then
   check_rclone || die "先装 rclone（版本 ${RCLUBE_PINNED}）再 --apply"
   # 凭据第三面（D19）：rclone 配置只落本端用户空间（%APPDATA%\rclone\rclone.conf），
   # SSH 密钥以文件路径引用，永不入 manifest/注册表/同步面。首次配置：
-  #   rclone config create <remote名> sftp host 162.14.69.153 user ubuntu \
+  #   rclone config create <remote名> sftp host 203.0.113.153 user ubuntu \
   #     key_file ~/.ssh/<专用密钥>
   plan "mkdir -p '$MOUNT_DIR'（WinFsp 目录挂载点要求：NTFS 本地盘空目录）"
   run mkdir -p "$MOUNT_DIR"

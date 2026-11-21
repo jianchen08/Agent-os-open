@@ -98,23 +98,34 @@ export function resolveTruncatedToolResultForDisplay(
   return { result: r, resultData: rd, mark }
 }
 
+/** 截断总量的人类可读标签（X KB / X.X MB；通用与卡型语义 label 共用单源）。 */
+export function truncatedSizeLabel(totalBytes: number): string {
+  const kb = totalBytes / 1024
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.max(kb, 0.1).toFixed(1)} KB`
+}
+
 /**
- * 「已截断结果」详情块：预览收在可折叠块内，label 如实标注总量；
- * onExpand 由展开回填接线（首次展开触发单条回取，见 toolResultBackfill.ts）。
+ * 「已截断结果」详情块：预览收在可折叠块内，label 如实标注总量。
+ * 2026-11-18 用户裁定：展开只需显示与 LLM 所见一致的内容（写入面已截断的
+ * 预览），不需要未被截断的全文——缺省不接线 onExpand（展开纯渲染：不发起
+ * 请求、不改工具状态；拿不到的数据本就不该拿）。label 可由调用方按卡型
+ * 语义覆盖（如 file_card →「差异对比（共 X KB），展开加载全文」并自行接线
+ * onExpand，经 truncatedSizeLabel 保留总量信息）。
  */
 export function buildTruncatedResultDetailBlock(
   mark: TruncatedToolResult,
-  onExpand: () => Promise<boolean>,
+  onExpand?: () => Promise<boolean>,
+  label?: string,
 ): ActivityDetailBlock {
-  const kb = mark.totalBytes / 1024
-  const sizeLabel = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.max(kb, 0.1).toFixed(1)} KB`
   return {
     id: 'result-truncated',
-    label: `结果已截断（共 ${sizeLabel}），展开加载全文`,
+    label:
+      label ??
+      `结果已截断（共 ${truncatedSizeLabel(mark.totalBytes)}），显示与 LLM 所见一致`,
     content: mark.preview,
     contentType: 'text',
     collapsible: true,
     defaultExpanded: false,
-    onExpand,
+    ...(onExpand ? { onExpand } : {}),
   }
 }

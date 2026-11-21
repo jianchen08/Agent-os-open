@@ -99,13 +99,19 @@ def test_panel_page_served_as_html(plugin_id: str, mode: str, page_id: str) -> N
 
 @pytest.mark.parametrize(("plugin_id", "mode", "page_id"), SEEDS)
 def test_panel_html_read_failure_returns_500(
-    plugin_id: str, mode: str, page_id: str, monkeypatch: pytest.MonkeyPatch
+    plugin_id: str,
+    mode: str,
+    page_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_shared: Any,
 ) -> None:
     """面板页文件缺失（OSError）→ 500 JSON 错误响应（边界翻译，不静默吐空页）。"""
     module = _load_server(plugin_id)
     monkeypatch.setattr(
         module, "_PANEL_HTML_PATH", os.path.join(MODES_DIR, "no_such_panel.html")
     )
+    # mode_roleplay 拆分后消费点在 rp_content 自持绑定；其余种子读本模块属性
+    patch_shared("_PANEL_HTML_PATH", os.path.join(MODES_DIR, "no_such_panel.html"))
     result = _call(module, f"/ext/{plugin_id}/page/{mode}-panel")
     assert result["success"] is False
     assert "panel html read failed" in result["error"]
@@ -415,6 +421,7 @@ def test_live_roleplay_data_assets_served() -> None:
 def test_live_roleplay_sessions_degrade_to_empty_without_kernel() -> None:
     """provider 未注入（单测/内核握手前）→ 200 空载荷（前端契约不破坏）。"""
     module = _load_server("mode_roleplay")
+    module.reset_providers()  # 拆分后 _PROVIDERS 为 rp_common 共享态，先清防跨测试泄漏
     body = _body_json(_call(module, f"{_ROLEPLAY_EP}/sessions"))
     assert body == {"sessions": []}
 

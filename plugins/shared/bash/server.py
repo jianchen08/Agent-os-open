@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Bash 工具 MCP 服务端（0.2 sidecar 接口适配层）。
+"""bash 工具 MCP 服务端（0.2 sidecar 接口适配层）—— 四单词工具。
 
 生命周期治理：
 - `_tool` 为模块级惰性单例：所有 MCP 调用复用同一个 BashTool/ProcessManager，
-  active_processes 跨调用保留（execute → input → continue → terminate 全链路可用）。
+  active_processes 跨调用保留（bash 启动 → log/input/kill 凭 handle 全链路可用）。
 - `on_unload` + `atexit`：sidecar 卸载/退出时调用 ProcessManager.shutdown_all()
   终止所有活动进程并取消看门狗，防止残留进程变孤儿。
 
@@ -34,7 +34,7 @@ def _get_tool() -> BashTool:
     """获取（惰性创建）共享的 BashTool 实例。
 
     所有 MCP 调用复用同一实例——ProcessManager 的 active_processes 因此
-    在调用间存活，continue/input/terminate/read_log 凭 pid 可命中。
+    在调用间存活，log/input/kill 凭 handle（内含 pid + owner）可命中。
     """
     global _tool  # noqa: PLW0603
     if _tool is None:
@@ -42,12 +42,29 @@ def _get_tool() -> BashTool:
     return _tool
 
 
+def _failure_envelope(result: Any) -> dict[str, Any]:
+    """工具失败信封：error/error_code 之外透传 metadata 执行痕迹。
+
+    metadata（exit_code / terminated_by_signal）是上游区分「命令进程已
+    跑完、退出码非零」与「工具本身执行不了」的唯一结构化信号——失败熔断
+    据此不计连败（duplicate_check，2026-11-11 用户裁定）。
+    """
+    envelope: dict[str, Any] = {
+        "success": False,
+        "error": result.error,
+        "error_code": result.error_code,
+    }
+    if result.metadata:
+        envelope["metadata"] = result.metadata
+    return envelope
+
+
 def _progress_forwarder(call_context: dict):
     """构建执行中进度推送前向器（task_observability 任务 2）。
 
     组装 ProgressReporter（1KB/2s 节流）+ asyncio.Queue 消费者（llm_core
     同款模式）：_read_output 每行调 report → 阈值触发 → 消费者协程经
-    frontend.emit 推 tool_progress 事件（bash_execute await 期间事件循环
+    frontend.emit 推 tool_progress 事件（bash 工具 await 期间事件循环
     空闲，消费者得以并发运行）。
 
     Returns:
@@ -82,7 +99,7 @@ def _progress_forwarder(call_context: dict):
                 "pipeline_id": pipeline_id,
                 "message_id": message_id,
                 "call_id": call_id,
-                "tool_name": "bash_execute",
+                "tool_name": "bash",
                 "delta": delta,
                 "bytes_read": bytes_total,
                 "elapsed_ms": int((time.monotonic() - started_at) * 1000),
@@ -105,6 +122,33 @@ def _progress_forwarder(call_context: dict):
             logger.debug("[bash_tool] 进度消费者收尾异常（忽略）", exc_info=True)
 
     return reporter.report, _finalize
+
+
+def _start_run_abort_watch(call_context: Any) -> tuple[asyncio.Event | None, Any]:
+    """装配并启动 run 中止看门狗 → (中止事件, 轮询任务)；不启用返回 (None, None)。
+
+    看门狗是增强能力：装配/启动任何一步失败都降级为不启用，工具本体照常执行
+    （与进度前向器同一降级哲学）。
+    """
+    try:
+        from run_abort_watch import start_watcher  # noqa: PLC0415
+
+        if not isinstance(call_context, dict):
+            return None, None
+        watcher = start_watcher(plugin, call_context)
+        if watcher is None:
+            return None, None
+        return watcher.event, asyncio.create_task(watcher.watch())
+    except Exception:  # noqa: BLE001 —— 看门狗故障不得阻断命令执行
+        logger.debug("[bash_tool] run 中止看门狗装配失败（降级为不启用）", exc_info=True)
+        return None, None
+
+
+def _stop_run_abort_watch(task: Any) -> None:
+    """取消看门狗轮询任务（调用结束收尾，幂等；任务已结束则空转）。"""
+    if task is None or task.done():
+        return
+    task.cancel()
 
 
 async def _shutdown_all() -> None:
@@ -135,55 +179,46 @@ def _atexit_cleanup() -> None:
         pass
 
 
+# ── 四工具注册（声明即注册；input_schema 与 plugin.json 全等，R3 契约） ──
+
+
 @plugin.tool(
-    name="bash_execute",
+    name="bash",
     schema={
         "type": "object",
         "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["execute", "continue", "terminate", "input", "read_log"],
-                "description": "execute=执行新命令；"
-                "continue=凭 pid 继续等（仍在跑则等到完成或超时，已完成则直接返回结果）；"
-                "terminate=凭 pid 终止；input=凭 pid 向等待输入的进程发文本（yes/no、密码等）；"
-                "read_log=凭 pid 读完整日志（任何时候都能用，进程已结束也能读）。",
-                "default": "execute",
-            },
             "command": {
                 "type": "string",
-                "description": "要执行的Shell命令（action=execute 时必需）",
-            },
-            "pid": {
-                "type": "integer",
-                "description": "进程ID（action=continue/terminate/input/read_log 时必需，由 execute 或 continue 的 running 返回值提供）",
+                "description": "要执行的 Shell 命令",
             },
             "timeout": {
                 "type": "integer",
-                "description": "等待上限秒数（默认30，最大290）。超时不杀进程，返回 running+pid 供继续轮询。",
+                "description": "前台等待上限秒数（默认 30，最大 600）。超时不杀进程："
+                "返回 running+handle 并附带全部已捕获输出，进程继续运行，"
+                "可凭 handle 用 log/input/kill 管理。",
                 "default": 30,
-                "maximum": 290,
+                "maximum": 600,
+            },
+            "background": {
+                "type": "boolean",
+                "description": "true=立即返回 handle 不等待（长任务用）；"
+                "false=前台阻塞到完成或等待上限（默认 false）。",
+                "default": False,
             },
             "working_dir": {
                 "type": "string",
                 "description": "命令执行的工作目录，默认为当前目录",
             },
-            "input_text": {
-                "type": "string",
-                "description": "向运行中进程发送的输入文本（action=input 时必需）。如 yes/no、密码、菜单选项编号。",
-            },
-            "force": {
-                "type": "boolean",
-                "description": "强制终止（action=terminate 时有效，默认 false）",
-                "default": False,
-            },
         },
-        "required": [],
+        "required": ["command"],
     },
-    description="执行 Shell 命令。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，"
+    description="执行 Shell 命令。前台阻塞到完成或等待上限；超时/后台返回 running+handle，"
+    "进程不死，凭 handle 用 log 读输出、input 发交互输入、kill 终止。"
+    "不要手动 nohup/setsid/disown/行尾&（本工具自带 background=true，"
     "手动后台化会使进程脱离管理）。读文件/看目录用 file_read、搜文件内容/文件名用 enhanced_search。"
     "危险命令（rm -rf /、format、dd if= 等）会被拦截。Windows 与 Linux/Mac 语法可能不同。",
 )
-async def bash_execute(**kwargs: dict[str, Any]) -> dict[str, Any]:
+async def bash(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """执行 Shell 命令（0.2 MCP 入口）。
 
     所有调用共享同一个 BashTool 单例——进程状态跨调用保持。
@@ -203,15 +238,104 @@ async def bash_execute(**kwargs: dict[str, Any]) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             logger.debug("[bash_tool] 进度前向器构建失败（降级）", exc_info=True)
 
-    bash = _get_tool()
+    # run 中止看门狗（run_abort_watch）：run 卡在长命令里时，停止信号（run_status
+    # =suspended）只能在工具返回后由引擎在 step/轮边界看到——本看门狗旁路轮询，
+    # 命中即置事件，由 run_command 整树杀进程并快速返回，run 立刻回到边界收尾，
+    # 排队注入消息随派发链 drain 消费。装配失败/能力缺席一律降级为不启用。
+    abort_event, abort_task = _start_run_abort_watch(call_context)
+    bash_tool = _get_tool()
     try:
-        result = await bash.execute(kwargs, on_output=report)
+        result = await bash_tool.run_command(kwargs, on_output=report, abort_event=abort_event)
     finally:
+        _stop_run_abort_watch(abort_task)
         if finalize is not None:
             await finalize()
     if result.success:
         return result.output
-    return {"success": False, "error": result.error, "error_code": result.error_code}
+    return _failure_envelope(result)
+
+
+@plugin.tool(
+    name="log",
+    schema={
+        "type": "object",
+        "properties": {
+            "handle": {
+                "type": "string",
+                "description": "进程句柄（bash 工具的返回值）",
+            },
+            "block": {
+                "type": "boolean",
+                "description": "true=等到完成或等待上限（默认 30 秒）后返回；"
+                "false=立即返回当前状态与完整日志（默认 false）。"
+                "进程已结束后任何时候都能读（含 sidecar 重启后跨会话定位）。",
+                "default": False,
+            },
+        },
+        "required": ["handle"],
+    },
+    description="凭 handle 读 bash 进程日志。block=false 立即返回当前状态与完整输出"
+    "（进程已结束也能读）；block=true 等到完成或等待上限。长任务超时返回 handle 后，"
+    "用它轮询/取回完整输出。",
+)
+async def log(**kwargs: dict[str, Any]) -> dict[str, Any]:
+    """读日志（0.2 MCP 入口）：block=false 读当前态，block=true 等待完成。"""
+    bash_tool = _get_tool()
+    result = await bash_tool.read_log(kwargs)
+    if result.success:
+        return result.output
+    return _failure_envelope(result)
+
+
+@plugin.tool(
+    name="input",
+    schema={
+        "type": "object",
+        "properties": {
+            "handle": {
+                "type": "string",
+                "description": "进程句柄（bash 工具的返回值）",
+            },
+            "text": {
+                "type": "string",
+                "description": "要发送的输入文本，如 yes/no、密码、菜单选项编号。",
+            },
+        },
+        "required": ["handle", "text"],
+    },
+    description="凭 handle 向等待输入的 bash 进程发送文本（交互式命令的 yes/no、密码、"
+    "菜单选项等）。",
+)
+async def input(**kwargs: dict[str, Any]) -> dict[str, Any]:
+    """发送输入（0.2 MCP 入口）。"""
+    bash_tool = _get_tool()
+    result = await bash_tool.send_input(kwargs)
+    if result.success:
+        return result.output
+    return _failure_envelope(result)
+
+
+@plugin.tool(
+    name="kill",
+    schema={
+        "type": "object",
+        "properties": {
+            "handle": {
+                "type": "string",
+                "description": "进程句柄（bash 工具的返回值）",
+            },
+        },
+        "required": ["handle"],
+    },
+    description="凭 handle 终止 bash 进程（整树杀，日志保留——kill 后 log 仍可读完整输出）。",
+)
+async def kill(**kwargs: dict[str, Any]) -> dict[str, Any]:
+    """终止进程（0.2 MCP 入口）：reason=agent 透传（agent 发起即 agent 语义）。"""
+    bash_tool = _get_tool()
+    result = await bash_tool.terminate(kwargs)
+    if result.success:
+        return result.output
+    return _failure_envelope(result)
 
 
 if __name__ == "__main__":

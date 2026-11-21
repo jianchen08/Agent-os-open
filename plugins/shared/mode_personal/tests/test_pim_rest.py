@@ -20,7 +20,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PKG = Path(__file__).resolve().parents[1]
-_SHARED = _PKG.parents[1]
+_SHARED = _PKG.parent  # plugins/shared/（_root_api 等共享模块所在）
 _MODES = _PKG.parents[1]
 
 # HOST_GUI 九裸名（tool_schema 剥离集，撞名会在边界上下文被静默剥）
@@ -344,3 +344,58 @@ class TestPackageContract:
         # 不新增管道（缺省共享 autonomous）
         assert "pipelines" not in mode_yaml
         assert not (_PKG / "material.py").exists()
+
+
+class TestAckReminderRoute:
+    """P0④：POST /todos/{id}/ack_reminder 与 /events/{id}/ack_reminder——
+    确认坐标 = <=now 最近一次发生；未到点 noop；缺失 404。"""
+
+    def test_todo_ack_targets_current_occurrence(self, store: Any) -> None:
+        todo, _ = store.create(
+            "todo", {"title": "运动", "repeat": "daily", "due": "2026-10-11 18:00"}
+        )
+        status, payload = pim_rest.route(
+            store,
+            f"/ext/mode_personal/todos/{todo['id']}/ack_reminder",
+            "POST",
+            {},
+            {},
+        )
+        assert status == 200
+        assert payload["todo"]["reminder_ack_for"] == "2026-10-11 18:00"
+        assert payload["todo"]["due"] == "2026-10-11 18:00"  # 基准坐标不动
+
+    def test_ack_before_due_time_is_noop_200(self, store: Any) -> None:
+        todo, _ = store.create(
+            "todo", {"title": "作息", "repeat": "daily", "due": "2026-10-12 23:50"}
+        )
+        status, payload = pim_rest.route(
+            store,
+            f"/ext/mode_personal/todos/{todo['id']}/ack_reminder",
+            "POST",
+            {},
+            {},
+        )
+        assert status == 200
+        assert not payload["todo"].get("reminder_ack_for")
+
+    def test_ack_missing_returns_404(self, store: Any) -> None:
+        status, payload = pim_rest.route(
+            store, "/ext/mode_personal/todos/nope/ack_reminder", "POST", {}, {}
+        )
+        assert status == 404
+        assert payload["error"]
+
+    def test_event_ack_route(self, store: Any) -> None:
+        event, _ = store.create(
+            "event", {"title": "冥想", "repeat": "daily", "at": "2026-10-12 07:00"}
+        )
+        status, payload = pim_rest.route(
+            store,
+            f"/ext/mode_personal/events/{event['id']}/ack_reminder",
+            "POST",
+            {},
+            {},
+        )
+        assert status == 200
+        assert payload["event"]["reminder_ack_for"] == "2026-10-12 07:00"

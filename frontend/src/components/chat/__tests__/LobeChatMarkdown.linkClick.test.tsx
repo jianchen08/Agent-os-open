@@ -10,8 +10,8 @@
  * （closest/href/textContent/preventDefault 全走真实链路）。
  */
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
 import ReactMarkdown from 'react-markdown'
+import { describe, expect, it, vi } from 'vitest'
 import { LobeChatMarkdown } from '../LobeChatMarkdown'
 
 // @lobehub/ui Markdown 桩：react-markdown 渲染真实锚点（委托逻辑的被测对象）。

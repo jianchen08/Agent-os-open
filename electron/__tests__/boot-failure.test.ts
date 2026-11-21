@@ -25,6 +25,8 @@ const electronMock = vi.hoisted(() => {
     exit: vi.fn(),
     getPath: vi.fn(() => "C:\\Users\\t\\AppData\\Roaming"),
     getName: vi.fn(() => "agent-os"),
+    // tier2-provision 接线（bootPackagedKernelThenLoad）消费 package_version
+    getVersion: vi.fn(() => "0.2.2"),
     quit: vi.fn(),
     on: vi.fn(),
     whenReady: vi.fn(() => new Promise(() => {})),

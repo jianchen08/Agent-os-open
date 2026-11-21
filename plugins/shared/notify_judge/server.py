@@ -15,7 +15,13 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
 
-from plugin import NotifyJudge, set_capability_caller, set_view_checker  # noqa: E402
+from plugin import (  # noqa: E402
+    NotifyJudge,
+    set_activity_checker,
+    set_capability_caller,
+    set_event_emitter,
+    set_view_checker,
+)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -36,6 +42,27 @@ async def _on_load(params: dict) -> None:
         return await plugin.get_capability("pipeline-executor").call(method, params_, timeout)
 
     set_view_checker(_view_call)
+
+    # 通知出队冲刷（批次 5）：活跃查询（空闲判据）+ notify_flush 帧发射通道。
+    async def _activity_call(method: str, params_: dict, timeout: float | None = None) -> Any:
+        return await plugin.get_capability("pipeline-executor").call(method, params_, timeout)
+
+    set_activity_checker(_activity_call)
+
+    async def _emit_call(method: str, params_: dict, timeout: float | None = None) -> Any:
+        # event-bus 能力面与 human 插件同款：cap.notify("emit", {event, payload, thread_id})
+        bus = plugin.get_capability("event-bus")
+        payload = dict(params_)
+        await bus.notify(
+            str(method),
+            {
+                "event": str(payload.pop("event", "notify_flush")),
+                "payload": payload,
+                "thread_id": str(payload.get("thread_id") or ""),
+            },
+        )
+
+    set_event_emitter(_emit_call)
 
 
 @plugin.tool(

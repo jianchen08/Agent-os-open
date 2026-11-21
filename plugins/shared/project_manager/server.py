@@ -13,6 +13,7 @@ wire 契约 = 工具函数裸 dict 返回，失败经 ``error`` 键表达（无�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict
 from typing import Any
@@ -398,11 +399,15 @@ async def project_create_service(
     mode_tags: list[str] | None = None,
     default_mode: str | None = None,
 ) -> dict[str, Any]:
-    """按路径幂等登记（ensure_project_registered 语义：同路径复用既有行）。"""
+    """按路径幂等登记（ensure_project_registered 语义：同路径复用既有行）。
+
+    登记链含 git init（timeout 60s，同步子进程），出事件循环执行。
+    """
     if not str(title or "").strip():
         return {"error": "title required"}
     try:
-        project, created = project_registry.ensure_project_registered(
+        project, created = await asyncio.to_thread(
+            project_registry.ensure_project_registered,
             title=str(title),
             explicit_path=str(path or ""),
             session_id=str(session_id or ""),
@@ -436,8 +441,13 @@ async def project_list_paths() -> dict[str, Any]:
     description="Delete a project folder (destructive; guarded roots refused → removed=false)",
 )
 async def project_remove_folder(path: str = "") -> dict[str, Any]:
-    """删项目文件夹（路径安全校验内置：盘符根/仓库根/工作空间基拒删）。"""
-    removed = project_registry.remove_project_folder(str(path or ""))
+    """删项目文件夹（路径安全校验内置：盘符根/仓库根/工作空间基拒删）。
+
+    整树 rmtree 是同步阻塞体，出事件循环执行。
+    """
+    removed = await asyncio.to_thread(
+        project_registry.remove_project_folder, str(path or "")
+    )
     return {"removed": removed}
 
 
@@ -518,8 +528,15 @@ async def project_remove_zone(
     description="One-time legacy cleanup: remove container_* dirs under workspace base (idempotent)",
 )
 async def project_purge_legacy_dirs() -> dict[str, Any]:
-    """容器任务遗留目录清除（幂等；tasks 启动序列消费）。"""
-    return {"removed_dirs": project_registry.purge_legacy_workspace_dirs()}
+    """容器任务遗留目录清除（幂等；tasks 启动序列消费）。
+
+    逐个整树 rmtree 是同步阻塞体，出事件循环执行。
+    """
+    return {
+        "removed_dirs": await asyncio.to_thread(
+            project_registry.purge_legacy_workspace_dirs
+        )
+    }
 
 
 if __name__ == "__main__":

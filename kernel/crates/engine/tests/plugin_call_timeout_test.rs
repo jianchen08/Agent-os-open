@@ -1,4 +1,4 @@
-// @feature: invoke_pipeline_plugin 单次调用超时包装（冻结根因根修）| @vision: V1 可观测可干预
+// @feature: FP-0.2.〇 插件调用单次超时包装(冻结根因根修,invoke_plugin 单次上限三分支取最小) | @vision: V1 | @ci: rust-test
 //! 冻结根因（装机版缺陷清偿计划 20261015 §二）：插件管线步调用无单次上限——
 //! 挂死成员冻结整 run，stop_check 轮边界执法等不到轮结束。3a3622520 run 级
 //! 看门狗兜住症状；本刀根修：`invoke_plugin` 单次调用恒有上界，三分支取最小：

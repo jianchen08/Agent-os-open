@@ -103,11 +103,11 @@ async def test_concurrent_same_workspace_creates_once():
     results = await asyncio.gather(
         manager.get_or_create_environment(
             task_id="t1", task_type=TaskType.ATOMIC, workspace=ws,
-            operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
+            operation_type=OperationType.CODE_EXECUTION, tool_name="bash",
         ),
         manager.get_or_create_environment(
             task_id="t2", task_type=TaskType.ATOMIC, workspace=ws,
-            operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
+            operation_type=OperationType.CODE_EXECUTION, tool_name="bash",
         ),
     )
 
@@ -139,12 +139,12 @@ async def test_concurrent_different_workspaces_dont_block():
         manager.get_or_create_environment(
             task_id="t1", task_type=TaskType.ATOMIC,
             workspace="/proj/ws_a__wt_11111111",
-            operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
+            operation_type=OperationType.CODE_EXECUTION, tool_name="bash",
         ),
         manager.get_or_create_environment(
             task_id="t2", task_type=TaskType.ATOMIC,
             workspace="/proj/ws_b__wt_22222222",
-            operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
+            operation_type=OperationType.CODE_EXECUTION, tool_name="bash",
         ),
     )
 
@@ -204,11 +204,11 @@ async def test_second_concurrent_task_reuses_via_liveness_probe():
     results = await asyncio.gather(
         manager.get_or_create_environment(
             task_id="t1", task_type=TaskType.ATOMIC, workspace=ws,
-            operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
+            operation_type=OperationType.CODE_EXECUTION, tool_name="bash",
         ),
         manager.get_or_create_environment(
             task_id="t2", task_type=TaskType.ATOMIC, workspace=ws,
-            operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
+            operation_type=OperationType.CODE_EXECUTION, tool_name="bash",
         ),
     )
 

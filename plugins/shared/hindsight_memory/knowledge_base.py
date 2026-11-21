@@ -1,12 +1,25 @@
 """知识库服务（knowledge-base 域）——bank 唯一存储 + 租户分 bank（X10-F1）。
 
-    上传（multipart）→ 切块（~2000 字符/块，朴素滑窗）→ aretain 逐块写记忆
-    bank（kb bank，独立于记忆 "default" bank；**向量库=唯一存储**：无目录、
-    无副本、无对账、不进消息面、不经内核）→ 中途失败如实报错并尽力清理已写
-    chunk → 列表/详情/统计/标签从 bank documents 面派生（分页拉全 +
-    document_metadata.kb_* 聚合）→ 检索（arecall include_chunks 原文，
-    chunk_id=document_id 逐条解析归属上下文）→ 删除（按 kb_item 标签删 bank，
-    主路径；定位 0 文档=404）
+    上传（multipart）→ 整文档单次 aretain 写记忆 bank（**客户端零切块**，
+    条目边界交上游 hindsight 原生摄取管线：递归分隔符切块 `\n\n` 段落优先 +
+    delta retain 增量；ADR 2026-11-19-KB原生摄取管线改造）→ 列表/详情/统计/
+    标签从 bank documents 面派生（分页拉全 + document_metadata.kb_* 聚合）→
+    检索（arecall 原文，results 事实面携带 kb_* 归属）→ 删除（按 kb_item
+    标签双 bank 删除，主路径；定位 0 文档=404）
+
+**双 bank 模式分治（用户裁定 2026-11-19）**：主 bank（``kb``/``kb_<tenant>``）
+bank 级配置 `retain_extraction_mode=verbatim`（LLM 只抽元数据标签，原文原样
+存）+ `entity_labels` 受控词表；降级 bank（``kb_chunks``/``kb_chunks_<tenant>``）
+chunks 模式（零 LLM 原文直存）。verbatim 落库失败（LLM provider 未配置 /
+bank 解析模式被上游强制非 verbatim / aretain 调用失败）→ 降级落 kb_chunks
+bank，响应字段（ingestion_mode/bank_id/degraded/degradation_reason）+ 告警
+日志**如实标注实际落库模式**，禁静默降级。recall/list 删双 bank 扇出，检索
+面统一。
+
+**标题双通道硬约束（ADR 决策5）**：上传把文档标题双通道传入摄取——①内容
+头部前置标题行 ``# {title}``（首 chunk 向量化输入=fact_text，标题随文入向量）
+②aretain context 字段=标题（每条 fact 记录携带归属 + verbatim 抽取获得文档
+上下文）。向量库=唯一存储：无目录、无副本、无对账、不进消息面、不经内核。
 
 租户归属（X10-F1，复用 X4-F1/X6-F1 身份过滤模式）：bank 按租户划分——
 default 种子租户沿用存量 bank ``kb``（旧 kb bank 即 default 租户的 bank，
@@ -55,8 +68,17 @@ logger = logging.getLogger(__name__)
 # ── 常量 ───────────────────────────────────────────────────────────────────
 # 知识块 bank（独立 bank，与记忆 "default" 隔离）——default 种子租户的 bank；
 # 其余租户 kb_<tenant>（_kb_bank_for_tenant）。存量旧 kb bank 即 default 租户
-# 的 bank，零数据迁移。
+# 的 bank，零数据迁移。主 bank bank 级配置 verbatim 抽取模式（LLM 只抽元数据
+# 标签、原文原样存；ADR 2026-11-19 用户裁定主模式）。
 _KB_BANK_ID = "kb"
+
+# 降级 bank（chunks 模式，零 LLM 原文直存）：verbatim 落库失败时的降级位。
+# default 种子租户 ↔ "kb_chunks"，其余租户 kb_chunks_<tenant>。
+_KB_CHUNKS_BANK_ID = "kb_chunks"
+_KB_CHUNKS_BANK_PREFIX = "kb_chunks"
+
+# 降级 bank 前缀（admin bank 发现面区分主/降级；非 admin 恒双 bank 精确对）
+_CHUNKS_BANK_PREFIX = "kb_chunks"
 
 # 内核 dispatcher 权威注入的身份头（匿名请求剥离伪造头，handler 可见即可信）
 _TENANT_HEADER = "x-agentos-tenant"
@@ -69,8 +91,21 @@ _DEFAULT_TENANT = "default"
 # 写面越权/无身份统一文案（403）
 _FORBIDDEN_MSG = "无权操作该知识条目（非上传租户且非 admin 角色）"
 
-# 知识块切块大小（字符，与 server.py _CHUNK_SIZE 同款朴素滑窗）
-_KB_CHUNK_SIZE = 2000
+# sidecar LLM provider 注入的环境变量（server.py _apply_llm_env 写入；缺省或
+# "none" = verbatim 抽取天然不可用，上游对 provider=none 全局强制 chunks 模式）
+_LLM_PROVIDER_ENV = "HINDSIGHT_API_LLM_PROVIDER"
+
+# verbatim 主 bank 的实体域受控词表（ADR 2026-11-19：健康/金钱/法律/安全/学习；
+# entity_labels 为 bank 级可配清单字段，形态=上游 LabelGroup 列表，key:value
+# 分类标签抽取对齐域词表）。消费方扩展词表 = 改此清单（bank config 幂等覆盖）。
+_VERBATIM_ENTITY_LABELS: list[dict[str, Any]] = [
+    {
+        "key": "domain",
+        "description": "知识条目内容域（kb bank verbatim 抽取受控词表）",
+        "type": "multi-values",
+        "values": [{"value": v} for v in ("健康", "金钱", "法律", "安全", "学习")],
+    }
+]
 
 # 允许入库的文档扩展名（无外部解析依赖，纯文本直读）
 _KB_ALLOWED_EXTS = (".txt", ".md")
@@ -144,7 +179,7 @@ def _caller_identity(headers: dict[str, str] | None) -> tuple[str, str, str]:
 
 
 def _kb_bank_for_tenant(tenant_id: str) -> str:
-    """租户 → kb bank id（X10-F1 租户分 bank）。
+    """租户 → kb 主 bank id（X10-F1 租户分 bank）。
 
     default 种子租户沿用存量 bank ``kb``（旧 kb bank 即 default 租户的 bank，
     存量文档零迁移）；其余租户 ``kb_<tenant>`` 从空开始。
@@ -152,11 +187,29 @@ def _kb_bank_for_tenant(tenant_id: str) -> str:
     return _KB_BANK_ID if tenant_id == _DEFAULT_TENANT else f"kb_{tenant_id}"
 
 
+def _kb_chunks_bank_for_tenant(tenant_id: str) -> str:
+    """租户 → kb 降级 bank id（chunks 模式降级位，与主 bank 同租户划分）。"""
+    if tenant_id == _DEFAULT_TENANT:
+        return _KB_CHUNKS_BANK_ID
+    return f"{_KB_CHUNKS_BANK_PREFIX}_{tenant_id}"
+
+
+def _is_chunks_bank(bank_id: str) -> bool:
+    """bank id 是否降级 bank（kb_chunks 前缀；主 bank 形如 kb / kb_<tenant>）。"""
+    return bank_id.startswith(_CHUNKS_BANK_PREFIX)
+
+
+def _bank_extraction_mode(bank_id: str) -> str:
+    """bank → 摄取模式：主 bank verbatim（LLM 抽元数据、原文原样存）；
+    降级 bank chunks（零 LLM 原文直存）。"""
+    return "chunks" if _is_chunks_bank(bank_id) else "verbatim"
+
+
 async def _discover_kb_banks() -> list[str]:
-    """实例内 kb 域 bank id 枚举（banks.list_banks 过滤 ``kb``/``kb_*``）。
+    """实例内 kb 域 bank id 枚举（banks.list_banks 过滤 ``kb``/``kb_*``，含降级 bank）。
 
     client 缺能力/发现失败 → 空集（跨 bank 面 fail-closed 只收窄：调用方
-    仍恒见自身租户 bank，仅失去 admin 全域视野与 403/404 精判）。
+    仍恒见自身租户双 bank，仅失去 admin 全域视野与 403/404 精判）。
     """
     if _client is None:
         return []
@@ -184,12 +237,13 @@ async def _discover_kb_banks() -> list[str]:
 
 
 async def _caller_banks(headers: dict[str, str] | None) -> list[str]:
-    """调用方可见的 kb bank 集合（fail-closed 归属过滤，X10-F1）。
+    """调用方可见的 kb bank 集合（fail-closed 归属过滤，X10-F1；主+降级双 bank）。
 
     - 身份头缺失（非内核认证分发/匿名剥离面）→ 空集，绝不返回全量；
-    - 非 admin：恰自身租户 bank（租户内共享、跨租户隔离）；
-    - admin 角色：实例 kb 域全 bank ∪ 自身 bank（运维面；发现失败降级自身
-      bank，只收窄不放大）。
+    - 非 admin：恰自身租户主 bank + 降级 bank（租户内共享、跨租户隔离；
+      verbatim 降级位落 kb_chunks bank，列表/检索/删除三面同权可见）；
+    - admin 角色：实例 kb 域全 bank ∪ 自身双 bank（运维面；发现失败降级自身
+      双 bank，只收窄不放大）。
     """
     tenant_id, user_id, role = _caller_identity(headers)
     if not tenant_id or not user_id:
@@ -197,11 +251,11 @@ async def _caller_banks(headers: dict[str, str] | None) -> list[str]:
             "[kb] 请求缺身份头（x-agentos-tenant/x-agentos-user），fail-closed 空集"
         )
         return []
-    own = _kb_bank_for_tenant(tenant_id)
+    own = {_kb_bank_for_tenant(tenant_id), _kb_chunks_bank_for_tenant(tenant_id)}
     if role != "admin":
-        return [own]
+        return sorted(own)
     discovered = await _discover_kb_banks()
-    return sorted({*discovered, own})
+    return sorted({*discovered, *own})
 
 
 # ── bank 文档面（唯一数据通道）──────────────────────────────────────────────
@@ -259,7 +313,11 @@ async def _bank_documents(banks: list[str]) -> list[dict[str, Any]]:
 
 
 def _aggregate_items(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """bank 文档 → 条目聚合（document_metadata.kb_* 分组；created_at 倒序）。"""
+    """bank 文档 → 条目聚合（document_metadata.kb_* 分组；created_at 倒序）。
+
+    chunk_count 兜底链：kb_chunk_total 元数据（旧逐块形态）→ memory_unit_count
+    （单文档形态，上游 chunk/单元数）→ 实见文档数。
+    """
     items: dict[str, dict[str, Any]] = {}
     seen: dict[str, int] = {}
     for doc in docs:
@@ -278,7 +336,11 @@ def _aggregate_items(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "mime_type": str(meta.get("kb_mime", "") or ""),
             "categories": [],
             "tags": _public_tags(doc.get("tags")),
-            "chunk_count": int(meta.get("kb_chunk_total", 0) or 0) or seen[kb_id],
+            "chunk_count": (
+                int(meta.get("kb_chunk_total", 0) or 0)
+                or int(doc.get("memory_unit_count", 0) or 0)
+                or seen[kb_id]
+            ),
             "created_at": created,
             "updated_at": created,
         }
@@ -287,13 +349,6 @@ def _aggregate_items(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not item["chunk_count"]:
             item["chunk_count"] = seen[kb_id]
     return sorted(items.values(), key=lambda it: iso_sort_key(str(it["created_at"])), reverse=True)
-
-
-def _chunk_text(text: str, chunk_size: int = _KB_CHUNK_SIZE) -> list[str]:
-    """按字符数朴素滑窗切块——本插件切块算式的单一实现（server 模块转发到此）。"""
-    if not text:
-        return []
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
 # ── 业务函数（bank 派生读面）────────────────────────────────────────────────
@@ -393,9 +448,10 @@ async def _delete_item_in_bank(client: Any, bank_id: str, item_id: str) -> bool:
 async def delete_item(item_id: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     """删除条目：按 ``type:knowledge + kb_item:{id}`` 标签删 bank（主路径）。
 
-    授权（X10-F1，写面真实状态到前端）：缺身份头 → 403；非 admin 且条目落
-    在他租户 bank → 403（同租户共享删除）；admin 跨租户运维删除放行；
-    全域定位 0 文档 → 404。
+    双 bank 覆盖：条目可能落主 bank（verbatim）或降级 bank（kb_chunks，verbatim
+    失败降级形态），两者都删。授权（X10-F1，写面真实状态到前端）：缺身份头 →
+    403；非 admin 且条目落在他租户 bank（含他租户降级 bank）→ 403（同租户共享
+    删除）；admin 跨租户运维删除放行；全域定位 0 文档 → 404。
     """
     tenant_id, user_id, role = _caller_identity(headers)
     if not tenant_id or not user_id:
@@ -404,14 +460,16 @@ async def delete_item(item_id: str, headers: dict[str, str] | None = None) -> di
     banks = await _caller_banks(headers)
     found = False
     if role != "admin":
-        own = _kb_bank_for_tenant(tenant_id)
+        own = {_kb_bank_for_tenant(tenant_id), _kb_chunks_bank_for_tenant(tenant_id)}
         foreign = [
             b for b in await _discover_kb_banks()
-            if b != own and await _bank_has_item(client, b, item_id)
+            if b not in own and await _bank_has_item(client, b, item_id)
         ]
         if foreign:
             raise KBError(403, "KNB_FORB_7006", _FORBIDDEN_MSG)
-        found = await _delete_item_in_bank(client, own, item_id)
+        for bank in sorted(own):
+            if await _delete_item_in_bank(client, bank, item_id):
+                found = True
     else:
         for bank in banks:
             if await _delete_item_in_bank(client, bank, item_id):
@@ -422,7 +480,103 @@ async def delete_item(item_id: str, headers: dict[str, str] | None = None) -> di
     return {"message": "条目已删除", "id": item_id}
 
 
-# ── 上传链路（bank 唯一写入面）──────────────────────────────────────────────
+# ── 上传链路（bank 唯一写入面；整文档单次 aretain + verbatim 主模式）────────
+
+
+def _llm_provider_configured() -> bool:
+    """sidecar LLM provider 是否可用（verbatim 抽取前提）。
+
+    信号源 = server.py `_apply_llm_env` 注入的 ``HINDSIGHT_API_LLM_PROVIDER``；
+    缺失或 "none"（上游对 provider=none 全局强制 chunks 模式）→ verbatim 主
+    模式天然不可用，上传直落 kb_chunks 降级 bank。
+    """
+    provider = os.environ.get(_LLM_PROVIDER_ENV, "").strip()
+    return bool(provider) and provider.lower() != "none"
+
+
+def _title_of(filename: str) -> str:
+    """文档标题 = 文件名去扩展名（kb_name 元数据保留完整文件名）。"""
+    return os.path.splitext(filename)[0] or filename
+
+
+def _title_primed_content(title: str, text: str) -> str:
+    """内容头部前置标题行 ``# {title}``（标题双通道之一：首 chunk 向量化输入
+    含标题语义——向量化输入=fact_text，context 不参与 embedding）。"""
+    return f"# {title}\n\n{text}"
+
+
+async def _resolved_extraction_mode(bank_id: str) -> str:
+    """bank 解析后的实际摄取模式（banks.get_bank_config 权威读）。
+
+    上游在 LLM provider=none 时全局强制 chunks——即使 bank 请求 verbatim，
+    解析值也是 chunks；此读是降级判定的配置面权威信号。读取失败（bank config
+    API 被服务端禁用等）返回空串 = 未知，调用方乐观走主链路。
+    """
+    getter = getattr(getattr(_client, "banks", None), "get_bank_config", None)
+    if not callable(getter):
+        return ""
+    try:
+        config = await getter(bank_id=bank_id)
+    except Exception as exc:  # noqa: BLE001 — 探测失败按未知处理（乐观走主链路）
+        logger.debug("[kb] bank 解析模式探测失败（按未知处理）| bank=%s error=%s", bank_id, exc)
+        return ""
+    if hasattr(config, "model_dump"):
+        config = config.model_dump()
+    if not isinstance(config, dict):
+        return ""
+    resolved = config.get("config") or {}
+    return str(resolved.get("retain_extraction_mode", "") or "") if isinstance(resolved, dict) else ""
+
+
+async def _ensure_bank(bank_id: str = _KB_BANK_ID) -> None:
+    """确保 kb bank 存在且摄取模式/词表就位（幂等；X10-F1 起按租户 bank 调用）。
+
+    模式经 acreate_bank 的 create-or-update 通道（retain_extraction_mode 直传，
+    幂等覆盖）；受控词表（entity_labels）仅 banks config API 通道承载——该 API
+    被服务端禁用时 warn 留痕继续（模式已由 acreate_bank 承载，缺词表仅降级
+    verbatim 实体的域标签增强面）。
+    """
+    if _client is None:
+        raise KBError(503, "KNB_INIT_5001", "知识库后端未初始化（hindsight not initialized）")
+    create = getattr(_client, "acreate_bank", None)
+    if callable(create):
+        await create(bank_id=bank_id, retain_extraction_mode=_bank_extraction_mode(bank_id))
+    if _is_chunks_bank(bank_id):
+        return
+    updater = getattr(getattr(_client, "banks", None), "update_bank_config", None)
+    if callable(updater):
+        try:
+            await updater(bank_id=bank_id, entity_labels=_VERBATIM_ENTITY_LABELS)
+        except Exception as exc:  # noqa: BLE001 — 词表缺席 warn 降级（模式面不受影响）
+            logger.warning(
+                "[kb] bank entity_labels 受控词表设置失败（verbatim 实体域标签增强缺席）"
+                "| bank=%s error=%s",
+                bank_id,
+                exc,
+            )
+
+
+def _auto_tag_from_ext(ext: str) -> str:
+    """自动标签：文件扩展名（如 ".md" → "filetype:md"，随 chunk 落 bank tags）。"""
+    return f"filetype:{ext.lstrip('.')}" if ext else "filetype:unknown"
+
+
+async def _retain_document(bank_id: str, content: str, title: str, metadata: dict[str, str],
+                           tags: list[str]) -> None:
+    """整文档单次 aretain（标题双通道：内容前置标题行 + context=标题）。
+
+    retain_async=True：抽取后台完成（不阻塞上传；recall 逐步可见，ADR 验证点③
+    时点语义）。在 MCP 事件循环内 await（aiohttp 会话 loop 绑定，禁止另起循环）。
+    """
+    client = _require_client()
+    await client.aretain(
+        bank_id=bank_id,
+        content=content,
+        context=title,
+        metadata=metadata,
+        tags=tags,
+        retain_async=True,
+    )
 
 
 async def upload_document(
@@ -431,10 +585,12 @@ async def upload_document(
     mime_type: str = "application/octet-stream",
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """上传文档：切块 → aretain 逐块写调用方租户 bank（唯一存储，X10-F1）。
+    """上传文档：整文档单次 aretain 写调用方租户 bank（唯一存储，X10-F1）。
 
-    中途失败：上传如实失败（500）+ 已写 chunk 尽力清理（清理失败仅告警——
-    残留 chunk 会如实出现在列表面，无账本可失配）。
+    主链路 verbatim 模式（主 bank bank 级配置）；verbatim 落库失败（LLM
+    provider 未配置 / bank 解析模式被上游强制非 verbatim / aretain 调用失败）
+    → 降级落 kb_chunks bank（chunks 模式零 LLM），响应字段 + 告警日志如实
+    标注实际落库模式（禁静默降级）；双 bank 皆失败 → 上传如实 500。
 
     Args:
         filename: 原始文件名
@@ -443,16 +599,17 @@ async def upload_document(
         headers: 入站请求头（内核权威身份头；缺失 → 403 不落写）
 
     Returns:
-        {item_id, file_id, filename, size, chunks_imported, name, message}
+        {item_id, file_id, filename, size, chunks_imported, name, message,
+         ingestion_mode, bank_id, degraded, degradation_reason}
+        （chunks_imported=入库文档数，恒 1；条目内切块归上游原生管线）
 
     Raises:
         KBError: 扩展名不支持 / 文件过大 / 文本解码为空 / 缺身份头(403) /
-            client 未初始化(503) / bank 入库失败(500)
+            client 未初始化(503) / 双 bank 入库失败(500)
     """
     tenant_id, user_id, _role = _caller_identity(headers)
     if not tenant_id or not user_id:
         raise KBError(403, "KNB_FORB_7006", "知识库上传缺身份头（fail-closed，不落写）")
-    bank_id = _kb_bank_for_tenant(tenant_id)
     client = _require_client()
     ext = os.path.splitext(filename)[1].lower()  # noqa: PTH122 —— 与仓库 os.* 风格一致
     if ext not in _KB_ALLOWED_EXTS:
@@ -471,79 +628,85 @@ async def upload_document(
     if not text:
         raise KBError(400, "KNB_VAL_7004", "文件内容为空（无法提取文本）")
 
-    chunks = _chunk_text(text)
-    if not chunks:
-        raise KBError(400, "KNB_VAL_7004", "文件内容为空")
-
     item_id = uuid.uuid4().hex[:12]
     created_at = _now_iso()
     tags = [_TAG_TYPE, f"{_TAG_ITEM_PREFIX}{item_id}", _auto_tag_from_ext(ext)]
+    title = _title_of(filename)
+    metadata = {
+        "memory_type": "semantic",
+        "kb_id": item_id,
+        "kb_name": filename,
+        "kb_size": str(len(content)),
+        "kb_mime": mime_type,
+        "kb_owner": user_id,
+        "kb_tenant": tenant_id,
+        "source": "knowledge_base",
+        "created_at": created_at,
+    }
+    doc_content = _title_primed_content(title, text)
 
-    # 切块 → 向量化入库（bank=唯一存储）。在 MCP 事件循环内 await（aiohttp
-    # 会话 loop 绑定，禁止另起循环）。
-    chunk_ids: list[str] = []
-    try:
-        await _ensure_bank(bank_id)
-        for idx, chunk in enumerate(chunks):
-            chunk_meta = {
-                "memory_type": "semantic",
-                "kb_id": item_id,
-                "kb_name": filename,
-                "kb_size": str(len(content)),
-                "kb_mime": mime_type,
-                "kb_chunk_index": str(idx),
-                "kb_chunk_total": str(len(chunks)),
-                "kb_owner": user_id,
-                "kb_tenant": tenant_id,
-                "source": "knowledge_base",
-                "created_at": created_at,
-            }
-            result = await client.aretain(
-                bank_id=bank_id,
-                content=chunk,
-                metadata=chunk_meta,
-                tags=tags,
-            )
-            cid = str(getattr(result, "operation_id", "") or "")
-            if cid:
-                chunk_ids.append(cid)
-    except Exception as exc:  # noqa: BLE001 — bank 故障=上传如实失败（唯一存储无兜底）
-        await _cleanup_chunks(client, chunk_ids, bank_id)
-        raise KBError(500, "KNB_ING_8001", f"知识块入库失败: {exc}") from exc
+    primary_bank = _kb_bank_for_tenant(tenant_id)
+    fallback_bank = _kb_chunks_bank_for_tenant(tenant_id)
+    landed_bank = ""
+    degradation_reason = ""
 
-    logger.info("[kb] 上传入库成功 item_id=%s filename=%s chunks=%d", item_id, filename, len(chunks))
+    if _llm_provider_configured():
+        try:
+            await _ensure_bank(primary_bank)
+            resolved = await _resolved_extraction_mode(primary_bank)
+            if resolved and resolved != "verbatim":
+                # 上游强制非 verbatim（provider=none 全局强制 chunks）→ 主 bank
+                # 假 verbatim 不做，直落降级 bank
+                degradation_reason = (
+                    f"bank {primary_bank} 解析摄取模式={resolved}（LLM provider 未配置，"
+                    "上游强制 chunks）"
+                )
+            else:
+                await _retain_document(primary_bank, doc_content, title, metadata, tags)
+                landed_bank = primary_bank
+        except Exception as exc:  # noqa: BLE001 — verbatim 落库失败 → 降级（如实上报）
+            degradation_reason = f"verbatim 落库失败: {exc}"
+    else:
+        degradation_reason = (
+            f"LLM provider 未配置（{_LLM_PROVIDER_ENV} 缺失或 none，verbatim 不可用）"
+        )
+
+    if landed_bank:
+        ingestion_mode = "verbatim"
+    else:
+        # 降级落 kb_chunks bank（chunks 模式零 LLM）；降级也失败 = 唯一存储面
+        # 真实故障，如实 500
+        ingestion_mode = "chunks"
+        try:
+            await _ensure_bank(fallback_bank)
+            await _retain_document(fallback_bank, doc_content, title, metadata, tags)
+            landed_bank = fallback_bank
+        except Exception as exc:  # noqa: BLE001 — 双 bank 皆败 = 上传如实失败
+            raise KBError(500, "KNB_ING_8001", f"知识块入库失败: {exc}") from exc
+        logger.warning(
+            "[kb] verbatim 降级落 chunks 模式（如实上报，禁静默）| item_id=%s bank=%s reason=%s",
+            item_id,
+            fallback_bank,
+            degradation_reason,
+        )
+
+    logger.info(
+        "[kb] 上传入库成功 item_id=%s filename=%s bank=%s mode=%s",
+        item_id, filename, landed_bank, ingestion_mode,
+    )
     return {
         "item_id": item_id,
         "file_id": item_id,
         "filename": filename,
         "name": filename,
         "size": len(content),
-        "chunks_imported": len(chunks),
-        "message": "文件上传成功",
+        "chunks_imported": 1,
+        "message": "文件上传成功" if not degradation_reason else "文件上传成功（已降级 chunks 模式入库）",
+        "ingestion_mode": ingestion_mode,
+        "bank_id": landed_bank,
+        "degraded": bool(degradation_reason),
+        "degradation_reason": degradation_reason,
     }
-
-
-async def _cleanup_chunks(client: Any, chunk_ids: list[str], bank_id: str) -> None:
-    """失败清理：已写 chunk 尽力删除（失败只告警——残留会如实出现在列表）。"""
-    for cid in chunk_ids:
-        try:
-            await client.documents.delete_document(bank_id=bank_id, document_id=cid)
-        except Exception as exc:  # noqa: BLE001 — 清理失败留痕，不掩盖原始失败
-            logger.warning("[kb] 失败清理 chunk 未竟 id=%s | %s", cid, exc)
-
-
-async def _ensure_bank(bank_id: str = _KB_BANK_ID) -> None:
-    """确保 kb bank 存在（acreate_bank 幂等；X10-F1 起按租户 bank 调用）。"""
-    if _client is None:
-        raise KBError(503, "KNB_INIT_5001", "知识库后端未初始化（hindsight not initialized）")
-    create = getattr(_client, "acreate_bank", None)
-    if callable(create):
-        await create(bank_id=bank_id)
-
-
-def _auto_tag_from_ext(ext: str) -> str:
-    """自动标签：文件扩展名（如 ".md" → "filetype:md"，随 chunk 落 bank tags）。"""
-    return f"filetype:{ext.lstrip('.')}" if ext else "filetype:unknown"
 
 
 # ── 检索（bank 语义召回）────────────────────────────────────────────────────

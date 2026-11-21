@@ -54,9 +54,17 @@ export interface PipelineMessageState {
    *  >0 = run 结束但链尾 drain 还要继续消费，前端不得显示空闲。运行时态。 */
   roundQueueDepthByPipeline: Record<string, number>
   /** 停止受理中：pipelineId → boolean（点停止 → run 级终止事件之间）。
-   *  run_status 已变 suspended 但引擎长步骤未退出时，前端据此显示「停止中」
-   *  而不是回到可发送态。运行时态，终止事件/新 stream_start 清除。 */
+   *  运行时态，终止事件/新 stream_start 清除；护栏 TTL（streaming handlers
+   *  utils STOP_REQUEST_TTL_MS）过期仍无终态事件时由其定时翻转解除
+   *  （生成观感回落 runs 真值，停止未生效可辨别）。 */
   stoppingByPipeline: Record<string, boolean>
+  /** 等待 AI 响应壳：pipelineId → user 消息落定时刻（Date.now()）。
+   *  直跑认领（claimUserMessage）→ stream_start 之间的窗口观感（ADR
+   *  2026-11-17-awaiting-reply-render-shell）：此窗口用户气泡已上屏但 AI 真
+   *  气泡（stream_start 建）尚未出现，消息区以派生壳补齐「AI 侧即时反馈」——
+   *  壳非消息实体（零乐观气泡=零残影不变量不破），stream_start/轮终态/
+   *  TTL（AWAITING_REPLY_TTL_MS，防引擎死亡悬挂）三口清除。运行时态，不持久化。 */
+  awaitingReplyByPipeline: Record<string, number>
   /** 消息加载失败标记：pipelineId → boolean（X1-F1）。会话切换加载失败由
    *  sessionListStore 落标记（通知策略在调用方，见 loadPipelineMessages 的
    *  { ok, error } 返回契约），消息区据此渲染错误态 + 「重新加载」而非误导性
@@ -159,6 +167,10 @@ export interface PipelineMessageState {
   setRoundQueueDepth: (pipelineId: string, depth: number) => void
   /** 停止受理中标记（点停止 → run 级终止事件/新 stream_start） */
   setStopping: (pipelineId: string, stopping: boolean) => void
+  /** 等待 AI 响应壳置位（user 消息落定 → stream_start 窗口；流式中幂等零动作） */
+  markAwaitingReply: (pipelineId: string) => void
+  /** 等待 AI 响应壳清除（stream_start/轮终态/TTL 三口收敛，幂等） */
+  clearAwaitingReply: (pipelineId: string) => void
   /** 标记/清除指定管道的消息加载失败态（X1-F1：设置点=调用方通知策略，即
    *  sessionListStore 会话切换失败分支；清除点统一收敛在 loadPipelineMessages
    *  成功路径，重试成功/下次进入/WS 重连对账共用） */
@@ -230,6 +242,7 @@ export const PIPELINE_MESSAGE_ACCOUNT_RESET = {
   compressingByPipeline: {},
   roundQueueDepthByPipeline: {},
   stoppingByPipeline: {},
+  awaitingReplyByPipeline: {},
   loadErrorByPipeline: {},
   activePipelineId: null,
   topCursorsByPipeline: {},
@@ -253,4 +266,60 @@ export function setInitialLoadingFlag(
   setState({
     initialLoadingByPipeline: { ...getState().initialLoadingByPipeline, [pipelineId]: loading },
   })
+}
+
+/** 等待 AI 响应壳 TTL（直跑落定 → stream_start 窗口的护栏上限）：热路径亚秒级、
+ *  冷启动（sidecar spawn）秒级，60s 覆盖极端仍不无限悬挂（引擎死亡无终态事件
+ *  时定时兜底撤壳；量级对齐 startPipelineStreaming 的 90s 流式看门狗先例）。 */
+export const AWAITING_REPLY_TTL_MS = 60_000
+
+// TTL 定时器（pipelineId → timer）：置位时挂，清除/重置时撤——与 streaming
+// handlers utils 的 stopUiTtlTimers 同款模块级 Map 模式（行为挂契约文件同源）。
+const awaitingReplyTtlTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function cancelAwaitingReplyTtl(pipelineId: string): void {
+  const timer = awaitingReplyTtlTimers.get(pipelineId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    awaitingReplyTtlTimers.delete(pipelineId)
+  }
+}
+
+/** 等待 AI 响应壳清除（幂等）：stream_start（真气泡接管）/轮终态（stopStreaming
+ *  漏斗，含 terminatePipeline）/TTL 三口收敛到此。 */
+export function clearAwaitingReplyFlag(
+  setState: (partial: Partial<PipelineMessageState>) => void,
+  getState: () => PipelineMessageState,
+  pipelineId: string,
+): void {
+  cancelAwaitingReplyTtl(pipelineId)
+  if (!(pipelineId in getState().awaitingReplyByPipeline)) return
+  const next = { ...getState().awaitingReplyByPipeline }
+  delete next[pipelineId]
+  setState({ awaitingReplyByPipeline: next })
+}
+
+/** 等待 AI 响应壳置位：流式中幂等零动作（new_message 认领回传链等晚到认领
+ *  不得点亮壳——真气泡已在场）；重置 TTL 窗口（先撤旧定时器再挂新的）。 */
+export function markAwaitingReplyFlag(
+  setState: (partial: Partial<PipelineMessageState>) => void,
+  getState: () => PipelineMessageState,
+  pipelineId: string,
+): void {
+  if (!pipelineId) return
+  if (getState().streamingState[pipelineId]?.isStreaming) return
+  cancelAwaitingReplyTtl(pipelineId)
+  setState({
+    awaitingReplyByPipeline: {
+      ...getState().awaitingReplyByPipeline,
+      [pipelineId]: Date.now(),
+    },
+  })
+  awaitingReplyTtlTimers.set(
+    pipelineId,
+    setTimeout(() => {
+      awaitingReplyTtlTimers.delete(pipelineId)
+      clearAwaitingReplyFlag(setState, getState, pipelineId)
+    }, AWAITING_REPLY_TTL_MS),
+  )
 }

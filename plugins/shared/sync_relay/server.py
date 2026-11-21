@@ -37,6 +37,7 @@ token 来源：env ``AGENTOS_SYNC_RELAY_TOKENS``（``device:token`` 逗号对）
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -528,8 +529,13 @@ def _is_loopback_url(url: str) -> bool:
 
 
 async def _login_admin(password: str, port: str) -> tuple[int, dict[str, Any] | None]:
-    """本机内核 login 出站（测试 monkeypatch 面）；返回 (status, body)。"""
-    return _http_json(
+    """本机内核 login 出站（测试 monkeypatch 面）；返回 (status, body)。
+
+    同步 stdlib 单发下放线程池（``sync_agent/server.py`` 孪生同口径：借权链
+    在宿主事件循环上跑，阻塞超 watchdog 阈值即整组退出）。
+    """
+    return await asyncio.to_thread(
+        _http_json,
         "POST",
         f"http://127.0.0.1:{port}/api/v1/auth/login",
         payload={"username": "admin", "password": password},

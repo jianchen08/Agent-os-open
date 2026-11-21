@@ -127,6 +127,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 

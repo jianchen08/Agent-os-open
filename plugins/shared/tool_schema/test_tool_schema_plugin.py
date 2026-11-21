@@ -123,7 +123,15 @@ class TestConfigInterface:
         p = ToolSchemaPlugin(config={"enabled": False})
         p.set_capability_caller(caller)
         result = _run(p.execute(_make_ctx(state={"tool_ids": ["x"]})))
-        assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
+        assert result.state_updates == {
+            "tool_schemas": [],
+            "tool_output_contracts": {},
+            "dynamic_tools": [],
+            "dynamic_tools_errors": [],
+            # 动态引用计数（观测/保活提示，不控制回收）：早退路径显式写空表，
+            # 防上一轮残留把已撤出的宿主显示成"仍被引用"。
+            "dynamic_tool_refs": {},
+        }
         assert caller.calls == []
 
     def test_execute_result_is_plugin_result(self) -> None:
@@ -148,7 +156,15 @@ class TestWantedResolution:
         p.set_capability_caller(caller)
         with caplog.at_level(logging.WARNING):
             result = _run(p.execute(_make_ctx(state={})))
-        assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
+        assert result.state_updates == {
+            "tool_schemas": [],
+            "tool_output_contracts": {},
+            "dynamic_tools": [],
+            "dynamic_tools_errors": [],
+            # 动态引用计数（观测/保活提示，不控制回收）：早退路径显式写空表，
+            # 防上一轮残留把已撤出的宿主显示成"仍被引用"。
+            "dynamic_tool_refs": {},
+        }
         assert caller.calls == []
         assert any("tool_ids" in r.getMessage() for r in caplog.records)
 
@@ -483,6 +499,26 @@ class TestUnavailableSurfaceKey:
         result = _run(p.execute(_make_ctx(state={"tool_ids": ["b", "a"]})))
         assert result.state_updates["tool_surface.unavailable"] == []
 
+    def test_g2_stub_tool_present_in_surface_not_counted_unavailable(self) -> None:
+        """G2 失败桩（声明 schema 保留在工具面）不进 unavailable。
+
+        ADR 2026-11-12：判定失败的工具在面、调用时显式失败——它不是「不在
+        工具面」，模型不应收到「不要规划或调用」。
+        """
+        caller = _FakeCaller(result={
+            "schemas": [
+                {"function": {"name": "task_submit"}},
+                {"function": {"name": "bash"}},
+            ],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={
+            "tool_ids": ["task_submit", "bash"],
+        })))
+        assert result.state_updates["tool_surface.unavailable"] == []
+
     def test_gui_stripped_ids_not_counted_unavailable(self) -> None:
         """隔离会话被剥离的 GUI 工具不进 unavailable（剥离是策略非故障，不告 model）。"""
         caller = _FakeCaller(result={
@@ -563,7 +599,15 @@ class TestServerAdapter:
         """execute 工具：state 无 tool_ids → 空工具面（PluginResult 序列化契约）。"""
         server = _load_server()
         data = _run(server.execute({"pipeline_id": "p-1"}))
-        assert data["state_updates"] == {"tool_schemas": [], "tool_output_contracts": {}}
+        assert data["state_updates"] == {
+            "tool_schemas": [],
+            "tool_output_contracts": {},
+            "dynamic_tools": [],
+            "dynamic_tools_errors": [],
+            # 动态引用计数（观测/保活提示，不控制回收）：早退路径显式写空表，
+            # 防上一轮残留把已撤出的宿主显示成"仍被引用"。
+            "dynamic_tool_refs": {},
+        }
         assert "route_signal" not in data
         assert "skip_remaining" not in data
 

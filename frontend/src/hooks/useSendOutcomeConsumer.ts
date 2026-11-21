@@ -2,8 +2,8 @@
  *  5s 超时三类 outcome，本 hook 按 id 增量消费——
  *  - landed：本管道在途全部落定（按计数）且当前文本 == 受理快照（比对守卫）→
  *    清空输入面（onLanded）；
- *  - timeout：判死出口（用户裁定：超时=消息已坏）→ 操作点报错，停止链由宿主层
- *    订阅同一 outcome 驱动（本 hook 不重复发停止）；
+ *  - timeout：判死出口 → 操作点报错（2026-11-18 修订：超时不自动停 run，reason
+ *    优先透出——默认文案=未确认送达可重试，acked 文案不诱导重发）；
  *  - failed：判死出口的操作点报错（文本未离开输入框，天然可重试）。
  *  挂载即消费一次：组件不存活期间到达的终局经草稿 store 落地（清草稿），
  *  重挂载重放历史终局收敛视图。 */
@@ -49,7 +49,9 @@ export function useSendOutcomeConsumer({
             onLanded()
           }
         } else if (outcome.kind === 'timeout') {
-          onError('发送超时，已停止执行——请重新发送')
+          // 默认文案 = 未确认送达可重试；ack 已受理的超时（宽限耗尽）随 reason
+          // 透出——文案不诱导重发（消息在服务端排队/执行中）
+          onError(outcome.reason ?? '发送超时，未收到送达确认——请重试')
         } else {
           onError(outcome.reason ? `消息发送失败：${outcome.reason}` : '消息发送失败，请重新发送')
         }

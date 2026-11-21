@@ -1,4 +1,5 @@
 use super::*;
+use agentos_core::types::PendingInputSource;
 
 // ── 读路径：slot_row_to_record 的 tool 状态判定（envelope 权威 + 内容兜底）──
 
@@ -105,29 +106,30 @@ fn slot_row_to_record_tool_status_precedence() {
     assert_eq!(rich.metadata.unwrap()["client_message_id"], "cm-1");
 }
 
-/// pending 输入 source / 可选 JSON 列的解析契约：合法值原样还原；
-/// 腐败值分别回退 user 标注 / 丢弃该列（不 panic）。
+/// pending 输入 request 单列的解析契约（ADR-2026-11-17）：合法 JSON 原样
+/// 还原；腐败值返回 None（调用方按毒丸处置——list 跳过 / pop 删除后取下一条，
+/// 防单条坏行永久阻塞队列）。
 #[test]
-fn pending_source_and_optional_json_fail_soft() {
-    assert_eq!(
-        SqliteStore::parse_pending_source("\"http\"", "p1"),
-        PendingInputSource::Http
-    );
-    assert_eq!(
-        SqliteStore::parse_pending_source("{corrupt", "p1"),
-        PendingInputSource::User,
-        "腐败 source 回退 user 标注（留痕）"
-    );
-
-    let ok = SqliteStore::parse_pending_optional_json(Some("{\"k\":1}"), "p1", "execution_context");
-    assert_eq!(ok.unwrap()["k"], 1);
+fn pending_request_parse_fails_closed() {
+    let raw = serde_json::json!({
+        "thread_id": "th1",
+        "user_id": "u1",
+        "pipeline_id": "p1",
+        "content": "hi",
+        "client_message_id": "cm-1",
+        "source": "http",
+        "execution_context": {"k": 1},
+        "state_overlay": null,
+        "pipeline_config_id": null,
+    });
+    let parsed =
+        SqliteStore::parse_pending_request(&raw.to_string(), "p1").expect("合法 request 应可解析");
+    assert_eq!(parsed.source, PendingInputSource::Http);
+    assert_eq!(parsed.execution_context.unwrap()["k"], 1);
+    assert!(parsed.state_overlay.is_none());
     assert!(
-        SqliteStore::parse_pending_optional_json(None, "p1", "state_overlay").is_none(),
-        "NULL 列按缺失"
-    );
-    assert!(
-        SqliteStore::parse_pending_optional_json(Some("{corrupt"), "p1", "state_overlay").is_none(),
-        "腐败 JSON 列丢弃（留痕）"
+        SqliteStore::parse_pending_request("{corrupt", "p1").is_none(),
+        "腐败 request 解析失败（毒丸语义，不静默造默认值）"
     );
 }
 
@@ -349,4 +351,92 @@ async fn list_state_pipeline_ids_merges_two_sources_and_sorts() {
         "两源合并去重 + 映射优先 + 字典序"
     );
     assert!(store.list_state_pipeline_ids("other").unwrap().is_empty());
+}
+
+// ── 重发状态回退读面：load_checkpoint_before_seq / replace_pipeline_state ──
+
+/// 按 `ckpt_max_seq < seq_exclusive` 取 step_no 最大的 checkpoint：
+/// 目标 user 消息所属轮次开始前的状态基线；无满足条件 → None。
+#[tokio::test]
+async fn load_checkpoint_before_seq_picks_latest_below_watermark() {
+    let store = SqliteStore::open_memory().unwrap();
+    // 三份快照的水位分别 = 1 / 5 / 9（save_checkpoint 从 messages 最高 seq 写水位）
+    let state_with_seq = |max_seq: u64, tag: &str| {
+        let messages: Vec<serde_json::Value> = (0..=max_seq)
+            .map(|seq| json!({"seq": seq, "role": "user", "content": "m"}))
+            .collect();
+        json!({"v": tag, "messages": messages})
+    };
+    store
+        .save_checkpoint("p_rb", "t1", 1, &state_with_seq(1, "a"))
+        .unwrap();
+    store
+        .save_checkpoint("p_rb", "t1", 2, &state_with_seq(5, "b"))
+        .unwrap();
+    store
+        .save_checkpoint("p_rb", "t1", 3, &state_with_seq(9, "c"))
+        .unwrap();
+
+    let (step, state) = store
+        .load_checkpoint_before_seq("p_rb", "t1", 5)
+        .expect("水位 1 < 5 应命中")
+        .expect("有档应出口");
+    assert_eq!(step, 1, "水位 5/9 不满足 < 5，取 step 1");
+    assert_eq!(state["v"], "a");
+    assert!(state.get("messages").is_none(), "读面剥离 messages");
+
+    let (step, state) = store
+        .load_checkpoint_before_seq("p_rb", "t1", 6)
+        .unwrap()
+        .expect("水位 5 < 6，应取 step 2");
+    assert_eq!(step, 2);
+    assert_eq!(state["v"], "b");
+
+    assert!(
+        store
+            .load_checkpoint_before_seq("p_rb", "t1", 1)
+            .unwrap()
+            .is_none(),
+        "水位 1 不满足 < 1 → 无基线"
+    );
+    assert!(
+        store
+            .load_checkpoint_before_seq("p_rb", "other_tenant", 99)
+            .unwrap()
+            .is_none(),
+        "租户隔离"
+    );
+}
+
+/// replace_pipeline_state 先清后写：基线缺席的键（目标 step 之后才产生的）
+/// 不得残留；同租户内替换，他租户不受影响。
+#[tokio::test]
+async fn replace_pipeline_state_clears_stale_keys() {
+    let store = SqliteStore::open_memory().unwrap();
+    store
+        .upsert_state_field("p_rp", "t1", "keep", &json!("old"))
+        .unwrap();
+    store
+        .upsert_state_field("p_rp", "t1", "future_only", &json!("later"))
+        .unwrap();
+    store
+        .upsert_state_field("p_other", "t1", "keep", &json!("untouched"))
+        .unwrap();
+
+    let mut fields = serde_json::Map::new();
+    fields.insert("keep".to_string(), json!("rolled_back"));
+    store.replace_pipeline_state("p_rp", "t1", &fields).unwrap();
+
+    let state = store.load_pipeline_state("p_rp", "t1").unwrap();
+    assert_eq!(state.get("keep"), Some(&json!("rolled_back")));
+    assert!(
+        !state.contains_key("future_only"),
+        "目标 step 之后新增的键必须删除"
+    );
+    let other = store.load_pipeline_state("p_other", "t1").unwrap();
+    assert_eq!(
+        other.get("keep"),
+        Some(&json!("untouched")),
+        "他管道不受影响"
+    );
 }

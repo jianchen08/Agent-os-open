@@ -97,12 +97,18 @@ class TestLoadWslNativeConfig:
             assert guard._wsl_native_cfg == {}
 
     def test_explicit_non_dict_normalized_to_empty(self) -> None:
-        """显式值非映射（误配为字符串）→ 空配置（视为未启用），不抛。"""
+        """显式值非映射（误配为字符串）→ 归一空配置，不抛。
+
+        归一后 nt 缺省启用补位（2026-11-13 用户裁定：隔离技术栈 Codex 式
+        原生优先）；posix 装载出口平台门归空。"""
         from plugin import IsolationGuard
 
         guard = IsolationGuard(config={"providers": {"wsl_native": "Ubuntu"}})
 
-        assert guard._wsl_native_cfg == {}
+        if os.name == "nt":
+            assert guard._wsl_native_cfg == {"enabled": True}
+        else:
+            assert guard._wsl_native_cfg == {}
 
     def test_injected_namespace_value_used_when_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """无显式 providers + config_files 注入命名空间在场 → 用其 wsl_native 段。
@@ -131,12 +137,17 @@ class TestLoadWslNativeConfig:
             assert guard._wsl_native_cfg == {}
 
     def test_injected_non_dict_segment_normalized_to_empty(self) -> None:
-        """注入段内 wsl_native 非映射 → 空配置（不把列表当配置用）。"""
+        """注入段内 wsl_native 非映射 → 归一空配置（不把列表当配置用）。
+
+        归一后 nt 缺省启用补位；posix 平台门归空。"""
         from plugin import IsolationGuard
 
         guard = IsolationGuard(config={"isolation_config": {"providers": {"wsl_native": []}}})
 
-        assert guard._wsl_native_cfg == {}
+        if os.name == "nt":
+            assert guard._wsl_native_cfg == {"enabled": True}
+        else:
+            assert guard._wsl_native_cfg == {}
         assert guard._config_probe_error is None
 
     def test_no_injection_source_reports_chain_break(self) -> None:
@@ -152,14 +163,22 @@ class TestLoadWslNativeConfig:
         assert guard._docker_available is False
         assert guard._docker_probe_error == guard._config_probe_error
 
-    def test_injected_namespace_absent_wsl_native_defaults_docker(self) -> None:
-        """注入命名空间在场而 wsl_native 缺席 = 未配置该后端（合法缺省）。"""
+    def test_injected_namespace_absent_wsl_native_defaults_enabled_on_windows(self) -> None:
+        """注入命名空间在场而 wsl_native 缺席：nt 缺省启用 wsl_native。
+
+        2026-11-13 用户裁定（隔离技术栈 Codex 式原生优先）+ 同日装机实测
+        动因：内核启动时资源树换包中间态致配置快照丢 wsl_native 段，旧
+        「合法缺省 docker」语义下 Docker 静默补位拦截全部隔离 bash。posix
+        仍为合法缺省（docker 后端）。"""
         from plugin import IsolationGuard
 
         guard = IsolationGuard(config={"isolation_config": {"providers": {"cua": {}}}})
 
-        assert guard._wsl_native_cfg == {}
         assert guard._config_probe_error is None
+        if os.name == "nt":
+            assert guard._wsl_native_cfg == {"enabled": True}
+        else:
+            assert guard._wsl_native_cfg == {}
 
 
 class TestNoLocalManagerGate:
@@ -206,6 +225,36 @@ class TestProbeBackendConfigBreakage:
 
         assert guard._docker_available is False
         assert guard._docker_probe_error == guard._config_probe_error
+
+    def test_probe_dispatch_wsl_when_section_absent_on_windows(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """段缺席 + nt：探测分派 wsl_native（缺省启用），不落 docker 探测。
+
+        构造期与复检期双断言；_detect_docker 打桩为必炸（分派回潮即红）。
+        posix 平台门归空 → 分派 linux_native/docker，不在本用例面（不落
+        断言，仅冒烟不炸）。"""
+        from plugin import IsolationGuard
+
+        calls: list[str] = []
+
+        def _fake_wsl_detect() -> tuple[str, str]:
+            calls.append("wsl")
+            return (IsolationGuard._PROBE_AVAILABLE, "")
+
+        def _boom() -> Any:  # pragma: no cover - 命中即失败
+            raise AssertionError("wsl_native 缺省启用时分派不得落 docker 探测")
+
+        monkeypatch.setattr(IsolationGuard, "_detect_wsl_native", staticmethod(_fake_wsl_detect))
+        monkeypatch.setattr(IsolationGuard, "_detect_docker", staticmethod(_boom))
+
+        guard = IsolationGuard(config={"isolation_config": {"providers": {"cua": {}}}})
+        guard._probe_backend()  # 冷却复检路径同分派语义
+
+        if os.name == "nt":
+            assert calls  # 构造期 + 复检期均分派 wsl_native
+            assert guard._docker_available is True
+            assert guard._docker_probe_error is None
 
 
 # ═══════════════════ wsl_native 平台门（装载出口单点归一） ═══════════════════
@@ -335,7 +384,7 @@ class TestWslNativePlatformGate:
         ctx = PluginContext(
             state={
                 StateKeys.CORE_TYPE: "tool_execute",
-                StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {}}],
+                StateKeys.RAW_TOOL_CALLS: [{"name": "bash", "args": {}}],
             },
             config={},
             _services={},
@@ -504,13 +553,13 @@ class TestParseCreateEnvResponse:
     成功 → (env_id, exec_backend)；业务失败（任一形态）→ (None, None)。
     """
 
-    def _parse(self, raw: Any) -> tuple[str | None, dict[str, Any] | None]:
+    def _parse(self, raw: Any) -> tuple[str | None, dict[str, Any] | None, str]:
         from plugin import IsolationGuard
 
         return IsolationGuard._parse_create_env_response(raw, "/ws")
 
     def test_success_envelope_yields_env_id(self) -> None:
-        env_id, backend = self._parse(
+        env_id, backend, _detail = self._parse(
             {"success": True, "data": {"env_id": "c1", "status": "ready"}}
         )
         assert env_id == "c1"
@@ -519,7 +568,7 @@ class TestParseCreateEnvResponse:
     def test_exec_backend_dict_passthrough(self) -> None:
         """data.exec_backend 是映射 → 原样返回（原生环境 bash 传输通道）。"""
         backend = {"kind": "wsl_native", "distro": "Ubuntu"}
-        env_id, parsed = self._parse(
+        env_id, parsed, _detail = self._parse(
             {"success": True, "data": {"env_id": "c1", "exec_backend": backend}}
         )
         assert env_id == "c1"
@@ -527,14 +576,14 @@ class TestParseCreateEnvResponse:
 
     def test_exec_backend_non_dict_returns_none(self) -> None:
         """exec_backend 非映射 → None（不把不可信形态注入工具参数）。"""
-        _, backend = self._parse(
+        _, backend, _detail = self._parse(
             {"success": True, "data": {"env_id": "c1", "exec_backend": "wsl"}}
         )
         assert backend is None
 
     def test_explicit_failure_envelope_returns_none(self) -> None:
         """信封 success=False（服务显式失败，error 携原因）→ (None, None)。"""
-        env_id, backend = self._parse(
+        env_id, backend, _detail = self._parse(
             {"success": False, "error": "隔离环境数量已达上限 (3/3)"}
         )
         assert env_id is None
@@ -542,13 +591,13 @@ class TestParseCreateEnvResponse:
 
     def test_business_error_payload_returns_none(self) -> None:
         """data 带 error 键（裸返 error dict 旧形态）→ (None, None)。"""
-        env_id, backend = self._parse({"success": True, "data": {"error": "隔离服务未初始化"}})
+        env_id, backend, _detail = self._parse({"success": True, "data": {"error": "隔离服务未初始化"}})
         assert env_id is None
         assert backend is None
 
     def test_error_placeholder_env_returns_none(self) -> None:
         """status=error（创建失败的 ERROR 占位环境，env_id 是假 id）→ (None, None)。"""
-        env_id, backend = self._parse({
+        env_id, backend, _detail = self._parse({
             "success": True,
             "data": {"env_id": "docker-session", "status": "error", "provider_error": "boom"},
         })
@@ -557,17 +606,29 @@ class TestParseCreateEnvResponse:
 
     def test_missing_env_id_returns_none(self) -> None:
         """成功信封缺 env_id（服务异常形态）→ (None, None)，不注入空 id。"""
-        env_id, _ = self._parse({"success": True, "data": {"status": "ready"}})
+        env_id, _backend, _detail = self._parse({"success": True, "data": {"status": "ready"}})
         assert env_id is None
 
     def test_non_dict_raw_returns_none(self) -> None:
         """返回非映射（反序列化异常形态）→ (None, None)。"""
-        assert self._parse(None) == (None, None)  # type: ignore[arg-type]
-        assert self._parse("boom") == (None, None)  # type: ignore[arg-type]
+        assert self._parse(None) == (None, None, "环境服务返回非映射信封")  # type: ignore[arg-type]
+        assert self._parse("boom") == (None, None, "环境服务返回非映射信封")  # type: ignore[arg-type]
 
     def test_missing_data_payload_returns_none(self) -> None:
-        """信封缺 data 载荷 → (None, None)。"""
-        assert self._parse({"success": True}) == (None, None)
+        """信封缺 data 载荷 → (None, None, 缺载荷原始错)。"""
+        assert self._parse({"success": True}) == (
+            None,
+            None,
+            "环境服务返回缺 data 载荷",
+        )
+
+    def test_missing_env_id_returns_none(self) -> None:
+        """data 无 env_id → (None, None, 缺 env_id 原始错)。"""
+        assert self._parse({"success": True, "data": {}}) == (
+            None,
+            None,
+            "环境服务返回缺 env_id",
+        )
 
 
 # ═══════════════ exec_backend 注入 ═══════════════
@@ -577,22 +638,22 @@ class TestExecBackendInjection:
     """exec_backend 经 ``_inject_container_id`` 注入 bash 参数（plugin.py:570-574）。"""
 
     def test_exec_backend_injected_for_bash_and_browser(self) -> None:
-        """bash_execute 与 browser_* 均收到 _exec_backend（沙箱内 bridge 通路
+        """bash 与 browser_* 均收到 _exec_backend（沙箱内 bridge 通路
         据 backend 选 wsl 传输——v1 缺口补全后的契约）。"""
         from plugin import IsolationGuard
 
         backend = {"kind": "wsl_native"}
         calls = [
-            {"name": "bash_execute", "args": {"command": "ls"}},
+            {"name": "bash", "args": {"command": "ls"}},
             {"name": "browser_navigate", "args": {"url": "http://x"}},
         ]
 
         injected = IsolationGuard._inject_container_id(
             calls,
-            {"bash_execute", "browser_navigate"},
+            {"bash", "browser_navigate"},
             "c-1",
             exec_backend=backend,
-            exec_backend_capable={"bash_execute", "browser_navigate"},
+            exec_backend_capable={"bash", "browser_navigate"},
         )
 
         assert injected is not None
@@ -606,11 +667,11 @@ class TestExecBackendInjection:
         from plugin import IsolationGuard
 
         injected = IsolationGuard._inject_container_id(
-            [{"name": "bash_execute", "args": {"command": "ls"}}],
-            {"bash_execute"},
+            [{"name": "bash", "args": {"command": "ls"}}],
+            {"bash"},
             "c-1",
             exec_backend=None,
-            exec_backend_capable={"bash_execute"},
+            exec_backend_capable={"bash"},
         )
 
         assert injected is not None
@@ -621,11 +682,11 @@ class TestExecBackendInjection:
         from plugin import IsolationGuard
 
         injected = IsolationGuard._inject_container_id(
-            [{"name": "bash_execute", "args": {"command": "ls", "working_dir": "/data"}}],
-            {"bash_execute"},
+            [{"name": "bash", "args": {"command": "ls", "working_dir": "/data"}}],
+            {"bash"},
             "c-1",
             exec_backend={"kind": "wsl_native"},
-            exec_backend_capable={"bash_execute"},
+            exec_backend_capable={"bash"},
         )
 
         assert injected is not None
@@ -637,10 +698,10 @@ class TestExecBackendInjection:
 
         injected = IsolationGuard._inject_container_id(
             [{"name": "file_read", "args": {"path": "/x"}}],
-            {"bash_execute"},
+            {"bash"},
             "c-1",
             exec_backend={"kind": "wsl_native"},
-            exec_backend_capable={"bash_execute"},
+            exec_backend_capable={"bash"},
         )
 
         assert injected is None

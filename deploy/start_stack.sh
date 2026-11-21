@@ -21,6 +21,14 @@ export AGENTOS_PLUGIN_VENVS_DIR=/opt/agentos/plugin-venvs
 export AGENTOS_DB_PATH="$AGENTOS_USER_ROOT/agentos_kernel.db"
 export PATH="/opt/agentos/python/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
+# uv 下载缓存清场（幂等；目录不存在时 rm -rf 零报错零副作用）。内核 boot 自愈轮
+# （主 venv uv sync / 辅助 venv uv pip install，见 kernel venv_provision）在 proot
+# 内 HOME=/root，wheel 下载缓存落 /root/.cache/uv——真机实测单轮 2.39GB，sync
+# 完成后即无用。本脚本在内核启动前清上一轮残留：缓存体积上界=单轮 sync 增量，
+# 稳态（无重建发生）恒为 0。huggingface 缓存=/root/.cache/huggingface 是运行时
+# 按需模型（本地向量模式 bge-m3 ONNX 经 HF 镜像下载），清了即重下——保留不清。
+rm -rf /root/.cache/uv
+
 cd /opt/agentos
 mkdir -p logs
 exec /opt/agentos/agentos-kernel

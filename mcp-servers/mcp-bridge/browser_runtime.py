@@ -78,6 +78,9 @@ def resolve_browser_executable(explicit: str) -> str:
     for pattern in (
         os.path.join(local, "ms-playwright", "chromium-*", "chrome-win*", "chrome.exe"),
         os.path.join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux", "chrome"),
+        # Playwright ≥1.44 的 Linux 产物目录名带 64 后缀（chrome-linux64）：
+        # 只匹配 chrome-linux 会让 Linux 宿主解析不到浏览器。
+        os.path.join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux64", "chrome"),
         os.path.join(
             home, "Library", "Caches", "ms-playwright", "chromium-*",
             "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium",
@@ -141,6 +144,11 @@ class BrowserRuntime:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def upstream(self) -> str:
+        """本运行时挂接的上游名（浏览器型上游首转发前须等它就绪）。"""
+        return self._upstream
 
     def _base_url(self) -> str:
         return f"http://127.0.0.1:{self._debug_port}"

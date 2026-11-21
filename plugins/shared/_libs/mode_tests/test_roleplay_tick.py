@@ -151,7 +151,9 @@ def _audit_rows(workspace: str) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+def rp(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, patch_shared: Any
+) -> Any:
     """server 模块 + 会话行（含 schema）+ 双根卡/包 + tool-executor 桩。"""
     monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path / "user_config"))
     module = _load_server()
@@ -176,6 +178,7 @@ def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     captured: list[tuple[str, str, dict]] = []
     te = _FakeToolExecutor({"world.日期": 1, "world.季节": "春", "world.丰饶": 20}, captured)
     module.plugin = _StubPlugin(te)
+    patch_shared("plugin", module.plugin)  # 拆分后 rp_* 各持绑定，传播到消费点
     module.ops_te = te
     module.ops_captured = captured
     _write_yaml(

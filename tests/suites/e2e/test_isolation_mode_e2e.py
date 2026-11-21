@@ -94,11 +94,11 @@ class TestIsolationDecider:
     def test_resolve_by_tool_name(self):
         """精确工具名匹配。"""
         loader = IsolationPolicyLoader(config_path="/nonexistent/path.yaml")
-        loader._tools["bash_execute"] = ToolIsolationPolicy(
+        loader._tools["bash"] = ToolIsolationPolicy(
             isolation=IsolationLevel.CONTAINER,
         )
         decider = IsolationDecider(policy_loader=loader)
-        policy = decider.resolve("bash_execute")
+        policy = decider.resolve("bash")
         assert policy.isolation == IsolationLevel.CONTAINER
 
     def test_resolve_by_category(self):

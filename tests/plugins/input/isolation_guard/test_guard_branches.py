@@ -65,7 +65,7 @@ def _ok_caller(env_id: str = "container-abc") -> Any:
 
 
 def _make_guard(docker_available: bool = True, **config: Any) -> Any:
-    """构造 IsolationGuard，decider 按策略真值：bash_execute/browser_* → 容器。
+    """构造 IsolationGuard，decider 按策略真值：bash/browser_* → 容器。
 
     显式传 docker_available 使 _docker_auto=False（构造期不触发真实探测）；
     caller 注入落地成功假身（docker_available=True 的决策不再触碰真实 docker）。
@@ -80,7 +80,7 @@ def _make_guard(docker_available: bool = True, **config: Any) -> Any:
 
     def _resolve(tool_name: str, category: Any = None) -> Any:
         mock = MagicMock()
-        if tool_name in ("bash_execute", "browser_navigate", "browser_snapshot"):
+        if tool_name in ("bash", "browser_navigate", "browser_snapshot"):
             mock.isolation = IsolationLevel.CONTAINER
         else:
             mock.isolation = IsolationLevel.HOST
@@ -102,7 +102,7 @@ def _base_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.TASK_ID: "",
         "workspace": _LANDING_WS,
         "execution_context": {"isolation": {"level": "isolated"}},
-        StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "ls"}}],
+        StateKeys.RAW_TOOL_CALLS: [{"name": "bash", "args": {"command": "ls"}}],
     }
     base.update(overrides)
     return base
@@ -263,7 +263,7 @@ class TestHostPathRouting:
                 StateKeys.TASK_ID: "t-1",
                 StateKeys.AGENT_LEVEL: "L2",
                 StateKeys.RAW_TOOL_CALLS: [
-                    {"name": "bash_execute", "args": {"command": "type D:/secrets.txt"}}
+                    {"name": "bash", "args": {"command": "type D:/secrets.txt"}}
                 ],
             }
         )
@@ -286,7 +286,7 @@ class TestHostPathRouting:
                 StateKeys.AGENT_LEVEL: "L2",
                 "execution_context": {"isolation": {"level": "non_isolated"}},
                 StateKeys.RAW_TOOL_CALLS: [
-                    {"name": "bash_execute", "args": {"command": "ls", "working_dir": "C:\\Users"}}
+                    {"name": "bash", "args": {"command": "ls", "working_dir": "C:\\Users"}}
                 ],
             }
         )
@@ -373,13 +373,13 @@ class TestMetadataOverrideAndTaskService:
 class TestContainerAcquisitionGuards:
     async def test_no_workspace_returns_none(self) -> None:
         guard = _make_guard(docker_available=True)
-        assert await guard._get_or_create_container(None, _ctx({})) == (None, None)
+        assert await guard._get_or_create_container(None, _ctx({})) == (None, None, "workspace 未解析")
 
     async def test_caller_none_guard_in_acquisition(self) -> None:
         """调用方未注入守卫：workspace 有效也不触服务，直接 (None, None)。"""
         guard = _make_guard(docker_available=True)
         set_env_caller(None)
-        assert await guard._get_or_create_container(_LANDING_WS, _ctx({})) == (None, None)
+        assert await guard._get_or_create_container(_LANDING_WS, _ctx({})) == (None, None, "环境服务调用方未注入")
 
     async def test_args_parsed_to_non_dict_normalized_empty(self) -> None:
         """args JSON 解析结果非 dict（如 list）→ 归空 dict 再注入。"""
@@ -388,7 +388,7 @@ class TestContainerAcquisitionGuards:
         state = _base_state(
             **{
                 StateKeys.RAW_TOOL_CALLS: [
-                    {"name": "bash_execute", "args": '["rm", "-rf"]'}
+                    {"name": "bash", "args": '["rm", "-rf"]'}
                 ]
             }
         )

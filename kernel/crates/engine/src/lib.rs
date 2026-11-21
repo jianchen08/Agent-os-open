@@ -9,6 +9,7 @@
 //!
 //! - `pipeline_loop`: PipelineExecutor——统一管道执行器（生产路径）
 //! - `store`: SQLite 存储实现——runs/message_slots/blobs/traces/sessions 等 DDL + CRUD
+//! - `deleted_pipelines`: 已删除管道墓碑——删除后的写屏障（防在途 run 回写孤儿）
 //! - `template`: 配置模板插值器——解析 `{{state.xxx}}` / `{{path:xxx}}` 表达式
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.6]
@@ -17,6 +18,7 @@
 
 pub mod compiler;
 pub mod condition;
+pub mod deleted_pipelines;
 pub mod metrics;
 pub mod pipeline_loop;
 pub mod round_events;
@@ -30,6 +32,7 @@ pub use pipeline_loop::apply_messages_op_update;
 pub use pipeline_loop::apply_slot_ops_to_array;
 pub use pipeline_loop::trace_mirror_digest;
 pub use pipeline_loop::PipelineExecutor;
+pub use pipeline_loop::RUN_PLUGIN_ERRORS_KEY;
 pub use round_events::{ConsumedPendingRecord, PendingConsumed, RoundEnd, RoundEvents, RoundStart};
 pub use store::SqliteStore;
 pub use store::VOLATILE_RUN_KEYS;

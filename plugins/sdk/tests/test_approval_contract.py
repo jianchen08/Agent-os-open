@@ -20,11 +20,15 @@ from agentos_plugin_sdk.approval_contract import (
 pytestmark = pytest.mark.unit
 
 # ADR 2026-10-01 决策 2 拍板的封闭集合（+grant 永久/会话两轴）。
+# 2026-11-12 增补（ADR 2026-10-01 附录 A）：approve_pipeline_scope /
+# approve_permanent_whitelist（管道级免审批与永久白名单，设计稿 v2）。
 # 新增成员 = 修订 ADR + 同步改本断言（防枚举变第二张别名表）。
 _ADR_SEMANTICS = frozenset(
     {
         "approve_once",
         "approve_and_remember",
+        "approve_pipeline_scope",
+        "approve_permanent_whitelist",
         "deny",
         "grant_write",
         "grant_write_permanent",

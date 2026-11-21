@@ -4,8 +4,8 @@
 裸名 ``import server`` 在多插件共跑车道会命中他人实现（R2 实证在案），
 故按 child_task_guard 先例经 importlib 显式路径加载为独名模块。覆盖
 http.handle 三路由分发、信封形态、404/422 边界翻译与 on_load 编排——
-探活/拉起全部打桩（外部 HTTP 与进程边界，本文件零网络零 spawn；
-分支级行为在 test_acp_gateway 已覆盖）。
+探活全打桩（外部 HTTP 边界，本文件零网络零 spawn；分支级行为在
+test_acp_gateway 已覆盖；拉起面 2026-11-21 退役，start 端点语义=探活报告）。
 """
 
 from __future__ import annotations
@@ -45,9 +45,7 @@ _SERVER = _load_server()
 def _config() -> GatewayConfig:
     return GatewayConfig(
         base_url="http://127.0.0.1:9999",
-        start_command="start.bat",
         health_timeout_secs=0.5,
-        startup_grace_secs=1.0,
     )
 
 
@@ -113,9 +111,11 @@ def test_status_route_probes_and_reports(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_start_route_reuses_ensure_and_carries_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """start 端点保留（控制台页/契约面不破），语义 = 探活报告（拉起移交后
+    网关不在时返回 handoff 指向 llm_provider_gateway）。"""
     calls = _patch_gateway(
         monkeypatch,
-        ensure_result={"action": "launched", "running": True, "detail": "HTTP 200"},
+        ensure_result={"action": "handoff", "running": False, "detail": "网关不在"},
     )
 
     response = asyncio.run(
@@ -123,9 +123,10 @@ def test_start_route_reuses_ensure_and_carries_urls(monkeypatch: pytest.MonkeyPa
     )
 
     _, body = _body(response)
-    assert body["action"] == "launched"
+    assert body["action"] == "handoff"
+    assert body["running"] is False
     assert body["management_url"].endswith("/management.html")
-    assert len(calls["ensure"]) == 1  # 与 on_load 同一段 ensure 入口
+    assert len(calls["ensure"]) == 1  # 与 on_load 同一段探活入口
     assert calls["probe"] == []
 
 

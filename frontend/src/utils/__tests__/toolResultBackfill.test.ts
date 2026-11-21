@@ -208,6 +208,38 @@ describe('expandTruncatedToolResult 展开回填', () => {
     expect(tool.toolResultData).toEqual(FULL_RESULT)
   })
 
+  it('全量消息缺 toolResult/toolResultData → 如实失败，预览不被 undefined 顶掉（防展开翻中断卡）', async () => {
+    seedBucket()
+    const before = usePipelineMessageStore.getState().getMessages(PIPE).find((m: Message) => m.id === 'a4')!
+    const beforePreview = (before.parts![1] as any).result
+    mockGet.mockResolvedValueOnce({
+      data: { messages: [{ ...fullToolRecord(), content: '', toolResult: undefined, toolResultData: undefined }], total: 1, has_more: false },
+    })
+
+    const ok = await expandTruncatedToolResult({
+      messageId: 'a4',
+      partIndex: 1,
+      callId: 'call-1',
+      sequence: TOOL_SEQ,
+    })
+    expect(ok).toBe(false)
+
+    // part 预览原样保留（若被 undefined 顶掉，卡头会翻「已中断（无结果）」）
+    const after = usePipelineMessageStore.getState().getMessages(PIPE).find((m: Message) => m.id === 'a4')!
+    expect((after.parts![1] as any).result).toBe(beforePreview)
+    // 失败不落已回填标记 → 下次展开可重试
+    mockGet.mockResolvedValueOnce({
+      data: { messages: [fullToolRecord()], total: 1, has_more: false },
+    })
+    const retry = await expandTruncatedToolResult({
+      messageId: 'a4',
+      partIndex: 1,
+      callId: 'call-1',
+      sequence: TOOL_SEQ,
+    })
+    expect(retry).toBe(true)
+  })
+
   it('sequence 缺失（流式占位未挂 seq）→ 如实失败，不发请求', async () => {
     seedBucket()
     const ok = await expandTruncatedToolResult({ messageId: 'a4', partIndex: 1, callId: 'call-1' })

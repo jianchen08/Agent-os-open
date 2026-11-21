@@ -5,6 +5,14 @@ native FFI（对称借用协议）两侧必须同源编译：exe 晚于 dll = dl
 native-sdk 布局编译，工具派发点位 SIGSEGV（2026-09-01/08-31 两次实证）。
 产物与其依赖的源码比 mtime，早于即过期（同批编译的硬链接 mtime 相同，天然通过）。
 
+**检查对象 = 运行面真身**：内核 NativePluginLoader 加载的是插件目录根那份
+cdylib（manifest 相对路径），它必须同时满足两条：
+
+1. 不早于 `kernel/crates/native-sdk` 源码（ABI 同源）；
+2. 不早于**插件自身**源码（改了插件代码不重编 = 内核加载的是旧逻辑；
+   2026-11-09 实测：tool_core 改了 messages.rs，旧口径只比 native-sdk，
+   `--build` 直接放行，实际运行产物仍是旧代码）。
+
 用法：
   python scripts/check_native_artifacts_sync.py            # 只检查
   python scripts/check_native_artifacts_sync.py --build    # 缺失/过期产物先重编再检查
@@ -111,7 +119,7 @@ def main() -> int:
     kernel_latest = latest_source_mtime(REPO / "kernel" / "crates")
 
     rc = 0
-    stale: list[Path] = []
+    stale: list[tuple[Path, bool, bool]] = []
     no_source: list[Path] = []
     checked = 0
     for manifest in native_manifests():
@@ -124,7 +132,12 @@ def main() -> int:
             continue
         dll = manifest.parent / platform_artifact_name(artifact)
         checked += 1
-        if dll.exists() and dll.stat().st_mtime >= sdk_latest:
+        # 运行面真身 = 插件目录根这份 dll（内核 NativePluginLoader 按 manifest
+        # 相对路径加载）：既不能早于 native-sdk（ABI 同源），也不能早于插件自身
+        # 源码（改了自己不重编 = 跑的是旧逻辑，门禁说 OK 也是假的）。
+        plugin_latest = latest_source_mtime(manifest.parent)
+        abi_stale, source_stale = artifact_staleness(dll, sdk_latest, plugin_latest)
+        if not (abi_stale or source_stale):
             continue
         if not (manifest.parent / "Cargo.toml").is_file():
             # 无源码可编（产物只存在于开发机）：跳过，不阻塞启动；
@@ -135,9 +148,9 @@ def main() -> int:
             rel = manifest.parent.relative_to(REPO) if manifest.parent.is_relative_to(REPO) else manifest.parent
             print(f"[native-sync] 重编 {dll.name}（{rel}）...")
             built = build_artifact(manifest.parent, artifact)
-            if built is not None and built.stat().st_mtime >= sdk_latest:
+            if built is not None and not any(artifact_staleness(built, sdk_latest, plugin_latest)):
                 continue
-        stale.append(dll)
+        stale.append((dll, abi_stale, source_stale))
 
     if no_source:
         print(f"[native-sync] ⚠ {len(no_source)} 个声明产物无仓内源码，跳过（插件加载时将报缺失）：")
@@ -147,11 +160,16 @@ def main() -> int:
     if stale:
         rc = 1
         print(
-            f"[native-sync] ❌ {len(stale)} 个 cdylib 缺失或编译于 native-sdk 源码最近变更之前（异源 → SIGSEGV 风险）："
+            f"[native-sync] ❌ {len(stale)} 个 cdylib 缺失/过期（运行面加载的就是插件目录这一份）："
         )
-        for dll in stale:
+        for dll, abi_stale, source_stale in stale:
             rel = dll.relative_to(REPO) if dll.is_relative_to(REPO) else dll
-            print(f"  - {rel}")
+            reasons = []
+            if abi_stale:
+                reasons.append("早于 native-sdk 源码（ABI 异源 → SIGSEGV 风险）")
+            if source_stale:
+                reasons.append("早于插件自身源码（跑的是旧逻辑）")
+            print(f"  - {rel}（{'；'.join(reasons) or '缺失'}）")
     if exe_mtime < kernel_latest:
         rc = 1
         print(
@@ -168,12 +186,31 @@ def main() -> int:
     return rc
 
 
+def artifact_staleness(dll: Path, sdk_latest: float, plugin_latest: float) -> tuple[bool, bool]:
+    """产物过期判定（纯函数）：返回 (ABI 过期, 插件源码过期)。
+
+    - 产物缺失 → 两者皆 True；
+    - 早于 native-sdk 源码 → ABI 过期（跨 FFI 布局可能不一致）；
+    - 早于插件自身源码 → 源码过期（内核加载的是插件目录这份产物，改了不重编
+      等于跑旧逻辑；2026-11-09 实测：tool_core 改了 messages.rs，本门禁按旧口径
+      只比 native-sdk，`--build` 直接放行，实际 release 产物仍是旧代码）。
+    """
+    if not dll.exists():
+        return True, True
+    mtime = dll.stat().st_mtime
+    return mtime < sdk_latest, mtime < plugin_latest
+
+
 def latest_source_mtime(crates: Path) -> float:
-    """kernel/crates 下源码文件（rs/toml）的最新 mtime（构建产物 target 排除）。"""
+    """目录下源码文件（rs/toml/Cargo.lock）的最新 mtime（构建产物/依赖目录排除）。
+
+    同时用于 kernel/crates 与单个插件目录：插件目录里 .venv/target 等依赖与
+    产物目录不算源码变更，否则一次 `uv sync` 就会把产物误判过期。
+    """
     latest = 0.0
     if not crates.is_dir():
         return latest
-    skip = {"target", "__pycache__", "node_modules"}
+    skip = {"target", "__pycache__", "node_modules", ".venv", ".git"}
     stack = [crates]
     while stack:
         d = stack.pop()
@@ -183,7 +220,7 @@ def latest_source_mtime(crates: Path) -> float:
                     if child.name not in skip:
                         stack.append(child)
                     continue
-                if child.suffix in (".rs", ".toml"):
+                if child.suffix in (".rs", ".toml") or child.name == "Cargo.lock":
                     m = child.stat().st_mtime
                     latest = max(latest, m)
         except OSError:

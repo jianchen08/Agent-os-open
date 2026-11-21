@@ -1,3 +1,4 @@
+// @feature: FP-0.2.内核API面 | @vision: V3 可嵌入 | @ci: rust-test
 use super::*;
 use agentos_core::traits::PluginManifest;
 
@@ -588,7 +589,6 @@ async fn session_level_execution_context_injected_by_declaration() {
         "thread-ec",
         "msg-1",
         "u1",
-        "",
         None,
         "run-1",
     )
@@ -655,7 +655,6 @@ async fn message_level_execution_context_merges_per_key_over_session_level() {
         "thread-ec2",
         "msg-2",
         "u1",
-        "",
         Some(&task_ec),
         "run-2",
     )
@@ -679,7 +678,6 @@ async fn message_level_execution_context_merges_per_key_over_session_level() {
         "thread-ec2",
         "msg-3",
         "u1",
-        "",
         Some(&bad),
         "run-3",
     )
@@ -699,7 +697,6 @@ async fn message_level_execution_context_merges_per_key_over_session_level() {
         "thread-ec2",
         "msg-4",
         "u1",
-        "",
         Some(&empty),
         "run-4",
     )
@@ -737,7 +734,6 @@ async fn missing_session_or_metadata_skips_context_injection() {
         "thread-missing",
         "m",
         "u",
-        "",
         None,
         "run",
     )
@@ -757,7 +753,6 @@ async fn missing_session_or_metadata_skips_context_injection() {
         "thread-nometa",
         "m",
         "u",
-        "",
         None,
         "run",
     )

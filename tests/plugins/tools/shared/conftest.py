@@ -7,7 +7,9 @@ sys.path 注入 + 裸名串扰治理声明。
   workspace_aware 等共享单一真值源所在）
 - 插件共享根 plugins/shared（拍平布局，web_ext/media 等插件目录的
   父目录，供 ``web_ext.tool`` 等 PEP-420 命名空间导入）
-- 各插件目录 web_ext / media（与 server.py 的 flat 导入语义一致）
+- 各插件目录 web_ext / media / task_submit（与 server.py 的 flat 导入语义一致；
+  task_submit 的 tool.py 拆分出 acceptance/prompts/validation 裸名同目录模块，
+  运行时由 server.py 的 bootstrap_plugin 垫目录，测试装载器同契约）
 
 _PLUGIN_SOURCE_DIRS 供 tests/plugins/conftest.py 的 pytest_runtest_setup
 在每个测试执行前重新提升源目录并逐出裸名缓存（与 bash/ conftest 同款纪律）。
@@ -24,7 +26,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 _SDK_DIR = _REPO_ROOT / "plugins" / "sdk" / "src"
-_PLUGIN_DIRS = ["web_ext", "media"]
+_PLUGIN_DIRS = ["web_ext", "media", "task_submit"]
 
 # 按优先级排序（第一个最优先），供 tests/plugins/conftest.py 治理钩子消费
 _PLUGIN_SOURCE_DIRS = [

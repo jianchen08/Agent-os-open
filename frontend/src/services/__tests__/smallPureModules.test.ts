@@ -7,14 +7,15 @@
  * registerAuthExpiredCallback / triggerAuthExpired 回调触发。
  */
 import { describe, it, expect, vi } from 'vitest'
-import { resolveFileViewer } from '@/services/fileViewerRegistry'
 import { registerAuthExpiredCallback, triggerAuthExpired } from '@/services/authCallbacks'
+import { resolveFileViewer } from '@/services/fileViewerRegistry'
 import { safeLoadLayout, DEFAULT_LAYOUT_CONFIG } from '@/services/layout/resolver'
 
 describe('resolveFileViewer - 扩展名到查看器映射（原 getEditorForFile 迁移）', () => {
   it('常见扩展名映射到文本编辑器/图片查看器/HTML 预览', () => {
     expect(resolveFileViewer('main.py').viewer.render.widget).toBe('code_editor')
-    expect(resolveFileViewer('README.md').viewer.render.widget).toBe('code_editor')
+    // .md 渲染态预览单列（markdown_viewer 注册项；源码高亮仍可从查看器内切换）
+    expect(resolveFileViewer('README.md').viewer.render.widget).toBe('markdown_preview')
     expect(resolveFileViewer('index.html').viewer.render.widget).toBe('html_preview')
     expect(resolveFileViewer('photo.png').viewer.render.widget).toBe('image_preview')
     expect(resolveFileViewer('photo.JPG').viewer.render.widget).toBe('image_preview') // 大小写不敏感

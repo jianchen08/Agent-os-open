@@ -62,7 +62,7 @@ describe('MessageList 长会话（5000 条）', () => {
     expect(screen.getByTestId('message-item-m-5001')).toBeInTheDocument()
 
     // 耗时留痕（jsdom 无布局引擎，数字供横向对比；不设紧阈值防 CI 抖动）
-    // eslint-disable-next-line no-console -- 计时留痕供实测报告引用
+     
     console.info(
       `[MessageList.longSession] 5000 条 mount=${mountMs.toFixed(0)}ms, 追加1条重渲=${rerenderMs.toFixed(0)}ms`,
     )

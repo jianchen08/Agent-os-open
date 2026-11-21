@@ -69,6 +69,7 @@ fn test_task_export_manifest() -> agentos_core::traits::PluginManifest {
         .map(|s| s.to_string())
         .collect(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 
@@ -280,6 +281,7 @@ fn test_state_writes_lookup() -> crate::capability_router::StateWritesLookupFn {
                 "task.*".to_string(),
                 "trigger.registry.*".to_string(),
                 "task.trigger.registry.*".to_string(),
+                "approval.*".to_string(),
             ]
         } else {
             Vec::new()
@@ -1539,6 +1541,94 @@ async fn resume_pipeline_without_injected_identity_fails_fast() {
 }
 
 #[tokio::test]
+async fn resume_pipeline_boot_fallback_uses_persisted_owner() {
+    // 启动期系统面（插件 on_load 排空自动恢复）无注入身份：回落管道持久化
+    // 属主 task.submitted_by 续跑——身份仍非调用方手传（信任模型不变）。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<DispatchedResumes> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String,
+                  thread_id: String,
+                  user_id: String,
+                  state_overlay: Option<serde_json::Value>| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock()
+                        .unwrap()
+                        .push((pipeline_id, thread_id, user_id, state_overlay));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    let scope_ctx = agentos_core::types::TenantContext::new("t_boot", "th_boot");
+    agentos_tenant::scope(scope_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_boot",
+                &tenant,
+                "run_b1",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_boot", "th_boot", &tenant)
+            .await
+            .unwrap();
+        store
+            .upsert_state_fields(
+                "pipe_boot",
+                &tenant,
+                &json!({"task.submitted_by": "u_owner"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .unwrap();
+        router
+            .handle(
+                "pipeline-executor",
+                "suspend_pipeline",
+                json!({"pipeline_id": "pipe_boot"}),
+            )
+            .await
+            .unwrap();
+
+        let r = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_boot"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["dispatched"], true);
+        assert_eq!(
+            dispatched.lock().unwrap().as_slice(),
+            [(
+                "pipe_boot".to_string(),
+                "th_boot".to_string(),
+                "u_owner".to_string(),
+                None
+            )],
+            "无注入身份时应回落持久化属主（u_owner）派发"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn resume_pipeline_approval_pending_flips_only() {
     // 审批挂起（metadata.pending_interaction_request_id 署名，run 在飞未收束）：
     // 翻 Running 簿记，真唤醒走 interaction.respond——不派发续跑轮（重复派发
@@ -2319,15 +2409,15 @@ fn schema_names(result: &serde_json::Value) -> Vec<String> {
 
 #[tokio::test]
 async fn tool_surface_filters_by_tool_ids_and_keeps_declared_tools() {
-    // 契约（P1-5 声明化）：白名单命中注入；声明方（spill_guard manifest
+    // 契约（P1-5 声明化）：白名单命中注入；声明方（manifest
     // force_include_tools）声明的工具无视白名单保留。
     let router = router_with_tool_descriptors_and_forced(
         &[
             plain_tool("bash_execute"),
             plain_tool("file_read"),
-            plain_tool("spill_retrieve"),
+            plain_tool("forced_demo_tool"),
         ],
-        vec!["spill_retrieve"],
+        vec!["forced_demo_tool"],
     );
     let result = router
         .handle(
@@ -2339,7 +2429,7 @@ async fn tool_surface_filters_by_tool_ids_and_keeps_declared_tools() {
         .unwrap();
     assert_eq!(
         schema_names(&result),
-        vec!["bash_execute".to_string(), "spill_retrieve".to_string()],
+        vec!["bash_execute".to_string(), "forced_demo_tool".to_string()],
         "白名单命中 + 声明强制工具"
     );
     // OpenAI function-calling 形态
@@ -2348,20 +2438,20 @@ async fn tool_surface_filters_by_tool_ids_and_keeps_declared_tools() {
     assert!(first["function"]["parameters"].is_object());
     // 换一组声明 → 强制面随声明变（声明驱动，非内核名单）
     let router2 = router_with_tool_descriptors_and_forced(
-        &[plain_tool("bash_execute"), plain_tool("spill_retrieve")],
+        &[plain_tool("bash_execute"), plain_tool("forced_demo_tool")],
         vec!["bash_execute"],
     );
     let result2 = router2
         .handle(
             "tool-surface",
             "schemas",
-            json!({"tool_ids": ["spill_retrieve"]}),
+            json!({"tool_ids": ["forced_demo_tool"]}),
         )
         .await
         .unwrap();
     assert_eq!(
         schema_names(&result2),
-        vec!["bash_execute".to_string(), "spill_retrieve".to_string()],
+        vec!["bash_execute".to_string(), "forced_demo_tool".to_string()],
         "强制注入集合随声明增减"
     );
 }
@@ -2370,19 +2460,19 @@ async fn tool_surface_filters_by_tool_ids_and_keeps_declared_tools() {
 async fn tool_surface_empty_whitelist_yields_declared_only() {
     // 契约：空数组 = agent 声明零工具 → 仅声明强制工具（非断链、非全量）。
     let router = router_with_tool_descriptors_and_forced(
-        &[plain_tool("bash_execute"), plain_tool("spill_retrieve")],
-        vec!["spill_retrieve"],
+        &[plain_tool("bash_execute"), plain_tool("forced_demo_tool")],
+        vec!["forced_demo_tool"],
     );
     let result = router
         .handle("tool-surface", "schemas", json!({"tool_ids": []}))
         .await
         .unwrap();
-    assert_eq!(schema_names(&result), vec!["spill_retrieve".to_string()]);
+    assert_eq!(schema_names(&result), vec!["forced_demo_tool".to_string()]);
 }
 
-// ── BUG-51：观测失败插件遮挡（verify_incomplete/verify_failed 不进 LLM 工具面）──
+// ── G2 工具面稳定（ADR 2026-11-12）：判定/观测失败不遮挡 schema ──
 
-/// 构造挂了多插件工具注册表 + 遮挡名单的路由器（工具按描述符的 plugin_id 注册）。
+/// 构造挂了多插件工具注册表 + 拦截名单的路由器（工具按描述符的 plugin_id 注册）。
 fn router_with_plugin_tools_and_shadowed(
     tools: &[agentos_core::traits::ToolDescriptor],
     shadowed: Vec<String>,
@@ -2415,9 +2505,46 @@ fn tool_for(name: &str, plugin_id: &str) -> agentos_core::traits::ToolDescriptor
 }
 
 #[tokio::test]
-async fn tool_surface_shadows_verify_pending_plugin_tools() {
-    // BUG-51 契约：观测失败按声明注册的插件，工具在 LLM 工具面不可见（注册面
-    // 保留，服务/HTTP 面不受影响）；白名单/插件 id 两种配法都不得透出。
+async fn tool_surface_keeps_declaration_mismatch_tools() {
+    // ADR 2026-11-12 事故场景：task_submit 被 G2 判 sanitized（账本拒调清单
+    // 命中）后，声明 schema 仍进面、契约表照常；只有调用被显式拦截。
+    use agentos_plugin_loader::CapabilityRegistryImpl;
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    registry.register_tool(
+        "task_manage_tool",
+        tool_for("task_submit", "task_manage_tool"),
+    );
+    let rejected: crate::capability_router::RejectedToolNamesLookupFn =
+        Arc::new(|| vec![("task_manage_tool".to_string(), "task_submit".to_string())]);
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_registry(registry)
+        .with_rejected_tool_names_lookup(rejected);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["task_submit"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_names(&result),
+        vec!["task_submit".to_string()],
+        "G2 判拒工具的声明 schema 必须留在工具面（前缀缓存稳定）"
+    );
+    assert!(
+        result["contracts"]
+            .as_object()
+            .unwrap()
+            .contains_key("task_submit"),
+        "契约表照常下发（output_schema/render 不被削弱）"
+    );
+}
+
+#[tokio::test]
+async fn tool_surface_keeps_verify_pending_plugin_tools() {
+    // ADR 2026-11-12：观测失败/校验失败终态不再遮挡工具面——声明 schema 恒
+    // 进面（失败桩），工具数组稳定；调用拦截在 tool-executor.invoke。
     let router = router_with_plugin_tools_and_shadowed(
         &[
             tool_for("hello_pack", "hello_pack"),
@@ -2433,16 +2560,24 @@ async fn tool_surface_shadows_verify_pending_plugin_tools() {
         )
         .await
         .unwrap();
+    let names: std::collections::HashSet<String> = schema_names(&result).into_iter().collect();
     assert_eq!(
-        schema_names(&result),
-        vec!["bash_execute".to_string()],
-        "遮挡插件的工具不得进入 LLM 工具面"
+        names,
+        ["hello_pack".to_string(), "bash_execute".to_string()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        "待复验插件的工具 schema 不得被剔除（缓存稳定性）"
+    );
+    let contracts = result["contracts"].as_object().unwrap();
+    assert!(
+        contracts.contains_key("hello_pack"),
+        "契约表同样保留声明条目"
     );
 }
 
 #[tokio::test]
 async fn tool_surface_shadow_keeps_contracts_unfiltered() {
-    // 契约表不过滤（既有语义）：遮挡的工具若仍被非 LLM 通道调用，输出校验照常。
+    // 契约表与 schema 面同源：待复验工具的输出契约照常下发（运行期校验不被削弱）。
     let router = router_with_plugin_tools_and_shadowed(
         &[tool_for("hello_pack", "hello_pack")],
         vec!["hello_pack".to_string()],
@@ -2456,15 +2591,12 @@ async fn tool_surface_shadow_keeps_contracts_unfiltered() {
         .await
         .unwrap();
     let contracts = result["contracts"].as_object().unwrap();
-    assert!(
-        contracts.contains_key("hello_pack"),
-        "契约表与被过滤的 schema 面解耦"
-    );
+    assert!(contracts.contains_key("hello_pack"), "契约表不被校验态过滤");
 }
 
 #[tokio::test]
-async fn tool_surface_unshadows_when_ledger_clears() {
-    // 转正：复验通过（账本 ok）后遮挡名单不再含该插件 → 工具自动回面。
+async fn tool_surface_stays_stable_across_ledger_clear() {
+    // 转正（复验通过/账本 ok）不改变工具数组：判定前后面逐字节稳定。
     let pending = std::sync::Arc::new(std::sync::Mutex::new(vec!["hello_pack".to_string()]));
     use agentos_plugin_loader::CapabilityRegistryImpl;
     let registry = Arc::new(CapabilityRegistryImpl::new());
@@ -2484,7 +2616,11 @@ async fn tool_surface_unshadows_when_ledger_clears() {
         )
         .await
         .unwrap();
-    assert!(schema_names(&before).is_empty(), "待复验期间工具不可见");
+    assert_eq!(
+        schema_names(&before),
+        vec!["hello_pack".to_string()],
+        "待复验期间 schema 仍在面"
+    );
 
     pending.lock().unwrap().clear();
     let after = router
@@ -2498,13 +2634,13 @@ async fn tool_surface_unshadows_when_ledger_clears() {
     assert_eq!(
         schema_names(&after),
         vec!["hello_pack".to_string()],
-        "复验通过（账本清除）后自动转正"
+        "复验通过后工具数组不变（无二次抖动）"
     );
 }
 
 #[tokio::test]
-async fn tool_surface_shadow_overrides_force_include() {
-    // 必败工具不得借 force_include_tools 强制注入复活（遮挡优先于强制注入）。
+async fn tool_surface_shadow_does_not_remove_tool_even_with_force_include() {
+    // 强制注入语义不变；校验态不再参与过滤——两条路径都保留声明 schema。
     use agentos_plugin_loader::CapabilityRegistryImpl;
     let registry = Arc::new(CapabilityRegistryImpl::new());
     registry.register_tool("hello_pack", tool_for("hello_pack", "hello_pack"));
@@ -2521,9 +2657,10 @@ async fn tool_surface_shadow_overrides_force_include() {
         .handle("tool-surface", "schemas", json!({"tool_ids": []}))
         .await
         .unwrap();
-    assert!(
-        schema_names(&result).is_empty(),
-        "遮挡插件的工具即使被声明强制注入也不回面"
+    assert_eq!(
+        schema_names(&result),
+        vec!["hello_pack".to_string()],
+        "校验态不遮挡 schema（强制注入照常，工具不被剔除）"
     );
 }
 
@@ -2531,7 +2668,7 @@ async fn tool_surface_shadow_overrides_force_include() {
 async fn tool_surface_without_declaration_forces_nothing() {
     // P1-5 fail-closed：无任何 force_include_tools 声明 → 零强制注入，
     // 工具面严格等于 tool_ids 白名单（内核不再持有框架名单）。
-    let router = router_with_tool_descriptors(&[plain_tool("spill_retrieve")]);
+    let router = router_with_tool_descriptors(&[plain_tool("forced_demo_tool")]);
     let result = router
         .handle("tool-surface", "schemas", json!({"tool_ids": []}))
         .await
@@ -4990,4 +5127,469 @@ fn state_writes_for_caller_resolves_group_host_union() {
     // 未知调用方：空声明（fail-closed）
     assert!(state_writes_for_caller(&entries, host_key_of, "group:none:1").is_empty());
     assert!(state_writes_for_caller(&entries, host_key_of, "ghost").is_empty());
+}
+
+// ── pipeline-state.update delete_keys：键真删（审计单一路径形态）──────
+
+/// delete_keys 测试辅助：先在内存 registry 注册管道（模拟 run 出生），再经
+/// capability update 真实播种（DB + 内存双落点，与生产链路同构）。
+async fn seed_state_via_update(
+    router: &KernelCapabilityRouter,
+    tenant: &str,
+    thread: &str,
+    pid: &str,
+    fields: serde_json::Value,
+) {
+    let reg = agentos_session::pipeline_state_registry::global_registry();
+    reg.get_or_init(tenant, pid, thread, "agentos", json!({"pipeline_id": pid}));
+    let r = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(tenant, thread),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "fields": fields,
+            }),
+        ),
+    )
+    .await;
+    assert!(r.is_ok(), "播种 update 应成功: {r:?}");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_delete_keys_single_and_multi() {
+    // AC1+AC2+AC5：update 带 delete_keys 删单/多键——DB 行消失、内存键消失、
+    // list 不再返回 task.ended_at（export 白名单成员，断言非空转）；删后写
+    // 任意字段，被删键不复活（内存同步缺失的特征缺陷）。
+    let tenant = format!("tenant_del_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_del_{}", uuid::Uuid::new_v4().simple());
+    let router = router_with_store();
+    let store = router.store.as_ref().unwrap().clone();
+    seed_state_via_update(
+        &router,
+        &tenant,
+        "th_del",
+        &pid,
+        json!({
+            "approval.tickets.t1": {"id": "t1"},
+            "approval.tickets.t2": {"id": "t2"},
+            "task.status": "running",
+            "task.ended_at": "2026-11-20T00:00:00Z",
+        }),
+    )
+    .await;
+    // 播种自检：DB 确有行（防"断言在空库上空转"）
+    let seeded = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert_eq!(seeded.len(), 4, "播种必须真实落 DB: {seeded:?}");
+
+    // 删多键（含一个不存在的键：幂等进 not_found，不报错）
+    let r = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "delete_keys": ["approval.tickets.t1", "approval.tickets.t2",
+                                "task.ended_at", "approval.never_existed"],
+            }),
+        ),
+    )
+    .await;
+    let out = r.expect("delete_keys 删除应成功");
+    let mut deleted: Vec<&str> = out["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    deleted.sort();
+    assert_eq!(
+        deleted,
+        vec![
+            "approval.tickets.t1",
+            "approval.tickets.t2",
+            "task.ended_at"
+        ]
+    );
+    let not_found: Vec<&str> = out["not_found"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        not_found,
+        vec!["approval.never_existed"],
+        "不存在的键幂等报 not_found 不报错"
+    );
+
+    // DB 行消失（真实落过 DB 再删，断言非空转）
+    let fields = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert!(!fields.contains_key("approval.tickets.t1"), "DB 行必须消失");
+    assert!(!fields.contains_key("approval.tickets.t2"), "DB 行必须消失");
+    assert!(!fields.contains_key("task.ended_at"), "DB 行必须消失");
+    assert!(fields.contains_key("task.status"), "未删键不受影响");
+
+    // 内存键消失（复活坑的直接防线：内存不删，下次写会把旧值刷回 DB）
+    let reg = agentos_session::pipeline_state_registry::global_registry();
+    let entry = reg.get(&tenant, &pid).unwrap();
+    {
+        let st = entry.read();
+        assert!(
+            st.state.get("approval.tickets.t1").is_none(),
+            "内存键必须消失"
+        );
+        assert!(st.state.get("task.ended_at").is_none(), "内存键必须消失");
+        assert_eq!(st.state["task.status"], "running");
+    }
+
+    // list 不再返回被删键（task.ended_at 是 export 白名单成员，断言非空转）
+    let rows = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del"),
+        router.handle("pipeline-state", "list", json!({})),
+    )
+    .await
+    .unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+        .expect("list 应包含该管道");
+    assert!(row.get("task.ended_at").is_none(), "list 不再返回被删键");
+    assert_eq!(row["task.status"], "running");
+
+    // 复活检查（AC5 关键）：删后对同管道写任意字段，被删键不得复活
+    let r2 = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "fields": {"task.status": "completed"},
+            }),
+        ),
+    )
+    .await;
+    assert!(r2.is_ok());
+    let fields2 = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert!(
+        !fields2.contains_key("approval.tickets.t1"),
+        "被删键不得随后续写操作复活（内存同步缺失的特征缺陷）: {fields2:?}"
+    );
+    assert!(!fields2.contains_key("task.ended_at"), "被删键不得复活");
+    let st2 = entry.read();
+    assert!(
+        st2.state.get("approval.tickets.t1").is_none(),
+        "内存侧也不得复活"
+    );
+    assert_eq!(st2.state["task.status"], "completed");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_delete_keys_fails_closed_on_undeclared() {
+    // AC4：未声明的键整批拒绝（fail-closed，无部分删除半态）；未声明插件一律拒绝。
+    let tenant = format!("tenant_del2_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_del2_{}", uuid::Uuid::new_v4().simple());
+    let router = router_with_store();
+    let store = router.store.as_ref().unwrap().clone();
+    seed_state_via_update(
+        &router,
+        &tenant,
+        "th_del2",
+        &pid,
+        json!({
+            "approval.tickets.t1": {"id": "t1"},
+            "task.status": "running",
+        }),
+    )
+    .await;
+
+    // 混合批次：approval.* 已声明、other.domain.key 未声明 → 整批拒绝
+    let r = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del2"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "delete_keys": ["approval.tickets.t1", "other.domain.key"],
+            }),
+        ),
+    )
+    .await;
+    let err = r.expect_err("未声明键必须整批拒绝（fail-closed）");
+    assert!(err.to_string().contains("state.writes"), "{err}");
+
+    // 无部分删除半态：声明过的键也不许在被拒批次里被删掉
+    let fields = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert!(
+        fields.contains_key("approval.tickets.t1"),
+        "被拒批次不得部分生效"
+    );
+    assert!(fields.contains_key("task.status"));
+
+    // 无声明插件：一律拒绝且不留痕迹
+    let r2 = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del2"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": "undeclared_plugin",
+                "pipeline_id": pid,
+                "delete_keys": ["approval.tickets.t1"],
+            }),
+        ),
+    )
+    .await;
+    assert!(r2.is_err(), "未声明插件删除必须拒绝: {r2:?}");
+    let fields2 = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert!(fields2.contains_key("approval.tickets.t1"));
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_delete_keys_tenant_isolation() {
+    // AC6：租户隔离——只能删本租户的键，其他租户同 pid 同名键不动。
+    let tenant = format!("tenant_del3_{}", uuid::Uuid::new_v4().simple());
+    let other = format!("tenant_del3o_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_del3_{}", uuid::Uuid::new_v4().simple());
+    let router = router_with_store();
+    let store = router.store.as_ref().unwrap().clone();
+    seed_state_via_update(
+        &router,
+        &tenant,
+        "th_del3",
+        &pid,
+        json!({"approval.tickets.t1": {"id": "mine"}}),
+    )
+    .await;
+    seed_state_via_update(
+        &router,
+        &other,
+        "th_del3o",
+        &pid,
+        json!({"approval.tickets.t1": {"id": "theirs"}}),
+    )
+    .await;
+
+    let r = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del3"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "delete_keys": ["approval.tickets.t1"],
+            }),
+        ),
+    )
+    .await;
+    assert!(r.is_ok(), "本租户删除应成功: {r:?}");
+
+    let mine = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert!(!mine.contains_key("approval.tickets.t1"), "本租户键已删");
+    let theirs = store.load_pipeline_state(&pid, &other).await.unwrap();
+    assert_eq!(
+        theirs.get("approval.tickets.t1"),
+        Some(&json!({"id": "theirs"})),
+        "其他租户同 pid 同名键不得被删"
+    );
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_delete_keys_writes_audit_trace() {
+    // AC7（审计核心）：删除经 update 单一路径，traces 表留下可追溯记录——
+    // patch_type=state_update、patch_data.action=delete_keys + deleted_keys、
+    // 发起方 plugin_id、目标 pipeline_id、时间戳（TraceEntry.created_at）。
+    let tenant = format!("tenant_del4_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_del4_{}", uuid::Uuid::new_v4().simple());
+    let router = router_with_store();
+    let store = router.store.as_ref().unwrap().clone();
+    seed_state_via_update(
+        &router,
+        &tenant,
+        "th_del4",
+        &pid,
+        json!({"approval.tickets.t1": {"id": "t1"}}),
+    )
+    .await;
+
+    let r = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del4"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "delete_keys": ["approval.tickets.t1"],
+            }),
+        ),
+    )
+    .await;
+    assert!(r.is_ok(), "删除应成功: {r:?}");
+
+    // 从 traces 读回（真实链路：append_trace → SQLite → 读面）
+    let traces = store
+        .get_step_traces_by_pipeline(&pid, &tenant)
+        .await
+        .unwrap();
+    let del_trace = traces
+        .iter()
+        .find(|t| {
+            t.patch_data.get("action").and_then(|a| a.as_str()) == Some("delete_keys")
+                && t.patch_data.get("deleted_keys").is_some_and(|dk| {
+                    dk.as_array()
+                        .map(|a| a.iter().any(|k| k.as_str() == Some("approval.tickets.t1")))
+                        .unwrap_or(false)
+                })
+        })
+        .expect("删除操作必须在 traces 留下可追溯记录");
+    assert_eq!(
+        del_trace.patch_type,
+        agentos_core::types::PatchType::StateUpdate
+    );
+    assert_eq!(del_trace.plugin_id, TEST_STATE_WRITER, "审计须记录发起方");
+    assert_eq!(del_trace.pipeline_id, pid, "审计须记录目标管道");
+    assert!(!del_trace.created_at.is_empty(), "审计须带时间戳");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_param_type_errors_rejected_explicitly() {
+    // MF1 回归：键存在但类型不符必须显式拒绝——静默降级成缺省会把删除/
+    // upsert 意图整段吞掉还返回 updated（假成功）。
+    let router = router_with_store();
+    // delete_keys 非数组（字符串）
+    let err = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_type1", "th_type1"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": "pipe_type1",
+                "delete_keys": "approval.tickets.t1",
+            }),
+        ),
+    )
+    .await
+    .expect_err("delete_keys 非数组必须显式拒绝");
+    assert!(err.to_string().contains("delete_keys 必须是数组"), "{err}");
+
+    // fields 非对象（数组）
+    let err2 = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_type1", "th_type1"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": "pipe_type1",
+                "fields": ["not", "an", "object"],
+            }),
+        ),
+    )
+    .await
+    .expect_err("fields 非对象必须显式拒绝");
+    assert!(err2.to_string().contains("fields 必须是对象"), "{err2}");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_delete_keys_all_not_found_keeps_contract() {
+    // MF2 分支②回归：全 not_found（请求键全不存在）也必须返回完整契约体
+    // （deleted: [] + not_found: [...]），不得退化成 {status, pipeline_id}。
+    let tenant = format!("tenant_del5_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_del5_{}", uuid::Uuid::new_v4().simple());
+    let router = router_with_store();
+    let store = router.store.as_ref().unwrap().clone();
+    seed_state_via_update(
+        &router,
+        &tenant,
+        "th_del5",
+        &pid,
+        json!({"approval.tickets.t1": {"id": "t1"}}),
+    )
+    .await;
+
+    let out = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del5"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "delete_keys": ["approval.never_existed"],
+            }),
+        ),
+    )
+    .await
+    .expect("全 not_found 是幂等成功不是错误");
+    assert_eq!(out["deleted"], json!([]), "deleted 恒在场（空数组）");
+    assert_eq!(
+        out["not_found"],
+        json!(["approval.never_existed"]),
+        "not_found 恒在场且如实差集"
+    );
+    // 原键不受影响（真实链路断言）
+    let fields = store.load_pipeline_state(&pid, &tenant).await.unwrap();
+    assert_eq!(fields.len(), 1, "原键不受影响");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_delete_keys_store_absent_honest_report() {
+    // MF2 分支③回归：store 缺席（内存唯一落点）时 deleted = 内存实际删除集
+    // （remove 返回 Some），not_found = 差集——不得把不存在的键谎报为 deleted。
+    let tenant = format!("tenant_del6_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_del6_{}", uuid::Uuid::new_v4().simple());
+    // 无 store 装配：仅声明面 + 内存
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_state_writes_lookup(test_state_writes_lookup());
+    let reg = agentos_session::pipeline_state_registry::global_registry();
+    reg.get_or_init(
+        &tenant,
+        &pid,
+        "th_del6",
+        "agentos",
+        json!({"pipeline_id": pid, "approval.tickets.t1": {"id": "t1"}}),
+    );
+
+    let out = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_del6"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "delete_keys": ["approval.tickets.t1", "approval.ghost"],
+            }),
+        ),
+    )
+    .await
+    .expect("store 缺席删除应成功（内存唯一落点）");
+    assert_eq!(
+        out["deleted"],
+        json!(["approval.tickets.t1"]),
+        "deleted = 内存实际删除集"
+    );
+    assert_eq!(
+        out["not_found"],
+        json!(["approval.ghost"]),
+        "不存在的键诚实进 not_found，不谎报 deleted"
+    );
+
+    // 内存键确实消失（真实链路断言）
+    let entry = reg.get(&tenant, &pid).unwrap();
+    let st = entry.read();
+    assert!(st.state.get("approval.tickets.t1").is_none());
 }

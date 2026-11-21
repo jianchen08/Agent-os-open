@@ -53,9 +53,9 @@ import { InlineEditWidget } from '@/components/schema/widgets/InlineEditWidget'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { slotRegistry } from '@/services/slots/slotRegistry'
 import { loadSchemaIntoRegistries } from '@/test/schemaLoader'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import type { PageDeclaration, WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 
 const approvalDecl: WidgetDeclaration = {

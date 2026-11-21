@@ -7,8 +7,8 @@
  * 的裁决语义由注册表测试覆盖，此处锁定接线）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { normalizeContentCard } from '@/services/schema/contentCard'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { FIRST_PARTY_CONTENT_CARDS, initializeWidgets } from '@/services/schema/registerWidgets'
 
 beforeEach(() => {

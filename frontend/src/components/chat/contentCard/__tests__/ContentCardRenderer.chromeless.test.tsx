@@ -83,6 +83,9 @@ describe('ContentCardRenderer — webview 卡体自报高度桥', () => {
       <ContentCardRenderer card={{ ...webviewCard, chromeless: true }} content="x" defaultView={<div>src</div>} />,
     )
     const wrapper = container.querySelector('iframe')!.parentElement!
+    // fail-closed 契约 = 非法消息不改状态：断言前后高度不变（初始占位值随占位
+    // 策略演进，不硬编码——2026-11-07 占位高度 24→320 持久化根修）
+    const before = wrapper.style.height
     window.dispatchEvent(
       new MessageEvent('message', {
         origin: 'null',
@@ -96,7 +99,7 @@ describe('ContentCardRenderer — webview 卡体自报高度桥', () => {
       }),
     )
     await new Promise((r) => setTimeout(r, 50))
-    expect(wrapper.style.height).toBe('24px')
+    expect(wrapper.style.height).toBe(before)
   })
 })
 

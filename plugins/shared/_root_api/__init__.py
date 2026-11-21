@@ -55,6 +55,7 @@ _EXPORTS: dict[str, str] = {
     # —— wiring：capability 调用面装配
     "build_memory_backend": "wiring",
     # —— mode_keys：模式键两级解析
+    "collect_mode_inject_tool_ids": "mode_keys",
     "collect_mode_tool_ids": "mode_keys",
     "collect_planning_executors": "mode_keys",
     # —— http_json：HTTP 响应封装样板
@@ -70,6 +71,8 @@ _EXPORTS: dict[str, str] = {
     # —— mode_keys：模式键两级解析
     "find_mode_agent_yaml": "mode_keys",
     "find_mode_package_dir": "mode_keys",
+    "primary_mode_tag": "mode_keys",
+    "resolve_active_mode": "mode_keys",
     # —— rp_state_audit：RP 状态审计事件（裁定件）
     "has_idem": "rp_state_audit",
     # —— mode_keys：模式键两级解析
@@ -93,6 +96,7 @@ _EXPORTS: dict[str, str] = {
     # —— ulid_keys：ULID 生成与校验
     "new_ulid": "ulid_keys",
     # —— _llm_streaming：流式协议翻译真源（llm 兼容 shim 经出口消费）
+    "DegenerationDetector": "_llm_streaming",
     "StreamEvent": "_llm_streaming",
     "StreamTranslator": "_llm_streaming",
     "map_finish_reason": "_llm_streaming",
@@ -159,6 +163,7 @@ __all__ = [
     "atomic_write_text",
     "birth_task_pipeline",
     "build_memory_backend",
+    "collect_mode_inject_tool_ids",
     "collect_mode_tool_ids",
     "collect_planning_executors",
     "asset_channel",
@@ -186,13 +191,16 @@ __all__ = [
     "ok",
     "parse_mode_agent_key",
     "parse_multipart",
+    "primary_mode_tag",
     "protocol_error",
     "recent_events",
     "repo_anchor",
+    "resolve_active_mode",
     "resolve_project_root",
     "resolve_repo_root",
     "resolve_uploads_url",
     "state_fields",
+    "DegenerationDetector",
     "StreamEvent",
     "StreamTranslator",
     "map_finish_reason",

@@ -13,6 +13,7 @@ config/tools/project_create.yaml（通用配置，新增类型 = 加条目不改
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
@@ -449,7 +450,9 @@ class ProjectCreateTool(BuiltinTool):
         from project_manager import project_registry  # noqa: PLC0415
 
         try:
-            project, created = project_registry.ensure_project_registered(
+            # 登记链含 git init（timeout 60s，同步子进程）——出事件循环执行。
+            project, created = await asyncio.to_thread(
+                project_registry.ensure_project_registered,
                 title=goal,
                 explicit_path=explicit_path,
                 session_id=str(inputs.get("session_id") or ""),
@@ -465,14 +468,21 @@ class ProjectCreateTool(BuiltinTool):
             )
         # 技能播种（批 B8）：写入 mode_tags 的登记把各标签包 skills/ 增量补缺
         # 到项目根（幂等重跑即对账补缺）；失败不阻断登记，告警回传不静默。
-        seed_warnings = project_registry.seed_mode_skills(project)
+        # 整树 copytree 同属同步阻塞体，出事件循环。
+        seed_warnings = await asyncio.to_thread(
+            project_registry.seed_mode_skills, project
+        )
 
         routed: tuple[str, dict[str, Any]] | None
         init_info: dict[str, Any] | None = None
         try:
             routed = _match_recipe(project.path, requested_type, _load_type_config())
             if routed is not None:
-                init_info = _apply_init_recipe(project.path, project.title, routed[1])
+                # 出生初始化整段（addon copytree + git init/commit，timeout 60s×多条）
+                # 是同步阻塞体，出事件循环执行（宿主 watchdog 判停滞即整组退出）。
+                init_info = await asyncio.to_thread(
+                    _apply_init_recipe, project.path, project.title, routed[1]
+                )
         except (ValueError, OSError) as exc:
             logger.error(
                 "[ProjectCreate] 类型初始化失败 | project_id=%s | type=%s | path=%s | err=%s",

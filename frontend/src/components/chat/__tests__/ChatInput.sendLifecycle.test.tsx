@@ -216,7 +216,7 @@ describe('ChatInput 发送态生命周期（落定语义）', () => {
     // 解锁 + 文本保留 + 判死报错落在操作点（error alert 语义）
     expect(textarea()).not.toBeDisabled()
     expect(textareaValue()).toBe('慢消息')
-    expect(screen.getByRole('alert')).toHaveTextContent('发送超时，已停止执行')
+    expect(screen.getByRole('alert')).toHaveTextContent('发送超时，未收到送达确认')
     // 判死统一 error 语义：不再有非 error 级警告条
     expect(screen.queryByRole('status')).toBeNull()
   })
@@ -301,7 +301,13 @@ describe('ChatInput 发送态生命周期（落定语义）', () => {
     )
 
     // 判死落在操作点（error alert），文本从未离开输入框（天然可重试）
-    expect(screen.getByRole('alert')).toHaveTextContent('消息发送失败：服务器拒绝派发：会话无可派发管道')
+    // P1-6 修订：折叠态显一行摘要（错误类型短语），全文经「详情」展开可达
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('消息发送失败')
+    fireEvent.click(screen.getByTestId('input-error-expand'))
+    expect(screen.getByTestId('input-error-full')).toHaveTextContent(
+      '消息发送失败：服务器拒绝派发：会话无可派发管道',
+    )
     expect(textareaValue()).toBe('会被拒收的消息')
     expect(textarea()).not.toBeDisabled()
     // 警告条不出现（failed ≠ timeout）

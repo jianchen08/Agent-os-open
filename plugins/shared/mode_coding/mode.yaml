@@ -9,6 +9,7 @@ icon: 🔨                # 选择器选项图标（批 G⑤；emoji 随声明�
 # 并集快照按名可读）；方案段骨架第零步按本键查注册表（ADR 2026-10-09 决策 4）
 plan_spec: skill-solution-software
 panel_page_id: coding_delivery
+material: material.py::build_injection   # 提示词物料组装器（声明驱动发现，设计 D3；注入 rules/dispatch.md 编码派发口径）
 chain:
   entry: main
   # v2 是执行型编排：自身承担编码/测试/调试，审查与功能验证外包在其 team

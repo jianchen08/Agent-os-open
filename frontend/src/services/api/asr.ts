@@ -23,31 +23,46 @@ interface ErrorWithResponse {
   response?: { status?: number; data?: unknown }
 }
 
-/** 未知错误收窄：带 axios 形态 response 的错误对象 */
-function isErrorWithResponse(error: unknown): error is ErrorWithResponse {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'response' in error &&
-    typeof (error as ErrorWithResponse).response === 'object'
-  )
+/** 错误对象面：axios 原始形态（response）与 apiClient 拦截器重抛形态（code/message/details） */
+interface ErrorWithMeta extends ErrorWithResponse {
+  code?: string
+  message?: string
+  details?: unknown
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-/** 从后端结构化错误体提取用户可读原因（{code, message}）；缺失时回退 HTTP 状态码 */
-function extractFailureReason(response: ErrorWithResponse['response']): {
+/** 客户端错误面收窄：拦截器对任意 Error 实例附加 code/details 后重抛 */
+function isErrorWithMeta(error: unknown): error is ErrorWithMeta {
+  return typeof error === 'object' && error !== null
+}
+
+/** 后端结构化错误体：优先 response.data（axios 原始），其次 details（拦截器重抛形态） */
+function errorBody(error: ErrorWithMeta): Record<string, unknown> | undefined {
+  if (isRecord(error.response?.data)) return error.response.data
+  if (isRecord(error.details)) return error.details
+  return undefined
+}
+
+/** 未配置判定：HTTP 503，或后端结构化 code=asr_not_configured（插件 503 信封） */
+function isNotConfigured(error: ErrorWithMeta): boolean {
+  if (error.response?.status === 503) return true
+  return errorBody(error)?.code === 'asr_not_configured'
+}
+
+/** 从后端结构化错误体提取用户可读原因（{code, message}）；缺失时回退错误 message / HTTP 状态码 */
+function extractFailureReason(error: ErrorWithMeta): {
   message: string
   code?: string
 } {
-  const status = response?.status
-  const body = response?.data
-  const code = isRecord(body) && typeof body.code === 'string' ? body.code : undefined
+  const body = errorBody(error)
+  const code = typeof body?.code === 'string' ? body.code : undefined
   const backendMessage =
-    isRecord(body) && typeof body.message === 'string' && body.message ? body.message : undefined
-  return { message: backendMessage ?? `HTTP ${status ?? 'unknown'}`, code }
+    typeof body?.message === 'string' && body.message ? body.message : undefined
+  const fallback = error.response?.status ? `HTTP ${error.response.status}` : error.message || '未知错误'
+  return { message: backendMessage ?? fallback, code }
 }
 
 /** 将音频 Blob 转写为文本 静默处理 503（ASR 未配置），避免全局错误拦截器报错 */
@@ -72,13 +87,13 @@ export async function transcribeAudio(
     )
     return response.data
   } catch (error: unknown) {
-    // 503 = 后端 ASR 未配置，静默返回 null（不触发全局报错）
-    if (isErrorWithResponse(error) && error.response?.status === 503) {
-      return null
-    }
-    // HTTP 错误 → 抛带结构化原因的 TranscriptionError（横幅补原因）
-    if (isErrorWithResponse(error)) {
-      const { message, code } = extractFailureReason(error.response)
+    if (isErrorWithMeta(error)) {
+      // 503 / asr_not_configured = 后端 ASR 未配置，静默返回 null（走到设置引导）
+      if (isNotConfigured(error)) {
+        return null
+      }
+      // 其余失败 → 抛带结构化原因的 TranscriptionError（横幅补原因）
+      const { message, code } = extractFailureReason(error)
       throw new TranscriptionError(message, code)
     }
     throw error

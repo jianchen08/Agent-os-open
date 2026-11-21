@@ -210,12 +210,95 @@ async def test_continue_running_injects_via_chat_sender(tool: TaskTool, svc: Any
     assert data["injected"] is True
     assert data["target_pipeline_id"] == task.id
     assert data["message_preview"] == "再检查一遍路径"
-    # 队列语义如实声明：注入=受理入队、run 边界消费、停止会退回（防"已注入"被当"已消费"）
-    assert data["semantics"] == "queued_until_run_boundary"
+    # 强制发送语义如实声明（2026-11-14 修「发了没反应」）：停当前 run → 投递
+    # → 触发新一轮，不再排队等 run 自然边界。
+    assert data["semantics"] == "stop_then_dispatch"
     sender.assert_awaited_once()
     assert captured["pipeline_id"] == task.id
-    assert captured["background"] is True
+    # 前台派发（background=False）是 running 注入的送达前提：后台分支在内核
+    # spawn 后立即回执，派发失败只落日志 → injected=True 是假成功（2026-11-16）。
+    assert captured["background"] is False
     assert captured["message"] == "再检查一遍路径"
+    # 工具路径必须走强制通道（内核先停当前 running 再投递），不得退回排队语义
+    assert captured["force"] is True, "送消息给下级必须走强制发送通道"
+
+
+async def test_continue_running_dispatch_failure_surfaces_not_fake_success(
+    tool: TaskTool, svc: Any
+) -> None:
+    """running 态注入：前台派发让内核错误穿透 → INJECT_FAILED，禁假成功。
+
+    2026-11-16 实证根因：后台分支（background=True）在内核 `tokio::spawn` 里
+    派发，capability 在 spawn 前就返回 {"status":"dispatched"}——tenant 解析、
+    注入管道反查会话、入队任一步失败只落日志与系统通知。插件据此置
+    injected=True，上游看到"注入成功"而目标任务零新活动。
+
+    本用例锁定新契约：running 注入必须以前台派发调用内核（background=False），
+    使派发错误在 await 处抛出 → 转 INJECT_FAILED 显式失败。
+    """
+    task = await _make_task(svc)
+    await _set_running(svc, task.id)
+    await svc.bind_pipeline_run(task.id, task.id)
+    captured: dict[str, Any] = {}
+
+    async def failing_sender(params: dict[str, Any]) -> dict[str, Any]:
+        captured.update(params)
+        # 内核前台分支的真实失败形态（parse/dispatch 层返回 Err → 桥抛异常）
+        raise RuntimeError("chat.send_message 注入的 pipeline_id 不属于任何会话")
+
+    _set_chat(failing_sender)
+    result = await tool.execute(
+        {
+            "action": "continue",
+            "task_id": task.id,
+            "message": "立刻停下当前步骤",
+            "parent_agent_level": 1,
+        }
+    )
+    # 送达前提：该次调用必须走前台（否则失败根本到不了这里）
+    assert captured["background"] is False, "running 注入必须前台派发才能收到失败"
+    assert not result.success
+    assert result.error_code == "INJECT_FAILED"
+    assert "不属于任何会话" in (result.error or "")
+    assert (result.output or {}).get("injected") is not True
+
+
+async def test_continue_running_dispatch_params_invariant_across_inputs(
+    tool: TaskTool, svc: Any
+) -> None:
+    """running 注入参数契约稳定：两组有区分度输入都带 force=True + background=False。
+
+    防拟合：断言同一组不变量（而非拟合某一字面值），换输入即失效的实现会红。
+    """
+    task = await _make_task(svc)
+    await _set_running(svc, task.id)
+    await svc.bind_pipeline_run(task.id, task.id)
+    calls: list[dict[str, Any]] = []
+
+    async def recording_sender(params: dict[str, Any]) -> dict[str, Any]:
+        calls.append(dict(params))
+        return {"status": "dispatched"}
+
+    _set_chat(recording_sender)
+    messages = ["停", "把方案里被否掉的那条路也实现一遍，然后跑全量门禁并回报证据" * 2]
+
+    for message in messages:
+        result = await tool.execute(
+            {
+                "action": "continue",
+                "task_id": task.id,
+                "message": message,
+                "parent_agent_level": 1,
+            }
+        )
+        assert result.success, result.error
+
+    assert len(calls) == 2
+    for call, message in zip(calls, messages, strict=True):
+        assert call["pipeline_id"] == task.id
+        assert call["message"] == message
+        assert call["force"] is True, "强制发送通道不可退化为排队"
+        assert call["background"] is False, "必须前台派发以拿到真实失败"
 
 
 async def test_continue_acceptance_criteria_override_writes_state(tool: TaskTool, svc: Any) -> None:
@@ -404,11 +487,23 @@ async def test_continue_stopped_resumes_status(tool: TaskTool, svc: Any) -> None
     assert after is not None, "resume 不删除任务记录"
 
 
-async def test_continue_stopped_with_message_marks_injected(tool: TaskTool, svc: Any) -> None:
-    """stopped + message → message_injected=True（retry_message 仅内存标记）。"""
+async def test_continue_stopped_with_message_dispatches_forced(tool: TaskTool, svc: Any) -> None:
+    """stopped + message → 走强制发送通道真实派发（2026-11-14 修「发了没反应」）。
+
+    旧实现只写 metadata["retry_message"] 再 resume 旧 run：消息不落地执行，
+    外部表现「发了没反应」。新语义 = 停当前（已停则幂等）→ 投递该条 → 触发
+    新一轮，派发参数必须带 force=True。
+    """
     task = await _make_task(svc)
     await svc.pause_task(task.id)
     _set_exec(AsyncMock())
+    captured: dict[str, Any] = {}
+
+    async def sender_fn(params: dict[str, Any]) -> dict[str, Any]:
+        captured.update(params)
+        return {"ok": True}
+
+    _set_chat(sender_fn)
     result = await tool.execute(
         {
             "action": "continue",
@@ -418,7 +513,38 @@ async def test_continue_stopped_with_message_marks_injected(tool: TaskTool, svc:
         }
     )
     assert result.success, result.error
-    assert result.output["message_injected"] is True
+    data = result.output
+    assert data["message_injected"] is True
+    assert data["semantics"] == "stop_then_dispatch"
+    assert captured["pipeline_id"] == task.id
+    assert captured["message"] == "换个思路重来"
+    assert captured["background"] is True
+    assert captured["force"] is True, "stopped 任务的送消息必须走强制发送通道"
+
+
+async def test_continue_stopped_with_message_without_chat_warns_not_lied(
+    tool: TaskTool, svc: Any
+) -> None:
+    """chat capability 缺席 → 如实告警「消息未派发」，不得谎报 message_injected。
+
+    只写 metadata ≠ 消息生效：谎报会让上级以为纠正已送达。
+    """
+    task = await _make_task(svc)
+    await svc.pause_task(task.id)
+    _set_exec(AsyncMock())
+    _task_mod._chat_sender = None
+    result = await tool.execute(
+        {
+            "action": "continue",
+            "task_id": task.id,
+            "message": "换个思路重来",
+            "parent_agent_level": 1,
+        }
+    )
+    assert result.success, result.error
+    data = result.output
+    assert "message_injected" not in data
+    assert "消息未派发" in data.get("warning", "")
 
 
 async def test_continue_stopped_resume_executor_raises(tool: TaskTool, svc: Any, caplog) -> None:
@@ -779,13 +905,14 @@ async def test_continue_completed_with_message_reopens(
     assert data["old_status"] == "completed"
     assert data["new_status"] == "running"
     assert data["injected"] is True
-    assert data["semantics"] == "queued_until_run_boundary"
+    assert data["semantics"] == "stop_then_dispatch"
     # 三步时序：翻转 → 派发（写面先行）
     assert [step for step, _ in order] == ["write", "send"]
     assert order[0][1] == _REOPEN_FLIP_FIELDS
     send_params = order[1][1]
     assert send_params["pipeline_id"] == "reopen-task-0001"
     assert send_params["background"] is True
+    assert send_params["force"] is True
     assert send_params["message"] == "素材用错了，改用新版重做"
     # 证据清空 overlay：完成证据键会从恢复快照复活，不清则闸门信号②当轮收束
     assert send_params["state"] == _EVIDENCE_CLEAR_OVERLAY

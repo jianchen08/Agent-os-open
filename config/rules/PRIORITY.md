@@ -1,3 +1,4 @@
+<!-- seed-version: 1 -->
 # 规则面跨文件优先级（PRIORITY）
 
 > 适用范围：`config/rules/**` 规则文件之间、规则文件与 AGENTS.md 浓缩锚之间、
@@ -18,5 +19,11 @@
   （如 `testing_rules.md`）；`per_agent` 只允许在域规则之上**收紧**，
   不允许放松。
 - AGENTS.md 各节浓缩锚是对应全文的索引，全文优先于浓缩。
+- **职责分工口径**（谁做需求侧 / 谁做技术侧，含项目任务链方案规划段）的真值 =
+  `skills/skill-container-task-flow/SKILL.md`「七、方案规划段」（§7.1 按产出性质
+  切分、§7.2 讨论自动路由、§7.3 活跃方案管道锚、§7.4 真值地位）。`AGENTS.md`
+  「开发流程·角色分流」节、`config/agents/main/agentos.yaml` 的骨架与硬约束、
+  各 agent 配置的角色描述均为**引用面**，与之不一致时以 SKILL.md 为准并按待修
+  文档缺陷处理，不得反向以引用面覆盖或另立口径。
 - 机械门禁（测试/格式/覆盖率/文件行数基线）优先于一切软约束；门禁之间的
   冲突以 `.github/` 基线文件与 `scripts/run_gates.py` 接线为准，不另行解释。

@@ -594,13 +594,34 @@ class TestAutoNotifyParentGuards:
             data["context_usage"] = {"pct": pct, "input_tokens": 1000, "context_window": 10000}
         return data
 
+    def _notify_message(self, pct: float | None, event_name: str = "task_completed") -> str:
+        """跑一次父通知并返回注入正文（装配样板收敛，断言只看可观察投递内容）。"""
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str, state: dict | None = None) -> str:
+            received.append(message)
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(injector)
+        try:
+            _run(mgr.handle_domain_event(event_name, self._event(pct)))
+        finally:
+            mgr.stop_check_loop()
+        assert received, "父通知未注入"
+        return received[0]
+
     @pytest.mark.parametrize(
         ("pct", "hint"),
-        [(60.0, "建议优先创建新任务"), (30.0, "不建议继续向此 Agent 继承提交"), (10.0, "可直接继续向此 Agent 派发任务")],
+        [
+            (60.0, "不建议继续向此 Agent 继承提交"),
+            (30.0, "可直接继续向此 Agent 派发任务"),
+            (10.0, "可直接继续向此 Agent 派发任务"),
+        ],
         ids=["over-50", "25-50", "under-25"],
     )
     def test_context_usage_hint_bands(self, pct: float, hint: str) -> None:
-        """上下文使用率三档提示全覆盖（>50 / 25-50 / ≤25）。"""
+        """上下文使用率分档提示（>50 提示不建议继承提交；≤50 可直接继续）。"""
         received: list[tuple[str, str]] = []
 
         async def injector(pipeline_id: str, message: str, user_id: str, state: dict | None = None) -> str:
@@ -615,6 +636,54 @@ class TestAutoNotifyParentGuards:
             assert hint in received[0][1], received[0][1]
         finally:
             mgr.stop_check_loop()
+
+    @pytest.mark.parametrize(
+        ("pct", "expect_warn"),
+        [
+            (25.0, False),
+            (30.0, False),
+            (49.9, False),
+            (50.0, False),
+            (50.1, True),
+            (60.0, True),
+            (99.0, True),
+        ],
+        ids=["at-25", "mid-30", "just-under-50", "at-50", "just-over-50", "over-60", "over-99"],
+    )
+    def test_context_inherit_warn_threshold_is_50(self, pct: float, expect_warn: bool) -> None:
+        """阈值 50%：25%~50%（含 50 本身）不再提示继承告警，>50% 才提示。"""
+        msg = self._notify_message(pct)
+        assert ("不建议继续向此 Agent 继承提交" in msg) is expect_warn, msg
+        if not expect_warn:
+            assert "可直接继续向此 Agent 派发任务" in msg, msg
+
+    @pytest.mark.parametrize("event_name", ["task_completed", "task_failed"])
+    def test_context_inherit_warn_text_number_matches_threshold(self, event_name: str) -> None:
+        """提示语里的百分比数字与阈值同源：写「已超50%」，且不再残留「25%」。"""
+        msg = self._notify_message(60.0, event_name)
+        assert "上下文已超50%" in msg, msg
+        assert "25%" not in msg, msg
+        assert "保留充足余量" in msg, msg
+
+    def test_context_inherit_warn_pct_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """env 覆盖阈值生效：同样 60% 在阈值 70 下不再告警，且文案数字随之为 70%。"""
+        monkeypatch.setenv("AGENTOS_TRIGGER_CONTEXT_INHERIT_WARN_PCT", "70")
+        assert "不建议继续向此 Agent 继承提交" not in self._notify_message(60.0)
+        assert "上下文已超70%" in self._notify_message(75.0)
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["", "abc", "0", "-5", "101"],
+        ids=["empty", "non-numeric", "zero", "negative", "over-100"],
+    )
+    def test_context_inherit_warn_pct_env_invalid_falls_back_to_50(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """env 非法（空/非数字/越界）一律回落默认 50%：阈值与文案同步回落。"""
+        monkeypatch.setenv("AGENTOS_TRIGGER_CONTEXT_INHERIT_WARN_PCT", raw)
+        msg = self._notify_message(60.0)
+        assert "上下文已超50%" in msg, (raw, msg)
+        assert "可直接继续向此 Agent 派发任务" in self._notify_message(30.0), raw
 
     def test_context_usage_without_pct_omits_block(self) -> None:
         """无 context_usage 数据 → 不拼上下文段（对照组）。"""

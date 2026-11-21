@@ -282,12 +282,18 @@ class TestZeroOutOfPackageConfigDiff:
     ])
     def test_whitelist_never_lists_mode_tools(self, yaml_path: str) -> None:
         """③main yaml 及执行者 yaml 白名单零包外改动（静态断言：不含 pim/
-        mode_personal 并入痕迹——加行制 = state 加行，不落配置）。"""
+        mode_personal 并入痕迹——加行制 = state 加行，不落配置）。
+
+        断言面为配置语义（键/条目行），剥注释后判定——main yaml 存在指向
+        ADR 的指针注释（2026-11-19-KB 原生摄取管线改造：路由句在 mode_personal
+        mode.yaml description），文档性提及不等于白名单并入。
+        """
         target = _REPO_ROOT / yaml_path
         assert target.is_file(), yaml_path
         text = target.read_text(encoding="utf-8")
-        assert "pim" not in text
-        assert "mode_personal" not in text
+        config_only = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+        assert "pim" not in config_only
+        assert "mode_personal" not in config_only
 
 
 class TestModeOrthogonality:

@@ -278,7 +278,23 @@ class TestManifestContract:
     def test_contributes_frontend_contract(self, manifest: dict):
         c = manifest["contributes"]
         assert c["dsh_adapter"]["source_commit"] == DSH_SOURCE_COMMIT
-        assert c["renderers"] == []
+        # renderers：官方页工具 → 渲染卡映射（2026-11-19 官方页同步批次起非空）。
+        # 契约 = 每条 {tool, card} 双键齐 + 卡型落在已知词表 + 声明工具不重复 +
+        # 关键卡型抽查（终端/读取/差异/搜索/网页走专属卡，其余 generic）。
+        renderers = c["renderers"]
+        assert renderers, "renderers 不应回空（官方页按卡型路由）"
+        cards = {r["card"] for r in renderers}
+        assert cards <= {"generic", "terminal", "diff", "read", "search", "web"}
+        tools_mapped = [r["tool"] for r in renderers]
+        assert len(tools_mapped) == len(set(tools_mapped)), "同一工具重复映射"
+        spot = {r["tool"]: r["card"] for r in renderers}
+        assert spot.get("bash") == "terminal"
+        assert spot.get("read") == "read"
+        assert spot.get("edit") == "diff"
+        assert spot.get("write") == "diff"
+        assert spot.get("grep") == "search"
+        assert spot.get("web_search") == "web"
+        assert spot.get("web_fetch") == "web"
 
 
 # ── bridge：协议层（mock Node runtime） ────────────────────────────────
@@ -398,6 +414,14 @@ class TestBridgeProtocol:
         b = DshRuntimeBridge(runtime_root=str(tmp_path / "explicit"))
         assert b._runtime_root == str(tmp_path / "explicit")  # noqa: SLF001
 
+    def test_relative_runtime_root_normalized_to_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """相对 root 归一成绝对路径（Node 侧官方 profile loader 拒绝相对路径）。"""
+        monkeypatch.chdir(tmp_path)
+        b = DshRuntimeBridge(runtime_root="rel/ws")
+        assert b._runtime_root == str(tmp_path / "rel" / "ws")  # noqa: SLF001
+
     def test_shutdown_terminates_process(self, mock_bridge: DshRuntimeBridge):
         async def scenario() -> None:
             await mock_bridge.initialize()
@@ -431,23 +455,32 @@ class TestInstalledDshPlugins:
         packages = {p["source"]["package"] for p in loaded["packages"]}
         assert "@deepseek-ai/dsh-tool-time" in packages, packages
 
-    def test_manifest_has_no_llm_tools(self):
+    def test_manifest_llm_tools_contract(self):
         import json as _json  # noqa: PLC0415
 
         manifest = _json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
-        # LLM 工具面已退役（工具面审查 2026-10-19）：翻译走 translator 模块，
-        # 桥接/样式走生命周期钩子与 http.handle，manifest 不再声明任何工具
-        assert manifest["capabilities"]["tools"] == []
+        # LLM 面精确 = DSH 生态桥两件（2026-11-10 修订：dsh.tool.list/call 把已装
+        # DSH 插件自己的工具接进灵汐工具面，供真实试用；general_agent.yaml 持有）。
+        # 服务/拦截点仍不进 LLM 面（2026-10-19 工具面审查裁定）：dsh.service.call/
+        # dsh.hook.emit/dsh.web.request 只住 services 轴，经显式插件通道消费。
+        tools = manifest["capabilities"]["tools"]
+        assert {t["name"] for t in tools} == {"dsh.tool.list", "dsh.tool.call"}
         assert manifest["plugin_type"] == "system"
         # D.6 槽位拆分：声明即注册，无类型豁免字段
         assert "llm_tools" not in manifest
         # 正式贡献面：renderers + 适配器元信息 + pages（皮肤中心页面）+ themes
         # （皮肤 CSS 走 merged.css 端点，manifest 无 client_styles 贡献位）
         assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "pages", "themes"}
-        # 配置入口：DSH 插件装载管理（config/plugins/dsh_adapter/dsh_adapter.yaml）
-        assert manifest["config_files"] == [
-            {"id": "dsh_plugins", "path": "config/plugins/dsh_adapter/dsh_adapter.yaml", "label": "DSH 插件配置"}
-        ]
+        # 配置入口：DSH 插件装载管理 + LLM 默认模型注入（settings:false 仅供
+        # agentDefaultModel 翻译取用，不出口为配置面板）
+        config_files = manifest["config_files"]
+        assert [c["id"] for c in config_files] == ["dsh_plugins", "llm"]
+        assert config_files[0]["path"].endswith("dsh_adapter.yaml")
+        assert config_files[1]["path"].endswith("llm.yaml")
+        assert config_files[1]["settings"] is False
+        # 服务轴不得混入 LLM 面两件（两轴各归其位）
+        svc_names = {s["name"] for s in manifest["capabilities"]["services"]}
+        assert svc_names == {"dsh.service.call", "dsh.hook.emit", "dsh.web.request"}
 
 
 # ── 配置装载过滤（config/plugins/dsh_adapter/dsh_adapter.yaml：DSH 插件逐包启用/禁用） ─────
@@ -879,6 +912,25 @@ class TestSkinPositionRoutingCss:
         assert '[data-region="chat"] [data-testid="message-list"]{a:b}' in out
         assert 'data-phase' not in out and 'data-chat-flow' not in out
 
+    def test_titlebar_row_maps_to_top_band(self):
+        """桌面壳标题栏行 → 顶带（CSS 专属映射）：皮肤给标题栏上深色渐变+金线，
+        不映射则顶带透明、标题栏与花边檐口成两条叠在一起的条（用户 2026-11-10
+        报「顶部/底部挂载重叠」）。单双引号形态都保持。"""
+        out = self._rw('[class*="titlebar"]{background:linear-gradient(#1f3876e6,#091333fa)}'
+                       "[class*='titlebar']{a:b}")
+        assert '[data-testid="chat-top-band"]{background:linear-gradient' in out
+        assert "[data-testid='chat-top-band']{a:b}" in out
+        assert 'class*="titlebar"' not in out
+
+    def test_titlebar_row_not_mapped_in_hooks(self):
+        """hooks 侧不映射 titlebar：同一选择器在 hooks 里是「品牌文字挂载」
+        （titlebar-brand prepend）——挂到顶带会把品牌塞成三区布局首子、
+        挤歪与列对齐的区宽。"""
+        src = "const t = document.querySelector(\"[class*='titlebar']\")\n"
+        out = self._server()._sub_position(src)
+        assert "[class*='titlebar']" in out
+        assert 'chat-top-band' not in out
+
     def test_slots_and_surfaces(self):
         out = self._rw(
             '[data-slot="sidebar.settings"]{a:b}'
@@ -917,6 +969,45 @@ class TestSkinPositionRoutingCss:
         assert 'html[data-skin=\\"dsh_adapter:miku\\"]' in r  # JS 转义引号形（miku 44 处）
         assert 'html[data-skin="${ctx.scopeAttr}"]' in r  # 运行时插值形
         assert "'data-skin-dark'" in r  # 属性名字符串（观察器/读取）
+
+    def test_message_dom_stems_translated(self):
+        """会话内部 DOM 词干 → 我方消息区锚点（2026-11-10 whale-mom 对账：
+        18 个内部选择器此前零命中 = 皮肤效果对不上 DSH 的根因）。词干级
+        替换，compound 选择器自动组合；两种引号形态同译。"""
+        out = self._rw(
+            '[class*="markdown"]:not([class*="Payload"]){background:v2}'
+            '[class*="markdown"] :is(p, li){color:strong}'
+            "[class*='thinkBody']{background:v4}"
+            '[class*="summary"]{background:v3}'
+            '[class*="timeEnd"],[class*="timeStart"],[class*="turnStatus"]{color:mid}'
+            '[class*="usage"]{color:mid}'
+            '[class*="footerItem"],[class*="footerHint"]{color:mid}'
+            '[class*="chipLabel"]{color:strong}'
+            '[class*="previewBadge"]{color:badge}'
+            '[class*="bubble"]{color:strong}'
+            "[class$='modal']{background:#fff}"
+            '[data-phase="active"] [class*="composerSeat"]:before{content:""}'
+            '[class*="root"][data-open] [class*="body"]{background:v4}'
+            '[data-context-source="true"]{background:v3}'
+        )
+        assert '[data-testid="message-markdown"]:not([class*="Payload"]){background:v2}' in out
+        assert '[data-testid="message-markdown"] :is(p, li){color:strong}' in out
+        assert "[data-testid='message-think-body']{background:v4}" in out
+        assert '[data-testid="message-think"]{background:v3}' in out
+        assert '[data-testid="message-time"],[data-testid="message-time"],[data-testid="message-time"]{color:mid}' in out
+        assert '[data-testid="context-usage-indicator"]{color:mid}' in out
+        assert '[data-testid="chat-input-footer"],[data-testid="chat-input-footer"]{color:mid}' in out
+        assert ':is([data-testid^="declared-widget-"], [data-testid^="slot-default-"]){color:strong}' in out
+        assert '[data-testid="attachment-preview"]{color:badge}' in out
+        assert '[data-bubble]{color:strong}' in out
+        assert ".ant-modal{background:#fff}" in out
+        assert '[data-chat-state="active"] [data-testid="chat-composer"]:before{content:""}' in out
+        assert '.ant-popover:not(.ant-popover-hidden), .ant-dropdown:not(.ant-dropdown-hidden){background:v4}' in out
+        assert '[data-bubble] blockquote{background:v3}' in out
+        # DSH 词汇不出现在我方选择器（已译词干形态全数转出）
+        for stem in ('thinkBody', 'timeEnd', 'timeStart', 'turnStatus', 'composerSeat',
+                     'footerItem', 'footerHint', 'data-context-source'):
+            assert stem not in out
 
     def test_media_nested_rules_translated(self):
         """@media 嵌套规则头同样翻译；@keyframes 体透传（重建会规整头部空格）。"""
@@ -1073,6 +1164,28 @@ class TestSkinPluginThemes:
         matrix = next(t for t in themes if t["id"] == "dsh-skin-matrix")
         assert matrix["base"] == "dark"
         assert "backgrounds" not in matrix or matrix["backgrounds"]["image"]["enabled"] is False
+
+    def test_surface_tokens_alias(self, tmp_path: Path):
+        """表面令牌别名（2026-11-10 用户裁定：侧栏/输入面与 DSH 一致）：
+        皮肤定义 --dsw-specific-sidebar-fill / --dsw-specific-input-major 时，
+        --region-sidebar-bg / --chat-input-bg 发 var() 别名（明暗态由浏览器
+        按令牌解析，不吃静态首匹配的亮值）；未定义则维持静态抽取。"""
+        root = tmp_path / "skins"
+        _write_skin(root, "tokens-skin", (
+            ":root {\n  background-color: #16244a;\n  color: #eef2f8;\n"
+            "  --dsw-specific-sidebar-fill: #ecf4fcd9;\n"
+            "  --dsw-specific-input-major: #060a14db;\n}\n"
+            "body[data-ds-dark-theme] {\n"
+            "  --dsw-specific-sidebar-fill: #050810d1;\n}\n"
+        ))
+        _write_skin(root, "plain-skin", _skin_css("#101014", "#d0d4e0"))
+        themes = skins_to_plugin_themes(base_dir=root)
+        tokens = next(t for t in themes if t["id"] == "dsh-skin-tokens-skin")
+        assert tokens["variables"]["--region-sidebar-bg"] == "var(--dsw-specific-sidebar-fill)"
+        assert tokens["variables"]["--chat-input-bg"] == "var(--dsw-specific-input-major)"
+        plain = next(t for t in themes if t["id"] == "dsh-skin-plain-skin")
+        assert plain["variables"].get("--chat-input-bg") is None
+        assert plain["variables"].get("--region-sidebar-bg") != "var(--dsw-specific-sidebar-fill)"
 
     def test_manifest_themes_auto_declared(self):
         manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))

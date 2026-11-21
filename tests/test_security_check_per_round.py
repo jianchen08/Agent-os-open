@@ -71,6 +71,16 @@ def _ctx_for(tool_name: str, command: str, *, provider: str = "host") -> PluginC
     return make_tool_ctx(tool_name, {"command": command}, provider=provider)
 
 
+def _carry_state_updates(target_ctx: PluginContext, updates: dict[str, Any]) -> None:
+    """模拟引擎把上一轮 state_updates 合并回管道 state。
+
+    指纹记忆 v2 起载体是管道级 state 键 task.approved_signatures（跨轮次、
+    子任务可读）；测试用独立 ctx 模拟两轮，须显式搬运状态更新。
+    """
+    for key, value in updates.items():
+        target_ctx.state[key] = value
+
+
 # ═══════════════════════════════════════════════════════════════
 # 契约 1：根因回归 —— 每轮独立审批，不因前轮残留而跳过
 # ═══════════════════════════════════════════════════════════════
@@ -96,13 +106,13 @@ class TestPerRoundApproval:
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
         # 第一轮：危险命令 A
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/a")
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/a")
         r1 = await plugin.execute(ctx1)
         assert _decision_view(r1)["allowed"] is True
         assert create.calls == 1
 
         # 第二轮：危险命令 B（不同路径）—— 关键：必须再次审批
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/b")
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/b")
         await plugin.execute(ctx2)
         assert create.calls == 2, (
             f"第二轮危险命令必须再次触发审批，但 create_choice_request 只被调用 {create.calls} 次"
@@ -120,7 +130,7 @@ class TestPerRoundApproval:
         cap, create = _approval_svc([{"selected_option": "approved_once"}])
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
-        ctx = _ctx_for("bash_execute", "rm -rf /tmp/evil")
+        ctx = _ctx_for("bash", "rm -rf /tmp/evil")
         # 模拟上一轮残留的决策
         ctx.state["security"] = {"decision": {"allowed": True, "reason": "approved"}}
 
@@ -146,13 +156,14 @@ class TestSignatureMemory:
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
         # 第一次：危险命令，用户选"同命令免批"
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
-        await plugin.execute(ctx1)
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/x")
+        r1 = await plugin.execute(ctx1)
         assert create.calls == 1
-        assert plugin._approved_signatures, "指纹应被记忆"
+        assert r1.state_updates.get(sc_mod.APPROVED_SIGNATURES_KEY), "指纹应被记忆"
 
-        # 第二次：完全相同命令 → 免审批
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        # 第二次：完全相同命令 → 免审批（引擎合并上一轮 state_updates）
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/x")
+        _carry_state_updates(ctx2, r1.state_updates)
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "同命令已记忆，不应再次发起审批"
         assert _decision_view(r2)["allowed"] is True
@@ -169,13 +180,13 @@ class TestSignatureMemory:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
-        await plugin.execute(ctx1)
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/x")
+        r1 = await plugin.execute(ctx1)
         assert create.calls == 1
-        assert not plugin._approved_signatures, "approved_once 不应记忆指纹"
+        assert not r1.state_updates.get(sc_mod.APPROVED_SIGNATURES_KEY), "approved_once 不应记忆指纹"
 
         # 同命令再次调用 → 仍要审批
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/x")
         await plugin.execute(ctx2)
         assert create.calls == 2, "approved_once 未记忆，同命令仍应审批"
 
@@ -192,12 +203,12 @@ class TestSignatureMemory:
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
         # 记忆 rm -rf /tmp/a
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/a")
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/a")
         await plugin.execute(ctx1)
         assert create.calls == 1
 
         # rm -rf /tmp/b —— 路径不同，必须重审（不能因记了 /tmp/a 就放行 /tmp/b）
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/b")
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/b")
         await plugin.execute(ctx2)
         assert create.calls == 2, "不同路径的命令必须重新审批"
 
@@ -213,12 +224,13 @@ class TestSignatureMemory:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
-        ctx1 = _ctx_for("bash_execute", "rm -rf    /tmp/x")
-        await plugin.execute(ctx1)
+        ctx1 = _ctx_for("bash", "rm -rf    /tmp/x")
+        r1 = await plugin.execute(ctx1)
         assert create.calls == 1
 
-        # 单空格版本 → 同指纹 → 免审批
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        # 单空格版本 → 同指纹 → 免审批（引擎合并上一轮 state_updates）
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/x")
+        _carry_state_updates(ctx2, r1.state_updates)
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "空白归一化后应视为同命令，免审批"
         assert _decision_view(r2)["allowed"] is True
@@ -250,13 +262,14 @@ class TestLabelBasedSelection:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
-        await plugin.execute(ctx1)
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/x")
+        r1 = await plugin.execute(ctx1)
         assert create.calls == 1
-        assert plugin._approved_signatures, "label 路径下 approved_remember 应记忆指纹"
+        assert r1.state_updates.get(sc_mod.APPROVED_SIGNATURES_KEY), "label 路径下 approved_remember 应记忆指纹"
 
         # 同命令再次调用 → 免审批（指纹已记）
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/x")
+        _carry_state_updates(ctx2, r1.state_updates)
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "label 路径记忆后，同命令应免审批"
         assert _decision_view(r2)["allowed"] is True
@@ -272,13 +285,13 @@ class TestLabelBasedSelection:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
-        await plugin.execute(ctx1)
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/x")
+        r1 = await plugin.execute(ctx1)
         assert create.calls == 1
-        assert not plugin._approved_signatures, "label 路径下 approved_once 不应记忆"
+        assert not r1.state_updates.get(sc_mod.APPROVED_SIGNATURES_KEY), "label 路径下 approved_once 不应记忆"
 
         # 同命令再次调用 → 仍要审批
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/x")
         await plugin.execute(ctx2)
         assert create.calls == 2, "label 路径 approved_once 未记忆，同命令仍应审批"
 
@@ -291,7 +304,7 @@ class TestLabelBasedSelection:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
-        ctx = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        ctx = _ctx_for("bash", "rm -rf /tmp/x")
         r = await plugin.execute(ctx)
         decision = _decision_view(r)
         # _soft_block 返回 allowed=True（软拦截：拒绝结果反馈给 LLM，
@@ -300,7 +313,7 @@ class TestLabelBasedSelection:
             "label 路径 denied 应走 soft_block，reason 须带 soft_block 标记"
         )
         assert "用户拒绝" in decision.get("reason", ""), "reason 应体现用户拒绝"
-        assert not plugin._approved_signatures, "denied 绝不记忆指纹"
+        assert not r.state_updates.get(sc_mod.APPROVED_SIGNATURES_KEY), "denied 绝不记忆指纹"
 
     @pytest.mark.asyncio
     async def test_denied_never_whitelists_command(self):
@@ -318,13 +331,13 @@ class TestLabelBasedSelection:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
-        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        ctx1 = _ctx_for("bash", "rm -rf /tmp/x")
         r1 = await plugin.execute(ctx1)
         assert create.calls == 1
         assert "soft_block" in _decision_view(r1).get("reason", "")
 
         # 同命令第二轮：拒绝没有记忆指纹 → 必须再次发起审批
-        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        ctx2 = _ctx_for("bash", "rm -rf /tmp/x")
         await plugin.execute(ctx2)
         assert create.calls == 2, "denied 后同命令必须重新审批（不得免批放行）"
 
@@ -362,7 +375,7 @@ class TestApprovalServiceErrorContract:
         ])
 
         plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
-        result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
+        result = await plugin.execute(_ctx_for("bash", "rm -rf /tmp/err"))
 
         assert create.calls == 1
         decision = _decision_view(result)
@@ -378,7 +391,7 @@ class TestApprovalServiceErrorContract:
         _cap, create = _approval_svc(["not-a-dict"])  # type: ignore[list-item]
 
         plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
-        result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
+        result = await plugin.execute(_ctx_for("bash", "rm -rf /tmp/err"))
 
         assert create.calls == 1
         decision = _decision_view(result)
@@ -397,7 +410,7 @@ class TestApprovalServiceErrorContract:
         sc_mod.set_human_interaction_cap(_CreateFailingCap())
 
         plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
-        result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
+        result = await plugin.execute(_ctx_for("bash", "rm -rf /tmp/err"))
 
         decision = _decision_view(result)
         assert "审批服务异常" in decision.get("reason", "")
@@ -429,7 +442,7 @@ class TestApprovalDescriptionPreview:
             state={
                 "core_type": "tool_execute",
                 "raw_tool_calls": [{
-                    "name": "bash_execute",
+                    "name": "bash",
                     "args": {
                         "command": "rm -rf " + "c" * 600,
                         "path": "/tmp/preview.txt",
@@ -439,7 +452,7 @@ class TestApprovalDescriptionPreview:
                     },
                 }],
                 "execution_contexts": [
-                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": False}
+                    {"provider": "host", "tool_name": "bash", "task_isolated": False}
                 ],
             },
             _services={},
@@ -491,11 +504,11 @@ class TestApprovalFormatsStringArgsToolCalls:
             state={
                 "core_type": "tool_execute",
                 "raw_tool_calls": [
-                    {"name": "bash_execute", "args": {"command": "rm -rf /tmp/x"}},
+                    {"name": "bash", "args": {"command": "rm -rf /tmp/x"}},
                     {"name": "helper_tool", "args": companion_args},
                 ],
                 "execution_contexts": [
-                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": False}
+                    {"provider": "host", "tool_name": "bash", "task_isolated": False}
                 ],
             },
             _services={},

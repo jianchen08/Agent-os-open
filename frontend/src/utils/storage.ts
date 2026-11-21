@@ -3,8 +3,8 @@
  */
 
 import { loggers } from './logger'
-import { STORAGE_KEYS } from '../constants/storage'
 import { userScopedKey } from './userScopedStorage'
+import { STORAGE_KEYS } from '../constants/storage'
 
 export { STORAGE_KEYS }
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]

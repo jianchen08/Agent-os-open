@@ -16,8 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SERVER_BASE_URL_KEY } from '@/services/shellApiBase'
 import { PeerDeviceCards } from '../PeerDeviceCards'
 import { SelfDeviceCard } from '../SelfDeviceCard'
-import type { DeviceProbeResult, RelayDevice, RelayDevicesResponse, SyncAgentStatus } from '@/services/api/syncMirror'
 import type { ConnectKernelResult } from '../connectKernel'
+import type { DeviceProbeResult, RelayDevice, RelayDevicesResponse, SyncAgentStatus } from '@/services/api/syncMirror'
 
 // 同步面数据源（HTTP）：按用例给数据，避免真实网络与查询缓存时序
 const mirror = vi.hoisted(() => ({

@@ -143,6 +143,28 @@ class TestList:
         assert all(i["id"] for i in out["items"])
         assert out["total"] == 2
 
+    def test_list_exposes_icon_field(self, server: Any, tmp_path: Path) -> None:
+        """`icon` 字段原样透出（emoji / 内置图标名两形态），未配置为空串。
+
+        两形态必须都通：前端据此决定渲染 emoji 文本还是图标组件；未配置留空串
+        由前端缺省图标兜底（后端不猜默认图标，图标语义在前端单一真值）。
+        """
+        main = tmp_path / "config" / "agents" / "main"
+        (main / "emoji_agent.yaml").write_text(
+            'config_id: emoji_agent\nname: Emoji代理\nicon: "🧠"\nagent_type: specialized\n',
+            encoding="utf-8",
+        )
+        (main / "named_agent.yaml").write_text(
+            "config_id: named_agent\nname: 具名代理\nicon: wrench\nagent_type: specialized\n",
+            encoding="utf-8",
+        )
+        out = server.list_agents()
+        by_id = {i["id"]: i for i in out["items"]}
+        assert by_id["emoji_agent"]["icon"] == "🧠"
+        assert by_id["named_agent"]["icon"] == "wrench"
+        # 未配置 → 空串（不伪造、不借用别的 agent 的 icon）
+        assert by_id["agentos"]["icon"] == ""
+
 
 # ══ 2. schema ══
 

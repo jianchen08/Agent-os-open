@@ -1,9 +1,12 @@
 # @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
-"""continue 路径测试。
+"""log(block=true) 路径测试。
 
 验证两个新增/改动行为：
-1. continue 完成路径返回 output 字段（对齐 execute 完成路径，原只有 summary）
-2. continue 在 pid 已清（completed 即时清理后）时降级走磁盘日志，而非粗暴失败
+1. log(block=true) 完成路径返回 output 字段（对齐 bash 完成路径，原只有 summary）
+2. log(block=true) 在记录已清（completed 即时清理后）时降级走磁盘日志，而非粗暴失败
+
+2026-11-07 四工具重构（ADR T2）：continue action 退役 → log(block=true)；
+pid 参数退役 → handle。
 """
 
 from __future__ import annotations
@@ -11,9 +14,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from agentos_plugin_sdk.process_runtime import ProcessInfo
-from agentos_plugin_sdk.process_runtime import ProcessManager
-from tool import BashTool
+from tool import BashTool, encode_handle
+
+from agentos_plugin_sdk.process_runtime import ProcessInfo, ProcessManager
 
 pytestmark = pytest.mark.unit
 
@@ -38,8 +41,8 @@ def _write_log_file(log_dir: Path, pid: int, command: str, content: str) -> Path
 
 
 @pytest.mark.asyncio
-async def test_continue_completed_includes_output(tool, tmp_path):
-    """continue 完成路径应返回 output 字段（不只是 summary）。"""
+async def test_block_true_completed_includes_output(tool, tmp_path):
+    """log(block=true) 完成路径应返回 output 字段（不只是 summary）。"""
     log_file = _write_log_file(
         tmp_path / "logs", pid=300, command="echo done",
         content="real result line\n",
@@ -54,8 +57,8 @@ async def test_continue_completed_includes_output(tool, tmp_path):
     )
     tool.process_manager.active_processes[300] = info
 
-    # timeout 设小，第一次轮询就发现进程已完成（status != running 直接返回）
-    result = await tool.execute({"action": "continue", "pid": 300, "timeout": 1})
+    # 等待上限内第一拍即发现进程已完成（status != running 直接返回）
+    result = await tool.read_log({"handle": encode_handle(300, None), "block": True})
 
     assert result.success
     assert result.output["status"] == "completed"
@@ -64,10 +67,10 @@ async def test_continue_completed_includes_output(tool, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_continue_cleared_pid_falls_back_to_disk(tool, tmp_path):
-    """continue 在 pid 已清时应降级走磁盘，而非 PROCESS_NOT_FOUND。
+async def test_block_true_cleared_pid_falls_back_to_disk(tool, tmp_path):
+    """log(block=true) 在记录已清时应降级走磁盘，而非 PROCESS_NOT_FOUND。
 
-    场景：execute 启动→进程完成被即时清理→LLM 调 continue 想确认结果。
+    场景：bash 启动→进程完成被即时清理→LLM 调 log(block=true) 想确认结果。
     应自动从磁盘读最后输出，告诉 LLM "进程已结束"+输出。
     """
     _write_log_file(
@@ -77,7 +80,7 @@ async def test_continue_cleared_pid_falls_back_to_disk(tool, tmp_path):
     # 确保 active_processes 里没有这个 pid（模拟已即时清理）
     assert 301 not in tool.process_manager.active_processes
 
-    result = await tool.execute({"action": "continue", "pid": 301, "timeout": 1})
+    result = await tool.read_log({"handle": encode_handle(301, None), "block": True})
 
     assert result.success, "应降级成功，而非失败"
     assert result.output["status"] == "completed"
@@ -86,18 +89,18 @@ async def test_continue_cleared_pid_falls_back_to_disk(tool, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_continue_no_pid_no_file_returns_failure(tool):
-    """pid 不存在且无磁盘日志 → PROCESS_NOT_FOUND 失败。"""
-    result = await tool.execute({"action": "continue", "pid": 99998, "timeout": 1})
+async def test_block_true_no_handle_no_file_returns_failure(tool):
+    """handle 无对应进程且无磁盘日志 → PROCESS_NOT_FOUND 失败。"""
+    result = await tool.read_log({"handle": encode_handle(99998, None), "block": True})
 
     assert not result.success
     assert result.error_code == "PROCESS_NOT_FOUND"
 
 
 @pytest.mark.asyncio
-async def test_continue_missing_pid_arg_returns_failure(tool):
-    """没传 pid → MISSING_PID 失败。"""
-    result = await tool.execute({"action": "continue", "timeout": 1})
+async def test_block_true_missing_handle_returns_failure(tool):
+    """没传 handle → MISSING_HANDLE 失败。"""
+    result = await tool.read_log({"block": True})
 
     assert not result.success
-    assert result.error_code == "MISSING_PID"
+    assert result.error_code == "MISSING_HANDLE"

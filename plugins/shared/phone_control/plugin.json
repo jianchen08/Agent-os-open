@@ -1,0 +1,53 @@
+{
+  "id": "phone_control",
+  "name": "PhoneControl",
+  "description": "手机操控文本档：经 localhost HTTP 调 uia2-server 操控服务（元素树/点击/输入），带分级安全闸（付款/密码/验证码/系统设置恒交还用户）",
+  "version": "0.1.1",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "phone_control",
+        "description": "手机操控文本档：经 localhost HTTP 调 uia2-server 操控服务（元素树/点击/输入），带分级安全闸（付款/密码/验证码/系统设置恒交还用户）",
+        "render": {
+          "card": "form",
+          "title": "PhoneControl"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["tree", "click", "input", "key", "screenshot"],
+              "description": "操控动作：tree=读元素树(source)；click=点击坐标；input=输入文本(先聚焦输入框)；key=按键(keycode)；screenshot=截图(base64)"
+            },
+            "x": {"type": "integer", "description": "click 目标横坐标"},
+            "y": {"type": "integer", "description": "click 目标纵坐标"},
+            "text": {"type": "string", "description": "input 要输入的文本"},
+            "keycode": {"type": "integer", "description": "key 动作的 Android keycode（如 4=返回）"}
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["message", "status"],
+          "properties": {
+            "message": {"type": "string", "description": "执行结果摘要或拦截原因"},
+            "status": {
+              "type": "string",
+              "enum": ["ok", "blocked", "error"],
+              "description": "ok=执行成功；blocked=安全闸拦截（交还用户）；error=调用失败"
+            },
+            "data": {"type": "object", "description": "动作返回数据（tree 的元素 JSON / screenshot 的 base64 等）"}
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light"
+}

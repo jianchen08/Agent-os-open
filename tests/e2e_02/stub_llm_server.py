@@ -44,6 +44,16 @@ def tool_call_step(name: str, **arguments: Any) -> dict[str, Any]:
     return {"tool_calls": [{"name": name, "arguments": arguments}]}
 
 
+def error_step(status: int = 500, message: str = "stub upstream exploded") -> dict[str, Any]:
+    """脚本步骤：上游失败注入（返回 HTTP status + OpenAI 错误形态 JSON 体）。
+
+    供「LLM 调用失败」类场景使用：llm 插件经 litellm 消费时收到非 2xx 即
+    上抛，步骤错误由引擎记录（_plugin_errors）后继续——管道级重试/熔断行为
+    的可编程触发器。
+    """
+    return {"fail_status": int(status), "fail_message": str(message)}
+
+
 def default_text_factory(prefix: str) -> Callable[[dict[str, Any], int], dict[str, Any]]:
     """缺省步骤工厂：第 n 次兜底请求返回带序号的可区分纯文本。"""
 
@@ -258,6 +268,20 @@ class ScriptedLLMUpstream:
                     return
                 step = script.next_step(body)
                 model = str(body.get("model") or "stub-model")
+                fail_status = step.get("fail_status")
+                if fail_status:
+                    # 上游失败注入：非 2xx + OpenAI 错误形态（litellm 消费面即抛）
+                    self._send_json(
+                        {
+                            "error": {
+                                "message": str(step.get("fail_message") or "stub upstream failed"),
+                                "type": "server_error",
+                                "code": "stub_fail",
+                            }
+                        },
+                        status=int(fail_status),
+                    )
+                    return
                 if body.get("stream"):
                     self._send_stream_completion(step, model)
                 else:

@@ -6,7 +6,7 @@
  * - 展示：执行中/最近完成两组，组内按归属会话分组（会话 → 管道 包含关系），
  *   无归属（孤儿）管道单独平铺；树子级点击展开/收起（默认收起），条目详情走
  *   独立「详细信息」按钮、与树展开解耦（树操作不关
- *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复（原「取消」改标暂停）/复制 ID/打开工作空间）
+ *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复/删除管道/复制 ID/打开工作空间）
  * - 任务与执行管道一对一绑定：条目行即任务行，不包
  *   任务节点层——子任务/子管道直挂该条目行下，只一个层级
  */
@@ -23,6 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { openTaskSceneTab } from '@/components/workspace/taskScene/taskSceneTab'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
@@ -33,7 +34,7 @@ import { useAsyncResource } from '@/hooks/useAsyncResource'
 import { useElementVisible } from '@/hooks/useElementVisible'
 import { useVisibleRefetch } from '@/hooks/useVisibleRefetch'
 import { mapStateInfoToViewModel, type PipelineStateEntryViewModel } from '@/services/api/pipelines'
-import { deleteProject } from '@/services/api/tasks'
+import { deleteProject, deleteTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { queryKeys } from '@/services/query/queryKeys'
 import { runTaskRowAction } from '@/services/taskRowActions'
@@ -43,18 +44,19 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { taskPendingSubtaskParents, taskStatusToPipelineStatus } from '@/types/taskStatus'
+import {
+  taskAncestorsWithRunningDescendant,
+  taskPendingSubtaskParents,
+  taskStatusToPipelineStatus,
+} from '@/types/taskStatus'
 import { sanitizeSessionTitle } from '@/utils/sessionTitle'
+import { resolveAgentIconValue } from './agentIcon'
 import {
   matchesEntryFilters,
   PipelineManagerFilterBar,
   resolveEntrySessionId as resolveEntrySessionIdPure,
   sessionFilterLabelOf,
 } from './PipelineManagerFilterBar'
-import {
-  PipelineManagerPauseConfirmDialog,
-  type PauseConfirmTarget,
-} from './PipelineManagerPauseConfirmDialog'
 import {
   ensureAnchorNode,
   PipelineTree,
@@ -63,7 +65,11 @@ import {
 } from './PipelineManagerTreeParts'
 import { pipelineRowLifecycleFields } from './pipelineRowLifecycle'
 import { resolveAgentLabel } from './pipelineShortLabel'
-import { pipelineStatusToTabStatus, TERMINAL_PIPELINE_STATUSES } from './pipelineStatusVisuals'
+import {
+  entryShowsRunning,
+  pipelineStatusToTabStatus,
+  TERMINAL_PIPELINE_STATUSES,
+} from './pipelineStatusVisuals'
 import { openWorkspaceTreeTab } from './workspaceTreeTab'
 import type { PipelineViewEntry } from '@/types/pipeline'
 
@@ -97,8 +103,31 @@ function entryAgentId(
 /** 任务定位高亮时长（focusTaskId 定位行的高亮窗口，超时自动清除） */
 const LOCATE_HIGHLIGHT_MS = 2500
 
+/** 各数据源的恒定空缺省（引用稳定：query 无数据时不打穿下游 useMemo 依赖） */
+const EMPTY_RUNS: Record<string, never> = {}
+const EMPTY_STATES: Record<string, never> = {}
+const EMPTY_TASKS: readonly Record<string, unknown>[] = []
+
+/** 空 key 集常量（引用恒定：无下辖运行中时不打穿下游 useMemo 依赖） */
+const EMPTY_KEY_SET: ReadonlySet<string> = new Set<string>()
+
 /** agents 注册表空缺省（引用恒定：query 无数据时不打穿下游 useMemo 依赖） */
 const EMPTY_AGENT_LIST: Array<{ id?: string; configId?: string; name?: string }> = []
+
+/** 收集树中全部节点 key（含各级子级）：关键词搜索时整体展开用——命中的
+ *  行可能挂在折叠的子级里，不展开等于搜不到（用户实测 2026-11-19：搜管道 ID
+ *  只看到父级锚点行，目标行被折叠藏起） */
+function collectTreeKeys(nodes: PipelineTreeNode[]): Set<string> {
+  const keys = new Set<string>()
+  const walk = (list: PipelineTreeNode[]): void => {
+    for (const n of list) {
+      keys.add(n.key)
+      if (n.children.length > 0) walk(n.children)
+    }
+  }
+  walk(nodes)
+  return keys
+}
 
 /** 在树中查找节点 key 的祖先路径（父→子序、含自身；找不到返回空数组） */
 function findTreePathKeys(nodes: PipelineTreeNode[], key: string, trail: string[] = []): string[] {
@@ -122,17 +151,17 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
   const { ref: rootRef, visible: panelVisible } = useElementVisible<HTMLDivElement>()
   /** 管道 runs 快照（query 化：queryKeys.pipelineRuns，30s 兜底轮询 + WS 流式事件增量） */
   const runsQuery = usePipelineRunsQuery(panelVisible ? undefined : false)
-  const registryRuns = runsQuery.data ?? {}
+  const registryRuns = useMemo(() => runsQuery.data ?? EMPTY_RUNS, [runsQuery.data])
   /** 管道 state 摘要（query 化：queryKeys.pipelineStates；states 侧失败仅 runs 快照仍可用） */
   const statesQuery = usePipelineStatesQuery(panelVisible ? undefined : false)
-  const registryStates = statesQuery.data ?? {}
+  const registryStates = useMemo(() => statesQuery.data ?? EMPTY_STATES, [statesQuery.data])
   const registryStatesError = statesQuery.error
   /** 实时 token 用量（cost_update 事件驱动） */
   const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
   /** 全量任务（task_service 插件端点，不过滤 long-term；任务节点/任务管道判定权威源）。
    *  query 化：queryKeys.pipelineAllTasks，30s 轮询 + 窗口聚焦刷新替代原本地 interval */
   const tasksQuery = useAllTasksQuery(panelVisible ? undefined : false)
-  const allTasks = tasksQuery.data ?? []
+  const allTasks = useMemo(() => tasksQuery.data ?? EMPTY_TASKS, [tasksQuery.data])
   const tasksError = tasksQuery.error
   const queryClient = useQueryClient()
   useVisibleRefetch(
@@ -167,6 +196,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     }
     // 子任务挂号推导（§4.5「等待子任务」取数源）：单源 types/taskStatus.taskPendingSubtaskParents
     const pendingSubtaskParents = taskPendingSubtaskParents(allTasks)
+    // 任务链活跃推导（父行状态聚合取数源）：子孙中有运行中的祖先任务 id 集
+    const runningChainTaskIds = taskAncestorsWithRunningDescendant(allTasks)
     // 任务 → 管道 ID 映射（判定任务类型 + 取任务名/进度；全量任务）
     const taskByPipeline = new Map<string, Record<string, unknown>>()
     for (const task of allTasks) {
@@ -214,6 +245,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         name,
         agentName: agentId,
         agentLabel: resolveAgentLabel(agentId, agents),
+        // 图标与名字同源解析（同一注册表行）：名字转 tooltip，行内显图标
+        agentIcon: resolveAgentIconValue(agentId, agents),
         taskId: task ? String(task.id) : undefined,
         // 归属会话标题（threadId 未命中会话列表 = 无归属孤儿管道）
         sessionTitle: session ? sanitizeSessionTitle(session.title) : undefined,
@@ -238,6 +271,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         // 原始状态与 state 真值（不被 4 态映射吞掉——evaluating/planning 等细态可见）
         taskStatus: task ? String(task.status ?? '') || undefined : undefined,
         hasPendingSubtasks: task ? pendingSubtaskParents.has(String(task.id)) : undefined,
+        // 下辖运行中（聚合展示字段，不改写 status 真值）：子孙里有人显示为运行中
+        hasRunningDescendant: task ? runningChainTaskIds.has(String(task.id)) : undefined,
         stateStatus: st?.taskStatus,
         modeTags: st?.modeTags,
         ...pipelineRowLifecycleFields(st),
@@ -309,6 +344,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         name: String(task.title ?? '') || '未命名', // 无 title 不落短 ID（用户裁定 2026-11-06）
         agentName: agentId,
         agentLabel: resolveAgentLabel(agentId, agents),
+        // 图标与名字同源解析（同一注册表行）：名字转 tooltip，行内显图标
+        agentIcon: resolveAgentIconValue(agentId, agents),
         taskId: String(task.id),
         sessionTitle: undefined,
         workspacePath:
@@ -325,6 +362,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         totalTokens: null,
         taskStatus: taskStatus || undefined,
         hasPendingSubtasks: pendingSubtaskParents.has(String(task.id)),
+        // 下辖运行中（聚合展示字段，不改写 status 真值）
+        hasRunningDescendant: runningChainTaskIds.has(String(task.id)),
         currentPhase: st?.currentPhase,
         messageCount: st?.messageCount,
         stateStatus: st?.taskStatus,
@@ -358,6 +397,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         name: st.title || '未命名',
         agentName: agentId,
         agentLabel: resolveAgentLabel(agentId, agents),
+        // 图标与名字同源解析（同一注册表行）：名字转 tooltip，行内显图标
+        agentIcon: resolveAgentIconValue(agentId, agents),
         sessionTitle: session ? sanitizeSessionTitle(session.title) : undefined,
         currentPhase: st.currentPhase,
         messageCount: st.messageCount,
@@ -393,8 +434,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
   }, [registryRuns, registryStates, usageByPipeline, allTasks, sessions, projects, agents])
 
   /** 类型筛选（空集 = 全部；任务/会话可叠加并集） */
-  const [kindFilters, setKindFilters] = useState<Set<'task' | 'session'>>(new Set())
-  /** 状态筛选（空集 = 全部；「运行中」与其余状态互斥自动反选，逻辑在 FilterBar 单源）。
+  /** 状态筛选（空集 = 全部；可叠加组任意状态取并集，切换逻辑在 FilterBar 单源）。
    *  缺省：有活跃会话 → 空集（2026-10-17 裁定：会话筛选已收窄不叠加）；无 → 只看运行中（09-21 裁定） */
   const [statusFilters, setStatusFilters] = useState<Set<string>>(() =>
     useSessionStore.getState().activeSessionId ? new Set() : new Set(['running']))
@@ -428,12 +468,18 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
 
   /** 项目删除确认弹窗（待删项目；null = 关闭） */
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<{ id: string; name: string } | null>(null)
-  /** 暂停确认弹窗目标（null = 关闭；确认链路内聚 PipelineManagerPauseConfirmDialog） */
-  const [pauseTarget, setPauseTarget] = useState<PauseConfirmTarget | null>(null)
+  /** 管道删除确认弹窗（待删任务管道；null = 关闭。「打叉」位改删除，2026-11-11
+   *  用户指令：0.2 任务=管道，DELETE 任务端点级联删除管道全部执行数据） */
+  const [pipelineDeleteTarget, setPipelineDeleteTarget] = useState<{
+    taskId: string
+    pipelineId: string
+    name: string
+  } | null>(null)
   /** 删除口径：连子任务一起删除（缺省仅挂起保留）/ 连文件夹一起删除 */
   const [deleteChildren, setDeleteChildren] = useState(false)
   const [deleteFiles, setDeleteFiles] = useState(false)
   const [deletingProject, setDeletingProject] = useState(false)
+  const [deletingPipeline, setDeletingPipeline] = useState(false)
 
   /** 确认删除项目：成功后刷新项目登记与任务列表（级联口径下子任务随之消失） */
   const handleProjectDeleteConfirm = useCallback(async () => {
@@ -471,13 +517,64 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     }
   }, [projectDeleteTarget, deleteChildren, deleteFiles, queryClient])
 
+  /** 确认删除管道：DELETE 任务端点（0.2 任务=管道，后端级联清理管道全部执行
+   *  数据，含在途 run 挂起与血缘后代），成功刷新管道三源 + 任务列表 */
+  const handlePipelineDeleteConfirm = useCallback(async () => {
+    if (!pipelineDeleteTarget) return
+    setDeletingPipeline(true)
+    try {
+      const ok = await deleteTask(pipelineDeleteTarget.taskId)
+      if (!ok) throw new Error('删除请求失败')
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineRuns })
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineStates })
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelineAllTasks })
+      invalidateLongTermTasks()
+      useNotificationStore.getState().addNotification({
+        title: '管道已删除',
+        message: `管道「${pipelineDeleteTarget.name}」已删除，执行数据已级联清理`,
+        priority: 'normal',
+        category: 'alert',
+        isBlocking: false,
+        autoDismissMs: 6000,
+        sourceLabel: '系统',
+      })
+      setPipelineDeleteTarget(null)
+    } catch (e) {
+      useNotificationStore.getState().addNotification({
+        title: '删除管道失败',
+        message: (e as { message?: string })?.message || '删除失败，请稍后重试',
+        priority: 'normal',
+        category: 'alert',
+        isBlocking: false,
+        autoDismissMs: 6000,
+        sourceLabel: '系统',
+      })
+    } finally {
+      setDeletingPipeline(false)
+    }
+  }, [pipelineDeleteTarget, queryClient])
+
+  /** 下辖运行中的条目 key 集（状态筛选「运行中」的链活跃聚合输入）：任务链里
+   *  有运行中子孙的祖先任务 → 其条目的 key（任务即管道，两 id 同源） */
+  const runningChainKeys = useMemo(() => {
+    const ancestorTaskIds = taskAncestorsWithRunningDescendant(allTasks)
+    if (ancestorTaskIds.size === 0) return EMPTY_KEY_SET
+    const keys = new Set<string>()
+    for (const e of pipelineEntries) {
+      if (e.taskId && ancestorTaskIds.has(e.taskId)) keys.add(e.key)
+    }
+    return keys
+  }, [allTasks, pipelineEntries])
+
   /** 按类型 + 状态 + 会话 + 关键词筛选管道条目（各维度 AND 叠加，谓词在
    *  PipelineManagerFilterBar 单源） */
   const filteredPipelineEntries = useMemo(
     () =>
       pipelineEntries.filter((entry) =>
-        matchesEntryFilters(entry, { kindFilters, statusFilters, sessionFilter, keyword })),
-    [pipelineEntries, kindFilters, statusFilters, sessionFilter, keyword],
+        matchesEntryFilters(entry, {
+          statusFilters, sessionFilter, keyword, runningChainKeys,
+        })),
+    [pipelineEntries, statusFilters, sessionFilter, keyword, runningChainKeys],
   )
 
   /** 会话 chip 标签：会话列表里的标题，查不到回退 id 前 8 位 */
@@ -530,7 +627,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       childrenMap.set(parentKey, list)
     }
     // 锚点行合成（契约见 ensureAnchorNode）：登记面按引用打包传入
-    const anchorCtx = { entryByKey, allEntryByKey, nodeByKey, roots, kindFilters }
+    const anchorCtx = { entryByKey, allEntryByKey, nodeByKey, roots }
     // 项目分组节点（登记行合成；无任务挂靠的项目也显示为空分组）
     const projectNodeKeys = new Map<string, string>() // projectId → node key
     for (const p of projects) {
@@ -643,13 +740,30 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     const sortByStart = (a: PipelineTreeNode, b: PipelineTreeNode) =>
       String(b.entry.startedAt).localeCompare(String(a.entry.startedAt))
     const build = (list: PipelineTreeNode[], depth: number): PipelineTreeNode[] =>
-      [...list].sort(sortByStart).map((n) => ({
-        ...n,
-        depth,
-        children: build(n.children, depth + 1),
-      }))
+      [...list].sort(sortByStart).map((n) => {
+        const children = build(n.children, depth + 1)
+        // 下辖运行中（按面板实际父子聚合）：本行自身未显示运行中、但任一子孙
+        // 显示运行中 → 标记。口径 = 用户看到的这棵树（任务父链/会话锚点嵌套/
+        // 项目分组三种归属同等对待），不是只认任务父链
+        const childRunning = children.some(
+          (c) => c.entry.hasRunningDescendant === true || entryShowsRunning(c.entry),
+        )
+        return {
+          ...n,
+          depth,
+          children,
+          entry: childRunning ? { ...n.entry, hasRunningDescendant: true } : n.entry,
+        }
+      })
     return build(visibleRoots, 0)
-  }, [filteredPipelineEntries, pipelineEntries, allTasks, sessions, projects, statusFilters, kindFilters])
+  }, [filteredPipelineEntries, pipelineEntries, allTasks, sessions, projects, statusFilters])
+
+  /** 生效的树展开态：关键词非空时整体展开（命中的行可能在折叠的子级里，
+   *  不展开用户只见父级行）；无关键词时用用户手动维护的展开集 */
+  const effectiveTreeOpenKeys = useMemo(
+    () => (keyword.trim() ? collectTreeKeys(pipelineTree) : treeOpenKeys),
+    [keyword, pipelineTree, treeOpenKeys],
+  )
 
   /** 展开/折叠树子级（行首 chevron / 任务节点行点击） */
   const toggleTreeNode = useCallback((key: string) => {
@@ -684,7 +798,6 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     const entry = pipelineEntries.find((e) => e.kind === 'task' && e.taskId === focusTaskId)
     if (!entry) return
     locatedFocusRef.current = focusTaskId
-    setKindFilters(new Set())
     setStatusFilters(new Set())
     setKeyword('')
     setSessionFilter(null)
@@ -867,11 +980,19 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     tabStore.loadTabMessages(tabId, pipelineId)
   }, [sessions])
 
-  /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间/打开项目文件夹/删除项目 */
+  /** 操作：暂停/恢复/删除管道（任务管道）/复制 ID/打开工作空间/打开项目文件夹/删除项目 */
   const handleAction = useCallback(
     async (
       entry: PipelineViewEntry,
-      action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
+      action:
+        | 'pause'
+        | 'resume'
+        | 'delete-pipeline'
+        | 'copy'
+        | 'workspace'
+        | 'scene'
+        | 'open-folder'
+        | 'delete',
     ) => {
       const pipelineId = entry.pipelineId || entry.key
       if (action === 'copy') {
@@ -897,6 +1018,14 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         await openFolderWithFeedback(entry.projectId, '文件夹', entry.name)
         return
       }
+      if (action === 'scene') {
+        // 任务现场（按时间看这个任务做了什么、产出了什么）：任务条目用 taskId，
+        // 非任务管道条目用 pipelineId（现场页以消息面为树干，两 id 同源可解析）
+        const sceneId = entry.taskId || entry.pipelineId || entry.key
+        if (!sceneId) return
+        openTaskSceneTab(sceneId, entry.name, resolveEntrySessionId(entry) ?? undefined)
+        return
+      }
       if (action === 'workspace') {
         // R3：所有有工作区坐标的条目都可打开——任务条目用 taskId（任务镜像
         // 解析），非任务管道条目用 pipelineId（state 行解析通道），项目条目用
@@ -909,9 +1038,14 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         return
       }
       if (!entry.taskId) return
-      if (action === 'cancel') {
-        // 原「取消」操作改标「暂停」（词汇退役，接口不变）：确认弹窗说明可恢复后才落终态
-        setPauseTarget({ taskId: entry.taskId, name: entry.name })
+      if (action === 'delete-pipeline') {
+        // 「打叉」位改删除（2026-11-11 用户指令）：打开确认弹窗，确认后
+        // DELETE 任务端点级联删除管道全部执行数据（不在行上直接删）
+        setPipelineDeleteTarget({
+          taskId: entry.taskId,
+          pipelineId,
+          name: entry.name,
+        })
         return
       }
       if (action === 'pause' || action === 'resume') {
@@ -929,8 +1063,6 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         setKeyword={setKeyword}
         statusFilters={statusFilters}
         setStatusFilters={setStatusFilters}
-        kindFilters={kindFilters}
-        setKindFilters={setKindFilters}
         sessionFilter={sessionFilter}
         clearSessionFilter={() => {
           setSessionFilter(null)
@@ -982,7 +1114,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
           <PipelineTree
             tree={pipelineTree}
             nowMs={nowMs}
-            treeOpenKeys={treeOpenKeys}
+            treeOpenKeys={effectiveTreeOpenKeys}
             detailOpenKeys={detailOpenKeys}
             locatedKey={locatedKey}
             onTreeToggle={toggleTreeNode}
@@ -1069,7 +1201,51 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         </DialogContent>
       </Dialog>
 
-      <PipelineManagerPauseConfirmDialog target={pauseTarget} onClose={() => setPauseTarget(null)} />
+      {/* 管道删除确认弹窗（打叉位改删除；后端删除前先挂起在途 run + 血缘后代级联清理） */}
+      <Dialog
+        open={!!pipelineDeleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deletingPipeline) setPipelineDeleteTarget(null)
+        }}
+      >
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除管道</DialogTitle>
+            <DialogDescription>
+              确定要删除管道「{pipelineDeleteTarget?.name}」吗？管道全部执行数据（消息/状态/检查点，
+              含子任务管道）将级联删除，不可恢复；运行中的管道会先挂起再删除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPipelineDeleteTarget(null)}
+              disabled={deletingPipeline}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={handlePipelineDeleteConfirm}
+              disabled={deletingPipeline}
+            >
+              {deletingPipeline ? (
+                <>
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  删除中...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-1 h-3.5 w-3.5" />
+                  确认删除
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

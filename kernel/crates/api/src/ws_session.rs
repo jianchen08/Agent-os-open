@@ -15,7 +15,7 @@ use std::sync::{
 
 use agentos_core::{
     traits::{MessageQueryOpts, StorageBackend},
-    types::{PatchType, PendingInputRecord, PendingInputSource, TenantContext, TraceEntry},
+    types::{DispatchRequest, PatchType, PendingInputRecord, TenantContext, TraceEntry},
 };
 use agentos_http::auth::verify_access_token;
 use agentos_session::{
@@ -59,7 +59,7 @@ static THREAD_OWNERSHIP_REJECTS: AtomicU64 = AtomicU64::new(0);
 /// REST chat 同步等待桥：client_message_id → outcome sender。
 ///
 /// chat_handler 入队前注册（cmid 由其生成，`http_` 前缀与前端 uuid cmid 空间
-/// 区分）；消费循环一轮结束后按 rec.client_message_id 命中即发送并移除；
+/// 区分）；消费循环一轮结束后按 request.client_message_id 命中即发送并移除；
 /// DELETE/清空逐出排队条目时通知失败 outcome（防 REST 请求挂死）。remove 语义
 /// 先到先得：条目被消费循环 pop 后表行已删，DELETE 侧 list 查不到即不通知，
 /// 两个通知点天然互斥。进程内瞬态：重启即失，对应 HTTP 连接同断，无挂死窗口。
@@ -783,22 +783,147 @@ fn frame_overlay_fields_from_manifests(
 /// interaction_response / stop_generation → 记录（引擎层审批/取消接入待 P3+）。
 pub struct EngineDispatcher {
     state: AppState,
+    /// 执行链注册表：生产恒进程单例（两个 dispatcher 实例必须共闸，见
+    /// RunChainRegistry 类型级注释）；测试经 `with_run_chain` 注入受控实例
+    /// （闸门上限可控，不动全局单例）。
+    run_chain: std::sync::Arc<crate::run_chain::RunChainRegistry>,
 }
 
 impl EngineDispatcher {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            run_chain: crate::run_chain::RunChainRegistry::global(),
+        }
+    }
+
+    /// 测试专用：注入受控注册表（闸门上限可控的独立实例）。
+    #[cfg(test)]
+    pub(crate) fn with_run_chain(
+        mut self,
+        registry: std::sync::Arc<crate::run_chain::RunChainRegistry>,
+    ) -> Self {
+        self.run_chain = registry;
+        self
+    }
+
+    /// 活跃抢占（ADR 2026-11-18）：为活跃管道派发腾一个闸门槽位——选一个
+    /// 运行态背景 run，落 `preempt_suspend` 标记 + suspend（既有中止机制：
+    /// run 置 suspended + RunSignalHub 信号唤醒）；受害链收尾经
+    /// `resume_if_preempted` 自动重入链续跑（步骤级检查点，在途步重试）。
+    /// 成功返回 true（调用方随即直跑，rank0 在闸门处等受害槽释放）。
+    ///
+    /// 受害策略：候选 = 已过闸的背景链（最新启动优先、排除请求者/活跃查看/
+    /// 冷却管道），逐个探测运行投影——仅 Running 投影可作受害（首 token 空窗
+    /// 链没有可中止的 run，且 pending_cancel 语义与续跑相悖，跳过）。
+    async fn preempt_one_victim(
+        &self,
+        registry: &std::sync::Arc<crate::run_chain::RunChainRegistry>,
+        store: &Arc<dyn agentos_core::traits::StorageBackend>,
+        requester_pipeline: &str,
+    ) -> bool {
+        for (candidate, candidate_user) in registry.preempt_candidates(requester_pipeline) {
+            let tenant_id =
+                match agentos_http::auth::resolve_tenant_id_by_user(Some(store), &candidate_user)
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        debug!(pipeline = %candidate, error = %e, "抢占候选租户解析失败（跳过）");
+                        continue;
+                    }
+                };
+            let runs = match store.list_runs_by_pipeline(&candidate, &tenant_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!(pipeline = %candidate, error = %e, "抢占候选运行投影查询失败（跳过）");
+                    continue;
+                }
+            };
+            let is_running = runs
+                .first()
+                .is_some_and(|r| r.status == agentos_core::types::RunStatus::Running);
+            if !is_running {
+                continue;
+            }
+            // 落抢占标记先于 suspend：受害链收尾检测依赖标记在 run 终态前可见
+            // （同管道链串行无并发写者；suspend 未落地则撤标记换下一候选）。
+            let mut fields = serde_json::Map::new();
+            fields.insert("preempt_suspend".to_string(), serde_json::json!(true));
+            if let Err(e) = store
+                .upsert_state_fields(&candidate, &tenant_id, &fields)
+                .await
+            {
+                warn!(pipeline = %candidate, error = %e, "抢占标记落库失败（跳过候选）");
+                continue;
+            }
+            if self
+                .suspend_pipeline_execution(store, &tenant_id, &candidate)
+                .await
+            {
+                registry.note_preempted(&candidate);
+                info!(
+                    pipeline = %candidate,
+                    requester = %requester_pipeline,
+                    "活跃管道抢占落地：背景 run 置 suspended + 续跑标记，槽位即将释放"
+                );
+                return true;
+            }
+            // suspend 未落地（候选 run 恰好终态等竞态）：撤标记，试下一候选。
+            let mut clear = serde_json::Map::new();
+            clear.insert("preempt_suspend".to_string(), serde_json::json!(false));
+            let _ = store
+                .upsert_state_fields(&candidate, &tenant_id, &clear)
+                .await;
+        }
+        false
+    }
+
+    /// 直跑单条 + 尾部 drain（直跑与抢占直跑共用的任务体，避免两处复制漂移）。
+    /// 返回 boxed future（`try_enqueue_direct` 消费；每次派发至多两次构造，
+    /// 一次堆分配可忽略）。
+    #[allow(clippy::too_many_arguments)]
+    fn direct_round_fut(
+        state: AppState,
+        tenant: TenantContext,
+        thread_id: String,
+        route_id: String,
+        store: Arc<dyn agentos_core::traits::StorageBackend>,
+        registry: std::sync::Arc<crate::run_chain::RunChainRegistry>,
+        rec: PendingInputRecord,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            // 先跑本条（先到先跑），尾部 drain 消费队列直到空。
+            let cmid = rec.request.client_message_id.clone();
+            let outcome = Self::run_pipeline_round_scoped(&state, &tenant, rec, &registry).await;
+            let cancelled = outcome_cancelled(&outcome);
+            let depth = pending_depth(&store, &tenant.tenant_id, &route_id).await;
+            if let Some(session) = state.session.as_ref() {
+                emit_round_finished_event(
+                    session,
+                    &thread_id,
+                    &route_id,
+                    outcome.failed,
+                    cancelled,
+                    depth,
+                )
+                .await;
+            }
+            notify_outcome_waiter(&cmid, outcome);
+            Self::drain_pending_queue(state, tenant, thread_id, route_id, store, registry).await;
+        })
     }
 
     /// 消费循环：FIFO pop pending 队列逐条执行直到空。入队链任务与直跑尾部的
     /// 共用体——直跑占链竞态窗口内入队的消息、重启遗留的队列残留都由此收走。
+    #[allow(clippy::too_many_arguments)]
     async fn drain_pending_queue(
         state: AppState,
         tenant: TenantContext,
         thread_id: String,
         route_id: String,
-        user_id: String,
         store: Arc<dyn agentos_core::traits::StorageBackend>,
+        registry: std::sync::Arc<crate::run_chain::RunChainRegistry>,
     ) {
         loop {
             let rec = match store.pop_pending_input(&tenant.tenant_id, &route_id).await {
@@ -820,7 +945,7 @@ impl EngineDispatcher {
                     {
                         for rec in remaining {
                             notify_outcome_waiter(
-                                &rec.client_message_id,
+                                &rec.request.client_message_id,
                                 crate::server::EngineOutcome {
                                     content: format!("pending 消费出队失败，消息未被本轮处理: {e}"),
                                     final_assistant: None,
@@ -847,8 +972,8 @@ impl EngineDispatcher {
             tracing::info!(
                 pipeline = %route_id,
                 input = %rec.id,
-                cmid = %rec.client_message_id,
-                content_len = rec.content.chars().count(),
+                cmid = %rec.request.client_message_id,
+                content_len = rec.request.content.chars().count(),
                 "pending 队列条目已出队（消费路径）"
             );
             // 消费事件：该条从队列条移入主消息流（前端据此同步）。
@@ -861,9 +986,8 @@ impl EngineDispatcher {
                 "consumed",
             )
             .await;
-            let cmid = rec.client_message_id.clone();
-            let outcome =
-                Self::run_pipeline_round_scoped(&state, &tenant, &thread_id, &user_id, rec).await;
+            let cmid = rec.request.client_message_id.clone();
+            let outcome = Self::run_pipeline_round_scoped(&state, &tenant, rec, &registry).await;
             let cancelled = outcome_cancelled(&outcome);
             let depth = pending_depth(&store, &tenant.tenant_id, &route_id).await;
             if let Some(session) = state.session.as_ref() {
@@ -882,25 +1006,23 @@ impl EngineDispatcher {
     }
 
     /// 直接入链执行一轮（无 store 路径：消息不经队列，行为与旧 dispatch 一致）。
-    async fn spawn_chain(state: &AppState, tenant: TenantContext, record: PendingInputRecord) {
-        let registry = crate::run_chain::RunChainRegistry::global();
-        let chain_key = record.route_id.clone();
-        let chain_user = record.user_id.clone();
+    async fn spawn_chain(
+        state: &AppState,
+        tenant: TenantContext,
+        record: PendingInputRecord,
+        registry: &std::sync::Arc<crate::run_chain::RunChainRegistry>,
+    ) {
+        let chain_key = record.request.pipeline_id.clone();
+        let chain_user = record.request.user_id.clone();
         registry.note_user_pipeline(&chain_user, &chain_key);
         let exec_state = state.clone();
-        let exec_thread = record.thread.clone();
-        let exec_user = record.user_id.clone();
-        let cmid = record.client_message_id.clone();
-        let exec_route = record.route_id.clone();
+        let exec_thread = record.request.thread_id.clone();
+        let cmid = record.request.client_message_id.clone();
+        let exec_route = record.request.pipeline_id.clone();
+        let exec_registry = std::sync::Arc::clone(registry);
         registry.enqueue(&chain_key, &chain_user, async move {
-            let outcome = Self::run_pipeline_round_scoped(
-                &exec_state,
-                &tenant,
-                &exec_thread,
-                &exec_user,
-                record,
-            )
-            .await;
+            let outcome =
+                Self::run_pipeline_round_scoped(&exec_state, &tenant, record, &exec_registry).await;
             let cancelled = outcome_cancelled(&outcome);
             if let Some(session) = exec_state.session.as_ref() {
                 emit_round_finished_event(
@@ -944,6 +1066,7 @@ impl EngineDispatcher {
     /// run 创建起手消费，终态 Cancelled）。返回是否落了任一取消信号（false =
     /// 链空闲的真幂等空转，不得残留标记）。
     async fn suspend_pipeline_execution(
+        &self,
         store: &Arc<dyn StorageBackend>,
         tenant_id: &str,
         target_pipeline: &str,
@@ -1008,7 +1131,7 @@ impl EngineDispatcher {
                 // 尚未建行）时取消必须生效：落管道级待取消标记，run 创建起手由引擎
                 // 消费（终态 Cancelled），禁静默吞。链空闲才是真幂等空转，且不得设
                 // 标记（否则下一轮被误杀）。
-                if !crate::run_chain::RunChainRegistry::global().has_chain(target_pipeline) {
+                if !self.run_chain.has_chain(target_pipeline) {
                     return false;
                 }
                 let mut fields = serde_json::Map::new();
@@ -1029,15 +1152,69 @@ impl EngineDispatcher {
         }
     }
 
+    /// 强制发送通道的停止段：引擎层停当前正在跑的 run（只发停止信号）。
+    ///
+    /// 与停止按钮共用 [`Self::suspend_pipeline_execution`]：Running → suspended，
+    /// 停止中/终态幂等，首 token 前空窗落待取消标记；**不退回**待处理队列
+    /// （退回是停止按钮的语义，强制发送要保留队列原序继续排队）。
+    ///
+    /// 返回 Err 仅限身份不可用（注入身份缺席且 user→tenant 解析失败）：
+    /// 此时不停、不派发，避免"没停成功却声称强制"的假成功。
+    async fn suspend_for_force(
+        &self,
+        thread_id: &str,
+        user_id: &str,
+        pipeline_id: &str,
+    ) -> Result<(), String> {
+        let Some(store) = self.state.store.as_ref() else {
+            // 无 store（单测/降级路径）：停止面本就不存在，派发照旧走既有链路。
+            return Ok(());
+        };
+        let (tenant_id, effective_user) = match agentos_tenant::current()
+            .filter(|c| c.user_id.as_deref().is_some_and(|u| !u.is_empty()))
+        {
+            Some(ctx) => (ctx.tenant_id, ctx.user_id.unwrap_or_default()),
+            None => {
+                let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id)
+                    .await
+                    .map_err(|e| {
+                        format!("强制发送前置停止失败（user→tenant 不可解析，未停未派发）: {e}")
+                    })?;
+                (tenant_id, user_id.to_string())
+            }
+        };
+        let target_pipeline = if pipeline_id.is_empty() {
+            resolve_pipeline_id_for_thread(store, thread_id, "", &tenant_id).await
+        } else {
+            pipeline_id.to_string()
+        };
+        if target_pipeline.is_empty() {
+            // 坐标缺失：无可停对象，交由派发段按协议报错（不在停止段吞掉）。
+            return Ok(());
+        }
+        let suspended = self
+            .suspend_pipeline_execution(store, &tenant_id, &target_pipeline)
+            .await;
+        info!(
+            thread = thread_id,
+            pipeline = %target_pipeline,
+            user = %effective_user,
+            suspended_now = suspended,
+            "强制发送前置停止已落地（run 在飞则置 suspended，停止中/终态幂等）"
+        );
+        Ok(())
+    }
+
     async fn run_pipeline_round_scoped(
         state: &AppState,
         tenant: &TenantContext,
-        thread_id: &str,
-        user_id: &str,
         rec: PendingInputRecord,
+        registry: &std::sync::Arc<crate::run_chain::RunChainRegistry>,
     ) -> crate::server::EngineOutcome {
-        let route_id = rec.route_id.clone();
-        let outcome = Self::run_pipeline_round(state, tenant, thread_id, user_id, rec).await;
+        let route_id = rec.request.pipeline_id.clone();
+        let resume_thread = rec.request.thread_id.clone();
+        let resume_user = rec.request.user_id.clone();
+        let outcome = Self::run_pipeline_round(state, tenant, rec).await;
         // 轮边界注入消费的队列条目（设计真值 docs/working/待输入队列轮边界注入_方案_20261025.md）：
         // 这些 cmid 不经本消费循环独立成轮，等待者漏通知会挂到超时层——run 收尾
         // 以同一 outcome 批量通知（失败轮同样通知，好于超时兜底）。
@@ -1046,58 +1223,169 @@ impl EngineDispatcher {
         }
         Self::clear_dispatch_scoped_cancel(state.store.as_ref(), &route_id, &tenant.tenant_id)
             .await;
+        Self::resume_if_preempted(
+            state,
+            tenant,
+            &route_id,
+            resume_thread,
+            resume_user,
+            std::sync::Arc::clone(registry),
+        );
         outcome
     }
 
+    /// 抢占收尾（ADR 2026-11-18）：`preempt_suspend` 标记 = 本 run 被活跃管道
+    /// 抢占中止（区别于用户停止——用户停止不落本标记）。清标记并按既有 resume
+    /// 语义自动重入链续跑：空 content + `_skip_user_append` + Trigger 源（与
+    /// resume_pipeline 拉起的续跑轮同构，步骤级检查点恢复、在途步重试）。经
+    /// `registry.enqueue` 以背景 rank 排队等下一空槽，不与抢占者争抢。
+    ///
+    /// 本函数恒为同步 + 检测入链整体独立任务化：run 收尾 future 结构上包含本
+    /// 函数入链的续跑轮 future（续跑轮同样可能被再抢占），async 化会让 Send
+    /// 自动证据求解进入类型级循环依赖（"cannot satisfy impl Future: Send"）。
+    ///
+    /// 标记读取用泛型 state 读清两步（无事务原子性）：同管道链串行保证无并发
+    /// 消费者；清除失败仅可能让下一轮多续跑一次空轮（幂等收尾），可接受。
+    fn resume_if_preempted(
+        state: &AppState,
+        tenant: &TenantContext,
+        route_id: &str,
+        thread_id: String,
+        user_id: String,
+        registry: std::sync::Arc<crate::run_chain::RunChainRegistry>,
+    ) {
+        let state = state.clone();
+        let tenant = tenant.clone();
+        let route_id = route_id.to_string();
+        tokio::spawn(async move {
+            let Some(store) = state.store.as_ref() else {
+                return;
+            };
+            let preempted = match store
+                .load_pipeline_state(&route_id, &tenant.tenant_id)
+                .await
+            {
+                Ok(fields) => fields
+                    .get("preempt_suspend")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                Err(e) => {
+                    warn!(pipeline = %route_id, error = %e, "抢占标记读取失败（跳过续跑判定）");
+                    return;
+                }
+            };
+            if !preempted {
+                return;
+            }
+            let mut clear = serde_json::Map::new();
+            clear.insert("preempt_suspend".to_string(), serde_json::json!(false));
+            if let Err(e) = store
+                .upsert_state_fields(&route_id, &tenant.tenant_id, &clear)
+                .await
+            {
+                warn!(pipeline = %route_id, error = %e, "抢占标记清除失败（续跑轮可能重复触发一次空轮）");
+            }
+            let mut resume_req = DispatchRequest {
+                thread_id: thread_id.clone(),
+                user_id: user_id.clone(),
+                pipeline_id: route_id.clone(),
+                content: String::new(),
+                client_message_id: String::new(),
+                // 系统发起，与 resume_pipeline / 任务派发同源。
+                source: agentos_core::types::PendingInputSource::Trigger,
+                execution_context: None,
+                state_overlay: None,
+                pipeline_config_id: None,
+            };
+            let mut overlay = serde_json::Map::new();
+            overlay.insert("_skip_user_append".to_string(), serde_json::json!(true));
+            resume_req.state_overlay = Some(serde_json::Value::Object(overlay));
+            let resume_record = PendingInputRecord {
+                id: format!("p_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+                tenant_id: tenant.tenant_id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                request: resume_req,
+            };
+            info!(
+                pipeline = %route_id,
+                thread = %thread_id,
+                "run 被活跃管道抢占中止：续跑轮已重入链（背景 rank 等下一空槽）"
+            );
+            let resume_registry = std::sync::Arc::clone(&registry);
+            let fut_route = route_id.clone();
+            // dyn Future 存在类型断环（同上，续跑轮 future 结构含本收尾链路）。
+            let resume_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                Box::pin(async move {
+                    let outcome = Self::run_pipeline_round_scoped(
+                        &state,
+                        &tenant,
+                        resume_record,
+                        &resume_registry,
+                    )
+                    .await;
+                    // 续跑轮自行收尾：round_finished 事件让前端收尾快照一致；cmid
+                    // 为空，等待者通知幂等零动作。
+                    let cancelled = outcome_cancelled(&outcome);
+                    if let Some(session) = state.session.as_ref() {
+                        emit_round_finished_event(
+                            session,
+                            &thread_id,
+                            &fut_route,
+                            outcome.failed,
+                            cancelled,
+                            0,
+                        )
+                        .await;
+                    }
+                    notify_outcome_waiter("", outcome);
+                });
+            registry.enqueue(&route_id, &user_id, resume_fut);
+        });
+    }
+
     /// 消费一条 pending 输入：发 stream_start + 引擎执行 + 推送结果（流式协议与
-    /// 旧 dispatch 完全一致，参数从 rec 取——等待窗口内 PUT 的修改在此生效）。
+    /// 旧 dispatch 完全一致，参数从 request 取——等待窗口内 PUT 的修改在此生效）。
     /// 返回引擎 outcome——消费循环据此通知 REST chat 同步等待者。
     async fn run_pipeline_round(
         state: &AppState,
         tenant: &TenantContext,
-        thread_id: &str,
-        user_id: &str,
         rec: PendingInputRecord,
     ) -> crate::server::EngineOutcome {
         // 生成 run 级 message_id：仅失败路径收尾（stream_error/plugin_error）使用
         // ——成功路径的消息事件由引擎轮次观察点逐轮发射（见 SessionRoundEvents）。
         let message_id = format!("a_{}", uuid::Uuid::new_v4().simple());
+        let exec_thread = rec.request.thread_id.clone();
         // 执行 agent（派发簿记：registry 登记 / run 日志）。run 的执行身份
         // 不取此值——身份是管道 state 持久键 agent.id，由 agent_config_load 与
         // 内核工具面消费（热启动在内存 state、冷启动在 DB）。
-        let exec_agent = if rec.agent_id.is_empty() {
-            resolve_dispatch_agent(
-                state.session.as_ref().map(|s| s.registry().as_ref()),
-                state.store.as_ref(),
-                &tenant.tenant_id,
-                thread_id,
-                "",
-            )
-            .await
-        } else {
-            rec.agent_id.clone()
+        // 取值优先级：本次派发 overlay 的 agent.id（内核契约键，WS/task_birth/
+        // 显式 agent_id 入口统一下压）→ 线程绑定/管道 state 解析。
+        let exec_agent = match rec
+            .request
+            .state_overlay
+            .as_ref()
+            .and_then(|o| o.get("agent.id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            Some(agent_id) => agent_id.to_string(),
+            None => {
+                resolve_dispatch_agent(
+                    state.session.as_ref().map(|s| s.registry().as_ref()),
+                    state.store.as_ref(),
+                    &tenant.tenant_id,
+                    &exec_thread,
+                    "",
+                )
+                .await
+            }
         };
-        let exec_thread = thread_id.to_string();
-        let exec_user = user_id.to_string();
 
         // 在租户上下文内执行管道。message_id 注入 state 供 sidecar 流式 chunk 携带
         // （sidecar on_chunk notify 时带上，前端据此把 chunk 路由到占位气泡）。
         let outcome = agentos_tenant::scope(
             tenant.clone(),
-            crate::server::process_via_engine(
-                state,
-                &rec.content,
-                &exec_agent,
-                &rec.route_id,
-                &exec_thread,
-                &message_id,
-                &exec_user,
-                &rec.thinking_strength,
-                rec.execution_context.as_ref(),
-                rec.state_overlay.as_ref(),
-                rec.pipeline_config_id.as_deref(),
-                &rec.client_message_id,
-            ),
+            crate::server::process_via_engine(state, &rec.request, &exec_agent, &message_id),
         )
         .await;
 
@@ -1114,7 +1402,7 @@ impl EngineDispatcher {
             emit_stream_error_event(
                 session,
                 &exec_thread,
-                &rec.route_id,
+                &rec.request.pipeline_id,
                 &message_id,
                 "ENGINE_RUN_FAILED",
                 &outcome.content,
@@ -1127,7 +1415,14 @@ impl EngineDispatcher {
         // 逐个发射 `plugin_error` 事件——非终止信号，前端只弹通知。必须在空回复
         // 防线之前发射：该防线提前 return，晚于此处会把携带真实失败原因的
         // plugin_error 事件一并吞掉（LLM 调用失败轮次用户只能看到无归因兜底文案）。
-        emit_plugin_error_events(session, &exec_thread, &rec.route_id, &message_id, &outcome).await;
+        emit_plugin_error_events(
+            session,
+            &exec_thread,
+            &rec.request.pipeline_id,
+            &message_id,
+            &outcome,
+        )
+        .await;
 
         // 空回复防线：run 结束但没有任何 assistant 消息（LLM 调用失败被引擎
         // error_policy warn+继续吞掉、或 core 轮次无产出）→ 不发 new_message、
@@ -1144,7 +1439,7 @@ impl EngineDispatcher {
             emit_stream_error_event(
                 session,
                 &exec_thread,
-                &rec.route_id,
+                &rec.request.pipeline_id,
                 &message_id,
                 "NO_ASSISTANT_REPLY",
                 &failed_outcome.content,
@@ -1256,7 +1551,7 @@ pub(crate) struct SessionRoundEvents {
 }
 
 impl SessionRoundEvents {
-    pub fn new(
+    pub(crate) fn new(
         session: Arc<SessionCoordinator>,
         thread_id: impl Into<String>,
         route_id: impl Into<String>,
@@ -1611,6 +1906,119 @@ fn reject_on_tenant_resolve_failure(
     }
 }
 
+impl EngineDispatcher {
+    /// 重发状态回退（2026-11-09 裁定）：把管道标量 state 整体恢复到目标轮次
+    /// 开始前（checkpoint 基线）——用户选择键也随之回退（它们是管道 state
+    /// 的一部分）；随后按**插件声明的用户设置名单**把当前设置原样写回，
+    /// 保证选择类设置实时生效。业务状态停在目标 step，重跑按正常管道流程
+    /// 从不含后续轮次残留的基线继续。
+    ///
+    /// - 基线来源：`load_checkpoint_before_seq`（ckpt_max_seq < 目标 seq 的
+    ///   最近快照 = 目标 user 消息所属轮次开始前的最终态）；无基线 → None
+    ///   （只截消息，状态不回退，保持旧行为）。
+    /// - 用户设置写回是**普遍操作**：名单 = 全部启用插件 widget 的
+    ///   `frame_field` 声明（与 user_input 帧 overlay 同一声明源），当前值
+    ///   取自热路径 registry / 冷路径 pipeline_state —— 内核零字段知识，
+    ///   新增设置型 widget 自动纳入，不为某个字段写特例。
+    /// - 写回两面：热路径 registry 快照 + 冷路径 pipeline_state 表（只写
+    ///   持久化字段声明面 ∪ 本次写回的用户设置键，保持表语义不混入非持久键）。
+    /// - 返回回退 trace 的锚点载荷（None = 未回退）。
+    async fn rollback_state_to_target_step(
+        &self,
+        store: &Arc<dyn StorageBackend>,
+        tenant_id: &str,
+        thread_id: &str,
+        route_id: &str,
+        target_seq: u32,
+        truncated_history: &[serde_json::Value],
+    ) -> Result<Option<serde_json::Value>, String> {
+        let baseline = store
+            .load_checkpoint_before_seq(route_id, tenant_id, i64::from(target_seq))
+            .await
+            .map_err(|e| format!("regenerate 状态回退读取基线失败: {e}"))?;
+        let Some((step_no, mut restored)) = baseline else {
+            return Ok(None);
+        };
+        let Some(restored_obj) = restored.as_object_mut() else {
+            return Ok(None);
+        };
+        let baseline_max_seq = restored_obj.remove("ckpt_max_seq").and_then(|v| v.as_i64());
+
+        // 用户设置名单（普遍声明面）：widget `frame_field` ∪ 同源 overlay 名单。
+        // 当前值先快照（registry 热快照优先，冷路径退回 pipeline_state 表），
+        // 状态整体回退后再写回——选择键不是"回退豁免"，而是"回退 + 重写当前值"。
+        let settings_keys = self.frame_overlay_fields().await;
+        let registry = agentos_session::pipeline_state_registry::global_registry();
+        let live_state = registry
+            .get(tenant_id, route_id)
+            .map(|entry| entry.read().state.clone());
+        let live_fields = store
+            .load_pipeline_state(route_id, tenant_id)
+            .await
+            .unwrap_or_default();
+        let mut settings: Vec<(String, serde_json::Value)> = Vec::new();
+        for key in &settings_keys {
+            let value = live_state
+                .as_ref()
+                .and_then(|s| s.get(key))
+                .cloned()
+                .or_else(|| live_fields.get(key).cloned());
+            if let Some(v) = value.filter(|v| v.as_str().is_some_and(|s| !s.is_empty())) {
+                settings.push((key.clone(), v));
+            }
+        }
+
+        // 消息历史 = 截断后前缀（messages 真相在 message_slots，checkpoint 不带）。
+        restored_obj.insert(
+            "messages".to_string(),
+            serde_json::Value::Array(truncated_history.to_vec()),
+        );
+        restored_obj.insert("pipeline_id".to_string(), json!(route_id));
+        // 用户设置（当前值）在基线之后统一写回：声明驱动，零字段特例。
+        for (key, value) in &settings {
+            restored_obj.insert(key.clone(), value.clone());
+        }
+
+        // 冷路径写回字段集先算（随回退基线恢复持久化声明面 + 本次写回的
+        // 用户设置键；目标 step 之后新增的键不在基线里 —— replace 先清后写
+        // 让它们消失）。
+        let settings_key_set: std::collections::HashSet<&str> =
+            settings.iter().map(|(k, _)| k.as_str()).collect();
+        let mut fields = serde_json::Map::new();
+        for (k, v) in restored_obj.iter() {
+            if k == "messages" {
+                continue;
+            }
+            if live_fields.contains_key(k) || settings_key_set.contains(k.as_str()) {
+                fields.insert(k.clone(), v.clone());
+            }
+        }
+        let agent_id = restored_obj
+            .get("agent.id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 写回热路径（registry 缺席时按回退基线建条目——重跑热恢复即读到）。
+        registry.get_or_init(tenant_id, route_id, thread_id, &agent_id, restored.clone());
+        registry.update_state(tenant_id, route_id, restored);
+
+        store
+            .replace_pipeline_state(route_id, tenant_id, &fields)
+            .await
+            .map_err(|e| format!("regenerate 状态回退写回失败: {e}"))?;
+
+        Ok(Some(json!({
+            "checkpoint_step_no": step_no,
+            "checkpoint_max_seq": baseline_max_seq,
+            "restored_user_settings": settings
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>(),
+        })))
+    }
+}
+
 #[async_trait::async_trait]
 impl PipelineDispatcher for EngineDispatcher {
     async fn frame_overlay_fields(&self) -> Vec<String> {
@@ -1620,20 +2028,7 @@ impl PipelineDispatcher for EngineDispatcher {
         frame_overlay_fields_from_manifests(&manifests, &enabled)
     }
 
-    async fn dispatch_user_input(
-        &self,
-        thread_id: &str,
-        user_id: &str,
-        content: &str,
-        pipeline_id: &str,
-        thinking_strength: &str,
-        execution_context: Option<&serde_json::Value>,
-        state_overlay: Option<&serde_json::Value>,
-        agent_id: &str,
-        pipeline_config_id: Option<&str>,
-        client_message_id: &str,
-        source: PendingInputSource,
-    ) -> Result<(), String> {
+    async fn dispatch_user_input(&self, mut request: DispatchRequest) -> Result<(), String> {
         // 身份来源二分（刀2，ADR docs/decisions/2026-10-17-reverse-call-user-
         // identity-injection.md）：反调链（插件工具 → chat.send_message）在桥
         // 重建的身份 scope 内到达本派发器——tenant/user 以注入身份为准，形参
@@ -1643,6 +2038,9 @@ impl PipelineDispatcher for EngineDispatcher {
         // 捕获并 scope 重建——跨 spawn 丢失是 task_local 的防泄露 feature。
         let injected_identity = agentos_tenant::current()
             .filter(|c| c.user_id.as_deref().is_some_and(|u| !u.is_empty()));
+        let thread_id = request.thread_id.clone();
+        let requested_user = request.user_id.clone();
+        let client_message_id = request.client_message_id.clone();
         // tenant_id 必须用真正的租户 ID（与 HTTP 路径 resolve_request_tenant_id 同源），
         // 不能用 user_id 顶替——否则消息按 user_id 落库，读取时按 default 查不到，
         // 表现为「刷新后历史消息不显示」。
@@ -1659,11 +2057,11 @@ impl PipelineDispatcher for EngineDispatcher {
             None => {
                 match agentos_http::auth::resolve_tenant_id_by_user(
                     self.state.store.as_ref(),
-                    user_id,
+                    &requested_user,
                 )
                 .await
                 {
-                    Ok(t) => (t, user_id.to_string()),
+                    Ok(t) => (t, requested_user.clone()),
                     Err(e) => {
                         if matches!(e, agentos_http::auth::TenantResolveError::StoreError(_)) {
                             if let Some(session) = self.state.session.as_ref() {
@@ -1675,16 +2073,22 @@ impl PipelineDispatcher for EngineDispatcher {
                                     "error": e.to_string(),
                                 });
                                 let ack_str = serde_json::to_string(&ack).unwrap_or_default();
-                                session.registry().send_to_user(user_id, &ack_str).await;
+                                session
+                                    .registry()
+                                    .send_to_user(&requested_user, &ack_str)
+                                    .await;
                             }
                         }
-                        return Err(reject_on_tenant_resolve_failure(&self.state, user_id, e));
+                        return Err(reject_on_tenant_resolve_failure(
+                            &self.state,
+                            &requested_user,
+                            e,
+                        ));
                     }
                 }
             }
         };
         let state = self.state.clone();
-        let content = content.to_string();
         // pipeline_id 是前端消息路由键，引擎回推流式事件时用它定位占位气泡。
         //
         // 防御性校验（后端不盲目信任前端数据）：前端切换/新建会话后，activePipelineId
@@ -1696,10 +2100,11 @@ impl PipelineDispatcher for EngineDispatcher {
         // 注意：resolve 必须在 tenant 构造前调用（TenantContext::new 会 move tenant_id）。
         let route_id = match state.store.as_ref() {
             Some(store) => {
-                resolve_pipeline_id_for_thread(store, thread_id, pipeline_id, &tenant_id).await
+                resolve_pipeline_id_for_thread(store, &thread_id, &request.pipeline_id, &tenant_id)
+                    .await
             }
             // 无 store（降级模式）：无解析依据，透传前端值；空值由下方守卫拒绝
-            None => pipeline_id.to_string(),
+            None => request.pipeline_id.clone(),
         };
         if route_id.is_empty() {
             // 会话无活跃管道且前端未带 pipeline_id：显式报错，不做 thread 回退
@@ -1712,101 +2117,90 @@ impl PipelineDispatcher for EngineDispatcher {
         // `_identity` 正向注入 → 插件反调回带）由此拿到执行者用户。下游簿记
         // （pending record 归属 / run chain 优先级键 / 引擎 user）统一以
         // effective_user 为准（外部面 = 形参本体；注入面 = 注入身份）。
-        let mut tenant = TenantContext::new(tenant_id, thread_id.to_string());
+        let mut tenant = TenantContext::new(tenant_id, thread_id.clone());
         tenant.user_id = Some(effective_user.clone());
-        let user_id: &str = &effective_user;
+        // 请求面回写解析结果：身份以注入分支为准、pipeline_id 为真实路由键
+        // （入队行的单一真值 = request，列只是索引投影）。
+        request.user_id = effective_user;
+        request.pipeline_id = route_id.clone();
+        let user_id = request.user_id.clone();
 
-        // ── pending 入队（ADR-2026-08-26）──
+        // ── pending 入队（ADR-2026-08-26 / ADR-2026-11-17）──
         // 消息先落持久化队列（pipeline_pending_inputs 表），入链的消费任务在
         // 链空闲时按 FIFO pop 并激活执行。等待窗口内条目可经 PUT/DELETE 修改删除；
         // 消费时从表读最新参数（内容不被闭包捕获）；重启后队列仍在，续跑。
         let record = PendingInputRecord {
             id: format!("p_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
-            pipeline_id: route_id.clone(),
             tenant_id: tenant.tenant_id.clone(),
-            user_id: user_id.to_string(),
-            content,
-            thread: thread_id.to_string(),
-            source,
-            agent_id: agent_id.to_string(),
-            route_id: route_id.clone(),
-            thinking_strength: thinking_strength.to_string(),
-            client_message_id: client_message_id.to_string(),
-            execution_context: execution_context.cloned(),
-            state_overlay: state_overlay.cloned(),
-            pipeline_config_id: pipeline_config_id.map(str::to_string),
             created_at: chrono::Utc::now().to_rfc3339(),
+            request,
         };
         // store 未注入（单测/兼容路径）：无持久化队列，直接入链执行本轮（旧行为）。
         let Some(store) = state.store.clone() else {
-            Self::spawn_chain(&state, tenant, record).await;
+            Self::spawn_chain(&state, tenant, record, &self.run_chain).await;
             return Ok(());
         };
 
         // ADR-2026-08-15：后台执行必须经 RunChainRegistry 入链——裸 spawn 会让
         // 同会话两条消息并发跑（registry 回写 / msg_sequence 竞态）。链保证同
         // 管道严格 FIFO、跨管道并行；user_id+route_id 兼作排队优先级键。
-        let registry = crate::run_chain::RunChainRegistry::global();
-        registry.note_user_pipeline(user_id, &route_id);
+        let registry = std::sync::Arc::clone(&self.run_chain);
+        registry.note_user_pipeline(&user_id, &route_id);
 
-        // 条件入队（ADR-2026-09-11，修订 ADR-2026-08-26 的无条件入队）：
-        // 链空闲 → 直跑本轮，不经持久化队列、不发 enqueued/consumed——前端乐观
-        // 气泡与待处理队列条由此互斥（链空时消息"立即开始"，不存在等待视图）；
-        // 链忙 → 持久化入队走消费循环，队列条语义收窄为"真正在等待的消息"
-        // （等待窗口内 PUT/DELETE 编辑仍生效，重启后队列仍在）。直跑尾部 drain
-        // 收走"占链竞态窗口内入队"的消息与重启遗留残留，FIFO 不破。
-        let direct_state = state.clone();
-        let direct_tenant = tenant.clone();
-        let direct_thread = thread_id.to_string();
-        let direct_route = route_id.clone();
-        let direct_user = user_id.to_string();
-        let direct_store = store.clone();
-        // 链忙分支的入队副本（直跑闭包 move 走原 record；两分支互斥，仅一份生效）。
-        let queued_record = record.clone();
-        let ran_direct = registry.try_enqueue_direct(&route_id, user_id, async move {
-            // 先跑本条（先到先跑），尾部 drain 消费队列直到空。
-            let cmid = record.client_message_id.clone();
-            let outcome = Self::run_pipeline_round_scoped(
-                &direct_state,
-                &direct_tenant,
-                &direct_thread,
-                &direct_user,
-                record,
-            )
-            .await;
-            let cancelled = outcome_cancelled(&outcome);
-            let depth = pending_depth(&direct_store, &direct_tenant.tenant_id, &direct_route).await;
-            if let Some(session) = direct_state.session.as_ref() {
-                emit_round_finished_event(
-                    session,
-                    &direct_thread,
-                    &direct_route,
-                    outcome.failed,
-                    cancelled,
-                    depth,
-                )
-                .await;
+        // 分流三态（ADR-2026-09-11 条件入队 + ADR 2026-11-18 闸门可见化/活跃抢占）：
+        // ① 闸门有空槽 → 直跑尝试（链空闲即占链，乐观气泡立即开始）；
+        // ② 闸门满载且本管道是用户活跃管道 → 抢占：suspend 一个运行态背景 run
+        //    腾槽后直跑（用户消息必须立即起管道，2026-11-18 用户裁定；抢不到
+        //    候选降级 ③）；
+        // ③ 其余（链忙 / 闸门满载）→ 持久化队列 + 队列条事件（等待可见、可
+        //    编辑、重启续跑）。并发计数只含运行态 run——队列条与闸门等待者
+        //    都不占槽位，不存在"排队占并发"的假饱和。
+        let gate_free = registry.gate_has_capacity();
+        let mut ran_direct = false;
+        if gate_free {
+            ran_direct = registry.try_enqueue_direct(
+                &route_id,
+                &user_id,
+                Self::direct_round_fut(
+                    state.clone(),
+                    tenant.clone(),
+                    thread_id.to_string(),
+                    route_id.clone(),
+                    store.clone(),
+                    std::sync::Arc::clone(&registry),
+                    record.clone(),
+                ),
+            );
+        }
+        if !ran_direct && !gate_free {
+            let is_active = registry.is_active_pipeline(&user_id, &route_id);
+            if is_active && self.preempt_one_victim(&registry, &store, &route_id).await {
+                // 抢占成功：受害者槽位即将释放，直跑任务 rank0 在闸门处等它
+                // （下一空槽必给活跃 rank，等待时长 ≈ 受害 run 收尾耗时）。
+                ran_direct = registry.try_enqueue_direct(
+                    &route_id,
+                    &user_id,
+                    Self::direct_round_fut(
+                        state.clone(),
+                        tenant.clone(),
+                        thread_id.to_string(),
+                        route_id.clone(),
+                        store.clone(),
+                        std::sync::Arc::clone(&registry),
+                        record.clone(),
+                    ),
+                );
             }
-            notify_outcome_waiter(&cmid, outcome);
-            Self::drain_pending_queue(
-                direct_state,
-                direct_tenant,
-                direct_thread,
-                direct_route,
-                direct_user,
-                direct_store,
-            )
-            .await;
-        });
+        }
         if ran_direct {
             return Ok(());
         }
 
-        // 链忙：消息落持久化队列，入链的消费任务在链空闲时按 FIFO pop 并激活
-        // 执行。等待窗口内条目可经 PUT/DELETE 修改删除；消费时从表读最新参数
-        // （内容不被闭包捕获）；重启后队列仍在，续跑。
+        // 链忙或闸门满载（抢占无候选）：消息落持久化队列，入链的消费任务在
+        // 链空闲时按 FIFO pop 并激活执行。等待窗口内条目可经 PUT/DELETE 修改
+        // 删除；消费时从表读最新参数（内容不被闭包捕获）；重启后队列仍在。
         if let Err(e) = store
-            .enqueue_pending_input(&tenant.tenant_id, &route_id, &queued_record)
+            .enqueue_pending_input(&tenant.tenant_id, &record)
             .await
         {
             return Err(format!("pending 输入入队失败: {e}"));
@@ -1814,7 +2208,7 @@ impl PipelineDispatcher for EngineDispatcher {
         // 入队事件（pending_inputs_changed）：前端实时同步队列条。
         emit_pending_inputs_changed(
             &state,
-            thread_id,
+            &thread_id,
             &route_id,
             &tenant.tenant_id,
             &store,
@@ -1824,28 +2218,27 @@ impl PipelineDispatcher for EngineDispatcher {
 
         // 消费任务在链空闲时 pop 队列：pop 到空即退出（无轮询无自续接）。
         let chain_key = route_id.clone();
-        let exec_user_key = user_id.to_string();
+        let exec_user_key = user_id.clone();
         registry.enqueue(&chain_key, &exec_user_key, {
             let exec_state = state.clone();
             let exec_thread = thread_id.to_string();
             let exec_route = route_id.clone();
-            let exec_user = user_id.to_string();
             let exec_tenant = tenant;
+            let exec_registry = std::sync::Arc::clone(&registry);
             async move {
                 Self::drain_pending_queue(
                     exec_state,
                     exec_tenant,
                     exec_thread,
                     exec_route,
-                    exec_user,
                     store,
+                    exec_registry,
                 )
                 .await;
             }
         });
         Ok(())
     }
-
     async fn dispatch_interaction_response(
         &self,
         _thread_id: &str,
@@ -1988,7 +2381,9 @@ impl PipelineDispatcher for EngineDispatcher {
             );
             return Ok(());
         }
-        let suspended = Self::suspend_pipeline_execution(store, &tenant_id, &target_pipeline).await;
+        let suspended = self
+            .suspend_pipeline_execution(store, &tenant_id, &target_pipeline)
+            .await;
         if !suspended {
             debug!(
                 thread = thread_id,
@@ -2012,16 +2407,16 @@ impl PipelineDispatcher for EngineDispatcher {
             Ok(rows) if !rows.is_empty() => {
                 let mut returned: Vec<serde_json::Value> = Vec::new();
                 for r in &rows {
-                    if r.source != agentos_core::types::PendingInputSource::User {
+                    if r.request.source != agentos_core::types::PendingInputSource::User {
                         continue;
                     }
                     returned.push(serde_json::json!({
                         "id": r.id,
-                        "content": r.content,
-                        "source": &r.source,
+                        "content": r.request.content,
+                        "source": &r.request.source,
                         // cmid 随条目透出：前端按它撤下对应的 queued 乐观气泡
                         // （气泡正被回填输入框，不撤会双份显示）。
-                        "client_message_id": &r.client_message_id,
+                        "client_message_id": &r.request.client_message_id,
                         "created_at": r.created_at,
                     }));
                     if let Err(e) = store
@@ -2075,6 +2470,21 @@ impl PipelineDispatcher for EngineDispatcher {
     /// 条目全程留队继续排队——只影响被点名的这一条。
     /// 与 dispatch_stop 的边界：停止按钮 = 停 run + 队列退回输入框（2026-09-11
     /// 裁定），本原语不动该语义。
+    /// 强制发送通道（2026-11-14）：先引擎层停当前 run，再按普通派发投递本条。
+    ///
+    /// 两步组合既有原语，不新造生命周期：停止段 = [`Self::suspend_for_force`]
+    /// （与停止按钮/队列强发共用 `suspend_pipeline_execution`，只发停止信号、
+    /// 不退回待处理队列）；投递段 = 既有 `dispatch_user_input`（链忙则本条成为
+    /// 队首待链尾 drain 消费，链空闲则直接直跑）。
+    ///
+    /// 与 `dispatch_user_input` 的差异正是「不等当前 run 的自然边界」：当前 run
+    /// 被停后立刻收尾，队列首位即本条 → 新一轮紧接着起跑。
+    async fn dispatch_force_input(&self, request: DispatchRequest) -> Result<(), String> {
+        self.suspend_for_force(&request.thread_id, &request.user_id, &request.pipeline_id)
+            .await?;
+        self.dispatch_user_input(request).await
+    }
+
     async fn dispatch_force_pending(
         &self,
         user_id: &str,
@@ -2118,28 +2528,30 @@ impl PipelineDispatcher for EngineDispatcher {
 
         // 2. 停当前回复（不退回队列）：run 在飞 → suspended；停止中/终态 → 幂等；
         //    首 token 前空窗 → 待取消标记。链尾 drain 随后弹出队首（= 目标）首个消费。
-        let suspended = Self::suspend_pipeline_execution(store, &tenant_id, &target_pipeline).await;
+        let suspended = self
+            .suspend_pipeline_execution(store, &tenant_id, &target_pipeline)
+            .await;
         if !suspended {
             // 链空闲（无 run 可停、无在途派发）：占链跑 drain——目标已在队首，
             // drain 首个消费它，其余条目按原序接续（复用消费循环，不再复制
             // 一份「跑目标 + emit + notify + drain」的直跑逻辑）。
-            let registry = crate::run_chain::RunChainRegistry::global();
+            let registry = std::sync::Arc::clone(&self.run_chain);
             registry.note_user_pipeline(&user_id, &target_pipeline);
             let mut tenant = TenantContext::new(tenant_id.clone(), thread_id.to_string());
             tenant.user_id = Some(user_id.clone());
             let drain_state = self.state.clone();
             let drain_thread = thread_id.to_string();
             let drain_route = target_pipeline.clone();
-            let drain_user = user_id.clone();
             let drain_store = store.clone();
+            let drain_registry = std::sync::Arc::clone(&registry);
             registry.try_enqueue_direct(&target_pipeline, &user_id, async move {
                 Self::drain_pending_queue(
                     drain_state,
                     tenant,
                     drain_thread,
                     drain_route,
-                    drain_user,
                     drain_store,
+                    drain_registry,
                 )
                 .await;
             });
@@ -2197,7 +2609,7 @@ impl PipelineDispatcher for EngineDispatcher {
             );
             return Ok(());
         }
-        crate::run_chain::RunChainRegistry::global().note_user_pipeline(user_id, &route_id);
+        self.run_chain.note_user_pipeline(user_id, &route_id);
         // 域事件插座：session.active_changed → 观察总线 + 声明订阅的插件。
         crate::plugin_lifecycle::broadcast_domain_event(
             &self.state,
@@ -2247,7 +2659,7 @@ impl PipelineDispatcher for EngineDispatcher {
         // 拒绝截断——在飞 run 仍在向被截后缀 append，截断落库与其竞争必出分叉
         // （2026-10-27 装机实证：在飞回退 → 空 assistant 槽位 + 重跑滞留队列被
         // 停止清队吞掉）。拒绝走 route_error 通道，用户指引先停止再重试。
-        if crate::run_chain::RunChainRegistry::global().has_chain(&route_id) {
+        if self.run_chain.has_chain(&route_id) {
             return Err("当前有回复正在进行，请先停止生成再重试/回退".into());
         }
 
@@ -2288,6 +2700,17 @@ impl PipelineDispatcher for EngineDispatcher {
             .load_message_history(&route_id, &tenant_id)
             .await
             .map_err(|e| format!("regenerate 读全文历史失败: {e}"))?;
+        // 截断后前缀（状态回退写回 registry 时随基线一起挂载）：消息真值在
+        // message_slots，回退基线（checkpoint 瘦身）不带 messages。
+        let truncated_history: Vec<serde_json::Value> = full_history
+            .iter()
+            .filter(|m| {
+                m.get("seq")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|seq| seq <= u64::from(target_seq))
+            })
+            .cloned()
+            .collect();
         let replaced_suffix: Vec<serde_json::Value> = full_history
             .into_iter()
             .filter_map(|mut m| {
@@ -2303,14 +2726,19 @@ impl PipelineDispatcher for EngineDispatcher {
             .collect();
         ops.push(freeze_segment_op(target_seq, replaced_suffix));
         match &target {
-            RegenTarget::Live { seq, .. } => {
+            RegenTarget::Live { seq, run_id } => {
                 if let Some(content) = new_content {
                     if let Some(target) = messages.iter().find(|m| m.seq_in_branch == *seq) {
                         let mut msg = serde_json::json!({"role": "user", "content": content});
                         if let Some(meta) = target.metadata.clone() {
                             msg["metadata"] = meta;
                         }
-                        ops.push(serde_json::json!({"op": "set", "seq": seq, "msg": msg}));
+                        // 原地改写保留 run 审计锚：槽位 run_id 是 regenerate 门禁
+                        // 的锚点，写丢后缺省重试会被「无有效 run_id」拒绝
+                        // （2026-11-09 装机实证：编辑重发后重新生成永久失败）。
+                        ops.push(serde_json::json!({
+                            "op": "set", "seq": seq, "msg": msg, "_run_id": run_id
+                        }));
                     }
                 }
             }
@@ -2341,6 +2769,20 @@ impl PipelineDispatcher for EngineDispatcher {
                 .map_err(|e| format!("regenerate 截断落库失败: {e}"))?;
         }
 
+        // 3b. 管道状态回退到目标 step（消息截断成功后才回退状态——截断失败
+        //     不制造「状态已退、消息未退」的分叉）。回退基线 + registry/
+        //     pipeline_state 写回见 rollback_state_to_target_step。
+        let state_rollback = self
+            .rollback_state_to_target_step(
+                store,
+                &tenant_id,
+                thread_id,
+                &route_id,
+                target_seq,
+                &truncated_history,
+            )
+            .await?;
+
         // 4. rollback trace（append-only 审计痕：回退目标 + 补偿 ops 实录）。
         // Live 路径 run_id = 目标消息所在 run（1b 预检锚定，审计反查可见）；
         // Ledger 路径 run 锚不可恢复，如实记空并以账本指针替代（可反查原文）。
@@ -2352,6 +2794,11 @@ impl PipelineDispatcher for EngineDispatcher {
             "pipeline_id": route_id,
             "messages": { "_ops": ops },
         });
+        // 状态回退锚点（哪份 checkpoint 基线、回退后写回了哪些用户设置键）——
+        // 无可用基线时不写该键（诚实留痕：本次只截消息未回退状态）。
+        if let Some(rollback) = state_rollback {
+            patch_data["state_rollback"] = rollback;
+        }
         if let RegenTarget::Ledger {
             ledger_trace_id,
             ledger_blob_id,
@@ -2422,20 +2869,19 @@ impl PipelineDispatcher for EngineDispatcher {
         };
         let overlay = serde_json::json!({"_skip_user_append": true});
         // 复用 user_input 同款派发路径（pending 入队 → 链消费 → process_via_engine），
-        // 保证与前端发送同一条 FIFO 链、同事件流。
-        self.dispatch_user_input(
-            thread_id,
-            user_id,
-            &content,
-            &route_id,
-            "",
-            None,
-            Some(&overlay),
-            "",
-            None,
-            "",
-            agentos_core::types::PendingInputSource::System,
-        )
+        // 保证与前端发送同一条 FIFO 链、同事件流。思考强度不重拼：它是管道持久
+        // state，状态回退后由恢复合并带入（重跑帧不传参）。
+        self.dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: thread_id.to_string(),
+            user_id: user_id.to_string(),
+            pipeline_id: route_id,
+            content,
+            client_message_id: String::new(),
+            source: agentos_core::types::PendingInputSource::System,
+            execution_context: None,
+            state_overlay: Some(overlay),
+            pipeline_config_id: None,
+        })
         .await
         .map_err(|e| format!("regenerate 重跑派发失败: {e}"))?;
         Ok(())
@@ -2917,6 +3363,7 @@ mod tests {
     mod cancel_poisoning;
     mod dispatch_user_input;
     mod e2e_fullchain;
+    mod force_channel;
     mod handle_inbound_tests;
     mod regenerate;
     mod segments;
@@ -2971,23 +3418,21 @@ mod tests {
         store
             .enqueue_pending_input(
                 "default",
-                &pipe,
                 &agentos_core::types::PendingInputRecord {
                     id: "p_pin1".to_string(),
-                    pipeline_id: pipe.clone(),
                     tenant_id: "default".to_string(),
-                    user_id: "u-pin".to_string(),
-                    content: "排队中".to_string(),
-                    thread: "T-pin".to_string(),
-                    source: agentos_core::types::PendingInputSource::User,
-                    agent_id: String::new(),
-                    route_id: pipe.clone(),
-                    thinking_strength: String::new(),
-                    client_message_id: String::new(),
-                    execution_context: None,
-                    state_overlay: None,
-                    pipeline_config_id: None,
                     created_at: "2026-09-13T00:00:00Z".to_string(),
+                    request: agentos_core::types::DispatchRequest {
+                        thread_id: "T-pin".to_string(),
+                        user_id: "u-pin".to_string(),
+                        pipeline_id: pipe.clone(),
+                        content: "排队中".to_string(),
+                        client_message_id: String::new(),
+                        source: agentos_core::types::PendingInputSource::User,
+                        execution_context: None,
+                        state_overlay: None,
+                        pipeline_config_id: None,
+                    },
                 },
             )
             .await
@@ -3117,6 +3562,7 @@ mod tests {
             export_fields: vec![],
             aux_venvs: Vec::new(),
             provides: None,
+            visibility: Default::default(),
         }
     }
 

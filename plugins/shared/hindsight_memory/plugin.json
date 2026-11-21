@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Hindsight Memory Service",
-  "version": "1.0.11",
+  "version": "1.0.13",
   "aux_venvs": [
     {
       "dir": ".venv-hindsight",
@@ -20,7 +20,77 @@
     "idle_timeout_secs": 0
   },
   "capabilities": {
-    "tools": [],
+    "tools": [
+      {
+        "name": "hindsight.recall",
+        "description": "Recall relevant memories from a hindsight bank",
+        "render": {
+          "card": "generic"
+        },
+        "input_schema": {
+          "properties": {
+            "bank_id": {
+              "type": "string",
+              "description": "Memory bank id (tenant isolation key)"
+            },
+            "query": {
+              "type": "string",
+              "description": "Recall query"
+            },
+            "top_k": {
+              "type": "integer",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 100
+            },
+            "memory_type": {
+              "type": "string",
+              "description": "Optional client-side filter by memory_type"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional server-side tag filter. A thread tag (\"thread-X\" or \"session:thread-X\") triggers cross-bank recall: fan out over session banks (capped) with boolean tag groups, so session-X memories match wherever they landed."
+            },
+            "tags_match": {
+              "type": "string",
+              "default": "any",
+              "description": "Tag match mode: any/all/any_strict/all_strict/exact"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "召回条目（{id, content, score, memory_type?, metadata?, bank_id?}）"
+            },
+            "total": {
+              "type": "integer",
+              "description": "返回条数"
+            },
+            "error": {
+              "type": "string",
+              "description": "降级/失败原因（成功或缺席）"
+            }
+          },
+          "required": [
+            "results",
+            "total"
+          ]
+        }
+      }
+    ],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",

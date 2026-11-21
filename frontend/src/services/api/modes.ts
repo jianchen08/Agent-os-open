@@ -7,8 +7,8 @@
  */
 
 import { useQuery } from '@tanstack/react-query'
-import { AGENT_MANAGER_ENDPOINTS, MODE_DATA_CARDS_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { apiClient } from '@/services/api/client'
+import { AGENT_MANAGER_ENDPOINTS, MODE_DATA_CARDS_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { queryKeys } from '@/services/query/queryKeys'
 
 /** 呈现来源声明（mode.yaml presenter.source） */

@@ -6,16 +6,21 @@ LLM 工具面已退役（工具面审查 2026-10-19 用户裁定：翻译能力�
 不经工具面）。
 保留面：
 - 通道 A：Node runtime 桥（bridge.py + runtime/dsh-rpc-bridge.mjs），从用户
-  空间 npm 运行时工作区 boot（设计 §4.2 C2；管理端点五件套见本文件下半部，
-  工作区/bootstrap 逻辑在 runtime_workspace.py + manager.py）；
-  生命周期 on_unload 时 shutdown Node 子进程（防孤儿）。
+  空间 DSH profile boot（设计 §4.2 C2；工作区/bootstrap 逻辑在
+  runtime_workspace.py + manager.py）；生命周期 on_unload 时 shutdown Node
+  子进程（防孤儿）。
 - http.handle：/ext/dsh_adapter/styles/** 客户端样式 CSS serve +
-  /ext/dsh_adapter/api/dsh/plugins* 管理端点 + /ext/dsh_adapter/page/manager
-  管理页。
+  /ext/dsh_adapter/client-bundle/** client bundle 供给 +
+  /ext/dsh_adapter/api/dsh/{client-ui,official-ui,hooks/translate}。
+
+插件管理界面归 DSH 官方 Web 应用（用户裁定 2026-11-17）：自研管理页与自研
+管理端点已删除，``api/dsh/official-ui`` 只回答「官方页在哪 / 为什么不可用」，
+由 web_app.py 把官方 Web 应用拉起来（同一 profile，故所见列表即官方列表）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -26,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 from bridge import shutdown_bridge
-from manager import ManagerError
 from translator import (
     SKIN_ASSET_EXTS,
     SKIN_CENTER_SKINS_DIR,
@@ -40,30 +44,134 @@ logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("dsh_adapter")
 
 
+def _wire_runtime_config() -> None:
+    """接入内核注入的 LLM 配置（``agentDefaultModel`` 翻译源，不直读 config/）。
+
+    内核按 manifest ``config_files[id=llm]`` 把 llm.yaml 的生效视图注入
+    ``get_config()``；桥启动时 runtime_workspace 经 provider 取用。
+    """
+    import runtime_workspace as rw
+
+    def _llm_view() -> dict[str, Any]:
+        cfg = plugin.get_config()
+        llm = cfg.get("llm") if isinstance(cfg, dict) else None
+        return llm if isinstance(llm, dict) else {}
+
+    rw.set_llm_config_provider(_llm_view)
+
+
+_wire_runtime_config()
+
+
 @plugin.on_load
 async def _on_dsh_adapter_load(params: dict) -> None:  # noqa: ARG001
-    """装载时把皮肤自动声明为 contributes.themes（形态路由终态，零手工）。
+    """装载时同步 contributes 声明（形态路由终态，零手工）。
 
-    幂等：生成的 themes 与 manifest 现值一致则不写（避免 watcher 指纹
-    抖动循环）；不一致才写回——plugin_watcher 检测 manifest 变化自动
-    reenable 重注册，前端主题列表随即出现/移除皮肤主题卡。
-    添加皮肤 = 放入 ~/.dsh/skins/，本钩子负责翻译成 PluginTheme 声明。
+    - ``themes``：皮肤自动声明（DSH 皮肤 → PluginTheme）；
+    - ``renderers``：已装 DSH 包的 toolview 聚合（DSH 工具名 → render 卡）。
+
+    幂等：生成值与 manifest 现值一致则不写（避免 watcher 指纹抖动循环）；
+    不一致才写回——plugin_watcher 检测 manifest 变化自动 reenable 重注册，
+    前端主题列表/渲染兜底随即更新。
+    """
+    _sync_manifest_contributions()
+    _wire_bridge_kernel_caller()
+
+
+def _wire_kernel_caller(bridge: Any, plugin: Any) -> None:
+    """把插件进程侧内核能力句柄装配成桥的统一内核 caller（垫片四接线）。
+
+    三条内核 wire 契约各走各的能力句柄：loop.status → service-registry、
+    loop.stop → pipeline-executor、loop.inject → chat；bind_capability_caller
+    剥能力前缀后以短名调句柄。部分能力未注入（旧内核 KeyError）→ 跳过缺席者
+    可用者照常装配；全部缺席 → caller=None（handler 调用 fail-visible）。
+    """
+    from agentos_plugin_sdk.capability import bind_capability_caller
+
+    callers: dict[str, Any] = {}
+    for cap in ("service-registry", "pipeline-executor", "chat"):
+        try:
+            callers[cap] = bind_capability_caller(plugin.get_capability(cap), cap)
+        except (KeyError, AttributeError, RuntimeError):
+            continue  # 能力未注入（旧内核）→ 跳过缺席者，可用者照常装配
+
+    if not callers:
+        bridge.set_kernel_caller(None)
+        return
+
+    def unified(method: str, params: dict[str, Any]) -> Any:
+        prefix = method.split(".", 1)[0]
+        caller = callers.get(prefix)
+        if caller is None:
+            raise RuntimeError(f"kernel capability not injected: {prefix}")
+        return caller(method, params)
+
+    bridge.set_kernel_caller(unified)
+
+
+def _wire_bridge_kernel_caller() -> None:
+    """on_load 装配点：把共享桥接上内核能力（垫片四 loop handler 内核接线）。
+
+    桥实例平时惰性到首个工具调用才创建；接线必须赶在 Node 插件 boot 前
+    完成（boot 后插件即可发起 loop 反向调用），故此处主动 get_bridge()
+    创建实例（不 boot）。桥不可建（工作区未配置）/装配失败不阻断插件装载
+    ——handler 侧 fail-visible 兜底，caller 缺席时插件调用得到可定位错误。
     """
     try:
-        from translator import skins_to_plugin_themes
+        from bridge import get_bridge
+
+        _wire_kernel_caller(get_bridge(), plugin)
+    except Exception as e:  # noqa: BLE001 — 装配失败不阻断插件装载
+        logger.warning("dsh_adapter: loop handler 内核接线跳过: %s", e)
+
+
+def _installed_package_dirs() -> list[str]:
+    """运行时工作区已装 DSH 包目录（renderers 聚合来源；工作区未就绪返回空）。"""
+    import runtime_workspace as rw
+
+    ws = Path(_manager().runtime_root)
+    if not (ws / "node_modules").is_dir():
+        return []
+    return [p["dir"] for p in rw.installed_packages(ws)
+            if p["name"] not in rw.PROFILE_INFRA_PACKAGES]
+
+
+def _sync_manifest_contributions() -> None:
+    """皮肤主题 + DSH 渲染器声明写回 plugin.json（失败不阻断插件装载）。
+
+    客户端 UI 的槽位页不在此处写清单：页面随「已装/已启用」运行态变化，
+    由前端 ``syncClientUiPages`` 按 client-ui 清单动态注册/注销。
+    """
+    try:
+        from client_ui import GENERATED_PAGE_PREFIX
+        from translator import collect_installed_renderers, skins_to_plugin_themes
 
         themes = skins_to_plugin_themes()
+        renderers = collect_installed_renderers(_installed_package_dirs())
         manifest_path = Path(__file__).parent / "plugin.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         contributes = manifest.setdefault("contributes", {})
+        changed: list[str] = []
         if contributes.get("themes") != themes:
             contributes["themes"] = themes
+            changed.append(f"themes={len(themes)}")
+        if contributes.get("renderers") != renderers:
+            contributes["renderers"] = renderers
+            changed.append(f"renderers={len(renderers)}")
+        # 自愈：运行期生成的槽位页不得留在清单里（页面随安装态由前端动态注册）
+        current_pages = contributes.get("pages") or []
+        declared_pages = [p for p in current_pages
+                          if not str(p.get("id") or "").startswith(GENERATED_PAGE_PREFIX)]
+        if current_pages != declared_pages:
+            contributes["pages"] = declared_pages
+            changed.append(f"pages-={len(current_pages) - len(declared_pages)}")
+        if changed:
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
-            logger.info("dsh_adapter: contributes.themes auto-synced (%d skins)", len(themes))
+            logger.info("dsh_adapter: contributes auto-synced (%s)", ", ".join(changed))
     except Exception as e:  # noqa: BLE001 - 声明同步失败不阻断插件装载
-        logger.warning("dsh_adapter: themes auto-sync failed: %s", e)
+        logger.warning("dsh_adapter: contributes auto-sync failed: %s", e)
 
 
 @plugin.on_unload
@@ -121,6 +229,8 @@ def _revalidate(headers: dict[str, str] | None, payload: bytes) -> bool:
 _DSH_SLOT_DOM_ANCHORS: dict[str, str] = {
     "sidebar.footer.action": "sidebar-user-area",
     "settings.trigger": "sidebar-user-area",
+    "settings.section": "settings-page",
+    "sidebar.right.pane.tab": "workspace",
     "conversation.session.header.actions": "agent-tab-bar",
     "conversation.session.header": "chat-session-header",
     "conversation.composer.dock": "chat-composer",
@@ -202,6 +312,41 @@ _DSH_POSITION_MAP: list[tuple[re.Pattern[str], str]] = [
     # 空态欢迎页标题（DSH hero headline → 我方空态文案块；:has(fish) 等
     # 子结构在我方 DOM 无命中则该规则自然惰性）
     (re.compile(r'\[class\*=(["\'])headline\1\]'), r'[data-testid=\1message-list-empty\1] > div'),
+    # ── DSH 会话内部 DOM 词汇（ui-conversation 稳定词干）→ 我方消息区锚点 ──
+    # 皮肤除结构位外还直接给会话 DOM 内部元素上妆（气泡/思考体/时间戳/用量/
+    # 输入区脚注/markdown 正文/模态/弹层）。这些词干是 DSH 客户端 DOM 契约的
+    # 一部分，与上方槽位/栏位词干同性质，逐词干映射（2026-11-10 whale-mom
+    # 全量对账：18 个内部选择器此前在我方 DOM 零命中 = 皮肤效果对不上 DSH
+    # 的根因）。命中面我方锚点：data-bubble / message-markdown / message-think
+    # / message-think-body / message-time（前端组件已挂）/ chat-composer、
+    # chat-input-actions、context-usage-indicator（既有 testid）/ .ant-modal、
+    # .ant-popover/.ant-dropdown（antd 弹层）。
+    (re.compile(r'\[class\*=(["\'])bubble\1\]'), r'[data-bubble]'),
+    (re.compile(r'\[class\*=(["\'])markdown\1\]'), r'[data-testid=\1message-markdown\1]'),
+    (re.compile(r'\[class\*=(["\'])thinkBody\1\]'), r'[data-testid=\1message-think-body\1]'),
+    (re.compile(r'\[class\*=(["\'])summary\1\]'), r'[data-testid=\1message-think\1]'),
+    (re.compile(r'\[class\*=(["\'])timeEnd\1\]'), r'[data-testid=\1message-time\1]'),
+    (re.compile(r'\[class\*=(["\'])timeStart\1\]'), r'[data-testid=\1message-time\1]'),
+    # turnStatus（运行读数行）我方无独立渲染位 → 并入元信息行时间锚（同为
+    # 次级文字着色意图，色值一致，多命中无害）
+    (re.compile(r'\[class\*=(["\'])turnStatus\1\]'), r'[data-testid=\1message-time\1]'),
+    (re.compile(r'\[class\*=(["\'])usage\1\]'), r'[data-testid=\1context-usage-indicator\1]'),
+    # 输入区脚注行（DSH composer footer）→ 底部工具栏行锚（无条件渲染；
+    # chat-input-actions 仅在插件声明动作时存在，不适用作 footer 锚）
+    (re.compile(r'\[class\*=(["\'])footerItem\1\]'), r'[data-testid=\1chat-input-footer\1]'),
+    (re.compile(r'\[class\*=(["\'])footerHint\1\]'), r'[data-testid=\1chat-input-footer\1]'),
+    # 输入区芯片（权限/模型选择器等）→ 声明件芯片锚（含 fallback 槽默认件）
+    (re.compile(r'\[class\*=(["\'])chipLabel\1\]'),
+     r':is([data-testid^=\1declared-widget-\1], [data-testid^=\1slot-default-\1])'),
+    # 附件预览徽章 → 附件预览卡锚
+    (re.compile(r'\[class\*=(["\'])previewBadge\1\]'), r'[data-testid=\1attachment-preview\1]'),
+    # DSH modal 词干（CSS module 尾缀）→ antd 模态/弹层开放体
+    (re.compile(r'\[class\$=(["\'])modal\1\]'), r'.ant-modal'),
+    (re.compile(r'\[class\*=(["\'])composerSeat\1\]'), r'[data-testid=\1chat-composer\1]'),
+    (re.compile(r'\[class\*=(["\'])root\1\]\[data-open\] \[class\*=(["\'])body\1\]'),
+     r'.ant-popover:not(.ant-popover-hidden), .ant-dropdown:not(.ant-dropdown-hidden)'),
+    # 引用来源消息（DSH 会话引用块）→ 我方消息内 markdown 块引用
+    (re.compile(r'\[data-context-source=(["\'])true\1\]'), r'[data-bubble] blockquote'),
 ]
 # DSH 的 [id="root"] 是桌面壳窗框：背景位（透出立绘）保留，窗框装饰
 # （border/box-shadow/outline）在我们壳里无对应位置 → 剥离（"背景图被
@@ -217,11 +362,25 @@ _WORKSPACE_CONTAINER_RE = re.compile(
 # 剥离声明：background / background-color（边框/内边距等位置装饰保留）
 _WORKSPACE_SURFACE_DECL = re.compile(r'^\s*background(?:-color)?\s*:')
 
+# CSS 专属位置映射（不进 hooks 转译）：桌面壳标题栏行 `[class*="titlebar"]`
+# 在我方同位锚点=顶带（chat-top-band）。皮肤给标题栏行上深色渐变+金色下边线，
+# 不映射则顶带保持透明（透出背景图），标题栏与花边檐口成两条叠在一起的条、
+# 侧栏金框与檐口错位（用户 2026-11-10 报「顶部/底部挂载重叠、丑」）。
+# 只对样式表成立：hooks 里同一选择器用于「品牌文字挂载」（titlebar-brand
+# prepend），挂到顶带会把品牌塞成三区布局首子、挤歪与列对齐的区宽。
+_DSH_POSITION_MAP_CSS_ONLY: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'\[class\*=(["\'])titlebar\1\]'), r'[data-testid=\1chat-top-band\1]'),
+]
 
-def _sub_position(text: str) -> str:
-    """DSH 位置词汇 → 我方锚点（CSS 选择器与 hooks.mjs JS 字符串同源转译）。"""
+
+def _sub_position(text: str, *, css_only: bool = False) -> str:
+    """DSH 位置词汇 → 我方锚点（CSS 选择器与 hooks.mjs JS 字符串同源转译；
+    css_only=True 时追加只对样式表成立的映射，见 _DSH_POSITION_MAP_CSS_ONLY）。"""
     for pat, repl in _DSH_POSITION_MAP:
         text = pat.sub(repl, text)
+    if css_only:
+        for pat, repl in _DSH_POSITION_MAP_CSS_ONLY:
+            text = pat.sub(repl, text)
     return text
 
 
@@ -264,7 +423,7 @@ def _rewrite_one_rule(header: str, block: str) -> str:
         if re.match(r'@(media|supports|layer|container)\b', header):
             return header + '{' + _rewrite_dsh_positions(block) + '}'
         return header + '{' + block + '}'
-    new_header = _sub_position(header)
+    new_header = _sub_position(header, css_only=True)
     # 工作区表面让位（用户裁决：工作区=对话区延伸，背景图/立绘透出）：
     # DSH details 容器裸规则画的实色纸面（maid #f2f6fdd1 等）剥离——
     # 边框等位置装饰保留；descendant 规则不动（只剥容器自身的面）
@@ -433,7 +592,7 @@ def _serve_skin_asset(path: str, headers: dict[str, str] | None = None) -> dict[
     },
     description=(
         "HTTP endpoint handler for /ext/dsh_adapter/**: styles CSS serve + "
-        "api/dsh/plugins management endpoints + page/manager webview page"
+        "client bundle serve + api/dsh/{client-ui,official-ui,hooks/translate}"
     ),
 )
 async def _http_handle_style(
@@ -450,16 +609,16 @@ async def _http_handle_style(
         return merged
     if path.startswith(_SKIN_ASSET_ROUTE_PREFIX):
         return _serve_skin_asset(path, headers)
-    if path == _PAGE_MANAGER_PATH and method == "GET":
-        return _manager_page_response()
     if path == _HOOKS_TRANSLATE_PATH and method == "POST":
         return _hooks_translate_response(raw_body)
     if path.startswith(_WEB_PROXY_PREFIX):
         return await _web_proxy_dispatch(path, method, raw_body, headers)
-    if path.startswith(_API_PREFIX):
-        resp = await _api_plugins_dispatch(path, method, raw_body, query)
-        if resp is not None:
-            return resp
+    if path.startswith(_CLIENT_BUNDLE_PREFIX):
+        return _client_bundle_response(path)
+    if path == _CLIENT_UI_PATH and method == "GET":
+        return _client_ui_response()
+    if path == _OFFICIAL_UI_PATH and method == "GET":
+        return await _official_ui_response(query)
     return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
 
 
@@ -469,12 +628,77 @@ async def _http_handle_style(
 # 业务面在 manager.DshPackageManager（审批/engines/依赖保护/状态机在彼处，
 # 本层只做路由、body 解析、错误码→HTTP 状态映射）。
 
-_API_PREFIX = "/ext/dsh_adapter/api/dsh/plugins"
-_PAGE_MANAGER_PATH = "/ext/dsh_adapter/page/manager"
 _HOOKS_TRANSLATE_PATH = "/ext/dsh_adapter/api/dsh/hooks/translate"
 _WEB_PROXY_PREFIX = "/ext/dsh_adapter/web/"
+# 客户端 UI 贡献清单（前端组件宿主据此装载插件 client bundle 并挂槽位）
+_CLIENT_UI_PATH = "/ext/dsh_adapter/api/dsh/client-ui"
+# 组件包文件供给（插件 client bundle 与其静态资源）
+_CLIENT_BUNDLE_PREFIX = "/ext/dsh_adapter/client-bundle/"
+
+# 官方插件管理页启动器：自研管理界面已删除，界面归 DSH 官方 Web 应用
+# （@deepseek-ai/dsh-client-ui-plugin-manager）。本插件只负责把官方 origin
+# 如实交给页面（status/url/reason），不在 AgentOS 侧另造一套列表。
+_OFFICIAL_UI_PATH = "/ext/dsh_adapter/api/dsh/official-ui"
 
 _MANAGER: Any | None = None
+
+
+# ── 官方插件管理页启动器（自研界面已删除，界面归 DSH 官方） ──────────
+# DSH 0.2.1 起官方自带 Web 侧插件管理面板（@deepseek-ai/dsh-client-ui-plugin-manager
+# 装/启/停/卸/重试 + ui-plugin-market 的 Discover 市场源），它跑在**官方 DSH Web
+# 应用**里、注册进 SPA 的 plugins.tab slot，不是独立 HTTP 页。因此"所见即官方"
+# 的唯一形态是：把官方 origin 如实交给用户并在新窗口打开它——不在 AgentOS 侧
+# 另造一套列表（代理渲染会立刻与官方漂移）。本插件只做「官方页在哪」的报告。
+
+async def _official_ui_response(query: dict[str, str] | None = None) -> dict[str, Any]:
+    """官方插件管理页：返回其访问地址（必要时把官方 Web 应用拉起来）。
+
+    AgentOS 所见 = 官方 DSH Web 应用本身（同一 profile、同一 `pluginManager`），
+    所以「插件列表一致」由构造保证，不做两份列表对账。地址缺失时如实给可判定
+    原因（缺 Node 22 / 全栈未装 / 启动失败），不编造链接、不静默降级。
+
+    ``query.ensure``（"1"/"true"）= 触发启动：启动在后台线程进行、立即返回
+    ``starting``，前端轮询本端点直到 ``available``——避免 HTTP 调用被冷启动
+    （首次装全栈可达数分钟）长时间占住。
+    """
+    from web_app import WebAppError, get_supervisor
+
+    sup = get_supervisor()
+    status = sup.status()
+    if not status.available and not status.starting and _wants_ensure(query):
+        try:
+            await asyncio.to_thread(_start_in_background, sup)
+        except WebAppError as exc:
+            return _json_response({"available": False, "url": None, "starting": False,
+                                   "reason": exc.message, "code": exc.code})
+        status = sup.status()
+    payload = {
+        "available": status.available,
+        "url": status.url,
+        "origin": status.origin,
+        "starting": status.starting,
+        "reason": status.reason,
+    }
+    return _json_response(payload)
+
+
+def _wants_ensure(query: dict[str, str] | None) -> bool:
+    """``?ensure=1|true`` 判定（缺省不启动：只读状态查询不产生副作用）。"""
+    raw = (query or {}).get("ensure")
+    return str(raw).strip().lower() in {"1", "true", "yes"}
+
+
+def _start_in_background(supervisor: Any) -> None:
+    """后台启动官方 Web 应用（异常只记日志：状态由 supervisor 记录并按 reason 暴露）。"""
+    import threading
+
+    def _run() -> None:
+        try:
+            supervisor.start()
+        except Exception:  # noqa: BLE001 - 失败原因已进 supervisor._error，端点如实回报
+            logger.warning("[dsh_adapter] 官方 DSH Web 应用启动失败", exc_info=True)
+
+    threading.Thread(target=_run, name="dsh-web-app-start", daemon=True).start()
 
 
 def _manager() -> Any:
@@ -500,19 +724,6 @@ def reset_manager() -> None:
     _MANAGER = None
 
 
-# 结构化错误码 → HTTP 状态（管理页按 code 展示可判定失败原因，AC-M2）
-_ERROR_STATUS: dict[str, int] = {
-    "invalid_request": 400,
-    "package_not_found": 404,
-    "package_not_installed": 404,
-    "has_dependents": 409,
-    "version_required_not_in_index": 422,
-    "engines_incompatible": 422,
-    "approval_denied": 403,
-    "approval_unavailable": 503,
-    "registry_unreachable": 502,
-    "npm_error": 502,
-}
 
 
 def _json_response(payload: dict[str, Any], status: int = 200) -> dict[str, Any]:
@@ -543,261 +754,64 @@ def _parse_body(raw_body: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-async def _api_plugins_dispatch(
-    path: str, method: str, raw_body: str, query: dict[str, str] | None
-) -> dict[str, Any] | None:
-    """管理端点五件套分发；未命中返回 None（交回 404 路径）。"""
-    sub = path[len(_API_PREFIX):].strip("/")
-    m = _manager()
-    try:
-        if method == "GET" and sub == "":
-            return _json_response(await m.list_installed())
-        if method == "GET" and sub == "index":
-            return _json_response(await m.refresh_index())
-        if method == "POST":
-            body = _parse_body(raw_body)
-            pkg = str(body.get("pkg") or (query or {}).get("pkg") or "").strip()
-            version = str(body.get("version") or "").strip()
-            if sub == "install":
-                if not pkg:
-                    return _json_response({"error": {"code": "invalid_request", "message": "缺 pkg"}}, 400)
-                return _json_response(await m.install(pkg, version or None,
-                                                      legacy_peers=bool(body.get("legacy_peers"))))
-            if sub in ("uninstall", "enable", "disable"):
-                if not pkg:
-                    return _json_response({"error": {"code": "invalid_request", "message": "缺 pkg"}}, 400)
-                if sub == "uninstall":
-                    return _json_response(await m.uninstall(pkg))
-                return _json_response(await (m.enable(pkg) if sub == "enable" else m.disable(pkg)))
-    except ManagerError as e:
-        return _json_response({"error": e.to_dict()}, _ERROR_STATUS.get(e.code, 400))
-    return None
+# ── 客户端 UI 贡献（组件级挂载：DSH 槽位 → 灵汐页面位） ──────────────
+# 插件前端是 client bundle（React 组件注册进 DSH 槽位），不是 HTML 页面：
+# 清单端点把「哪个包在哪个槽位注册了什么」如实交给前端组件宿主，文件端点
+# 供给 bundle 与其静态资源；槽位→页面位的映射在 client_ui.SLOT_PAGE_MAP。
 
 
-# ── 管理页 HTML（webview 自伺服；包内自包含，与 mode_coding 先例同构） ──
+def _client_ui_packages() -> tuple[Path, list[dict[str, Any]]]:
+    """运行时工作区里「已装且启用」的 DSH 包（排除 profile 基建包）。"""
+    import runtime_workspace as rw
 
-_MANAGER_PAGE_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>DSH 插件管理</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-         margin: 0; padding: 24px; background: var(--ag-bg, #f5f6fa); color: var(--ag-fg, #1d2539); }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  .sub { color: #777; font-size: 12px; margin-bottom: 16px; }
-  button { font: inherit; padding: 4px 12px; border: 1px solid #bbb; border-radius: 6px;
-           background: #fff; cursor: pointer; }
-  button:hover { border-color: #4a5fa8; color: #4a5fa8; }
-  button.danger:hover { border-color: #c3272b; color: #c3272b; }
-  input { font: inherit; padding: 4px 8px; border: 1px solid #bbb; border-radius: 6px; }
-  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px;
-          overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 13px; }
-  th { background: #eef1f7; font-weight: 600; }
-  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
-  .badge.enabled { background: #e2f4e8; color: #1a7f37; }
-  .badge.disabled { background: #eee; color: #666; }
-  .badge.failed, .badge.approval_denied { background: #fde8e8; color: #c3272b; }
-  .badge.pending_approval { background: #fff4d6; color: #946c00; }
-  .muted { color: #888; }
-  .err { color: #c3272b; font-size: 12px; white-space: pre-wrap; }
-  #preview, #index-box { background: #fff; border: 1px solid #ddd; border-radius: 8px;
-          padding: 12px 16px; margin-top: 16px; white-space: pre-wrap; font-size: 12px;
-          font-family: Consolas, monospace; display: none; }
-  form { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
-  .tabs { margin-bottom: 12px; }
-  .tabs button.active { border-color: #4a5fa8; color: #4a5fa8; font-weight: 600; }
-  code { background: #f0f2f7; padding: 0 4px; border-radius: 4px; }
-</style>
-</head>
-<body>
-<h1>DSH 插件</h1>
-<div class="sub" id="ws-info">运行时工作区：加载中…</div>
-
-<div class="tabs">
-  <button id="tab-installed" class="active" onclick="showTab('installed')">已装</button>
-  <button id="tab-index" onclick="showTab('index')">发现源</button>
-</div>
-
-<div id="installed-view">
-  <form onsubmit="return doInstall(event)">
-    <input id="pkg" placeholder="npm 包名（如 @scope/dsh-xxx）" size="34" required>
-    <input id="ver" placeholder="精确版本（缺省取索引最新发行版）" size="26">
-    <button type="submit">安装（走审批卡）</button>
-  </form>
-  <table>
-    <thead><tr><th>包</th><th>版本</th><th>状态</th><th>贡献面</th><th>engines.dsh</th><th>操作</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
-  </table>
-  <div id="preview"></div>
-  <div id="error" class="err"></div>
-</div>
-
-<div id="index-view" style="display:none">
-  <div class="sub">发现源 = format 1 静态索引（多源可配置）；安装才进工作区，发现面只读。</div>
-  <table>
-    <thead><tr><th>包</th><th>类别</th><th>最新精确版本</th><th>说明</th><th>操作</th></tr></thead>
-    <tbody id="idx-rows"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
-  </table>
-  <div id="idx-meta" class="sub"></div>
-</div>
-
-<script>
-const API = '/ext/dsh_adapter/api/dsh/plugins';
-let pollTimer = null;
-
-function showTab(name) {
-  document.getElementById('installed-view').style.display = name === 'installed' ? '' : 'none';
-  document.getElementById('index-view').style.display = name === 'index' ? '' : 'none';
-  document.getElementById('tab-installed').classList.toggle('active', name === 'installed');
-  document.getElementById('tab-index').classList.toggle('active', name === 'index');
-  if (name === 'index') loadIndex();
-}
-
-async function api(path, opts) {
-  const res = await fetch(API + path, opts);
-  let body = null;
-  try { body = await res.json(); } catch { body = {}; }
-  if (!res.ok || (body && body.error)) {
-    const e = (body && body.error) || { code: 'http_' + res.status, message: res.statusText };
-    throw e;
-  }
-  return body;
-}
-
-function errText(e) { return e.code ? e.code + '：' + (e.message || '') : String(e); }
-
-function badge(status) {
-  return '<span class="badge ' + status + '">' + status + '</span>';
-}
-
-function contrib(c) {
-  if (!c) return '';
-  const parts = [];
-  if (c.tools) parts.push('工具' + (c.tool_names && c.tool_names.length ? '(' + c.tool_names.join(', ') + ')' : ''));
-  if (c.themes) parts.push('主题×' + c.themes);
-  if (c.hooks) parts.push('钩子×' + c.hooks);
-  return parts.join(' · ') || '<span class="muted">—</span>';
-}
-
-async function refresh() {
-  try {
-    const out = await api('');
-    render(out);
-    document.getElementById('error').textContent = '';
-  } catch (e) {
-    document.getElementById('error').textContent = errText(e);
-  }
-  const needsPoll = document.querySelectorAll('.badge.pending_approval').length > 0;
-  if (needsPoll && !pollTimer) pollTimer = setTimeout(() => { pollTimer = null; refresh(); }, 3000);
-}
-
-function render(out) {
-  document.getElementById('ws-info').textContent =
-    '运行时工作区：' + (out.workspace || '—') + (out.initialized ? '' : '（空：未装任何 DSH 包）');
-  const rows = document.getElementById('rows');
-  if (!out.packages || out.packages.length === 0) {
-    rows.innerHTML = '<tr><td colspan="6" class="muted">空工作区——安装一个包试试（AC-R4：空工作区 boot 不加载任何 DSH 包）</td></tr>';
-    return;
-  }
-  rows.innerHTML = out.packages.map(p => {
-    const actions = [
-      p.enabled ? '<button onclick="op(\'disable\',\'' + p.name + '\')">禁用</button>'
-                : '<button onclick="op(\'enable\',\'' + p.name + '\')">启用</button>',
-      '<button class="danger" onclick="op(\'uninstall\',\'' + p.name + '\')">卸载</button>',
-    ].join(' ');
-    return '<tr><td><code>' + p.name + '</code>' + (p.error ? '<div class="err">' + p.error + '</div>' : '') + '</td>'
-      + '<td>' + p.version + (p.requested_version && p.requested_version !== p.version ? ' → ' + p.requested_version : '') + '</td>'
-      + '<td>' + badge(p.status) + '</td>'
-      + '<td>' + contrib(p.contribution) + '</td>'
-      + '<td>' + (p.engines_dsh ? '<code>' + p.engines_dsh + '</code>' : '<span class="muted">未声明</span>')
-        + (p.engines_compatible === false ? ' <span class="err">不兼容</span>' : '') + '</td>'
-      + '<td>' + actions + '</td></tr>';
-  }).join('');
-}
-
-async function op(action, pkg) {
-  if (action === 'uninstall' && !confirm('卸载 ' + pkg + '？')) return;
-  try {
-    await api('/' + action, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pkg }),
-    });
-    document.getElementById('error').textContent = '';
-  } catch (e) {
-    document.getElementById('error').textContent = errText(e);
-  }
-  refresh();
-}
-
-async function doInstall(ev) {
-  ev.preventDefault();
-  const pkg = document.getElementById('pkg').value.trim();
-  const version = document.getElementById('ver').value.trim();
-  const pv = document.getElementById('preview');
-  pv.style.display = 'block';
-  pv.textContent = '提交安装（等待审批卡裁决：批准后后台落盘，状态列轮询可见）…';
-  try {
-    const out = await api('/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pkg, version: version || undefined }),
-    });
-    pv.textContent = '审批中 request_id=' + out.request_id + '\n翻译预览（装什么注册什么）：\n'
-      + JSON.stringify(out.preview, null, 1);
-  } catch (e) {
-    pv.textContent = '';
-    document.getElementById('error').textContent = errText(e);
-  }
-  refresh();
-  return false;
-}
-
-async function loadIndex() {
-  const rows = document.getElementById('idx-rows');
-  try {
-    const out = await api('/index');
-    const plugins = out.plugins || [];
-    rows.innerHTML = plugins.slice(0, 200).map(p => {
-      const latest = (p.versions || []).map(v => v.version).slice(-1)[0] || '';
-      const cat = (p.metadata && p.metadata.category) || '';
-      const desc = (p.description && (p.description.zh || p.description.en)) || '';
-      return '<tr><td><code>' + p.name + '</code></td><td>' + cat + '</td><td>' + latest + '</td>'
-        + '<td class="muted">' + String(desc).slice(0, 120) + '</td>'
-        + '<td><button onclick="prefill(\'' + p.name + '\',\'' + latest + '\')">装这个</button></td></tr>';
-    }).join('') || '<tr><td colspan="5" class="muted">索引为空</td></tr>';
-    const srcs = (out.sources || []).map(s =>
-      s.name.slice(0, 40) + ' → ' + (s.ok ? 'ok' : ('不可达' + (s.stale ? '（缓存已标记过期）' : '')))).join('；');
-    document.getElementById('idx-meta').textContent =
-      srcs + '｜' + (plugins.length) + ' 条（最多显示 200）';
-  } catch (e) {
-    rows.innerHTML = '<tr><td colspan="5" class="err">' + errText(e) + '</td></tr>';
-  }
-}
-
-function prefill(pkg, ver) {
-  showTab('installed');
-  document.getElementById('pkg').value = pkg;
-  document.getElementById('ver').value = ver;
-}
-
-refresh();
-</script>
-</body>
-</html>
-"""
+    ws = Path(_manager().runtime_root)
+    if not (ws / "node_modules").is_dir():
+        return ws, []
+    enabled = set(rw.profile_bundles(ws))
+    packages = [
+        p for p in rw.installed_packages(ws)
+        if p["name"] not in rw.PROFILE_INFRA_PACKAGES and (not enabled or p["name"] in enabled)
+    ]
+    return ws, packages
 
 
-def _manager_page_response() -> dict[str, Any]:
-    """管理页 HTML → HttpHandleResponse（text/html，body base64）。"""
-    body = _MANAGER_PAGE_HTML.encode("utf-8")
+def _client_ui_response() -> dict[str, Any]:
+    """已装包的客户端 UI 贡献清单（槽位/映射页/未映射槽如实报告）。
+
+    随安装/启停变化，必须禁缓存：浏览器缓存会让前端挂到已消失的槽位页。
+    """
+    from client_ui import client_ui_contributions
+
+    _, packages = _client_ui_packages()
+    resp = _json_response({"bundles": client_ui_contributions(packages)})
+    resp["headers"]["Cache-Control"] = "no-store"
+    return resp
+
+
+def _client_bundle_response(path: str) -> dict[str, Any]:
+    """组件包文件供给：``/client-bundle/<bundle>/<包内路径>``（穿越防护在 client_ui）。"""
+    from client_ui import resolve_bundle_file
+
+    rel = path[len(_CLIENT_BUNDLE_PREFIX):]
+    segments = rel.split("/")
+    if not rel or any(seg in ("", ".", "..") for seg in segments):
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    if segments[0].startswith("@"):
+        if len(segments) < 3:
+            return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+        bundle, inner = "/".join(segments[:2]), segments[2:]
+    else:
+        if len(segments) < 2:
+            return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+        bundle, inner = segments[0], segments[1:]
+    found = resolve_bundle_file(Path(_manager().runtime_root), bundle, "/".join(inner))
+    if found is None:
+        return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+    payload, content_type = found
     return {
         "status": 200,
-        "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache"},
-        "body": base64.b64encode(body).decode("ascii"),
+        "headers": {"Content-Type": content_type, "Cache-Control": "no-cache"},
+        "body": base64.b64encode(payload).decode("ascii"),
         "body_encoding": "base64",
     }
 
@@ -864,6 +878,94 @@ async def _web_proxy_dispatch(
         "body": str(result.get("body_base64") or ""),
         "body_encoding": "base64",
     }
+
+
+# ── DSH 工具面进入工具（toolface 闭环） ─────────────────────────
+# DSH 插件的 tools.register 注册进 DSH 宿主工具注册表；灵汐侧经桥
+# tool/call RPC 执行。这里出两个泛化工具：list 供发现（LLM 先查再用）、
+# call 供执行（bridge.call_tool 三级信封原样透传）。
+
+_toolface_tools_cache: list[dict[str, Any]] | None = None
+
+
+# output_schema 口径：内核 mcp_result 归一（②-a）把 {success,data,error} 信封
+# 拆包，tool_core 校验的是拆包后的 **data 载荷**（2026-11-10 实测裁定：信封形
+# 声明必红 expected object got array）。故此处声明 data 形状，非信封。
+_TOOL_LIST_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "parameters": {"type": "object"},
+        },
+        "required": ["name"],
+    },
+}
+
+# DSH 工具载荷原样透传（形状由各 DSH 工具自决），六型联合 = 不约束。
+_TOOL_CALL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": ["object", "array", "string", "number", "boolean", "null"],
+}
+
+
+@plugin.tool(
+    name="dsh.tool.list",
+    schema={"type": "object", "properties": {}},
+    output_schema=_TOOL_LIST_OUTPUT_SCHEMA,
+    render={"card": "generic"},
+    description=(
+        "List tools registered by installed DSH plugins in the DSH host "
+        "(name/description/parameters). Call dsh.tool.call to execute one."
+    ),
+)
+async def dsh_tool_list() -> dict[str, Any]:
+    """DSH 宿主工具清单（bridge.list_tools 投影，失败 fail-visible）。"""
+    global _toolface_tools_cache  # noqa: PLW0603
+    from bridge import get_bridge
+
+    tools = await get_bridge().list_tools()
+    _toolface_tools_cache = tools if isinstance(tools, list) else None
+    return {
+        "success": True,
+        "data": [
+            {
+                "name": t.get("name"),
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters") or t.get("input_schema") or {},
+            }
+            for t in tools if isinstance(t, dict) and t.get("name")
+        ],
+        "error": None,
+        "duration_ms": 0,
+    }
+
+
+@plugin.tool(
+    name="dsh.tool.call",
+    schema={
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "description": "DSH 工具名（先 dsh.tool.list 查）"},
+            "args": {"type": "object", "description": "工具参数（按其 parameters）"},
+        },
+        "required": ["tool"],
+    },
+    output_schema=_TOOL_CALL_OUTPUT_SCHEMA,
+    render={"card": "generic"},
+    description=(
+        "Execute a tool registered by an installed DSH plugin (bridge tool/call). "
+        "Discover names with dsh.tool.list first."
+    ),
+)
+async def dsh_tool_call(tool: str = "", args: dict[str, Any] | None = None) -> dict[str, Any]:
+    """执行一个 DSH 宿主工具（信封原样透传；空名 fail-visible）。"""
+    if not tool.strip():
+        return {"success": False, "data": None, "error": "缺 tool 名（先 dsh.tool.list 查）", "duration_ms": 0}
+    from bridge import get_bridge
+
+    return await get_bridge().call_tool(tool.strip(), dict(args or {}))
 
 
 # ══ 能力服务面（capabilities.services 声明即契约，G2 校验声明=实现）══

@@ -10,7 +10,7 @@
 
 ## 0. 法定审查步骤（总纲§三(二)，优先级最高）
 
-以下三个法定审查步骤必须在每次代码审查中执行，拥有一票否决权：
+以下法定审查步骤必须在每次代码审查中执行，拥有一票否决权：
 
 ### 0.1 需求追溯审查
 
@@ -25,13 +25,27 @@
 - **信息泄漏检查** \[error]: 模块是否知道了另一个模块的实现细节？若是，驳回并强制隔离
 - **变化方向检查** \[error]: 接口是否暴露了易变的实现细节？稳定业务动作是否与易变技术实现耦合？若是，驳回并要求分离
 
-### 0.3 铁面裁决原则 
+### 0.3 架构合规审查（仓内架构约束，法定）
+
+> 口径只从仓内架构真值取，不新造：AGENTS.md「架构要点」、`docs/ARCHITECTURE.md` 设计哲学 §1（一切皆插件）、`docs/decisions/` 架构类 ADR。触碰 `kernel/`、`plugins/shared/`、`config/agents/` 的改动**必须**逐条核对本节，任一 [error] 条目命中即 Request Changes。
+
+- **内核不承载业务逻辑 / 一切皆插件** \[error] [出处: AGENTS.md「架构要点」首条；docs/ARCHITECTURE.md 设计哲学 §1]
+  - **判定方式**：diff 触碰 `kernel/crates/**` 时，逐个被改文件核对是否只做执行基座职责（管道解释执行 / 能力注册表 / 插件装载与调用 / 存储 / 会话租户 HTTP 基础设施）。出现以下任一即为越界：① 内核代码中出现业务概念/业务规则/业务流程（LLM 调度策略、评估裁决、审批流、记忆策略、agent 配置加载、工具面过滤等）；② 内核硬编码某插件/某能力的具体行为或开关；③ 为绕过插件改动而直接在内核加逻辑。
+  - **核对动作**：enhanced_search 检索 diff 中新增的函数/字段名是否属业务域词汇；对照 docs/ARCHITECTURE.md「能力→插件对照表」确认该能力应有承载位置。
+  - **正确去向**：业务行为 = 加/改 `plugins/shared/<插件>/` 或 `config/` 配置；审查时给出应落位的插件/配置路径。
+- **插件即声明** \[error] [出处: AGENTS.md「插件即声明」条] 新增/修改工具声明（`capabilities.tools`）必须带 `output_schema` + `render`（tool_core 校验 fail-closed）；缺任一即 Must Fix。
+- **评估裁决在插件，内核只落库** \[error] [出处: AGENTS.md「评估闸门」条] 改动把评估判定/放行检测逻辑写进内核代码即越界；裁决归属 `plugins/shared/evaluation/` 等插件。
+- **内核零 agent 配置知识** \[error] [出处: AGENTS.md「多循环体/执行上下文」条 + docs/decisions/2026-09-02-agent-config-decouple-tool-surface.md] 内核不得读 `config/agents/**`、不得内置 agent 配置语义；工具面过滤经 tool_schema 插件 + `tool-surface` capability 服务完成，内核直查/直过滤即越界。
+- **任务默认隔离执行** \[error] [出处: AGENTS.md「任务默认隔离执行」条] 改动默认工作空间/隔离语义时，核对是否维持 `workspace/{task_id}` + isolated 默认；擅自改为非隔离默认即 Must Fix。
+- **真值冲突即停** \[error]: 改动与上述任一真值出处冲突且实现方未提 ADR/回报时，标记 Must Fix 并要求回到提出方裁定；审查方不得自行解释放行（衔接 coding_domain_rules §1.7/§1.8）。
+
+### 0.4 铁面裁决原则 
 
 - **客观标准** \[error]: 审查结论必须基于规则和自动化工具的客观结果，禁止主观通融
 - **禁止降级** \[error]: Must Fix 级别问题不可通过辩解降级为 Should Fix 或 Nit
 - **禁止放水** \[error]: 不因"改动不大""看起来还行""为了兼容性"而放过问题
 
-### 0.4 冗余与质量审查
+### 0.5 冗余与质量审查
 
 - **翻译式注释** \[error]: 代码注释是否仅翻译代码本身（如 `// set name to x`），应删除
 - **历史叙事 / bug 修复注释** \[warning]: 含"曾/之前/原来/修复了 X/历史：曾…"等 bug 故事的注释，应改写为"当前功能目标/契约"（bug 上下文属 commit/PR，不属代码）。规范见 `coding_domain_rules.md` §4.7。`[来源:]`/`TODO:` 标记不在此列
@@ -211,11 +225,11 @@ net: -<N> lines possible.
 
 ## 7. 前端性能审查
 
-> 性能审查维度见 detail_review_checklist.md §3「快速审查清单」（性能项）。
+> 审查维度见 detail_review_checklist.md §3「快速审查清单」（性能项）。
 
 ## 8. 可访问性审查
 
-> 可访问性审查维度见 detail_review_checklist.md「维度五：可访问性」。
+> 审查维度见 detail_review_checklist.md「维度五：可访问性」。
 
 ***
 

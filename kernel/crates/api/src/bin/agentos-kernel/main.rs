@@ -19,20 +19,30 @@
 //!   用户空间 data/token_secret.key，首启生成、跨重启复用；默认不随机）
 //! - AGENTOS_TOKEN_SECRET_EPHEMERAL：置 1 显式选择一次性密钥（重启即全量
 //!   token 失效，强安全场景由部署者自行启用）
-//! - AGENTOS_PLUGINS_DIR：内置插件根目录（默认 plugins/shared）
-//! - AGENTOS_USER_PLUGINS_DIR：用户插件根目录（默认 OS 标准目录 agentos/plugins）
+//! - AGENTOS_INSTANCE_CONFIG：实例启动配置文件路径（三根真值载体；缺省读
+//!   `<AGENTOS_CONFIG_ROOT>/kernel/instance.yaml`，ADR
+//!   2026-11-07-plugin-tiered-single-copy-model——三根显式配置零推导零回落，
+//!   缺失/字段缺失/目录不存在 = 拒绝启动「插件根未配置」）
+//! - AGENTOS_PLUGINS_DIR / AGENTOS_PLUGIN_TIER2_ROOT：发现根交付载体（boot
+//!   从实例启动配置解析后**恒定回写**，供热发现/invoker/watcher 同源消费；
+//!   ambient 值不参与推导）
+//! - AGENTOS_USER_PLUGINS_DIR：用户数据面插件根（模式包播种/用户仓位置；
+//!   仅 AGENTOS_USER_ROOT 显式交付时生效，零回落）
 //! - AGENTOS_MAX_BLOCKING_THREADS：tokio 阻塞池上限（默认 512 = tokio 原生默认）
 //! - AGENTOS_WORKER_THREADS：tokio worker 线程数（默认按设备档派生，原则 P2：
 //!   手机档 min(核数,4) 收窄，桌面/云 = 核数即 tokio 默认）
 //! - AGENTOS_THREAD_STACK_KIB：线程栈大小 KiB（默认 2048 = tokio 默认 2MiB）
 //! - AGENTOS_MEM_WATERMARK_MB：水位自愈阈值 MB（**默认关闭**——2026-09-10
-//!   用户裁定水位重启不得默认触发；显式正值才启用排空重启自愈）
-//! - AGENTOS_MEM_WATERMARK_MIN：水位需持续的分钟数（启用时默认 10）
+//!   用户裁定水位重启不得默认触发；显式正值才启用排空重启自愈）。
+//!   2026-11-11 口径=进程 Working Set（实际占用）；提交内存尖峰不触发。
+//! - AGENTOS_MEM_WATERMARK_MIN：水位需持续的分钟数（启用时默认 10；采样
+//!   间隔 60s，即连续 N 个采样均超阈值才触发）
 //! - AGENTOS_MEM_HARD_LIMIT_MB：进程内存硬限 MB（**默认关闭**——未设置/0/
 //!   非法值不挂载，显式正值才启用；2026-09-10「显式正值才启用」裁定同语义）。
 //!   Windows 经 Job Object PROCESS_MEMORY 给进程 commit 上硬顶（超限=分配
-//!   失败）；已设时水位排水阈值取 min(水位阈值(如设), 95%×硬限)，优雅排空
-//!   （exit 75）先于硬熔断
+//!   失败）；仅配硬限时水位排水阈值取 95%×硬限（commit 口径）。水位与硬限
+//!   双设时水位（working set）优先、硬限仍由 OS 执法——两口径不同，不对
+//!   commit 阈值做 min 混合
 //! - AGENTOS_COLLECT_FAST_SECS：自适应清扫节奏（ADR 2026-10-19 D3 修订）——
 //!   WARN 阈值触发期间 mi_collect 收紧到的间隔秒数（默认 10；显式 0/非法值=
 //!   禁用收紧，恒常规节奏）。收紧只影响清扫频率，绝不触发重启（区别于水位/硬限）
@@ -74,25 +84,40 @@ use agentos_plugin_loader::{CapabilityRegistryImpl, NativePluginLoader};
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
-mod boot_env;
-mod plugin_boot;
+pub mod boot_env;
+pub mod plugin_boot;
 
 use agentos_core::device_profile::{detect_device_tier, probe_cores, DeviceTier};
 use agentos_memory::{BlockingPoolConfig, PoolTier};
 use boot_env::{
     attach_self_job_memory_limit, budget_exceeded, collect_fast_triggered,
-    effective_sample_threshold_mb, migrate_plaintext_passwords, resolve_bind_host,
-    resolve_collect_fast_secs, resolve_host_est_commit_mb, resolve_log_dir, resolve_mem_budget_mb,
-    resolve_mem_hard_limit_mb, resolve_user_plugins_dir, resolve_watermark_config,
-    resolve_worker_threads, sample_private_bytes, seed_admin_user, watermark_breach,
-    PressureAlertEdge,
+    effective_sample_threshold_mb, load_user_root_env_file, migrate_plaintext_passwords,
+    resolve_bind_host, resolve_collect_fast_secs, resolve_commit_retention_ratio,
+    resolve_host_est_commit_mb, resolve_log_dir, resolve_mem_budget_mb, resolve_mem_hard_limit_mb,
+    resolve_retention_floor_mb, resolve_user_plugins_dir, resolve_watermark_config,
+    resolve_worker_threads, retention_breach, run_boot_stage, run_boot_stage_async,
+    sample_private_bytes, sample_working_set_bytes, seed_admin_user, watermark_breach,
+    PressureAlertEdge, RetentionAction, RetentionGuardState,
 };
 use plugin_boot::{
     build_plugin_loader, collect_boot_plugin_roots, commit_seed_reconciliation_at_boot,
     init_user_repo_at_boot, reconcile_mode_seeds_at_boot, warn_legacy_db_not_migrated,
 };
 
+/// 启动拒绝（fail-closed 统一出口）：错误进 stderr（supervisor/装配日志面）与
+/// 返回值双通道，显式可读，绝不静默降级。
+fn refuse_boot(reason: &str) -> Box<dyn std::error::Error> {
+    eprintln!("[boot] 拒绝启动: {reason}");
+    std::io::Write::flush(&mut std::io::stderr()).ok();
+    Box::<dyn std::error::Error>::from(reason.to_string())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 用户根 .env 引导装载：必须最先——分配器选项的 env 读取（install_global_allocator
+    // 内的 MIMALLOC_*/AGENTOS_PURGE_DELAY_MS 缺席检查）与全部 resolve_* 链都可能消费
+    // 这里的键；ambient 已存在的键不被覆盖（ADR 2026-11-17-user-root-env-file-bootstrap）。
+    load_user_root_env_file();
+
     // 全局分配器（mimalloc + purge_delay=0）：必须在任何分配前安装。
     // Windows 段堆并发高水位滞留修复（ADR 2026-08-31-mimalloc-global-allocator）。
     agentos_api::allocator::install_global_allocator();
@@ -240,6 +265,14 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     // 内存预算闸（D5 第一刀）：此处解析供自证行；闸装配在 invoker 构建后
     // （采样闭包注入，见下）。
     let mem_budget_mb = resolve_mem_budget_mb();
+    // commit 相对保留闸（ADR 2026-11-16）：commit 维度补闸——水位只看驻留页，
+    // Windows 换出/压缩冷页后工作集失真而 commit 无线可涨（装机实证 commit
+    // 10GB+ / 工作集数百 MB）。ratio 显式正值才启用（默认 1.5；0/负/非法=禁用）；
+    // floor 为绝对下限防小工作集倍率噪声（配置项非开关，0/非法回落默认 1024）。
+    // 闸随水位 watch 循环在岗（循环关则闸不运行），此处解析一份供自证行与
+    // 循环同源共用，不重复读 env。
+    let mem_commit_ratio = resolve_commit_retention_ratio();
+    let mem_retention_floor_mb = resolve_retention_floor_mb();
     let mut hard_limit_attached = false;
     if let Some(mb) = mem_hard_limit_mb {
         match attach_self_job_memory_limit(mb.saturating_mul(1024 * 1024)) {
@@ -283,6 +316,10 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         // 该面已接线（D5 执法序列第一级：告警不再是仅内核日志）。
         mem_budget_mb = mem_budget_mb.unwrap_or(0),
         mem_pressure_notify = true,
+        // commit 相对保留闸（ADR 2026-11-16）：0.0 = 未启用（与「0=关」口径
+        // 一致）；floor 为闸启用时的绝对下限（防小工作集倍率噪声）。
+        mem_commit_ratio = mem_commit_ratio.unwrap_or(0.0),
+        mem_retention_floor_mb = mem_retention_floor_mb,
         // 宿主保活池（D1/B6+B8）：keepwarm 0 = 池关闭（旧行为）；ttl/轮换
         // 仅在池启用时有消费面。逐轮消费与启动期读同值（env 运行期不热变）。
         // 经 `agentos_invoker::invoker::` 直引（venv_provision/plugin_watcher
@@ -341,51 +378,6 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
 
     // ── 插件系统初始化 ──
 
-    // 确定插件目录
-    let plugins_dir = std::env::var("AGENTOS_PLUGINS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            // 默认路径：工作区根目录下的 plugins/shared/
-            // 尝试从 CARGO_MANIFEST_DIR 向上查找，否则用相对路径
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|root| root.join("plugins/shared"))
-                .unwrap_or_else(|| PathBuf::from("plugins/shared"))
-        });
-
-    info!(
-        target: "agentos-kernel",
-        "Plugin directory (builtin root): {}",
-        plugins_dir.display()
-    );
-
-    // 确定用户插件根目录（可写，第三方插件安装位置）
-    // 解析优先级：环境变量 > OS 标准目录 > None（保持原行为）
-    let user_plugins_dir = resolve_user_plugins_dir();
-    if let Some(ref user_dir) = user_plugins_dir {
-        info!(
-            target: "agentos-kernel",
-            "User plugin root: {}",
-            user_dir.display()
-        );
-    } else {
-        info!(
-            target: "agentos-kernel",
-            "User plugin root: disabled (no env var, OS data dir unavailable)"
-        );
-    }
-
-    // 模式种子对账（设计稿 2026-09-15 §2「版本管理」）：必须在插件扫描之前——
-    // 播种/静默升级要先落盘，discover 才能扫到正确的用户副本内容。
-    let seed_outcomes = reconcile_mode_seeds_at_boot(&plugins_dir, user_plugins_dir.as_deref());
-
-    // 用户仓 git 化（设计稿 2026-09-15 §2.2「用户目录 git 化边界」）：对账完成后
-    // 确保用户仓就绪；对账有落盘变化时自动提交一笔（用户自己的改动不自动提交）。
-    init_user_repo_at_boot();
-    commit_seed_reconciliation_at_boot(&seed_outcomes);
-
     // config_root = 工作区根目录下的 config/（与 plugins_dir 同级基准）
     // 必须在创建 loader 之前推导：loader 需要 config_root 才能让 load_config() 不返回空 {}
     let config_root = std::env::var("AGENTOS_CONFIG_ROOT")
@@ -404,6 +396,62 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         "Config root: {}",
         config_root.display()
     );
+
+    // 实例启动配置（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2）：三根
+    // 全部显式配置，零推导零回落——配置缺失/字段缺失/目录不存在 = 拒绝启动并显式
+    // 报「插件根未配置」（fail-closed，绝不猜）。Tier 归类单一真源 =
+    // config/kernel/plugin_tiers.yaml；守卫校验根集合 vs 配置声明（越界/双根同
+    // id/清单不一致即拒启，错误含期望根/实际解析）。
+    let instance = agentos_plugin_loader::load_instance_config(&config_root)
+        .map_err(|e| refuse_boot(&e.to_string()))?;
+    let plugin_tiers = agentos_plugin_loader::load_tier_manifest(&config_root)
+        .map_err(|e| refuse_boot(&e.to_string()))?;
+    agentos_plugin_loader::validate_boot_roots(&instance, &plugin_tiers)
+        .map_err(|e| refuse_boot(&e.to_string()))?;
+    info!(
+        target: "agentos-kernel",
+        tier1_root = %instance.tier1_root.display(),
+        tier2_root = %instance.tier2_root.display(),
+        shared_root = %instance.shared_root.display(),
+        config = %instance.config_path.display(),
+        "实例启动配置已生效（分级单副本三根，零推导零回落）"
+    );
+
+    // Tier1 根 = 安全级插件加载根（原内置根）；用户数据面插件根（modes 播种/
+    // 用户仓等）仍经 user_space 解析（env 显式交付，零回落），不参与发现根。
+    let plugins_dir = instance.tier1_root.clone();
+    let tier2_root = instance.tier2_root.clone();
+
+    info!(
+        target: "agentos-kernel",
+        "Plugin directory (tier1 root): {}",
+        plugins_dir.display()
+    );
+
+    // 确定用户数据面插件根目录（可写，模式包播种/用户仓位置；发现根由实例
+    // 启动配置三根承载，见 collect_boot_plugin_roots）
+    let user_plugins_dir = resolve_user_plugins_dir();
+    if let Some(ref user_dir) = user_plugins_dir {
+        info!(
+            target: "agentos-kernel",
+            "User data plugin root: {}",
+            user_dir.display()
+        );
+    } else {
+        info!(
+            target: "agentos-kernel",
+            "User data plugin root: disabled (AGENTOS_USER_ROOT 未显式交付)"
+        );
+    }
+
+    // 模式种子对账（设计稿 2026-09-15 §2「版本管理」）：必须在插件扫描之前——
+    // 播种/静默升级要先落盘，discover 才能扫到正确的用户副本内容。
+    let seed_outcomes = reconcile_mode_seeds_at_boot(&plugins_dir, user_plugins_dir.as_deref());
+
+    // 用户仓 git 化（设计稿 2026-09-15 §2.2「用户目录 git 化边界」）：对账完成后
+    // 确保用户仓就绪；对账有落盘变化时自动提交一笔（用户自己的改动不自动提交）。
+    init_user_repo_at_boot();
+    commit_seed_reconciliation_at_boot(&seed_outcomes);
 
     // 内核能力契约加载（定义驱动入口校验 + schema 聚合的
     // 单一真值源）。目录缺失 = 未启用（宽泛放行）；文件损坏 = fail-fast 拒启
@@ -469,8 +517,16 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     // repo 份，而热路径同 id 解析用户份（loader 用户根子树赢）——首个 sync 周
     // 期源码目录翻转触发复验驱逐（/ext 路由空窗）。双根同 id 用户赢必须在启动
     // 路径同样成立。
-    let root_paths = collect_boot_plugin_roots(&plugins_dir, user_plugins_dir.as_deref());
-    let loader = build_plugin_loader(&plugins_dir, user_plugins_dir, &config_root);
+    // Tier2 根与 Tier1 根同指（dev 退化配置）→ loader 只持单根（同一路径双根
+    // 扫描只会重复产出同批候选）；不同指 → 双根（Tier1 + Tier2，同 id 已被
+    // 启动守卫拒掉，loader 双根扫描只剩各自独占集）。
+    let tier2_loader_root = if tier2_root == plugins_dir {
+        None
+    } else {
+        Some(tier2_root.clone())
+    };
+    let root_paths = collect_boot_plugin_roots(&plugins_dir, tier2_loader_root.as_deref());
+    let loader = build_plugin_loader(&plugins_dir, tier2_loader_root, &config_root);
 
     info!(
         target: "agentos-kernel",
@@ -544,6 +600,46 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         "Discovered {} plugin manifests",
         manifests.len()
     );
+
+    // 启动装载清单（ADR 2026-11-07 §2.3 可观察性）：每插件 {路径, 版本, 级别,
+    // 来源根} 逐条打印 + 发布全局快照（GET /api/v1/system/plugin-load-manifest
+    // 消费）——「我在跑哪份」由启动日志与诊断面直接回答，不再日志考古。
+    {
+        let manifest_paths = loader.get_plugin_dirs();
+        let load_manifest = agentos_plugin_loader::build_load_manifest(
+            &manifests,
+            &manifest_paths,
+            &instance,
+            &plugin_tiers,
+        );
+        for entry in &load_manifest.plugins {
+            info!(
+                target: "agentos-kernel",
+                plugin = %entry.plugin_id,
+                version = %entry.version,
+                tier = entry.tier.as_str(),
+                source_root = entry.source_root,
+                path = %entry.path.display(),
+                "装载清单"
+            );
+        }
+        info!(
+            target: "agentos-kernel",
+            total = load_manifest.plugins.len(),
+            tier1 = load_manifest
+                .plugins
+                .iter()
+                .filter(|e| e.tier == agentos_plugin_loader::PluginTier::Tier1)
+                .count(),
+            tier2 = load_manifest
+                .plugins
+                .iter()
+                .filter(|e| e.tier == agentos_plugin_loader::PluginTier::Tier2)
+                .count(),
+            "启动装载清单汇总（级别=分级清单归类；来源根=加载副本所在根）"
+        );
+        agentos_plugin_loader::publish_boot_load_manifest(load_manifest);
+    }
 
     // ── 启动期按 manifest 声明面播种用户空间配置（2026-09-28 批次 A3）──
     // 读写同源公理：配置已迁移用户空间，则一切读取出自用户空间。对每个
@@ -725,10 +821,9 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     // 新位置——否则静默卸载把它当程序文件删除，用户会话/消息/凭据全丢。
     // 复制失败 fail-closed 拒绝启动（不静默换新库）；dev 仓形态新旧同位，
     // 天然 no-op，现网行为不变。
-    let migrated = agentos_engine::storage_factory::migrate_legacy_db_to_user_root(
-        &storage_cfg,
-        &config_root,
-    )?;
+    let migrated = run_boot_stage("legacy_db_migrate", || {
+        agentos_engine::storage_factory::migrate_legacy_db_to_user_root(&storage_cfg, &config_root)
+    })?;
     if migrated {
         eprintln!(
             "[boot] 存量库已迁移到本次生效位置 {}（旧库原件保留，随卸载清理）。",
@@ -750,13 +845,20 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         warn_legacy_db_not_migrated(&storage_cfg, &config_root);
     }
 
-    let (store, sqlite_db) = agentos_engine::storage_factory::open_storage(&storage_cfg)?;
+    let (store, sqlite_db) = run_boot_stage("db_open", || {
+        agentos_engine::storage_factory::open_storage(&storage_cfg)
+    })?;
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
 
     // 播种内置 admin 用户（0.5.0 最小持久化地基）：argon2 哈希落库 +
     // 随机口令置 must_change_password；存量明文口令行启动迁移哈希化（D1，fail-closed）。
     seed_admin_user(store.clone()).await;
-    if let Err(e) = migrate_plaintext_passwords(store.clone()).await {
+    let plaintext_migration = run_boot_stage_async(
+        "plaintext_password_migrate",
+        migrate_plaintext_passwords(store.clone()),
+    )
+    .await;
+    if let Err(e) = plaintext_migration {
         eprintln!(
             "[boot] 明文口令迁移失败，拒绝启动: {e}\n\
              处置：设置 AGENTOS_ADMIN_PASSWORD=<新口令> 重启（重置 admin 口令），或修复存储后重试"
@@ -773,7 +875,7 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     // B2 清扫是 SQLite 专有路径（reap_orphan_runs 固有方法）——非 SQLite driver
     // 跳过（孤儿 run 清扫属启动家政，跳过不影响正确性，仅留状态悬空到下次 sqlite 起时清）。
     if let Some(sqlite) = sqlite_db.as_ref() {
-        match sqlite.reap_orphan_runs() {
+        match run_boot_stage("reap_orphan_runs", || sqlite.reap_orphan_runs()) {
             Ok(victims) if !victims.is_empty() => {
                 // 失败原因落日志：这是这些 run 唯一的失败裁决点，受害者清单必须
                 // 可见（装机 2026-10-10 B74/B75/B76 三连：簿记 failed 而全日志
@@ -830,7 +932,12 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                         // cutoff 必在 DateTime 值域内。
                         let cutoff = chrono::Utc::now()
                             - chrono::Duration::seconds(retention_days as i64 * 86_400);
-                        match sqlite.purge_traces_older_than(cutoff).await {
+                        match run_boot_stage_async(
+                            "trace_retention_purge",
+                            sqlite.purge_traces_older_than(cutoff),
+                        )
+                        .await
+                        {
                             Ok(0) => {}
                             Ok(purged) => {
                                 info!(target: "agentos-kernel", purged, "trace 保留清扫完成")
@@ -841,7 +948,9 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                                 "trace 保留清扫失败（下周期重试）"
                             ),
                         }
-                        match sqlite.purge_orphan_blobs().await {
+                        match run_boot_stage_async("orphan_blob_purge", sqlite.purge_orphan_blobs())
+                            .await
+                        {
                             Ok(0) => {}
                             Ok(purged) => {
                                 info!(target: "agentos-kernel", purged, "孤儿 blob 清扫完成")
@@ -967,9 +1076,10 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     let contract_states = Arc::new(agentos_api::contract::ContractLedger::new());
     // 注册闸 G2 启动期存量校验（与热发现同源公共函数）：对 enabled 的 sidecar
     // tool 插件 spawn → tools/list → 对照声明。判定失败（tools/list 成功但声明
-    // 工具缺失）→ 剔除漂移工具并按净化后 manifest 重注册（前端经契约状态页可见）。
-    // 观测失败（spawn/list 重试后仍失败）≠ 判定失败：保留
-    // 声明注册 + 账本标记"校验未完成"，30s 后后台复验——复验出真漂移才净化。
+    // 实现不一致）→ 拒绝工具记入账本、声明 schema 保留在工具面（失败桩，调用
+    // 显式失败；ADR 2026-11-12；前端经契约状态页可见）。观测失败（spawn/list
+    // 重试后仍失败）≠ 判定失败：保留声明注册 + 账本标记"校验未完成"，30s 后
+    // 后台复验——复验出真漂移才武装失败桩。
     // 只验 tools 非空的 sidecar（services 方向 schema 契约在 Phase 1 补）。
     // 探测扇出有界并行（Phase 3 #1）：宿主 spawn 每个秒级且相互独立，并行度
     // min(8, 逻辑核数)——boot 串行段 45.6s 主瓶颈并行化；账本写入与漂移重注册
@@ -996,7 +1106,8 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
             "注册闸 G2 启动期存量校验完成"
         );
         // 观测失败复验（fire-and-forget）：30s 后重验，复验出真漂移（判定失败）
-        // 才净化重注册；复验仍观测失败则保持声明注册（下次 boot/热校验再试）。
+        // 才武装失败桩（声明 schema 保留在面、调用显式失败）；复验仍观测失败则
+        // 保持声明注册（下次 boot/热校验再试）。
         let observe_incomplete = summary.observe_incomplete;
         if !observe_incomplete.is_empty() {
             let inv2 = invoker.clone();
@@ -1038,7 +1149,7 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                             rejected = ?outcome.rejected_tools,
                             tools,
                             http_routes,
-                            "注册闸 G2（复验）：判定声明与实现不一致，已按净化后 manifest 重注册（需修改插件）"
+                            "注册闸 G2（复验）：判定声明与实现不一致，相关工具按声明注册为失败桩（schema 保留在工具面、调用显式失败；需修改插件）"
                         );
                     } else {
                         info!(
@@ -1239,14 +1350,33 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     // 流式声明查询闭包（ADR 2026-08-22）：capability_router 收到流式事件时查
     // 插件 capabilities.streaming 声明（未声明即拒，fail-closed）。manifests 用
     // 共享 RwLock（与 domain_broadcaster 同源）——watcher 热发现同步可见。
+    // 身份是进程身份：合宿宿主键 `group:<group>:<slot>` 按装箱表归约到成员声明
+    // （与 state_writes_lookup 同款；否则合宿进程的流式事件全员被拒）。
     let streaming_declaration_lookup: agentos_api::capability_router::StreamingDeclarationLookupFn = {
         let manifests_for_streaming = manifests_shared.clone();
+        let invoker_for_streaming = invoker.clone();
         Arc::new(move |plugin_id: &str| {
-            let guard = manifests_for_streaming.try_read().ok()?;
-            guard
-                .iter()
-                .find(|m| m.id == plugin_id)
-                .and_then(|m| m.capabilities.streaming.clone())
+            let entries: Vec<(String, Option<agentos_core::traits::StreamingCapability>)> =
+                manifests_for_streaming
+                    .try_read()
+                    .map(|guard| {
+                        guard
+                            .iter()
+                            .map(|m| (m.id.clone(), m.capabilities.streaming.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            // 先放 manifests 读锁再查 host_key_of（装箱表内部另有锁，避免锁序反转）
+            agentos_api::capability_router::streaming_declaration_for_caller(
+                &entries,
+                |id| {
+                    agentos_core::traits::PluginInvoker::host_key_of(
+                        invoker_for_streaming.as_ref(),
+                        id,
+                    )
+                },
+                plugin_id,
+            )
         })
     };
 
@@ -1304,8 +1434,9 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     };
 
     // 强制注入工具声明查询闭包（P1-5 声明化）：tool-surface 过滤时收集全部
-    // 插件 manifest force_include_tools 并集（如 spill_guard 声明 spill_retrieve）。
-    // 锁被占用（热重载写中）时按无声明降级——零强制注入，不阻塞读面。
+    // 插件 manifest force_include_tools 并集（插件可要求无视 agent tool_ids
+    // 白名单强制注入工具面）。锁被占用（热重载写中）时按无声明降级——
+    // 零强制注入，不阻塞读面。
     let force_include_tools_lookup: agentos_api::capability_router::ForceIncludeToolsLookupFn = {
         let manifests_for_forced = manifests_shared.clone();
         Arc::new(move || {
@@ -1321,13 +1452,22 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         })
     };
 
-    // 工具面遮挡名单查询闭包（BUG-51 注册门禁）：G2 观测失败（账本
-    // verify_incomplete）与复验超限终态（verify_failed）插件的工具不进 LLM
-    // 工具面（必败面遮挡），复验通过（账本 ok）即自动转正——实时读契约账本
-    // 现值，无独立状态需要维护。
+    // 工具调用拦截名单查询（BUG-51 注册门禁）：G2 观测失败（账本
+    // verify_incomplete）与复验超限终态（verify_failed）插件的工具调用被临时
+    // 拦截（ADR 2026-11-12：不再遮挡工具面——声明 schema 恒进面，保 prompt
+    // 前缀缓存稳定）；复验通过（账本 ok）即自动放行——实时读契约账本现值，
+    // 无独立状态需要维护。
     let shadowed_plugin_ids_lookup: agentos_api::capability_router::ShadowedPluginIdsLookupFn = {
         let ledger_for_shadow = contract_states.clone();
         Arc::new(move || ledger_for_shadow.verify_pending_plugin_ids())
+    };
+
+    // 声明↔实现漂移被拒工具查询（ADR 2026-11-12）：G2 判定 sanitized/drift 的
+    // 工具保留声明 schema 在工具面（失败桩），调用时显式失败
+    // （TOOL_DECLARATION_MISMATCH）；复验通过（账本 ok）自动清空。
+    let rejected_tool_names_lookup: agentos_api::capability_router::RejectedToolNamesLookupFn = {
+        let ledger_for_rejected = contract_states.clone();
+        Arc::new(move || ledger_for_rejected.rejected_tool_names())
     };
 
     // 管道恢复派发闭包（resume_pipeline 续跑拉起）：经 EngineDispatcher 走与
@@ -1359,19 +1499,18 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                         obj.insert("_skip_user_append".into(), serde_json::json!(true));
                     }
                     dispatcher
-                        .dispatch_user_input(
-                            &thread_id,
-                            &user_id,
-                            "",
-                            &pipeline_id,
-                            "",
-                            None,
-                            Some(&overlay),
-                            "",
-                            None,
-                            "",
-                            agentos_core::types::PendingInputSource::Trigger,
-                        )
+                        .dispatch_user_input(agentos_core::types::DispatchRequest {
+                            thread_id,
+                            user_id,
+                            pipeline_id,
+                            content: String::new(),
+                            client_message_id: String::new(),
+                            // 系统发起，与任务派发同源。
+                            source: agentos_core::types::PendingInputSource::Trigger,
+                            execution_context: None,
+                            state_overlay: Some(overlay),
+                            pipeline_config_id: None,
+                        })
                         .await
                 })
                     as std::pin::Pin<
@@ -1402,6 +1541,7 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         .with_state_writes_lookup(state_writes_lookup)
         .with_force_include_tools_lookup(force_include_tools_lookup)
         .with_shadowed_plugin_ids_lookup(shadowed_plugin_ids_lookup)
+        .with_rejected_tool_names_lookup(rejected_tool_names_lookup)
         .with_pipeline_resumer(pipeline_resumer)
         .with_capability_contracts(capability_contracts.clone());
     // SQLite 固有面：suspend/resume 挂起凭据读写（审批挂起恢复链写侧）。
@@ -1885,17 +2025,19 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
     // initial_ids 取启动 manifests，避免把已注册插件重复注册（与 reload-all 新插件序列对齐）。
     // 注入 enablement profile：热发现路径同样按 L1 过滤 disabled 插件（注册闸对齐启动期）。
     //
-    // 关键前置：discover_new_plugins 内部读 AGENTOS_PLUGINS_DIR 推导 roots。启动期若走
-    // 默认 plugins_dir（未设该环境变量），须在此补设，保证 watcher 监听目录与 invoker
-    // 发现目录同源——否则 watcher 触发同步、discover 却读到空 roots、发现不到新插件。
-    if std::env::var("AGENTOS_PLUGINS_DIR").is_err() {
-        std::env::set_var("AGENTOS_PLUGINS_DIR", &plugins_dir);
-        info!(
-            target: "agentos-kernel",
-            "AGENTOS_PLUGINS_DIR unset; defaulting to {} for hot-discover",
-            plugins_dir.display()
-        );
-    }
+    // 关键前置：discover_new_plugins / invoker 热路径 / watcher 监听目录都读
+    // AGENTOS_PLUGINS_DIR（Tier1 根）与 AGENTOS_PLUGIN_TIER2_ROOT（Tier2 根）
+    // 推导 roots。实例启动配置是三根唯一真值：此处把解析结果**恒定回写**进程
+    // 环境作为热路径的交付载体（env 只承载已解析值，ambient 值不参与——零推导
+    // 零回落），保证热发现目录与启动装载目录同源。
+    std::env::set_var("AGENTOS_PLUGINS_DIR", &plugins_dir);
+    std::env::set_var("AGENTOS_PLUGIN_TIER2_ROOT", &tier2_root);
+    info!(
+        target: "agentos-kernel",
+        tier1 = %plugins_dir.display(),
+        tier2 = %tier2_root.display(),
+        "发现根已交付热路径（AGENTOS_PLUGINS_DIR / AGENTOS_PLUGIN_TIER2_ROOT）"
+    );
     {
         let watcher_invoker: Arc<dyn agentos_core::traits::PluginInvoker> =
             state.invoker.clone().expect("invoker present at boot");
@@ -1940,7 +2082,7 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
         .with_initial_cdylib_ids(initial_cdylib_ids)
         .with_restart_hook(restart_hook)
         // 代码指纹复验：sidecar 实现修复（.py 改动不改 manifest）后，watcher
-        // 轮询即可复验恢复被 G2 净化剔除的工具——目录解析与 invoker respawn
+        // 轮询即可复验解除被 G2 判定的失败桩——目录解析与 invoker respawn
         // 判据同源（同一 loader 发现结果 + 同一指纹函数）。
         .with_code_dir_resolver({
             let fp_invoker = invoker.clone();
@@ -2043,6 +2185,21 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                             .join(","),
                         "family rss snapshot"
                     );
+                    // 孤儿内核观测（run 生命周期防线④，ADR
+                    // 2026-11-17-run-lifecycle-defense-lines）：本进程外另有
+                    // agentos-kernel 进程 = 任务侧裸拉内核/残留实例形态（监控
+                    // 台账 198-200 轮实证：缺密钥注入 → LLM 全断 + 反复重建
+                    // 烧环，LLM 失败 91+ 次）。**只 WARN 留痕供监控面消费，
+                    // 不动进程管理**（误杀在用实例裁定禁止；任务侧防线=派发
+                    // 指南与 wsl_scratch_kernel.sh scratch 配方）。
+                    let foreign_kernels = agentos_api::family_watch::capture_foreign_kernels();
+                    if !foreign_kernels.is_empty() {
+                        warn!(
+                            target: "agentos-kernel",
+                            foreign = ?foreign_kernels,
+                            "检测到本进程之外的 agentos-kernel 实例（裸拉/残留形态观测，只报告不处置）"
+                        );
+                    }
                     // P1 观测护栏（方案 §3-P1）：健康态 commit <600MB / abandoned
                     // <2k 页；阈值=事故态的 1/8 量级，给"整机卡顿"留 40 分钟级提前量。
                     if stats
@@ -2147,14 +2304,22 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
 
     // 内存水位监控（可选自愈兜底，**默认关闭**——2026-09-10 用户裁定：水位
     // 重启可能打断正常业务）：显式设置 AGENTOS_MEM_WATERMARK_MB 或
-    // AGENTOS_MEM_HARD_LIMIT_MB 为正值才启用；启用后每 60s 采样自身 Private
-    // Bytes，连续 N 次超阈值 → 走与 G8 cdylib 重启相同的 drain_and_exit75
+    // AGENTOS_MEM_HARD_LIMIT_MB 为正值才启用；启用后每 60s 采样自身内存，
+    // 连续 N 次超阈值 → 走与 G8 cdylib 重启相同的 drain_and_exit75
     // 排空路径（exit 75，监督脚本拉起新进程）。
+    // 采样口径（2026-11-11 用户裁定）：设了 AGENTOS_MEM_WATERMARK_MB 时按
+    // Working Set（实际占用）判定——提交内存（Private Bytes）含分配器预留，
+    // 实测尖峰 commit 1.0GB / RSS 0.3GB，按提交判定会把瞬时尖峰当泄漏；
+    // 只配硬限时沿用提交口径（Job Object 本身按提交执法）。
     // AGENTOS_MEM_WATERMARK_MIN=持续分钟数（默认 10；采样间隔固定 60s）。
-    // 判定阈值 = min(水位阈值(如设), 95%×硬限(如设))——排水契约见硬限挂载处。
+    // 判定阈值 = min(水位阈值(如设), 95%×硬限(如设))——排水先于硬熔断。
     {
         let watermark_db = state.db.clone();
         let watermark_invoker = state.invoker.clone();
+        // 重启前现场快照：分解面要读各结构 → 需要完整状态句柄；快照与
+        // kernel.log.* 同目录落盘。AppState 全字段 Arc，克隆即引用复制。
+        let watermark_state = state.clone();
+        let watermark_log_dir = log_dir.clone();
         let hard_limit_mb = mem_hard_limit_mb;
         let wm_activity =
             agentos_core::task_activity::global_registry().register("memory-watermark-watch");
@@ -2164,9 +2329,16 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                 agentos_core::task_activity::set_current_label("resolving config");
                 const SAMPLE_INTERVAL_SECS: u64 = 60;
                 let watermark_cfg = resolve_watermark_config();
-                let Some(threshold_mb) =
-                    effective_sample_threshold_mb(watermark_cfg.map(|(mb, _)| mb), hard_limit_mb)
-                else {
+                // 口径（2026-11-11）：显式水位 = 进程 Working Set（实际占用）——
+                // 提交内存尖峰是分配器 arena 行为（实测 commit 1.0GB / RSS 0.3GB），
+                // 按提交判定会把瞬时尖峰当泄漏重启。仅配硬限（Job Object 是提交
+                // 口径）时保留旧采样口径。双设时水位优先，硬限仍由 OS 执法。
+                let watermark_mb = watermark_cfg.map(|(mb, _)| mb);
+                let use_working_set = watermark_mb.is_some();
+                // 阈值仍取 min(水位, 95%×硬限)：排水必须先于 Job Object 硬熔断，
+                // 双设时水位不得压过硬限排水线。
+                let threshold_mb = effective_sample_threshold_mb(watermark_mb, hard_limit_mb);
+                let Some(threshold_mb) = threshold_mb else {
                     info!(
                         target: "agentos-kernel",
                         env_watermark = "AGENTOS_MEM_WATERMARK_MB",
@@ -2178,46 +2350,195 @@ async fn async_main(pool: BlockingPoolConfig) -> Result<(), Box<dyn std::error::
                 };
                 let sustain_minutes = watermark_cfg.map(|(_, m)| m).unwrap_or(10);
                 let consecutive = ((sustain_minutes * 60) / SAMPLE_INTERVAL_SECS).max(1) as usize;
+                let metric = if use_working_set {
+                    "working_set"
+                } else {
+                    "private_commit"
+                };
+                let trigger_reason = if use_working_set {
+                    "memory watermark self-heal: working set 持续超阈值"
+                } else {
+                    "memory watermark self-heal: private bytes 持续超阈值"
+                };
+                // commit 相对保留闸的排空 reason（ADR 2026-11-16）：任务书要求
+                // 注明 commit retention guard；「memory watermark self-heal」
+                // 前缀字串必须保留——tasks 插件自动恢复按三源字串做大小写不
+                // 敏感子串匹配（http_api._is_drain_suspend_reason），缺前缀 =
+                // 排空任务不自动恢复（回归水位自愈语义）。
+                const RETENTION_DRAIN_REASON: &str = concat!(
+                    "memory watermark self-heal: ",
+                    "commit retention guard（commit 相对工作集倍率连续超限",
+                    "且 purge 无效，滞留非可清扫）"
+                );
                 info!(
                     target: "agentos-kernel",
                     threshold_mb,
+                    metric,
                     hard_limit_mb = hard_limit_mb.unwrap_or(0),
                     consecutive,
                     sample_interval_secs = SAMPLE_INTERVAL_SECS,
                     "内存水位监控已启动（持续超限即排空重启自愈；阈值压在硬限之下，排水先于硬熔断）"
                 );
                 let mut recent: Vec<u64> = Vec::with_capacity(consecutive);
+                // commit 相对保留闸连续命中状态机（ADR 2026-11-16）：命中计数
+                // + 命中期 commit 序列（升级排空 WARN 携带，定性 purge 可回收
+                // vs 真泄漏/碎片）。
+                let mut retention_guard = RetentionGuardState::default();
                 let mut tick =
                     tokio::time::interval(std::time::Duration::from_secs(SAMPLE_INTERVAL_SECS));
                 agentos_core::task_activity::set_current_label("idle: next tick 60s");
                 loop {
                     tick.tick().await;
-                    agentos_core::task_activity::set_current_label("sampling private bytes");
-                    let Some(usage_bytes) = sample_private_bytes() else {
+                    agentos_core::task_activity::set_current_label("sampling memory watermark");
+                    let sampled = if use_working_set {
+                        sample_working_set_bytes()
+                    } else {
+                        sample_private_bytes()
+                    };
+                    let Some(usage_bytes) = sampled else {
                         agentos_core::task_activity::set_current_label("idle: next tick 60s");
                         continue; // 采样不可用（非 Windows/API 失败）：缺数不判，绝不误自愈
                     };
-                    recent.push(usage_bytes / (1024 * 1024));
+                    let latest_mb = usage_bytes / (1024 * 1024);
+                    recent.push(latest_mb);
                     // 滑动窗口只留判定所需样本，长运行监控自身不积内存
                     let keep_from = recent.len().saturating_sub(consecutive);
                     recent.drain(..keep_from);
                     if watermark_breach(&recent, threshold_mb, consecutive) {
+                        let commit_mb = sample_private_bytes().map(|b| b / (1024 * 1024));
                         warn!(
                             target: "agentos-kernel",
                             threshold_mb,
+                            metric,
                             consecutive,
-                            latest_mb = recent.last().copied().unwrap_or(0),
+                            latest_mb,
+                            latest_commit_mb = commit_mb,
                             "内存水位持续超限（自愈）：排空在途 runs 后 exit 75，监督脚本拉起新进程"
                         );
+                        // 先落现场快照再排空：总量日志只能证明涨了，分解面
+                        // （分配器全字段 + 活内存结构 + 任务活动）才能指出是谁。
+                        // 写失败只告警，不阻断重启。
+                        agentos_api::system_diagnostics::dump_memory_snapshot(
+                            &watermark_state,
+                            &watermark_log_dir,
+                            trigger_reason,
+                        )
+                        .await;
                         agentos_api::routes::drain_and_exit75(
                             watermark_db.as_ref(),
                             watermark_invoker.clone(),
-                            "memory watermark self-heal: private bytes 持续超阈值",
+                            trigger_reason,
                         )
                         .await;
                         // 逃生门（AGENTOS_DISABLE_SELF_EXIT=1）下 drain 只排空不退出：
                         // 停止本监控，避免每 60s 重复排空；进程交人工处置。
                         break;
+                    }
+                    // commit 相对保留闸（ADR 2026-11-16）：水位口径只看驻留页，
+                    // Windows 换出/压缩冷页后工作集失真而 commit 无闸可涨（装机
+                    // 实证 commit 10GB+ / 工作集数百 MB）。闸启用时每拍补采另一
+                    // 口径：commit 超绝对下限且相对工作集倍率超 ratio → 前两次
+                    // 连续命中强制回收清扫（abandoned 认领探针 + 既有 force
+                    // collect/purge），连续第 3 次（purge 后仍超 = 滞留非可清扫）
+                    // 走上方同路径排水自愈（reason 注明 commit retention guard）。
+                    if let Some(commit_ratio) = mem_commit_ratio {
+                        // 闸启用才补采第二口径（闸关时零多余 syscall）；主口径
+                        // 本拍已采——use_working_set=true 时主口径 = 工作集、补采
+                        // commit；仅硬限模式反之。
+                        let sampled_pair = if use_working_set {
+                            sample_private_bytes()
+                                .map(|b| b / (1024 * 1024))
+                                .map(|commit_mb| (commit_mb, latest_mb))
+                        } else {
+                            sample_working_set_bytes()
+                                .map(|b| b / (1024 * 1024))
+                                .map(|working_set_mb| (latest_mb, working_set_mb))
+                        };
+                        match sampled_pair {
+                            // 双口径任一缺数：保守清零——陈旧 streak 不跨数据缺口
+                            // 升级（与水位「缺数不判」同哲学）。
+                            None => retention_guard.reset(),
+                            Some((guard_commit_mb, guard_working_set_mb)) => {
+                                let breach = retention_breach(
+                                    guard_commit_mb,
+                                    guard_working_set_mb,
+                                    commit_ratio,
+                                    mem_retention_floor_mb,
+                                );
+                                match retention_guard.observe(breach, guard_commit_mb) {
+                                    RetentionAction::Idle => {}
+                                    RetentionAction::Purge => {
+                                        // 强制回收链：abandoned 认领探针（v3
+                                        // mi_collect 不收死线程 abandoned 页，装机
+                                        // 实证 11065→11062，见
+                                        // reclaim_abandoned_now 文档）→ 既有 force
+                                        // collect/purge 收尾。前后差值实录——
+                                        // purge 可回收（滞留）vs 不降（真泄漏/
+                                        // 碎片）的生产定性判据。
+                                        let abandoned_before =
+                                            agentos_api::allocator::snapshot_stats()
+                                                .abandoned_pages;
+                                        agentos_api::allocator::reclaim_abandoned_now();
+                                        agentos_api::allocator::collect_now();
+                                        let abandoned_after =
+                                            agentos_api::allocator::snapshot_stats()
+                                                .abandoned_pages;
+                                        let purge_after_mb =
+                                            sample_private_bytes().map(|b| b / (1024 * 1024));
+                                        warn!(
+                                            target: "agentos-kernel",
+                                            commit_mb = guard_commit_mb,
+                                            working_set_mb = guard_working_set_mb,
+                                            ratio = commit_ratio,
+                                            floor_mb = mem_retention_floor_mb,
+                                            consecutive = retention_guard.streak(),
+                                            purge_triggered = true,
+                                            purge_before_mb = guard_commit_mb,
+                                            purge_after_mb,
+                                            purged_delta_mb = purge_after_mb
+                                                .map(|a| guard_commit_mb as i64 - a as i64),
+                                            abandoned_pages_before = abandoned_before,
+                                            abandoned_pages_after = abandoned_after,
+                                            abandoned_delta_pages =
+                                                match (abandoned_before, abandoned_after) {
+                                                    (Some(b), Some(a)) => Some(b as i64 - a as i64),
+                                                    _ => None,
+                                                },
+                                            "commit 相对保留闸命中：abandoned 认领探针 + \
+                                             full mi_collect purge 已触发（delta>0=分配器滞留\
+                                             可回收；delta≈0=真泄漏/碎片嫌疑，连续 3 次升级排水）"
+                                        );
+                                    }
+                                    RetentionAction::Drain => {
+                                        warn!(
+                                            target: "agentos-kernel",
+                                            ratio = commit_ratio,
+                                            floor_mb = mem_retention_floor_mb,
+                                            hit_commits_mb = ?retention_guard.hit_commits_mb(),
+                                            "commit retention guard: purge 后 commit 仍连续 3 次\
+                                             超工作集倍率（滞留非可清扫），排空在途 runs 后 exit 75"
+                                        );
+                                        // 先落现场快照再排空（与水位突破同路径）。
+                                        agentos_api::system_diagnostics::dump_memory_snapshot(
+                                            &watermark_state,
+                                            &watermark_log_dir,
+                                            RETENTION_DRAIN_REASON,
+                                        )
+                                        .await;
+                                        agentos_api::routes::drain_and_exit75(
+                                            watermark_db.as_ref(),
+                                            watermark_invoker.clone(),
+                                            RETENTION_DRAIN_REASON,
+                                        )
+                                        .await;
+                                        // 逃生门（AGENTOS_DISABLE_SELF_EXIT=1）下
+                                        // drain 只排空不退出：停止本监控，避免每
+                                        // 60s 重复排空；进程交人工处置。
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                     agentos_core::task_activity::set_current_label("idle: next tick 60s");
                 }

@@ -2,23 +2,14 @@
 
 //! 入站路由测试——user_input/interaction_response/stop_generation/heartbeat 分发（ADR §7.2）。
 
-use agentos_core::types::PendingInputSource;
 use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// (thread_id, user_id, content, thinking_strength, client_message_id, agent_id,
-///  state_overlay)
-type UserInputRecord = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<serde_json::Value>,
-);
+/// 一次派发请求（ADR-2026-11-17：入口面收敛为 DispatchRequest；
+/// 执行身份/思考强度等插件语义键经 state_overlay 声明通道承载）
+type UserInputRecord = agentos_core::types::DispatchRequest;
 
 /// regenerate 记录：(thread_id, pipeline_id, user_message_id, new_content)
 type RegenerateRecord = (String, String, String, Option<String>);
@@ -41,27 +32,9 @@ impl PipelineDispatcher for MockDispatcher {
     }
     async fn dispatch_user_input(
         &self,
-        thread_id: &str,
-        user_id: &str,
-        content: &str,
-        _pipeline_id: &str,
-        thinking_strength: &str,
-        _execution_context: Option<&serde_json::Value>,
-        state_overlay: Option<&serde_json::Value>,
-        agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        client_message_id: &str,
-        _source: PendingInputSource,
+        request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
-        self.user_inputs.lock().unwrap().push((
-            thread_id.into(),
-            user_id.into(),
-            content.into(),
-            thinking_strength.into(),
-            client_message_id.into(),
-            agent_id.into(),
-            state_overlay.cloned(),
-        ));
+        self.user_inputs.lock().unwrap().push(request);
         Ok(())
     }
     async fn dispatch_interaction_response(
@@ -120,15 +93,21 @@ async fn user_input_routed_to_dispatcher() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].0, "thread-1");
-    assert_eq!(inputs[0].1, "user-A");
-    assert_eq!(inputs[0].2, "hello");
-    assert_eq!(inputs[0].3, "", "未指定强度 → 空串");
+    assert_eq!(inputs[0].thread_id, "thread-1");
+    assert_eq!(inputs[0].user_id, "user-A");
+    assert_eq!(inputs[0].content, "hello");
 }
 
 #[tokio::test]
-async fn user_input_carries_thinking_strength() {
+async fn user_input_carries_thinking_strength_via_declared_overlay() {
+    // ADR-2026-11-17：思考强度是 llm_core 声明的 frame_field，走声明面
+    // overlay 通道（生产环境由插件 manifest 提供该声明）。
     let (router, dispatcher) = router();
+    dispatcher
+        .overlay_fields
+        .lock()
+        .unwrap()
+        .push("thinking_strength".to_string());
     let msg = serde_json::json!({
         "type": "user_input",
         "thread_id": "thread-1",
@@ -138,12 +117,21 @@ async fn user_input_carries_thinking_strength() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].3, "high", "顶层 thinking_strength 应透传");
+    assert_eq!(
+        inputs[0].state_overlay.as_ref().unwrap()["thinking_strength"],
+        "high",
+        "声明面 frame_field → 单键 overlay"
+    );
 }
 
 #[tokio::test]
 async fn user_input_carries_thinking_strength_via_data_envelope() {
     let (router, dispatcher) = router();
+    dispatcher
+        .overlay_fields
+        .lock()
+        .unwrap()
+        .push("thinking_strength".to_string());
     let msg = serde_json::json!({
         "type": "user_input",
         "thread_id": "thread-1",
@@ -152,7 +140,11 @@ async fn user_input_carries_thinking_strength_via_data_envelope() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].3, "low", "data 信封 thinking_strength 应透传");
+    assert_eq!(
+        inputs[0].state_overlay.as_ref().unwrap()["thinking_strength"],
+        "low",
+        "data 信封位置同样提取"
+    );
 }
 
 #[tokio::test]
@@ -170,7 +162,7 @@ async fn user_input_carries_client_message_id_top_level() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(
-        inputs[0].4, "0198abcd-1111",
+        inputs[0].client_message_id, "0198abcd-1111",
         "顶层 client_message_id 应透传"
     );
 }
@@ -187,7 +179,7 @@ async fn user_input_carries_client_message_id_via_data_envelope() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(
-        inputs[0].4, "0198abcd-2222",
+        inputs[0].client_message_id, "0198abcd-2222",
         "data 信封 client_message_id 应透传"
     );
 }
@@ -203,7 +195,10 @@ async fn user_input_without_client_message_id_defaults_empty() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].4, "", "无幂等键 → 空串（触发器/旧客户端路径）");
+    assert_eq!(
+        inputs[0].client_message_id, "",
+        "无幂等键 → 空串（触发器/旧客户端路径）"
+    );
 }
 
 #[tokio::test]
@@ -219,12 +214,8 @@ async fn user_input_dispatches_unspecified_agent_id() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(
-        inputs[0].5, "",
-        "帧不带 agent_id → agent_id 槽位为空串（未指定）"
-    );
     assert!(
-        inputs[0].6.is_none(),
+        inputs[0].state_overlay.is_none(),
         "帧不带 agent_id → 不合成 overlay（沿用既有管道身份）"
     );
 }
@@ -244,9 +235,8 @@ async fn user_input_carries_agent_id_top_level_with_identity_overlay() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].5, "persona_x", "帧内 agent_id 透传到 dispatcher");
     assert_eq!(
-        inputs[0].6,
+        inputs[0].state_overlay,
         Some(serde_json::json!({"agent.id": "persona_x"})),
         "合成单键 overlay：身份经 agent.id 持久键消息级落入管道 state"
     );
@@ -263,9 +253,8 @@ async fn user_input_carries_agent_id_via_data_envelope() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].5, "persona_y", "data 信封位置同样提取");
     assert_eq!(
-        inputs[0].6,
+        inputs[0].state_overlay,
         Some(serde_json::json!({"agent.id": "persona_y"}))
     );
 }
@@ -273,12 +262,15 @@ async fn user_input_carries_agent_id_via_data_envelope() {
 #[tokio::test]
 async fn user_input_invalid_agent_id_treated_as_absent() {
     // 非法形态一律按缺失处理（锁定：忽略而非拒绝——可选提示性字段不得让
-    // 消息投递失败，与 execution_context 非对象按缺失同法）。逐一覆盖：
-    // 含 ".."、含空白、超 128 字符、空串、非字符串。
+    // 消息投递失败，与 execution_context 非对象按缺失同法）。值守卫与帧字段
+    // 同款 valid_frame_field_value（ADR-2026-11-17：agent.id 随 overlay 直落
+    // 持久 state 键，值形态归声明方——层级键 "mode/a"、含空格 id 均合法；
+    // 路径穿越自防在消费侧 agent_config_load，注册表外 "../x" 直解析被拒、
+    // 扫描按 basename 永不命中）。逐一覆盖：含控制字符、超 4096 字符、
+    // 空串、非字符串。
     for (label, bad) in [
-        ("含路径穿越点", serde_json::json!("../evil")),
-        ("含空白", serde_json::json!("bad id")),
-        ("超 128 字符", serde_json::json!("a".repeat(129))),
+        ("含控制字符", serde_json::json!("bad\u{0001}id")),
+        ("超 4096 字符", serde_json::json!("a".repeat(4097))),
         ("空串", serde_json::json!("")),
         ("非字符串", serde_json::json!(42)),
     ] {
@@ -292,8 +284,32 @@ async fn user_input_invalid_agent_id_treated_as_absent() {
         let outcome = router.route(&msg, "user-A").await;
         assert_eq!(outcome, RouteOutcome::Handled, "{label}: 消息仍应投递");
         let inputs = dispatcher.user_inputs.lock().unwrap();
-        assert_eq!(inputs[0].5, "", "{label}: agent_id 按缺失（空串）");
-        assert!(inputs[0].6.is_none(), "{label}: 不合成 overlay");
+        assert!(inputs[0].state_overlay.is_none(), "{label}: 不合成 overlay");
+    }
+
+    // 旧 config-id 形状判非法、值形态守卫下合法的类（回归锁定新语义）：
+    // 含 ".."、含空白、超 128 字符（≤4096）——均须照常合成 agent.id overlay。
+    for (label, good) in [
+        ("含路径形点", serde_json::json!("../evil")),
+        ("含空白", serde_json::json!("bad id")),
+        ("层级键形态", serde_json::json!("mode_roleplay/card_rp")),
+        ("超 128 字符", serde_json::json!("a".repeat(129))),
+    ] {
+        let (router, dispatcher) = router();
+        let msg = serde_json::json!({
+            "type": "user_input",
+            "thread_id": "thread-1",
+            "content": "hi",
+            "agent_id": good,
+        });
+        let outcome = router.route(&msg, "user-A").await;
+        assert_eq!(outcome, RouteOutcome::Handled, "{label}: 消息仍应投递");
+        let inputs = dispatcher.user_inputs.lock().unwrap();
+        assert_eq!(
+            inputs[0].state_overlay,
+            Some(serde_json::json!({"agent.id": good})),
+            "{label}: 值形态合法须合成 overlay"
+        );
     }
 }
 
@@ -314,7 +330,7 @@ async fn user_input_carries_model_id_as_state_overlay() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(
-        inputs[0].6,
+        inputs[0].state_overlay,
         Some(serde_json::json!({"model_id": "gw-glm-5.3-flash"})),
         "名单内字段合成单键 overlay：显式选择消息级落入管道 state（llm_core 解析链首位）"
     );
@@ -335,7 +351,7 @@ async fn user_input_undeclared_frame_field_not_transported() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert!(
-        inputs[0].6.is_none(),
+        inputs[0].state_overlay.is_none(),
         "名单外字段不合成 overlay（frame_field 未声明的键被丢弃）"
     );
 }
@@ -354,7 +370,10 @@ async fn user_input_empty_allowlist_transports_nothing() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert!(inputs[0].6.is_none(), "空名单不合成任何 overlay");
+    assert!(
+        inputs[0].state_overlay.is_none(),
+        "空名单不合成任何 overlay"
+    );
 }
 
 #[tokio::test]
@@ -372,7 +391,7 @@ async fn user_input_model_id_merges_with_agent_id_overlay() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(
-        inputs[0].6,
+        inputs[0].state_overlay,
         Some(serde_json::json!({
             "agent.id": "persona_x",
             "model_id": "MiniMax-M3.1-Flash",
@@ -382,10 +401,13 @@ async fn user_input_model_id_merges_with_agent_id_overlay() {
 
 #[tokio::test]
 async fn user_input_invalid_model_id_treated_as_absent() {
-    // 形态守卫与 agent_id 同法：非法按缺失忽略，不投递失败、不合成键
+    // 值形态守卫（valid_frame_field_value，ADR-2026-11-17 前置修正）：值类型
+    // 归声明方（thinking_strength 是参数组 JSON 串等），config-id 形状不再
+    // 误杀合法值；非法按缺失忽略，不投递失败、不合成键。逐一覆盖：含控制
+    // 字符、超 4096 字符、空串、非字符串。
     for (label, bad) in [
-        ("含路径穿越点", serde_json::json!("../evil")),
-        ("含空白", serde_json::json!("bad id")),
+        ("含控制字符", serde_json::json!("bad\u{0001}id")),
+        ("超 4096 字符", serde_json::json!("a".repeat(4097))),
         ("空串", serde_json::json!("")),
         ("非字符串", serde_json::json!(7)),
     ] {
@@ -400,27 +422,53 @@ async fn user_input_invalid_model_id_treated_as_absent() {
         assert_eq!(outcome, RouteOutcome::Handled, "{label}: 消息仍应投递");
         let inputs = dispatcher.user_inputs.lock().unwrap();
         assert!(
-            inputs[0].6.is_none(),
+            inputs[0].state_overlay.is_none(),
             "{label}: 不合成 overlay（管线沿用绑定）"
+        );
+    }
+
+    // 旧 config-id 形状判非法、值形态守卫下合法的类（回归锁定放宽语义）：
+    // 含 ".."、含空白——值是声明方数据非标识符，照常合成单键 overlay。
+    for (label, good) in [
+        ("含路径形点", serde_json::json!("../evil")),
+        ("含空白", serde_json::json!("bad id")),
+    ] {
+        let (router, dispatcher) = router();
+        let msg = serde_json::json!({
+            "type": "user_input",
+            "thread_id": "thread-1",
+            "content": "hi",
+            "model_id": good,
+        });
+        let outcome = router.route(&msg, "user-A").await;
+        assert_eq!(outcome, RouteOutcome::Handled, "{label}: 消息仍应投递");
+        let inputs = dispatcher.user_inputs.lock().unwrap();
+        assert_eq!(
+            inputs[0].state_overlay,
+            Some(serde_json::json!({"model_id": good})),
+            "{label}: 值形态合法须合成 overlay"
         );
     }
 }
 
 #[tokio::test]
 async fn user_input_agent_id_boundary_length_accepted() {
-    // 恰 128 字符（上界）合法：形态校验拒绝的是越界而非长度本身。
+    // 恰 4096 字符（值形态守卫上界，与帧字段同款）合法：形态校验拒绝的是
+    // 越界而非长度本身（旧 128 上界随 config-id 形状守卫退役）。
     let (router, dispatcher) = router();
     let msg = serde_json::json!({
         "type": "user_input",
         "thread_id": "thread-1",
         "content": "hi",
-        "agent_id": "a".repeat(128),
+        "agent_id": "a".repeat(4096),
     });
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].5, "a".repeat(128));
-    assert!(inputs[0].6.is_some());
+    assert_eq!(
+        inputs[0].state_overlay.as_ref().unwrap()["agent.id"],
+        "a".repeat(4096)
+    );
 }
 
 #[tokio::test]
@@ -553,17 +601,7 @@ async fn regenerate_default_noop_dispatcher_is_handled() {
     impl PipelineDispatcher for NoRegenerate {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -598,17 +636,7 @@ async fn regenerate_dispatcher_failure_returns_error() {
     impl PipelineDispatcher for FailingRegenerate {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -688,17 +716,7 @@ async fn dispatcher_failure_returns_error() {
     impl PipelineDispatcher for FailingDispatcher {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Err("boom".into())
         }
@@ -753,17 +771,7 @@ async fn interaction_response_passes_response_body_through() {
     impl PipelineDispatcher for ResponseCapturing {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -804,17 +812,7 @@ async fn interaction_response_without_body_dispatches_null() {
     impl PipelineDispatcher for NullBodyChecker {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -847,17 +845,7 @@ async fn interaction_response_dispatcher_failure_returns_error() {
     impl PipelineDispatcher for Fail {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -930,17 +918,7 @@ async fn stop_generation_dispatcher_failure_returns_error() {
     impl PipelineDispatcher for Fail {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -976,17 +954,7 @@ struct ActiveThreadRecorder {
 impl PipelineDispatcher for ActiveThreadRecorder {
     async fn dispatch_user_input(
         &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: Option<&serde_json::Value>,
-        _: Option<&serde_json::Value>,
-        _: &str,
-        _: Option<&str>,
-        _: &str,
-        _: PendingInputSource,
+        _request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -1085,17 +1053,7 @@ async fn active_thread_changed_dispatcher_failure_returns_error() {
     impl PipelineDispatcher for Fail {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -1131,17 +1089,7 @@ async fn active_thread_changed_default_noop_dispatcher_is_handled() {
     impl PipelineDispatcher for NoActiveThread {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            _request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -1246,7 +1194,7 @@ async fn user_input_content_falls_back_between_top_level_and_data() {
             "{why}"
         );
         let inputs = dispatcher.user_inputs.lock().unwrap();
-        assert_eq!(inputs.last().unwrap().2, expected, "{why}");
+        assert_eq!(inputs.last().unwrap().content, expected, "{why}");
     }
 }
 
@@ -1275,7 +1223,7 @@ async fn user_input_pipeline_id_resolution_order() {
             "{label} 位置组合应正常分发"
         );
         let inputs = dispatcher.user_inputs.lock().unwrap();
-        assert_eq!(inputs.last().unwrap().0, "thread-1");
+        assert_eq!(inputs.last().unwrap().thread_id, "thread-1");
     }
 }
 
@@ -1288,19 +1236,9 @@ async fn non_object_execution_context_is_ignored() {
     impl PipelineDispatcher for EcRecorder {
         async fn dispatch_user_input(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            execution_context: Option<&serde_json::Value>,
-            _: Option<&serde_json::Value>,
-            _: &str,
-            _: Option<&str>,
-            _: &str,
-            _: PendingInputSource,
+            request: agentos_core::types::DispatchRequest,
         ) -> Result<(), String> {
-            if execution_context.is_some() {
+            if request.execution_context.is_some() {
                 *self.0.lock().unwrap() += 1;
             }
             Ok(())
@@ -1347,5 +1285,5 @@ async fn route_raw_parses_valid_json() {
         .await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let inputs = dispatcher.user_inputs.lock().unwrap();
-    assert_eq!(inputs[0].2, "raw");
+    assert_eq!(inputs[0].content, "raw");
 }

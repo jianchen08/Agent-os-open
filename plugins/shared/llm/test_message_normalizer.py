@@ -18,9 +18,11 @@
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import sys
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +67,7 @@ def _assistant(call_ids: str | list[str], arguments: str = "{}") -> dict[str, An
     }
 
 
-def _tool_result(call_id: str, content: str = "ok") -> dict[str, Any]:
+def _tool_result(call_id: str, content: object = "ok") -> dict[str, Any]:
     return {"role": "tool", "tool_call_id": call_id, "content": content}
 
 
@@ -561,3 +563,55 @@ class TestMiniMaxPhase2Relocation:
         assert "name" not in moved
         assert "tool_calls" not in moved
         assert "tool_call_id" not in moved
+
+
+# ── 就地写回契约（返回恒为入参本体；被摘除消息随之释放）──────────────────
+
+
+def test_normalize_returns_input_list_identity(mod: Any) -> None:
+    """返回恒为入参 list 本体（就地写回契约）——调用面持原容器不产生第二份长持。"""
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "hi"},
+        _assistant("call_1"),
+        _tool_result("call_1"),
+    ]
+    result = mod.normalize_messages_for_provider(messages, provider="openai", name="t")
+    assert result is messages
+
+
+def test_orphan_tool_result_released_after_normalize(mod: Any) -> None:
+    """孤儿 tool result 被摘除后立即释放（weakref 死亡）——不随旧容器留存。
+
+    调用面（MCP 派发帧）在工具调用全程持有入参容器本体：若校验返回新容器，
+    被摘除的大 payload 孤儿会随旧容器多持一个调用周期；就地写回后即释放。
+    """
+    class _Probe:
+        """可 weakref 的载荷探针（dict 本体不可 weakref，探针随消息同生死）。"""
+
+    orphan = _tool_result("ghost", content=_Probe())
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "hi"},
+        orphan,
+        _assistant("call_1"),
+        _tool_result("call_1"),
+    ]
+    result = mod.normalize_messages_for_provider(messages, provider="openai", name="t")
+    assert result is messages
+    assert not [m for m in result if m.get("role") == "tool" and m.get("tool_call_id") == "ghost"]
+    ref = weakref.ref(orphan["content"])
+    del orphan
+    gc.collect()  # CPython 引用计数即死；collect 兜底非引用计数实现
+    assert ref() is None
+
+
+def test_minimax_path_returns_input_list_identity(mod: Any) -> None:
+    """MiniMax 三阶段同样写回入参本体（转换/重定位不产生返回容器换血）。"""
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "s", "name": "a"},
+        {"role": "system", "content": "mid"},
+        _assistant("call_1"),
+        _tool_result("call_1"),
+    ]
+    result = mod.normalize_messages_for_provider(messages, provider="minimax", name="t")
+    assert result is messages
+    assert result[1]["role"] == "user"

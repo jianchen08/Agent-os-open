@@ -49,7 +49,7 @@ def _parent_row(task_id: str, level: int | None) -> dict:
 
 def _inject_state(monkeypatch: pytest.MonkeyPatch, rows: list[dict] | None) -> None:
     """注入 state 聚合读取器（None 模拟桥未就绪/读取失败）。"""
-    monkeypatch.setattr(ts_tool, "_state_reader", (lambda: rows) if rows is not None else (lambda: None))
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", (lambda: rows) if rows is not None else (lambda: None))
 
 
 def _make_tool() -> TaskSubmitTool:

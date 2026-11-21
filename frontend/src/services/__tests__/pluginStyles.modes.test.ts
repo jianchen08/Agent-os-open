@@ -8,8 +8,8 @@
  * 永远注入（既有全局装饰语义零变化）。注册面：registerFromSchema 解析 modes
  * （非法形态 = 不限域）。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { waitFor } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '@/services/api/client'
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: vi.fn() },

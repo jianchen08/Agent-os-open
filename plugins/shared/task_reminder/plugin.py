@@ -8,6 +8,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from _libs.evaluation_result import extract_evaluation_result
 from _libs.pipeline_base.active_children import find_active_children, read_state_rows
 from _libs.pipeline_base.plugin import IOutputPlugin, OutputResult, PluginContext
 
@@ -64,11 +65,17 @@ class TaskReminder(IOutputPlugin):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}
-        self._max_reminders: int = self._config.get("max_reminders", 10)
-        self._max_reminders_total: int = self._config.get(
-            "max_reminders_total", _DEFAULT_MAX_REMINDERS_TOTAL,
+        # 构造期缺省预算：per-pipeline 覆盖一律在执行期从 state 读取。本类
+        # 实例被同 sidecar 的多管道并发复用，实例字段写 per-pipeline 配置会
+        # 被并发 execute 覆盖（2026-11-12 评估提醒误判实证：evaluation_mode
+        # 被同宿任务管道的 execute 重置，评估者收到执行者提醒）。
+        self._default_max_reminders: int = int(
+            self._config.get("max_reminders", 10) or 10
         )
-        self._evaluation_mode: bool = self._config.get("evaluation_mode", False)
+        self._default_max_reminders_total: int = int(
+            self._config.get("max_reminders_total", _DEFAULT_MAX_REMINDERS_TOTAL)
+            or _DEFAULT_MAX_REMINDERS_TOTAL
+        )
 
     @property
     def name(self) -> str:
@@ -132,8 +139,9 @@ class TaskReminder(IOutputPlugin):
         证据保留：信号②缺席时的当轮收束回退——真实路径 LLM 面被 result_format
         渲染化，文本形态不作主证据。
         """
-        self._apply_runtime_config(ctx)
         state = ctx.state
+        max_reminders = self._max_reminders_for(state)
+        max_reminders_total = self._max_reminders_total_for(state)
         iteration = state.get("iteration", -1)
 
         advanced = self._advance_pending_status(state)
@@ -144,10 +152,11 @@ class TaskReminder(IOutputPlugin):
         # L1（灵汐）的纯文本输出是正常的调度/沟通汇报，不代表"忘了提交评估"。
         # 层级单一真值：顶层 agent_level（context_build 以实际 Agent 层级
         # 无条件覆盖，见 context_build/plugin.py）。reminder 只对叶子执行者有意义。
-        # 豁免豁免：评估子管道（plugin_configs.task_reminder.evaluation_mode=true
-        # 派发标记）按构造不是调度层——身份降级（如缺 agent.id 静默回退 L1）时
-        # 此标记比 agent_level 更可信，跳过 L1 早退，否则 detected_result 永不
-        # 落库、task_evaluate 轮询必超时（B12 根因②）。
+        # 豁免豁免：评估子管道（state.evaluation.mode="evaluator" /
+        # evaluation.metric_id 派发标记）按构造不是调度层——身份降级（如缺
+        # agent.id 静默回退 L1）时此管道字段比 agent_level 更可信，跳过 L1
+        # 早退，否则 detected_result 永不落库、task_evaluate 轮询必超时
+        # （B12 根因②）。
         if (
             state.get("agent_level", "") == "L1"
             and not self._is_evaluation_mode(state)
@@ -196,7 +205,7 @@ class TaskReminder(IOutputPlugin):
         # 触顶 = 评估不收敛，任务明确失败（完成证据在场不覆盖，与耗尽裁决
         # 同一复查面）。评估模式强制提醒同受此门（同一注入面单一上限）。──
         reminder_total = self._reminder_total(state)
-        if reminder_total >= self._max_reminders_total:
+        if reminder_total >= max_reminders_total:
             return self._reminder_exhausted_result(
                 state,
                 reminder_count=reminder_total,
@@ -210,7 +219,10 @@ class TaskReminder(IOutputPlugin):
             )
 
         eval_counted = self._eval_no_text_tracking(
-            state, iteration=iteration, has_text=has_text,
+            state,
+            iteration=iteration,
+            has_text=has_text,
+            max_reminders=max_reminders,
         )
         if eval_counted is not None:
             return eval_counted
@@ -224,6 +236,18 @@ class TaskReminder(IOutputPlugin):
         if self._task_completed_in_state(state) or db_completed:
             return self._completed_round_result(
                 state, iteration=iteration, task_id=str(state.get("task.id") or ""),
+            )
+
+        # ── 退化循环裁决（llm_core 流式守卫本轮判停）：不自动重试——同一
+        # 上下文重跑只会再退化一次；任务直接失败并写明死因，完成证据在场不
+        # 覆盖（与空回复/提醒耗尽同一复查面）。会话管道无 task.id 不落任务
+        # 终态，只结束本轮。──
+        if state.get("llm_repetition_detected"):
+            return self._repetition_exhausted_result(
+                state,
+                iteration=iteration,
+                task_id=str(state.get("task.id") or ""),
+                db_completed=db_completed,
             )
 
         # ── 信号①：本轮有工具调用 → 路由工具执行，不评判（ADR 2026-08-28
@@ -293,13 +317,17 @@ class TaskReminder(IOutputPlugin):
                 iteration,
                 task_id,
             )
-        if reminder_count >= self._max_reminders:
+        if reminder_count >= max_reminders:
             return self._reminder_exhausted_result(
                 state, reminder_count=reminder_count, iteration=iteration, task_id=task_id,
                 db_completed=db_completed,
             )
         return self._inject_reminder_result(
-            state, reminder_count=reminder_count, iteration=iteration, task_id=task_id,
+            state,
+            reminder_count=reminder_count,
+            iteration=iteration,
+            task_id=task_id,
+            max_reminders=max_reminders,
         )
 
     @staticmethod
@@ -338,14 +366,15 @@ class TaskReminder(IOutputPlugin):
         ① raw_result 指纹与记账基线（reminder_seen_result_fp）一致——成功轮
            必覆盖写 raw_result；失败/超时轮引擎统一 warn+继续、state_updates
            为空，残留上轮值。
-        ② 本 run 存在 llm_core 错误条目（``_plugin_errors``，引擎 run 开头
-           清空）——排除 agent 连轮输出相同文本的正常重复轮（该轮必须正常
-           计额，否则复读即可绕过提醒耗尽兜底）。
+        ② 本 run 存在 llm_core 错误条目（``_plugin_error_stats``，引擎 run
+           开头清空、run 内按 (plugin_id, message) 聚合）——排除 agent 连轮
+           输出相同文本的正常重复轮（该轮必须正常计额，否则复读即可绕过
+           提醒耗尽兜底）。
         """
         fp = cls._result_fingerprint(state.get("raw_result"))
         if fp != state.get(_RESULT_FP_KEY):
             return False
-        errors = state.get("_plugin_errors")
+        errors = state.get("_plugin_error_stats")
         if not isinstance(errors, list):
             return False
         return any(
@@ -384,6 +413,7 @@ class TaskReminder(IOutputPlugin):
         *,
         iteration: Any,
         has_text: bool,
+        max_reminders: int,
     ) -> OutputResult | None:
         """评估模式连续无文本追踪（仅工具调用/空输出场景）。
 
@@ -412,7 +442,7 @@ class TaskReminder(IOutputPlugin):
             )
 
         reminder_count, _, _ = self._reminder_budget(state)
-        if reminder_count >= self._max_reminders:
+        if reminder_count >= max_reminders:
             # 提醒已达上限不再注入，仅维持计数。
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: eval no-text count=%d",
@@ -435,8 +465,6 @@ class TaskReminder(IOutputPlugin):
             '"score": 0-100, "feedback": "评估说明..."}}\n'
             "```"
         )
-        messages = list(state.get("messages", []))
-        messages.append({"role": "system", "content": reminder_message})
         logger.info(
             "TaskReminder[iter=%s][task=%s]: eval force reminder after %d no-text iters, reminder #%d",
             iteration,
@@ -447,7 +475,7 @@ class TaskReminder(IOutputPlugin):
         # 回 LLM 由 _has_new_llm_input 状态键 + DSL 路由承载（控制状态键契约）
         return OutputResult(
             state_updates={
-                "messages": messages,
+                "messages": self._reminder_append_ops(reminder_message),
                 "evaluate_reminder_count": reminder_count + 1,
                 "evaluate_reminder_run": run_at,
                 _TOTAL_KEY: self._reminder_total(state) + 1,
@@ -484,12 +512,20 @@ class TaskReminder(IOutputPlugin):
                     iteration,
                     task_id,
                 )
-                return OutputResult(
-                    state_updates={
-                        "evaluation.detected_result": detected,
-                        "ended": True,
-                    },
-                )
+                updates: dict[str, Any] = {
+                    "evaluation.detected_result": detected,
+                    "ended": True,
+                }
+                # 评估子管道自身终态投影（2026-11-11 修复）：检测到结论 JSON
+                # 只落 evaluation.detected_result 时，子管道 task.status 停在
+                # running → run.completed 派生不出 task_completed → 父任务
+                # task.subtasks_pending 永不解除、父挂起等待唤醒（实证
+                # 885b1a27752f 2026-11-11）。评估交付即完成，与
+                # _completed_round_result 同一写面（终态不可被 failed 覆盖）。
+                if task_id and str(state.get("task.status") or "") != "completed":
+                    updates["task.status"] = "completed"
+                    updates["task.ended_at"] = datetime.now(UTC).isoformat()
+                return OutputResult(state_updates=updates)
 
         # ── 次级证据收束（降级保留，ADR 2026-08-28 证据契约）：信号②（state
         # 投影键 / DB 权威终态）缺席时的 messages 通过证据回退。评估通过
@@ -663,6 +699,47 @@ class TaskReminder(IOutputPlugin):
         state_updates["ended"] = True
         return OutputResult(state_updates=state_updates)
 
+    def _repetition_exhausted_result(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+        task_id: str,
+        db_completed: bool = False,
+    ) -> OutputResult:
+        """LLM 输出退化循环 → 任务直接失败（流式守卫已截断，不自动重试）。
+
+        与空回复耗尽同一裁决面：完成证据（state ∪ DB）在场不覆盖；无证据且
+        有 task.id → task.status=failed + 结构化失败归因；会话管道只收束
+        end，不落任务终态。失败原因写明"调整指令后重提"，不重跑同一上下文
+        （退化形态可复现，重跑只会再烧一轮）。
+        """
+        state_updates: dict[str, Any] = {}
+        if task_id and not (self._has_completion_evidence(state) or db_completed):
+            state_updates["task.status"] = "failed"
+            state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+            state_updates["task.failure_class"] = "llm_degeneration"
+            state_updates["task.failure_reason"] = (
+                "LLM 输出退化循环（流式守卫已截断，本轮无有效进展；"
+                "请调整任务指令后重新提交）"
+            )
+            logger.warning(
+                "TaskReminder[iter=%s][task=%s]: llm repetition detected, "
+                "task.status -> failed",
+                iteration,
+                task_id,
+            )
+        else:
+            logger.info(
+                "TaskReminder[iter=%s][task=%s]: llm repetition detected, "
+                "completion evidence present or session pipeline, closing round",
+                iteration,
+                task_id,
+            )
+        state_updates["_has_new_llm_input"] = False
+        state_updates["ended"] = True
+        return OutputResult(state_updates=state_updates)
+
     @staticmethod
     def _llm_empty_exhausted(state: dict[str, Any]) -> bool:
         """空回复重试耗尽信号（llm_core 写入，本放行检测点的裁决触发面）。"""
@@ -720,30 +797,41 @@ class TaskReminder(IOutputPlugin):
         reminder_count: int,
         iteration: Any,
         task_id: str,
+        max_reminders: int,
     ) -> OutputResult:
         """注入下一轮系统提醒并置续跑标志触发 next_llm。"""
         reminder_message = self._build_reminder(state, reminder_count)
-
-        messages = list(state.get("messages", []))
-        messages.append({"role": "system", "content": reminder_message})
 
         logger.info(
             "TaskReminder[iter=%s][task=%s]: injecting reminder #%d/%d, triggering next_llm",
             iteration,
             task_id,
             reminder_count + 1,
-            self._max_reminders,
+            max_reminders,
         )
         # 回 LLM 经 _has_new_llm_input 状态键 + DSL 路由承载（控制状态键契约）
         return OutputResult(
             state_updates={
-                "messages": messages,
+                "messages": self._reminder_append_ops(reminder_message),
                 "evaluate_reminder_count": reminder_count + 1,
                 "evaluate_reminder_run": str(state.get("run_id") or ""),
                 _TOTAL_KEY: self._reminder_total(state) + 1,
                 "_has_new_llm_input": True,
             },
         )
+
+    @staticmethod
+    def _reminder_append_ops(reminder_message: str) -> dict[str, Any]:
+        """提醒消息的 slot ops 声明（messages 更新只认 {_ops:[set/insert]} 形态）。
+
+        引擎 finalize 对全量数组零兼容（收到即 warn 丢弃）——数组回传时计数器
+        与续跑标志照常生效而消息本体丢失，模型在无新输入的空转重调中复读至
+        耗尽（2026-11-13 装机 1af174 reminder_exhausted 实证）。缺 seq 的
+        set = append，seq 由引擎按现有 max seq 递增分配。
+        """
+        return {
+            "_ops": [{"op": "set", "msg": {"role": "system", "content": reminder_message}}]
+        }
 
     @staticmethod
     def _attempt_scope_start(messages: list) -> int:
@@ -863,45 +951,13 @@ class TaskReminder(IOutputPlugin):
 
     @staticmethod
     def _detect_evaluation_result_json(text: str) -> dict[str, Any] | None:
-        """检测文本中是否包含有效的 evaluation_result JSON。"""
-        candidates = []
+        """检测文本中是否包含有效的 evaluation_result JSON。
 
-        brace_depth = 0
-        start = -1
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if brace_depth == 0:
-                    start = i
-                brace_depth += 1
-            elif ch == "}":
-                brace_depth -= 1
-                if brace_depth == 0 and start >= 0:
-                    candidates.append(text[start : i + 1])
-                    start = -1
-
-        for candidate in reversed(candidates):
-            try:
-                parsed = json.loads(candidate)
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            inner = parsed.get("evaluation_result")
-            if isinstance(inner, dict):
-                target = inner
-            elif isinstance(parsed, dict) and "passed" in parsed:
-                target = parsed
-            else:
-                continue
-
-            if "passed" in target:
-                return {
-                    "passed": bool(target["passed"]),
-                    "score": float(target.get("score", 0)),
-                    "feedback": str(target.get("feedback", "")),
-                    "suggestions": target.get("suggestions", []),
-                }
-
-        return None
+        解析单源 = ``_libs.evaluation_result.extract_evaluation_result``
+        （task_evaluate 回收兜底共用）：passed 仅认 bool / "true"/"false"
+        字符串，score 仅认数值（else None），坏 payload 一律无证据。
+        """
+        return extract_evaluation_result(text)
 
     async def _has_active_children(
         self,
@@ -961,8 +1017,16 @@ class TaskReminder(IOutputPlugin):
         return False
 
     def _is_evaluation_mode(self, state: dict[str, Any]) -> bool:
-        """判断当前是否为评估者模式。"""
-        return bool(self._evaluation_mode)
+        """按管道身份字段判定评估者模式。
+
+        路由键 = 评估域登记字段 ``evaluation.metric_id``（task_evaluate 派发
+        评估子管道时写入，随管道 state 持久化）；也接受显式
+        ``evaluation.mode == "evaluator"``。不读插件实例配置：同 sidecar 多
+        管道并发时实例字段会被其他管道的 execute 覆盖（2026-11-12 实证）。
+        """
+        return bool(state.get("evaluation.metric_id")) or (
+            state.get("evaluation.mode") == "evaluator"
+        )
 
     def _build_reminder(self, state: dict[str, Any], count: int) -> str:
         """根据任务模式构建提醒内容。"""
@@ -1009,27 +1073,30 @@ class TaskReminder(IOutputPlugin):
 
         return "\n".join(parts)
 
-    def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。
+    @staticmethod
+    def _positive_int(raw: Any) -> int:
+        """容错正整数读取（state 标量可能是字符串/数字/None）。"""
+        try:
+            value = int(str(raw))
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
 
-        同 sidecar 实例被多个 agent 管道连续复用：先回构造默认值再应用本管道
-        state / plugin_configs 注入的 max_reminders / max_reminders_total /
-        evaluation_mode——前一 agent 的配置不得残留到下一 agent。
-        """
-        self._max_reminders = self._config.get("max_reminders", 10)
-        self._max_reminders_total = self._config.get(
-            "max_reminders_total", _DEFAULT_MAX_REMINDERS_TOTAL,
-        )
-        self._evaluation_mode = self._config.get("evaluation_mode", False)
+    def _max_reminders_for(self, state: dict[str, Any]) -> int:
+        """本管道 per-run 提醒预算（state 注入优先，缺省构造期默认）。"""
+        value = self._positive_int(state.get("max_reminders"))
+        return value if value > 0 else self._default_max_reminders
 
-        agent_max_reminders = ctx.state.get("max_reminders")
-        if agent_max_reminders is not None and agent_max_reminders > 0:
-            self._max_reminders = agent_max_reminders
-
-        plugin_configs = ctx.state.get("plugin_configs", {})
-        task_reminder_config = plugin_configs.get("task_reminder", {})
-        if "evaluation_mode" in task_reminder_config:
-            self._evaluation_mode = task_reminder_config["evaluation_mode"]
+    def _max_reminders_total_for(self, state: dict[str, Any]) -> int:
+        """本管道任务级总预算（plugin_configs 覆盖，缺省构造期默认）。"""
+        config = state.get("plugin_configs") or {}
+        if isinstance(config, dict):
+            reminder_config = config.get("task_reminder") or {}
+            if isinstance(reminder_config, dict):
+                value = self._positive_int(reminder_config.get("max_reminders_total"))
+                if value > 0:
+                    return value
+        return self._default_max_reminders_total
 
     def _build_evaluator_reminder(
         self,

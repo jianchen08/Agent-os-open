@@ -1,0 +1,43 @@
+）：国库所在格随场景——standard/world 在「京畿」；
+/// qing 等无京畿场景取在册格中库银存量最大者（户部所在），全空取首格。
+/// 建造/词条/吞并的国库扣银与退银一律经此取格，消除「京畿」硬编码。
+fn treasury_cell(w: &World) -> String {
+if w.material.regions.iter().any(|r| r == "京畿") {
+return "京畿".to_string();
+}
+let mut best: Option<(String, f64)> = None;
+for r in &w.material.regions {
+let v = w.material.amount_in(r, "库银");
+if best.as_ref().map(|(_, bv)| v > *bv).unwrap_or(true) {
+best = Some((r.clone(), v));
+}
+}
+best.map(|(r, _)| r)
+.or_else(|| w.material.regions.first().cloned())
+.unwrap_or_default()
+}
+```
+amount_in(&self, region: &str, kind: &str) — w.material.amount_in(r, "库银") where r: &String → needs &str: amount_in(r, ...) with r: &String derefs? Rust: &String coerces to &str in function arg position — yes, deref coercion applies. Good.
+light_mandate: before `let mut note = spec.desc.to_string();` insert `let tc = treasury_cell(w);` — wait, light_mandate already did entity spawns before; mutable borrows ended. Insert after `let eid = w.entities.spawn("词条"...` block? Any point before match. Put right after the 词条 entity block.
+grain_gift old:
+```
+"grain_gift" => {\r\n
+w.material.spawn_at("库银", 300.0, "京畿", None, None, Some("天命"));\r\n
+w.material.ledger.push("SPAWN 库银@京畿 n=300 owner=天命（词条：点石成金）".into());\r\n
+}\r\n
+```
+new:
+```
+"grain_gift" => {\r\n
+w.material.spawn_at("库银", 300.0, &tc, None, None, Some("天命"));\r\n
+w.material.ledger.push(format!("SPAWN 库银@{tc} n=300 owner=天命（词条：点石成金）"));\r\n
+}\r\n
+```
+recruit old:
+```
+"recruit" => {\r\n
+let aid = w.entities.spawn("代理人", Some("京畿"), None);\r\n
+if let Some(e) = w.entities.get_mut(&aid) {\r\n
+e.fields.insert("操守".into(), 0.95);\r\n
+e.fields.insert("带宽".into(), 0.9);\r\n
+e.fields.insert("截留累计".into(), 0.0);\r\n

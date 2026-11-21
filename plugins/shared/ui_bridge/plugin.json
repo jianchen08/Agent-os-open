@@ -1,0 +1,147 @@
+{
+  "id": "ui_bridge",
+  "name": "UI Bridge",
+  "description": "侧边栏 UI 对象桥：前端快照按 client_id 缓存（freshness=收到时刻 30s），ui_describe 工具读缓存返回机器可读界面对象，ui_act 工具命令闭环（词表封闭 fail-closed → ui_command 广播 → 前端执行 → command_result 回执，短等 2s）；/ext/ui_bridge/state 与 /ext/ui_bridge/command_result 端点供前端上报/回执与调试回读",
+  "version": "1.0.2",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "http_endpoints": [
+    {
+      "route_id": "ui_state_read",
+      "method": "GET",
+      "path": "/ext/ui_bridge/state",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "快照回读：默认最近 received 单端；?client_id= 定向；?all=1 全端按 received_at 降序；无快照 200+null（不是 404）"
+    },
+    {
+      "route_id": "ui_state_report",
+      "method": "POST",
+      "path": "/ext/ui_bridge/state",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "前端快照上报：fail-closed 校验（client_id 非空≤64 / region=sidebar / items≤100 / sessions≤50 / unread_count≥0），违规 400 零残留"
+    },
+    {
+      "route_id": "ui_command_result",
+      "method": "POST",
+      "path": "/ext/ui_bridge/command_result",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "命令回执（ui_command 闭环）：body {command_id, status: applied|rejected, reason?}；已知 id 受理（applied 唤醒 ui_act 等待者，rejected 不终结等待——多端取首个 applied）；未知 id 202 幂等忽略"
+    }
+  ],
+  "capabilities": {
+    "tools": [
+      {
+        "name": "ui_describe",
+        "description": "读取前端界面对象快照（P0：侧边栏）。返回 status=ok|stale|no_snapshot 与快照体（state 视图态 4 字段 / items 侧栏项 / sessions 会话列表 / actions 支持的操作词表）；freshness 由插件收到时刻 30s 窗口判定，过期如实 stale。可选 client_id 定向某前端实例，all=true 返回全部端。",
+        "category": "system",
+        "render": {
+          "card": "generic"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "region": {
+              "type": "string",
+              "enum": ["sidebar"],
+              "default": "sidebar",
+              "description": "界面对象区域，默认 sidebar（P0 仅侧边栏）"
+            },
+            "client_id": {
+              "type": "string",
+              "description": "前端实例标识（缺省取最近上报端）"
+            },
+            "all": {
+              "type": "boolean",
+              "description": "true 时返回全部端快照列表（按 received_at 降序）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status", "region"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["ok", "stale", "no_snapshot"]
+            },
+            "region": {
+              "type": "string"
+            },
+            "snapshot": {
+              "type": "object",
+              "description": "快照体：state{collapsed,width_ratio,active_view,unread_count} + items[] + sessions[] + actions[]"
+            },
+            "error": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "ui_act",
+        "description": "操作前端界面对象（P1：侧边栏命令闭环）。词表封闭四动作：navigate（target=item id 或会话 id，切侧栏视图）/ set_collapsed（collapsed=true|false 折叠侧栏）/ open_page（page_id=插件页 id，开对应工作区页签）/ highlight（item_id 高亮侧栏项，duration_ms ≤5000 默认 2000 自动消退）。fail-closed：未知动作/缺参/目标不在最新快照即 rejected（reason 注明）；合法命令广播给全部前端实例，2s 内任一端 applied 即 applied（附最新快照），否则如实 timeout。",
+        "category": "system",
+        "render": {
+          "card": "generic"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "region": {
+              "type": "string",
+              "default": "sidebar",
+              "description": "界面对象区域，默认 sidebar（P1 仅侧边栏）"
+            },
+            "action": {
+              "type": "string",
+              "enum": ["navigate", "set_collapsed", "open_page", "highlight"],
+              "description": "操作词表（封闭四值）"
+            },
+            "params": {
+              "type": "object",
+              "description": "动作参数：navigate{target} / set_collapsed{collapsed} / open_page{page_id} / highlight{item_id, duration_ms?}"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["applied", "rejected", "timeout"]
+            },
+            "reason": {
+              "type": "string",
+              "enum": ["unknown_action", "unknown_target", "no_fresh_snapshot", "invalid_params"]
+            },
+            "snapshot_after": {
+              "description": "applied 时附最新缓存快照（无快照为 null）",
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 25
+}

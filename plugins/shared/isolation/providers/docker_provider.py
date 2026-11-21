@@ -26,8 +26,44 @@ logger = logging.getLogger(__name__)
 class DockerProvider(IsolationProvider):
     """Docker 容器隔离提供者。"""
 
+    # 工具链持久层 named volumes(ADR 2026-11-07 决策 5)。
+    # 「工具链是跨任务资产」:任务内 rustup update / cargo install / nvm install /
+    # go install / pipx install / uv tool install 的落点全部挂卷持久——容器销毁/
+    # 重建(self_heal、namespace desync、切 worktree)后新容器挂同卷即恢复。
+    # 与 _BUILD_CACHE_VOLUMES 的分工:工具链卷承载「已安装的工具链本体」(低频写、
+    # 高价值),缓存卷承载「下载/编译缓存」(高频写、可重建)。volume 与容器实例
+    # 解耦语义同 _BUILD_CACHE_VOLUMES(named volume 首次使用 docker 自动创建,
+    # 首挂空卷时镜像内挂载点内容自动种进卷——种子层见 docker_assets/agentos/Dockerfile)。
+    # 迁移理由(agentos-cargo-registry 退役):旧卷只挂 /usr/local/cargo/registry
+    # 子目录,因为 deploy/build.sh 注释实证过「整卷盖 /usr/local/cargo 会把镜像
+    # 自带工具链一并遮蔽(exec 不可达)」的坑。本方案让镜像把工具链装进卷挂载
+    # 路径、卷即工具链本体(镜像内容=种子=卷初值),遮蔽问题结构性消解,
+    # CARGO_HOME 整目录(含 cargo install 产物与 registry)持久。
+    _TOOLCHAIN_VOLUMES: ClassVar[list[tuple[str, str]]] = [
+        ("agentos-rustup-home", "/usr/local/rustup"),  # RUSTUP_HOME:rustup 管理的 toolchain
+        ("agentos-cargo-home", "/usr/local/cargo"),  # CARGO_HOME 整目录:cargo 本体 + registry + 安装的 bin
+        ("agentos-nvm-dir", "/root/.nvm"),  # NVM_DIR:nvm 安装的 Node 版本(npm -g 随 nvm 版本持久)
+        ("agentos-gopath", "/root/go"),  # GOPATH:go install 的工具(模块下载缓存仍走 gomod 卷)
+        ("agentos-pipx-home", "/root/.local/pipx"),  # PIPX_HOME:pipx 应用
+        ("agentos-uv-tools", "/root/.local/share/uv/tools"),  # UV_TOOL_DIR:uv tool install 应用
+    ]
+
+    # 工具链标准路径 env(与 _TOOLCHAIN_VOLUMES 挂载点一一对应,ADR 决策 5
+    # 「统一标准路径约定」)。镜像(Dockerfile 种子层)带同一套 ENV;provider
+    # 侧再注入是契约自持:换用第三方镜像时标准路径挂载语义仍成立。PATH 不在
+    # 此列:-e PATH 会整体替换容器 PATH(env 做不了追加),bin 面 PATH 只能由
+    # 镜像层承载(Dockerfile 种子层负责)。
+    _TOOLCHAIN_ENV: ClassVar[dict[str, str]] = {
+        "RUSTUP_HOME": "/usr/local/rustup",
+        "CARGO_HOME": "/usr/local/cargo",
+        "NVM_DIR": "/root/.nvm",
+        "GOPATH": "/root/go",
+        "PIPX_HOME": "/root/.local/pipx",
+        "UV_TOOL_DIR": "/root/.local/share/uv/tools",
+    }
+
     # 通用构建/依赖缓存 named volumes。
-    # 设计原则:只缓存「可安全跨项目共享」的下载/存储层(registry / store /
+    # 设计原则:只缓存「可安全跨项目共享」的下载/存储层(store /
     # cache),不缓存项目特定的安装结果(node_modules、target/、dist/ 等)——后者
     # 依赖树不同会互相踩。volume 与容器实例解耦:容器销毁/重建(self_heal、
     # namespace desync、切 worktree 起新容器)都不丢,新容器挂上同一 volume 即
@@ -38,9 +74,9 @@ class DockerProvider(IsolationProvider):
         # sccache 编译产物缓存(内容寻址,跨 crate 复用编译结果)。依赖镜像里
         # RUSTC_WRAPPER=sccache + SCCACHE_DIR=/cargo-cache/sccache 两个环境变量。
         ("agentos-cargo-cache", "/cargo-cache"),
-        # cargo registry:下载的 crate 源码 + index。省去每个 worktree 重新下载
-        # 全部依赖源码(镜像内 CARGO_HOME=/usr/local/cargo)。
-        ("agentos-cargo-registry", "/usr/local/cargo/registry"),
+        # cargo registry 不再单列:已并入 _TOOLCHAIN_VOLUMES 的 agentos-cargo-home
+        # 整目录卷(CARGO_HOME=/usr/local/cargo,registry 下载与 cargo install
+        # 产物同卷持久);子目录卷语义退役理由见 _TOOLCHAIN_VOLUMES 处迁移注释。
         # ── Node ──
         # npm 下载缓存(tarball)。node_modules 仍随各项目 bind mount,不共享
         # (依赖树不同会互相踩)。想彻底加速 node_modules,改用 pnpm——其全局
@@ -87,12 +123,15 @@ class DockerProvider(IsolationProvider):
         self._wsl_docker_cache: bool | None = None
         # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build（BuildKit 缓存复用本机
         # 已下载的 apt/pip/playwright 包，二次构建秒级）；无 Dockerfile 则回退 docker pull。
-        # 仓库根：src/isolation/providers/ 上溯 3 级（与 stream_handler.py parents[2] 同手法）。
+        # 仓库根：providers/ 上溯 4 级（providers→isolation→shared→plugins→根，
+        # 与 wsl_native_provider state_dir 同约定）。src/ 布局时代的 parents[2]
+        # 在 0.2 迁移后指向 plugins/shared，相对 dockerfile_path 会解析到不存在
+        # 的 plugins/shared/docker/...（auto_build 静默跳过转 pull 必败）。
         from pathlib import Path  # noqa: PLC0415
 
-        self._repo_root = Path(__file__).resolve().parents[2]
+        self._repo_root = Path(__file__).resolve().parents[4]
         self._auto_build = bool(self._config.get("auto_build", True))
-        _df = self._config.get("dockerfile_path", "docker/agentos/Dockerfile")
+        _df = self._config.get("dockerfile_path", "docker_assets/agentos/Dockerfile")
         _df_path = Path(_df)
         self._dockerfile_path = _df_path if _df_path.is_absolute() else self._repo_root / _df
         _ctx = self._config.get("build_context", ".")
@@ -396,8 +435,10 @@ class DockerProvider(IsolationProvider):
                         f"工作空间挂载源悬空: {mount_src}",
                     )
 
-        # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）
-        run_args = self._build_run_args(name, context)
+        # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）。
+        # 参数构建链含 os.popen 网关探测（WSL 场景）与路径解析——纯同步体，
+        # 出事件循环执行（_build_run_args 自身保持同步契约）。
+        run_args = await asyncio.to_thread(self._build_run_args, name, context)
 
         # 撞名预检收养（D6）：容器名由 workspace 确定性派生；docker start 按名
         # 幂等（running=no-op，created/exited=启动）。同名遗留容器（上一轮/
@@ -702,11 +743,22 @@ class DockerProvider(IsolationProvider):
             mount_src = self._resolve_mount_path(context.workspace)
             args.extend(["-v", f"{mount_src}:/workspace"])
 
-        # 通用构建/依赖缓存:跨容器实例、跨 git worktree 复用各类语言的下载与
-        # 编译缓存。默认集合见类常量 _BUILD_CACHE_VOLUMES(Rust/Node/Python/Go),
-        # 额外卷可经 config extra_cache_volumes 追加。详见类常量处的说明。
-        for vol, path in (*self._BUILD_CACHE_VOLUMES, *self._extra_cache_volumes):
+        # 工具链持久层 + 通用构建/依赖缓存:跨容器实例、跨 git worktree 复用
+        # 工具链本体与各类语言的下载/编译缓存。默认集合见类常量
+        # _TOOLCHAIN_VOLUMES(工具链本体)与 _BUILD_CACHE_VOLUMES(Rust/Node/
+        # Python/Go 缓存),额外卷可经 config extra_cache_volumes 追加。
+        # 详见两处类常量的说明。
+        for vol, path in (
+            *self._TOOLCHAIN_VOLUMES,
+            *self._BUILD_CACHE_VOLUMES,
+            *self._extra_cache_volumes,
+        ):
             args.extend(["-v", f"{vol}:{path}"])
+
+        # 工具链标准路径 env(与工具链卷挂载点一一对应,契约自持——不依赖
+        # 镜像自带 ENV;镜像种子层同套 ENV,双方一致无冲突)。
+        for env_key, path in self._TOOLCHAIN_ENV.items():
+            args.extend(["-e", f"{env_key}={path}"])
 
         # IMAGE 必须在 COMMAND 之前（docker create 语法要求）
         args.append(self._image)

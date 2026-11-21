@@ -110,21 +110,28 @@ system_prompt: |-
 
   ## 参考规则
 
-
-
 dynamic_vars:
   enabled: true
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：文件管理/检索经两步法动态可达 ──
 - file_read
 - file_write
 - task_evaluate
-- create_directory
-- copy_file
-- delete_file
-- enhanced_search
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 第1章必须包含主角出场+核心矛盾引入+世界观初步展示，章末必须为冲突钩，禁止超过5个角色出场
 - 第2章主角目标必须明确，至少一次角色互动，禁止主角显得被动

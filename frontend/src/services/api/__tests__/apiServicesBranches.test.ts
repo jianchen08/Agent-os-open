@@ -771,10 +771,16 @@ describe('auth API — 用户名校验边界', () => {
   it('登录成功后用户名 trim 后进请求体', async () => {
     postMock.mockResolvedValue({ data: { access_token: 'a' } })
     await authApi.login('  username  ', 'password-1234')
-    expect(postMock).toHaveBeenCalledWith(API_ENDPOINTS.AUTH.LOGIN, {
-      username: 'username',
-      password: 'password-1234',
-    })
+    // 第三参为登录专用配置：长超时（AUTH_LOGIN_TIMEOUT=120s）+ 关闭拦截器
+    // 自动重试（内核整体停顿重试无益，只需长等待）
+    expect(postMock).toHaveBeenCalledWith(
+      API_ENDPOINTS.AUTH.LOGIN,
+      {
+        username: 'username',
+        password: 'password-1234',
+      },
+      { timeout: 120000, noAutoRetry: true },
+    )
   })
 
   it('邮箱格式非法的注册在本地被拦下', async () => {

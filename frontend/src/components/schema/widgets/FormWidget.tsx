@@ -51,17 +51,25 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { toast } from '@/components/ui/sonner'
-import { useActivePipelineId, useActiveSessionId } from '@/hooks/useActiveExecutionContext'
 import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
+import { useActivePipelineId, useActiveSessionId } from '@/hooks/useActiveExecutionContext'
+import { useAndroidBackCloser } from '@/hooks/useAndroidBackCloser'
 import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
 import { emitFormEvent } from '@/services/schema/formEventBus'
 import { RjsfForm } from '@/services/schema/RjsfForm'
 import { parseYamlObject, serializeYaml } from '@/services/schema/yaml'
+// 紧凑下拉定位策略（对齐 clamp，P0-2）：常量与纯函数单源独立文件
+// （react-refresh 禁组件文件新增非组件导出）
 import { createSessionWithProject } from '@/services/sessionCreation'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
 import { mergeFormValues } from '@/utils/configFormFields'
+import {
+  COMPACT_SELECT_VIEWPORT_MARGIN,
+  compactSelectAlign,
+} from './compactSelectLayout'
+import { compactTriggerLabel, triggerVisibleLabel } from './compactTriggerLabels'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -95,36 +103,6 @@ interface CompactOption {
   description?: string
   /** 选项图标（声明原文透传，如 emoji '💻'；触发器图标另经 props.icon 走语义图标注册表） */
   icon?: string
-}
-
-/**
- * 触发器窄屏收口文案（≤2 字）：去括注（「默认（命中规则才确认）」→「默认」）→
- * 去「模式」尾缀（「个人助理模式」→「个人助理」）→ 仍超 2 字取末 2 字
- * （「个人助手」→「助手」）。3 字且以否定前缀「免」开头保留首 2 字
- * （「免审批」→「免审」）——截成「审批」会把语义取反，比长标签更有害。
- * 全称不丢：菜单项与可访问名恒为原文；本函数只服务窄屏触发器
- * （桌面视口触发器走 triggerVisibleLabel 去括注，R10③）。
- */
-export function compactTriggerLabel(label: string): string {
-  const stripped = label
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/模式$/, '')
-    .trim()
-  if (stripped.length <= 2) return stripped
-  if (stripped.length === 3 && stripped.startsWith('免')) return stripped.slice(0, 2)
-  return stripped.slice(-2)
-}
-
-/**
- * 触发器可见文案（R10③ 精简，用户原话"显示的描述太长了"）：去括注——
- * 「默认（命中规则才确认）」→「默认」、「免审批（隔离默认）」→「免审批」、
- * 「旁路（跳过审批）」→「旁路」。全称不丢：菜单项与可访问名恒为原文，
- * 本函数只服务触发器可见文案（2026-09-21 的"桌面视口显示原文"契约由本裁定
- * 收窄为"去括注"——括注说明活在菜单项 description/原文里，输入条只留裸档名）。
- */
-export function triggerVisibleLabel(label: string): string {
-  const stripped = label.replace(/[（(][^）)]*[）)]/g, '').trim()
-  return stripped || label
 }
 
 /**
@@ -834,6 +812,21 @@ function CompactSelectToggle({
   const submitting = status === 'submitting'
   const disabled = disabledProp || submitting || options.length === 0
   const Icon = resolveChatCardIcon(icon ?? 'shield')
+  // 视口 clamp（P0-2）：展开瞬间量触发器右缘定对齐——靠右触发器翻转向左展开，
+  // 不依赖 radix collision 的环境差异（MuMu WebView 实测 align=start 溢出右缘）
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [align, setAlign] = useState<'start' | 'end'>('start')
+  const handleOpenChange = (next: boolean) => {
+    if (next && triggerRef.current && typeof window !== 'undefined') {
+      setAlign(compactSelectAlign(window.innerWidth, triggerRef.current.getBoundingClientRect().right))
+    }
+    setMenuOpen(next)
+  }
+  // Android back 优先关浮层（P1-8，MuMu 实测 shots/05 场景：思考强度浮窗打开
+  // 按 back 直接回退/退出应用）：菜单展开期间注册关闭器，back 一按先关菜单
+  // 并消费该按；收起即注销，不吞后续 back
+  useAndroidBackCloser(menuOpen, () => setMenuOpen(false))
   // 触发器自标识（BUG-6）：只显示裸值（如「高」）会与相邻权限档位混淆——
   // GUI/读屏按「高」找权限等级会误中思考强度。自标识由可访问名承载
   // （「思考强度：高」），文字形态可见文案只留裸值以省输入条宽度（icon-only
@@ -864,9 +857,10 @@ function CompactSelectToggle({
     // 最小内容宽钉在全标签宽，min-width:auto 的祖先链上任一环不放行收缩，
     // 窄视口下整颗 chip 就以自然宽溢出容器（实测压过发送键 27px）
     <div className="flex min-w-0 items-center gap-2">
-      <DropdownMenu>
+      <DropdownMenu open={menuOpen} onOpenChange={handleOpenChange}>
         <DropdownMenuTrigger asChild>
           <button
+            ref={triggerRef}
             type="button"
             data-testid="compact-select-trigger"
             className={cn(
@@ -892,7 +886,8 @@ function CompactSelectToggle({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
-          align="start"
+          align={align}
+          collisionPadding={COMPACT_SELECT_VIEWPORT_MARGIN}
           sideOffset={6}
           className="max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-48 overflow-y-auto"
         >

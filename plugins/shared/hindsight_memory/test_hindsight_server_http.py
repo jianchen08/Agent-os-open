@@ -473,9 +473,7 @@ def _multipart_body(filename: str, content: str, field_name: str = "file") -> tu
 
 def _kb_client() -> MagicMock:
     client = MagicMock()
-    client.aretain = AsyncMock(side_effect=lambda **kw: MagicMock(
-        operation_id=f"c{kw['metadata']['kb_chunk_index']}", accepted=True
-    ))
+    client.aretain = AsyncMock(return_value=MagicMock(operation_id="c0", accepted=True))
     client.acreate_bank = AsyncMock(return_value=None)
     return client
 
@@ -531,9 +529,7 @@ def _kb_doc(doc_id: str, kb_id: str, kb_name: str = "i1.md") -> dict[str, Any]:
 
 def _kb_client_with_docs() -> tuple[MagicMock, _FakeDocs]:
     client = MagicMock()
-    client.aretain = AsyncMock(side_effect=lambda **kw: MagicMock(
-        operation_id=f"c{kw['metadata']['kb_chunk_index']}", accepted=True
-    ))
+    client.aretain = AsyncMock(return_value=MagicMock(operation_id="c0", accepted=True))
     client.acreate_bank = AsyncMock(return_value=None)
     docs = _FakeDocs()
     client.documents = docs
@@ -572,10 +568,16 @@ class TestKbDomainDispatch:
 
     def test_search_route_with_client(self, srv: Any, kb: Any) -> None:
         client, docs = _kb_client_with_docs()
-        resp = MagicMock()
-        resp.chunks = [SimpleNamespace(model_dump=lambda: {"id": "c0", "text": "命中", "score": 0.9})]
-        resp.results = []
-        client.arecall = AsyncMock(return_value=resp)
+
+        def recall_by_bank(**kw: Any) -> Any:
+            if kw["bank_id"] == "kb":
+                resp = MagicMock()
+                resp.chunks = [SimpleNamespace(model_dump=lambda: {"id": "c0", "text": "命中", "score": 0.9})]
+                resp.results = []
+                return resp
+            return SimpleNamespace(chunks=[], results=[])
+
+        client.arecall = AsyncMock(side_effect=recall_by_bank)
         docs.add(_kb_doc("c0", "i1"))
         srv._client = client
 
@@ -586,7 +588,7 @@ class TestKbDomainDispatch:
         payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
         assert payload["total"] == 1
         assert payload["results"][0]["item_id"] == "i1"
-        assert client.arecall.call_args.kwargs["tags_match"] == "all"
+        assert all(c.kwargs["tags_match"] == "all" for c in client.arecall.call_args_list)
 
     def test_search_empty_query_maps_400(self, srv: Any, kb: Any) -> None:
         out = _run(srv._handle_kb_domain(
@@ -597,7 +599,8 @@ class TestKbDomainDispatch:
         payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
         assert payload["detail"] == "检索词不能为空"
 
-    def test_upload_success(self, srv: Any, kb: Any, tmp_path: Path) -> None:
+    def test_upload_success(self, srv: Any, kb: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
         srv._client = _kb_client()
         raw_body, content_type = _multipart_body("doc.md", "知识库内容 " * 300)
 
@@ -608,7 +611,8 @@ class TestKbDomainDispatch:
         assert out["data"]["status"] == 200
         payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
         assert payload["message"] == "文件上传成功"
-        assert payload["chunks_imported"] >= 1
+        assert payload["chunks_imported"] == 1
+        assert payload["ingestion_mode"] == "verbatim"
         assert srv._client.aretain.call_count == payload["chunks_imported"]
 
     def test_upload_invalid_base64_400(self, srv: Any, kb: Any) -> None:

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import lru_cache
 from typing import Any
@@ -37,8 +38,12 @@ def get_instance() -> IsolationGuard:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize isolation_guard plugin + 注入环境服务调用方。"""
-    get_instance()
+    """Initialize isolation_guard plugin + 注入环境服务调用方。
+
+    实例构造内含后端探测（docker/wsl 子进程，timeout 3s）：下放线程池，
+    避免 on_load 期间冻住合宿宿主事件循环心跳。
+    """
+    await asyncio.to_thread(get_instance)
     try:
         handle = plugin.get_capability("tool-executor")
     except KeyError:

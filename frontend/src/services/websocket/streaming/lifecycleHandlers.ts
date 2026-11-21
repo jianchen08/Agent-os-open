@@ -5,7 +5,7 @@
 import { invalidatePipelineStates } from '@/hooks/queries/usePipelineRunsQuery'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { finalizePartsForInterrupt, usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
@@ -21,11 +21,16 @@ export async function handleReconnected(): Promise<void> {
 
   logger.info('[streaming] WS 重连，清理残留状态，streaming 管道数=%d', Object.keys(streamingState).length)
 
-  // 清理残留 streaming thinking parts
+  // 清理残留 streaming thinking parts。
+  // 只清「非活跃流式」消息：status==='streaming' 的消息重连后仍在跑（内核活流），
+  // 无条件置 done 会让思考卡在内容继续追加时显示完成图标（用户实测缺陷①）——
+  // 活跃消息的收口交给下方宽限复查/backfill/90s 兜底。
   const messagesByPipeline = pipelineStore.messagesByPipeline
   for (const [pipelineId, messages] of Object.entries(messagesByPipeline)) {
     const stuckMessages = (messages as any[]).filter(
-      (m: any) => (m.parts || []).some((p: any) => p.type === 'thinking' && p.state === 'streaming'),
+      (m: any) =>
+        m.status !== 'streaming' &&
+        (m.parts || []).some((p: any) => p.type === 'thinking' && p.state === 'streaming'),
     )
     for (const msg of stuckMessages) {
       const updatedParts = (msg.parts as any[]).map((p: any) =>
@@ -130,7 +135,13 @@ export async function handleReconnected(): Promise<void> {
       // 杀流）。标记 interrupted + 追加 warning system part，让用户看到"输出
       // 被中断"而非误以为完成。
       for (const msg of stillStreaming) {
-        store.updateMessage(pipelineId, msg.id, { status: 'interrupted' } as any)
+        // 同刀收口在途 part（与 stopStreaming 共用 finalizePartsForInterrupt）：
+        // 只改 status 会让残留 streaming 的 thinking part 继续驱动思考卡永续转圈
+        // ——早轮孤儿流式消息不受 terminatePipeline 的单消息收口覆盖。
+        store.updateMessage(pipelineId, msg.id, {
+          status: 'interrupted',
+          parts: finalizePartsForInterrupt(msg.parts || []),
+        } as any)
         store.appendPart(pipelineId, msg.id, {
           type: 'system',
           content: '（输出被中断，内容可能不完整）',

@@ -8,8 +8,8 @@
   （不抛、不把垃圾直透给 prompt_build 的 list 消费面）；
 - ``knowledge_base`` 模块级共享根注入（58）：``_SHARED_ROOT`` 不在 sys.path
   时插入（真实 import 时序下执行，非 mock）；import 前先移除以保证真实执行；
-- ``knowledge_base.upload_document``（360）：``_chunk_text`` 返回空而 decode
-  后文本非空（空白字符形态）→ KBError(400, KNB_VAL_7004) 拒绝入库；
+- ``knowledge_base.upload_document``：decode 后纯空白（空白字符形态）→
+  KBError(400, KNB_VAL_7004) 拒绝入库且 bank 不被触碰；
 - ``routes_memory._document_to_memory``（98-99）：文档 tags 无 ``type:*``
   前缀时回落 ``document_metadata.memory_type``（取到值 / 缺失空串两态）。
 
@@ -179,7 +179,7 @@ async def test_search_applies_knowledge_name_filter_and_json_tag_fallback() -> N
 
 
 # ═══════════════════════════════════════════════════════════
-# knowledge_base：共享根注入 / 空切块拒绝 / uploads 解析回退
+# knowledge_base：共享根注入 / 空白拒绝 / uploads 解析回退
 # ═══════════════════════════════════════════════════════════
 
 
@@ -209,29 +209,27 @@ def test_module_level_shared_root_is_added_to_sys_path() -> None:
     assert module._SHARED_ROOT == _SHARED_ROOT
 
 
-def test_chunk_text_empty_for_whitespace_only_is_rejected_by_upload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """解码后文本非空但切块结果为空 → KBError(400, KNB_VAL_7004)。
+def test_whitespace_only_upload_is_rejected_before_bank_touch() -> None:
+    """解码后纯空白文本 → KBError(400, KNB_VAL_7004)。
 
-    以真实 monkeypatch 把 ``_chunk_text`` 换成恒空返回（模拟切块实现变更后
-    的防御分支），验证 upload_document 对「无块可入库」显式拒绝而非静默成功。
+    客户端切块面已随原生摄取管线切换移除（单次 aretain，切块归上游）；空白
+    拒绝由 upload_document 的解码后 strip 检查直接承载，bank 不被触碰。
     """
     module = _load_kb_fresh()
     client = MagicMock()
     client.aretain = AsyncMock(return_value=MagicMock(operation_id="c", accepted=True))
     client.acreate_bank = AsyncMock(return_value=None)
     module.set_client(client)
-    monkeypatch.setattr(module, "_chunk_text", lambda text, chunk_size=2000: [])
 
     with pytest.raises(module.KBError) as ei:
         _run(module.upload_document(
-            "doc.md", "有内容".encode(), "text/markdown",
+            "doc.md", "  \n  ".encode(), "text/markdown",
             headers={"x-agentos-tenant": "default", "x-agentos-user": "admin"},
         ))
 
     assert ei.value.status_code == 400
     assert ei.value.error_code == "KNB_VAL_7004"
+    client.aretain.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════

@@ -49,9 +49,11 @@ _STUB_KEYS = (
     "providers",
     "providers.base",
     "providers.docker_provider",
+    "providers.external_docker_provider",
     "providers.host_provider",
     "providers.wsl_native_provider",
     "providers.linux_native_provider",
+    "providers.mxc_native_provider",
     "hardware_profile",
     "tasks",
     "tasks.types",
@@ -146,6 +148,17 @@ def _install_stubs() -> None:
     host_mod.HostProvider = HostProvider
     sys.modules["providers.host_provider"] = host_mod
 
+    # external_docker（TB 外部容器通道）：manager 顶层 import PROVIDER_TYPE 与类
+    external_mod = types.ModuleType("providers.external_docker_provider")
+
+    class ExternalDockerProvider:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    external_mod.ExternalDockerProvider = ExternalDockerProvider
+    external_mod.PROVIDER_TYPE = "external_docker"
+    sys.modules["providers.external_docker_provider"] = external_mod
+
     wsl_mod = types.ModuleType("providers.wsl_native_provider")
 
     class WslNativeProvider:
@@ -163,6 +176,22 @@ def _install_stubs() -> None:
 
     linux_mod.LinuxNativeProvider = LinuxNativeProvider
     sys.modules["providers.linux_native_provider"] = linux_mod
+
+    mxc_mod = types.ModuleType("providers.mxc_native_provider")
+
+    class MxcNativeProvider:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._config = args[0] if args else kwargs.get("config", {})
+
+        def registered_profiles(self) -> dict[str, str]:
+            return {"linux-bash": "wslc", "native-win": "processcontainer"}
+
+        def env_name_suffix(self, metadata: dict[str, Any]) -> str:
+            profile = str((metadata or {}).get("execution_profile") or "linux-bash")
+            return "" if profile == "linux-bash" else f"--{profile}"
+
+    mxc_mod.MxcNativeProvider = MxcNativeProvider
+    sys.modules["providers.mxc_native_provider"] = mxc_mod
 
     # hardware_profile
     hp = types.ModuleType("hardware_profile")
@@ -1432,40 +1461,6 @@ class TestSingleton:
 
 
 class TestProviderConfig:
-    def test_load_provider_config_center_unreachable_returns_empty(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """ConfigCenter 不可达 → 返回空配置（调用方走默认提供者集，不 panic）。
-
-        直读仓库 yaml 的回退分支已退役（F11：配置经 sidecar 注入一次到位，
-        禁止仓库布局假设的静默兜底）——不可达即空，无第二层读取。
-        """
-        mod = _load_manager()
-
-        fake_center = types.ModuleType("config")
-        fake_center.config_center = types.ModuleType("config.config_center")
-        fake_center.config_center.get_config_center = lambda: (_ for _ in ()).throw(
-            RuntimeError("ConfigCenter 不可达")
-        )
-        monkeypatch.setitem(sys.modules, "config", fake_center)
-        monkeypatch.setitem(sys.modules, "config.config_center", fake_center.config_center)
-        assert mod._load_provider_config() == {}
-
-    def test_load_provider_config_from_center(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """config_center 返回 providers 段 → 透传。"""
-        fake_center = types.ModuleType("config")
-        fake_center.config_center = types.ModuleType("config.config_center")
-
-        class _FakeConfigCenter:
-            def get(self, _key: str) -> dict[str, Any]:
-                return {"providers": {"host": {"enabled": False}}}
-
-        fake_center.config_center.get_config_center = lambda: _FakeConfigCenter()
-        monkeypatch.setitem(sys.modules, "config", fake_center)
-        monkeypatch.setitem(sys.modules, "config.config_center", fake_center.config_center)
-        mod = _load_manager()
-        assert mod._load_provider_config() == {"host": {"enabled": False}}
-
     def test_extract_providers_config_dir_nested(self) -> None:
         """get_config() 全量配置（目录嵌套结构）→ providers 提取。"""
         mod = _load_manager()
@@ -1501,9 +1496,11 @@ class TestProviderConfig:
         mgr = mod.IsolationManager(
             providers_config_override={
                 "providers": {
-                    "cua": {"limits": {"memory": "3g", "cpus": "3.0"}},
-                    # 钉 docker 后端：linux_native 默认启用会接管 CONTAINER 槽（ADR 2026-10-12）
+                    # 2026-11-13 裁定：Docker 仅显式 opt-in（enabled 必带）；
+                    # 原生后端显式关（nt 上 wsl_native 缺省启用会占 CONTAINER 槽）
+                    "cua": {"enabled": True, "limits": {"memory": "3g", "cpus": "3.0"}},
                     "linux_native": {"enabled": False},
+                    "wsl_native": {"enabled": False},
                 }
             },
         )
@@ -1517,14 +1514,53 @@ class TestProviderConfig:
         assert IsolationLevel.HOST in providers
         assert IsolationLevel.CONTAINER in providers
 
+    def test_mxc_enabled_takes_container_slot_before_wsl(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """注册表真值：mxc_native 显式启用时先占 CONTAINER 槽位（Windows）。"""
+        mod = _load_manager()
+        monkeypatch.setattr(mod.os, "name", "nt")
+        providers = mod._create_providers_from_config({"mxc_native": {"enabled": True}})
+        assert isinstance(providers[IsolationLevel.CONTAINER], mod.MxcNativeProvider)
+
+    def test_mxc_disabled_falls_back_to_wsl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """默认关闭：槽位竞争回落到 wsl_native（Windows 缺省启用）。"""
+        mod = _load_manager()
+        monkeypatch.setattr(mod.os, "name", "nt")
+        providers = mod._create_providers_from_config({"mxc_native": {"enabled": False}})
+        assert isinstance(providers[IsolationLevel.CONTAINER], mod.WslNativeProvider)
+
+    def test_mxc_platform_gate_non_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """平台门：非 Windows 即使启用也不注册（不引入 MXC 依赖）。"""
+        mod = _load_manager()
+        monkeypatch.setattr(mod.os, "name", "posix")
+        monkeypatch.setattr(mod, "_is_linux_platform", lambda: False)
+        providers = mod._create_providers_from_config(
+            {"mxc_native": {"enabled": True}, "linux_native": {"enabled": False}}
+        )
+        if IsolationLevel.CONTAINER in providers:
+            assert not isinstance(providers[IsolationLevel.CONTAINER], mod.MxcNativeProvider)
+
+    def test_env_name_suffix_scopes_mxc_profile(self) -> None:
+        """manager 环境名后缀钩子：profile 作用域同时作用于 ws_key/容器名。"""
+        mod = _load_manager()
+        mgr = object.__new__(mod.IsolationManager)
+        mgr._providers = {}
+        assert mgr._env_name_suffix({"execution_profile": "native-win"}) == ""
+        mgr._providers = {IsolationLevel.CONTAINER: mod.MxcNativeProvider({"executor": ""})}
+        assert mgr._env_name_suffix({"execution_profile": "linux-bash"}) == ""
+        assert mgr._env_name_suffix({"execution_profile": "native-win"}) == "--native-win"
+
     def test_create_providers_all_disabled(self) -> None:
         mod = _load_manager()
         providers = mod._create_providers_from_config(
             {
                 "host": {"enabled": False},
                 "docker": {"enabled": False},
-                # linux_native 默认启用（Linux 默认后端），「全关」须显式 opt-out
+                # linux_native 默认启用（Linux 默认后端），「全关」须显式 opt-out；
+                # wsl_native 在 nt 缺省启用（2026-11-13 裁定），同样须显式关
                 "linux_native": {"enabled": False},
+                "wsl_native": {"enabled": False},
             }
         )
         assert providers == {}
@@ -1532,7 +1568,11 @@ class TestProviderConfig:
     def test_create_providers_host_only(self) -> None:
         mod = _load_manager()
         providers = mod._create_providers_from_config(
-            {"docker": {"enabled": False}, "linux_native": {"enabled": False}}
+            {
+                "docker": {"enabled": False},
+                "linux_native": {"enabled": False},
+                "wsl_native": {"enabled": False},
+            }
         )
         assert list(providers) == [IsolationLevel.HOST]
 
@@ -1540,7 +1580,11 @@ class TestProviderConfig:
         """docker 键缺失时回退 cua 键（老配置兼容）。"""
         mod = _load_manager()
         providers = mod._create_providers_from_config(
-            {"host": {"enabled": False}, "cua": {"enabled": True}}
+            {
+                "host": {"enabled": False},
+                "cua": {"enabled": True},
+                "wsl_native": {"enabled": False},
+            }
         )
         assert IsolationLevel.CONTAINER in providers
 
@@ -1556,8 +1600,9 @@ class TestProviderConfig:
         providers = mod._create_providers_from_config(
             {
                 "host": {"enabled": False},
-                "docker": {"limits": {"memory": "1g", "cpus": "2.0"}},
+                "docker": {"enabled": True, "limits": {"memory": "1g", "cpus": "2.0"}},
                 "linux_native": {"enabled": False},
+                "wsl_native": {"enabled": False},
             },
             profile=profile,
         )
@@ -1576,7 +1621,12 @@ class TestProviderConfig:
             "pids_limit": 64,
         }
         providers = mod._create_providers_from_config(
-            {"host": {"enabled": False}, "docker": {}, "linux_native": {"enabled": False}},
+            {
+                "host": {"enabled": False},
+                "docker": {"enabled": True},
+                "linux_native": {"enabled": False},
+                "wsl_native": {"enabled": False},
+            },
             profile=profile,
         )
         docker = providers[IsolationLevel.CONTAINER]
@@ -1588,7 +1638,12 @@ class TestProviderConfig:
         """无显式 limits 且 profile 只给部分键时其余用默认值。"""
         mod = _load_manager()
         providers = mod._create_providers_from_config(
-            {"host": {"enabled": False}, "docker": {}, "linux_native": {"enabled": False}},
+            {
+                "host": {"enabled": False},
+                "docker": {"enabled": True},
+                "linux_native": {"enabled": False},
+                "wsl_native": {"enabled": False},
+            },
             profile={"container_memory": "384m"},
         )
         docker = providers[IsolationLevel.CONTAINER]

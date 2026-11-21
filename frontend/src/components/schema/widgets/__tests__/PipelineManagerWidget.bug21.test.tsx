@@ -11,7 +11,7 @@
  *   所有任务派生条目耗时 ≈ 0ms。
  *
  * 契约（runs 权威对账）：runs/state 双面均无行的管道，任务域未决态不猜
- * running（落 unknown 视图态）；无时间真值不产假 0ms（耗时列 '--'）。
+ * running（落 unknown 视图态）；无时间真值不产假 0ms（空值不渲染，占位已退役）。
  */
 
 import { screen } from '@testing-library/react'
@@ -108,8 +108,9 @@ describe('PipelineManagerWidget BUG-21 无时间真值不产假 0ms', () => {
     renderPmAllStatuses(<PipelineManagerWidget />)
     expect(await screen.findByText('陈旧待执行任务')).toBeInTheDocument()
     expect(screen.queryByText('0ms')).toBeNull()
-    // 无真值 = 耗时缺失态 '--'（token 列同为 '--'，取至少一处即可）
-    expect(screen.getAllByText('--').length).toBeGreaterThanOrEqual(1)
+    // 无真值 = 耗时缺失不渲染任何占位（方案 B/P1-3 起 '--' 占位退役、空值
+    // 不渲染；BUG-21「禁假 0ms」契约不变，缺失态即无值可显示）
+    expect(screen.queryByText('--')).toBeNull()
   })
 
   it('载荷带 created_at/updated_at 真值（终态任务）：显示真实区间非 0ms', async () => {

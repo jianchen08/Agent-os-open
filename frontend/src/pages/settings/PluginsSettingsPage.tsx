@@ -7,6 +7,9 @@
  * - 顶部统一搜索框（sticky）：同时过滤插件（name/id/描述/类型）与工具能力
  *   （工具名/描述/所属插件）——单一搜索入口，不分区各自设框
  * - 视图分段：全部 / System / Pipeline / Tool / 已禁用
+ * - 可见性过滤：manifest visibility=private 的插件（随仓内置分发，如 LLM 链
+ *   llm_service / pipeline_llm_core）不进本管理面（ADR 2026-11-18 决策 5）；
+ *   缺省/未声明 = public（旧内核响应宽容读）
  * - 插件卡片：类型图标 + Enabled 开关（PUT /api/v1/plugins/{id}/enabled）；
  *   描述来自 manifest 透传（内核 plugins_status_handler）
  * - 工具能力浏览（ToolsPage 退役后并入：/api/v1/schema 聚合的 tools 面，
@@ -120,7 +123,13 @@ export function PluginsSettingsPage() {
     fallbackErrorText: '获取插件状态失败',
   })
   const isLoading = resource.isLoading
-  const plugins = resource.data?.plugins ?? []
+  // 可见性过滤（private 插件机制，ADR 2026-11-18 决策 5）：本页 = 用户插件
+  // 安装/管理面，private 插件（随仓内置分发、内核同链路装载）不在此展示；
+  // 只收窄本管理面，能力面（contributes/工具/http 端点）不随之收窄。
+  // 旧内核响应无 visibility 字段 = public（宽容读，不得误伤既有插件）。
+  const plugins = (resource.data?.plugins ?? []).filter(
+    (p) => p.visibility !== 'private',
+  )
 
   /** 切换插件启用状态 */
   /** 反向依赖查询（ADR 2026-09-14 §2.4 禁用事前提醒数据源；端点不可得时静默放行） */

@@ -7,8 +7,8 @@
 3. _client 为 None 时 retain/recall 优雅降级（不崩溃）
 4. mock client.retain 后调用工具，断言调用参数与返回形状
 5. recall 按 memory_type 客户端过滤
-6. import_document 将长文本切分为 ~3 块并 retain 3 次
-7. import_document 拒绝非 txt/md 文件
+6. import_document 整文档单次 retain（客户端零切块，标题双通道）
+7. import_document 拒绝非 txt/md 文件与纯空白文本
 8. bank_id 缺省时回落到默认值（多租户隔离 key）
 
 测试不依赖真实 hindsight 包——通过 monkeypatch 模块级 _client 实现。
@@ -321,10 +321,11 @@ class TestRecallRankingAndTopK:
 
 
 class TestImportDocument:
-    def test_import_document_chunks_text(
+    def test_import_document_single_whole_document_retain(
         self, mod: Any, mock_client: MagicMock
     ) -> None:
-        """5000 字符文本被切分为 ~3 块,aretain 调用 3 次。"""
+        """整文档单次 aretain（客户端零切块，切块/抽取归 bank 所配原生管线）；
+        标题双通道：内容头部前置 ``# {name}`` + context=name。"""
         long_text = "x" * 5000
         mock_client.aretain.return_value = MagicMock(operation_id="mem_x", accepted=True)
 
@@ -336,10 +337,13 @@ class TestImportDocument:
             knowledge_name="kb1",
         )
 
-        # 2000 字符/块 → 5000/2000 ≈ 3 块
-        assert result["chunks_imported"] == 3
+        assert result["chunks_imported"] == 1
         assert result["knowledge_name"] == "kb1"
-        assert mock_client.aretain.call_count == 3
+        assert mock_client.aretain.call_count == 1
+        call_kwargs = mock_client.aretain.call_args.kwargs
+        assert call_kwargs["content"].startswith("# kb1\n\n")
+        assert call_kwargs["context"] == "kb1"
+        assert "x" * 100 in call_kwargs["content"], "全文原样投递（无客户端截断）"
 
     def test_import_document_rejects_non_txt(
         self, mod: Any, mock_client: MagicMock
@@ -357,27 +361,22 @@ class TestImportDocument:
         # 关键：未触发 aretain
         mock_client.aretain.assert_not_called()
 
-    def test_import_document_skips_blank_chunks(
+    def test_import_document_blank_text_no_retain(
         self, mod: Any, mock_client: MagicMock
     ) -> None:
-        """N2 回归：空白 chunk（如整段空行）不投 retain——hindsight 对空
-        content 必 422（'content cannot be empty'），曾让整个导入中断。"""
-        mock_client.aretain.return_value = MagicMock(operation_id="mem_x", accepted=True)
-        long_text = "甲" * 2000 + "\n" * 2000 + "乙" * 2000
-
+        """N2 回归（形态更新）：纯空白文本不投 retain——hindsight 对空
+        content 必 422（'content cannot be empty'），导入前显式拒绝。"""
         result = _call_tool(
             mod,
             "hindsight.import_document",
             bank_id="bank_A",
-            text=long_text,
+            text="\n" * 2000,
             knowledge_name="kb1",
         )
 
-        # 3 个切块中空白块被跳过，只落 2 块
-        assert result["chunks_imported"] == 2
-        assert mock_client.aretain.call_count == 2
-        for call in mock_client.aretain.call_args_list:
-            assert call.kwargs["content"].strip()
+        assert "error" in result
+        assert result["chunks_imported"] == 0
+        mock_client.aretain.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -990,8 +989,8 @@ class TestImportDocMetaStr:
     def test_import_document_metadata_values_are_str(
         self, mod: Any, mock_client: MagicMock
     ) -> None:
-        """S3/S4 根因：hindsight MemoryItem.metadata 是 dict[str,str] pydantic
-        校验面，chunk_index/chunk_total 以 int 传入必 422（8-22 实测）。"""
+        """S3 根因：hindsight MemoryItem.metadata 是 dict[str,str] pydantic
+        校验面，任何非 str 值传入必 422（8-22 实测）。"""
         mock_client.aretain.return_value = MagicMock(operation_id="mem_x", accepted=True)
 
         _call_tool(
@@ -1002,9 +1001,8 @@ class TestImportDocMetaStr:
         for call in mock_client.aretain.call_args_list:
             meta = call.kwargs["metadata"]
             assert all(isinstance(v, str) for v in meta.values())
-            assert meta["chunk_index"] == "0"
-            assert meta["chunk_total"] == "1"
             assert meta["knowledge_name"] == "kb1"
+            assert meta["source"] == "import_document"
 
 
 class TestRecallEmptyQuery:
@@ -1146,8 +1144,8 @@ def test_http_kb_check_degrades_without_client():
     assert payload["bank"] == "kb"
 
 
-def test_http_kb_upload_dispatch_multipart():
-    """knowledge-base 上传：multipart 解析 → mock client 入库 → 注册条目。
+def test_http_kb_upload_dispatch_multipart(monkeypatch):
+    """knowledge-base 上传：multipart 解析 → mock client 整文档单次入库 → 注册条目。
 
     分发时 kb.set_client(server._client)——注入路径经 server 模块级 _client；
     srv 用 _load_module 显式加载，mock 注入与 http_handle 调用同一实例
@@ -1157,11 +1155,11 @@ def test_http_kb_upload_dispatch_multipart():
 
     import knowledge_base as kb
 
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai")
     srv = _load_module()
 
     client = MagicMock()
-    client.aretain = AsyncMock(side_effect=lambda **kw: MagicMock(
-        operation_id=f"c{kw['metadata']['kb_chunk_index']}", accepted=True))
+    client.aretain = AsyncMock(return_value=MagicMock(operation_id="c0", accepted=True))
     client.acreate_bank = AsyncMock(return_value=None)
     srv._client = client
     try:
@@ -1191,13 +1189,16 @@ def test_http_kb_upload_dispatch_multipart():
         assert result["data"]["status"] == 200, result
         payload = json.loads(b64.b64decode(result["data"]["body"]).decode("utf-8"))
         assert payload["message"] == "文件上传成功"
-        assert payload["chunks_imported"] >= 1
+        assert payload["chunks_imported"] == 1
+        assert payload["ingestion_mode"] == "verbatim"
         assert client.aretain.call_count == payload["chunks_imported"]
-        # bank 唯一存储：每块 aretain 均带 kb 隔离 tag 与聚合元数据
+        # bank 唯一存储：aretain 带 kb 隔离 tag 与聚合元数据（标题双通道在位）
         first_kwargs = client.aretain.call_args_list[0].kwargs
         assert first_kwargs["bank_id"] == "kb"
         assert f"kb_item:{payload['item_id']}" in first_kwargs["tags"]
-        assert first_kwargs["metadata"]["kb_chunk_total"] == str(payload["chunks_imported"])
+        assert first_kwargs["context"] == "doc"
+        assert first_kwargs["content"].startswith("# doc\n\n")
+        assert first_kwargs["metadata"]["kb_name"] == "doc.md"
     finally:
         srv._client = None
         kb.set_client(None)

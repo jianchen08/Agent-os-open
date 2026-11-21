@@ -38,6 +38,7 @@ bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 from _root_api import user_data_dir  # noqa: E402
 from adapter import QQAdapter  # noqa: E402
 from inbound_bridge import ChannelInboundBridge  # noqa: E402
+from onebot_client import DEFAULT_WS_PORT  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -62,7 +63,7 @@ async def _on_load(params: dict[str, Any]) -> None:
         raise RuntimeError("channel_qq 缺少必填配置: access_token")
     _adapter = QQAdapter(
         ws_host=settings.get("ws_host", "127.0.0.1"),
-        ws_port=int(settings.get("ws_port", 8080)),
+        ws_port=int(settings.get("ws_port", DEFAULT_WS_PORT)),
         http_api_url=settings.get("http_api_url", "http://127.0.0.1:5700"),
         access_token=access_token,
     )

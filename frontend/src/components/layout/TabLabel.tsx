@@ -20,10 +20,25 @@ export interface TabLabelProps {
   title: string
   /** 额外类名（字号等由调用方决定） */
   className?: string
+  /**
+   * 收边变体（缺省 fade=渐变遮蔽，顶带两处标签既有契约不变）：
+   * truncate = 省略号收边——移动面板形态（P1-2，MuMu 实测 shots/01）任务标签
+   * 过长时用 truncate 给右侧图标组让位；渐变遮蔽在压缩态会把 CJK 字从中间
+   * 切开（R9 巡检 #7 同款压字面），省略号在窄屏更可读。
+   */
+  variant?: 'fade' | 'truncate'
 }
 
-export function TabLabel({ title, className }: TabLabelProps) {
+export function TabLabel({ title, className, variant = 'fade' }: TabLabelProps) {
   const { ref, overflowing } = useFadeOverflow()
+
+  if (variant === 'truncate') {
+    return (
+      <span data-testid="tab-label" className={cn('min-w-0 truncate', className)}>
+        {title}
+      </span>
+    )
+  }
 
   return (
     <span

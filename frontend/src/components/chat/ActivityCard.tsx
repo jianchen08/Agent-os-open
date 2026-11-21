@@ -6,6 +6,7 @@
 
 import { useState } from 'react'
 import {
+  ArrowRight,
   Ban,
   CheckCircle2,
   ChevronDown,
@@ -25,6 +26,7 @@ import { formatDuration } from '@/types/activity'
 import { useConfirmDialog } from '@/utils/confirm'
 import { formatFileSize } from '@/utils/format'
 import { DetailBlock } from './ActivityBlockViews'
+import { StreamLiveLine } from './StreamLiveLine'
 import type {
   ActivityCardProps,
   ActivityStatus,
@@ -262,6 +264,19 @@ const ActivityCard: FC<ActivityCardProps> = ({
           <span className="text-foreground min-w-0 truncate font-medium">{activity.title}</span>
         )}
 
+        {/* 间接调用徽标（call_tool 动态转发卡）：标题旁固定标注，折叠态可见——
+            标题已是目标工具名，徽标区分「原生持有直接调用」与「经壳转发间接调用」 */}
+        {activity.indirectCall && (
+          <span
+            data-testid="indirect-call-badge"
+            title="经 call_tool 动态转发调用（非本 agent 原生持有）"
+            className="text-muted-foreground bg-[var(--hover-overlay)] flex flex-shrink-0 items-center gap-0.5 rounded border px-1 py-px text-[10px] leading-none"
+          >
+            <ArrowRight className="h-2.5 w-2.5" />
+            间接调用
+          </span>
+        )}
+
         {/* 条目摘要：文件路径/命令/URL 等一句话（折叠态可见，补足条目信息量） */}
         {activity.subtitle && (
           <span
@@ -270,6 +285,17 @@ const ActivityCard: FC<ActivityCardProps> = ({
           >
             {activity.subtitle}
           </span>
+        )}
+
+        {/* 折叠态实时活动行（新增功能 2026-11-18）：工具执行中折叠也能看到
+            stdout 尾部；终态 partialOutput 随 tool_result 释放，行随之收起。 */}
+        {!expanded && activity.status === 'running' && (activity.partialOutput ?? []).length > 0 && (
+          <StreamLiveLine
+            text={(activity.partialOutput ?? []).join('\n')}
+            running
+            testId="tool-live-line"
+            className="min-w-0 flex-1"
+          />
         )}
 
         {activity.durationMs && (
@@ -303,6 +329,10 @@ const ActivityCard: FC<ActivityCardProps> = ({
         {(activity.status === 'running' || activity.status === 'failed') && (
           <span className="flex-shrink-0">{getStatusIcon(activity.status)}</span>
         )}
+
+        {/* 2026-11-19 用户纠正（单一状态指示点）：工具卡头部同样不显示「执行中」
+            文字——状态只由消息底部带转圈的「执行中 · N.Ns」承担；卡内运行态由
+            左侧 spinner 图标表达，头部不显示耗时。 */}
 
         {/* 条目上的打开文件入口：显式图标按钮（不依赖标题 hover 提示） */}
         {activity.filePath && activity.onOpenFile && (

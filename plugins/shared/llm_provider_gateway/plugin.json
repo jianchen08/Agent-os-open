@@ -1,0 +1,189 @@
+{
+  "id": "llm_provider_gateway",
+  "name": "LLM Provider Gateway",
+  "description": "LLM 网关 provider 插件（CLIProxyAPI 随插件分发，ADR 2026-11-04 via=plugin 契约首个正式实例）：provides namespace llm_provider.gateway + 同名 service 背书；插件自包含拉起/管理捆绑网关进程（端口三态：外部探活命中复用不拉起/端口空闲拉起捆绑 exe 并健康等待+退避重启+树杀/第三方占口 fail-visible 不误杀）；complete_stream 聚合响应接 llm.yaml providers.cpa_gateway via=plugin（fallback_chain 首选出口即默认 provider）；config_files 播种网关配置命名空间（用户空间为真值，升级不丢用户配置）。llm_provider.<方言键> 契约：model_name/messages/tools/stream/params 入，聚合 {text,tool_calls,thinking_text,usage,finish_reason} 或 llm_failure{code,message} 出",
+  "version": "0.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "gateway.complete_stream",
+        "description": "via=plugin 契约方：调捆绑网关 /v1/chat/completions 并返回聚合响应（传输在插件，池化/兜底/用量留网关）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "llm.yaml 模型 id（路由键回传语义）"
+            },
+            "model_name": {
+              "type": "string",
+              "description": "网关侧模型名（model_name 缺省回落 model）"
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Chat messages 数组"
+            },
+            "tools": {
+              "type": ["array", "null"],
+              "items": {
+                "type": "object"
+              },
+              "description": "工具 schema（可选）"
+            },
+            "stream": {
+              "type": "boolean",
+              "description": "上游 SSE 收流聚合（true）/ JSON（false）"
+            },
+            "params": {
+              "type": "object",
+              "description": "模型参数透传（temperature/max_tokens 等）"
+            },
+            "stream_ctx": {
+              "type": "object",
+              "description": "流事件信封（本插件聚合语义下暂不消费）"
+            },
+            "call_context": {
+              "type": "object",
+              "description": "调用上下文（透传保留）"
+            },
+            "api_key": {
+              "type": "string",
+              "description": "网关托管形态注入的 client key（覆盖插件配置）"
+            },
+            "api_base": {
+              "type": "string",
+              "description": "网关托管形态注入的 base（覆盖插件配置）"
+            }
+          }
+        }
+      },
+      {
+        "name": "gateway.status",
+        "description": "网关状态（探活二态 + 持有信息 + 管理页 URL，密钥不参与）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "gateway.start",
+        "description": "拉起网关（端口三态幂等：复用/拉起/fail-visible）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "gateway.stop",
+        "description": "停止本插件持有的网关进程（树杀；外部网关不受扰）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ]
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "llm_provider.gateway",
+        "methods": [
+          "complete_stream",
+          "status",
+          "start",
+          "stop"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "gateway"
+      }
+    ]
+  },
+  "config_files": [
+    {
+      "id": "gateway",
+      "path": "config/plugins/llm_provider_gateway/gateway.yaml",
+      "label": "网关插件配置",
+      "fields": [
+        {
+          "name": "base_url",
+          "type": "string",
+          "label": "网关 base_url"
+        },
+        {
+          "name": "autostart",
+          "type": "boolean",
+          "label": "探活未命中时自动拉起捆绑网关"
+        },
+        {
+          "name": "client_api_key",
+          "type": "string",
+          "label": "调用网关的 client key（网关 access.api-keys 启用时填写）"
+        },
+        {
+          "name": "startup_timeout_secs",
+          "type": "number",
+          "label": "拉起健康等待超时（秒）"
+        },
+        {
+          "name": "call_timeout_secs",
+          "type": "number",
+          "label": "上游调用超时（秒）"
+        }
+      ]
+    },
+    {
+      "id": "gateway_server",
+      "path": "config/plugins/llm_provider_gateway/gateway_server.yaml",
+      "label": "网关进程配置（CLIProxyAPI server config 模板）",
+      "settings": false
+    }
+  ],
+  "permissions": {
+    "filesystem": {
+      "read_paths": [
+        "*"
+      ],
+      "write_paths": [
+        "*"
+      ]
+    },
+    "network": {
+      "allowed_hosts": [
+        "127.0.0.1",
+        "localhost"
+      ]
+    },
+    "env_vars": [
+      "PATH",
+      "SYSTEMROOT",
+      "APPDATA",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+      "AGENTOS_USER_ROOT",
+      "AGENTOS_CONFIG_ROOT",
+      "AGENTOS_DATA_DIR",
+      "LLM_GATEWAY_BASE_URL",
+      "LLM_GATEWAY_CLIENT_API_KEY"
+    ],
+    "system_calls": [
+      "cli-proxy-api",
+      "taskkill",
+      "cmd"
+    ]
+  },
+  "priority": 40
+}

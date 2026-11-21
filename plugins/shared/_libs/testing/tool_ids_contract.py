@@ -58,8 +58,18 @@ KNOWN_NON_TOOL_IDS: frozenset[str] = frozenset()
 USER_SPACE_TOOL_IDS: frozenset[str] = frozenset({
     "godot_run",          # external_mcp/godot_mcp（mode_godot 两份 agent 消费）
     "universal_search",   # external_mcp/omnisearch（general/research 系消费）
-    # ZCode/WorkBuddy 外部 agent 桌面端九件操作工具（上游原名，发任务技能
-    # 1ce8af4aa 接入；main/agentos.yaml 与 executor/general_agent.yaml 消费）
+    "web_reader",         # external_mcp/omnisearch（URL→markdown，general/research 系消费）
+    # 外部桌面通道（windows-mcp 外部 MCP，config/mcp.json 声明）工具真名：
+    # 上游实际导出 desktop_*（desktop_capture / desktop_launch / … 共 21 件），
+    # main/agentos.yaml 与 executor/general_agent.yaml 消费。
+    "desktop_capture", "desktop_look", "desktop_windows", "desktop_tree",
+    "desktop_click", "desktop_type", "desktop_key", "desktop_scroll",
+    "desktop_drag", "desktop_window", "desktop_invoke", "desktop_read",
+    "desktop_text", "desktop_wait", "desktop_sequence", "desktop_web",
+    "desktop_course", "desktop_doctor", "desktop_log", "desktop_steer",
+    "desktop_launch",     # 启动应用 / 打开文件 / 打开 URL（软件类别）
+    # 历史抽象名（旧版上游原名）。仍留在白名单：agent yaml 若残留旧名不该因本闸
+    # 静默通过——旧名调用必败，改由「桌面通道实际工具名」承接，见上方 desktop_*。
     "App", "Snapshot", "Click", "Type", "Shortcut", "Wait",
     "Move", "Screenshot", "Scroll",
 })
@@ -70,6 +80,9 @@ RETIRED_TOOL_IDS: frozenset[str] = frozenset({
     "list_directory",
     # 并入 project 工具 action='create'，从注册面退役（工具面退役·任务C刀4）
     "project_create",
+    # 拆为 bash/log/input/kill 四工具，旧名直退不设别名（ADR 2026-11-07
+    # bash 工具契约重构；残留引用 = 该 agent 每次调用必败）
+    "bash_execute",
 })
 
 

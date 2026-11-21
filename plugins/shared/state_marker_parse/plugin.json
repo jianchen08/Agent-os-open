@@ -105,5 +105,21 @@
       "description": "该管道最近一轮 state_updates 载荷（?pipeline_id=；无 = 空载荷——前端状态小卡拉取源，零内核边界下的唯一通道）"
     }
   ],
-  "invoke_entry": "state_marker_parse.execute"
+  "invoke_entry": "state_marker_parse.execute",
+  "state": {
+    "reads": [
+      "agent.id",
+      "context.regex_scripts",
+      "context.rp_actions",
+      "context.rp_engine",
+      "context.rp_init_effects",
+      "context.rp_state_behaviors",
+      "context.rp_state_hard_rules",
+      "context.rp_state_schema",
+      "messages",
+      "meta.cheating",
+      "pipeline_id",
+      "workspace"
+    ]
+  }
 }

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,12 @@ _SDK = str(ROOT / "plugins" / "sdk" / "src")
 _PLUGINS = str(ROOT / "plugins")
 
 _PROBE_ENV = dict(os.environ)
+# 生产等价：内核对 Python sidecar 恒注入 AGENTOS_USER_ROOT（用户数据根），
+# on_load 需要用户数据目录的插件（sync_relay/trace_ingestion 等）据此装配
+# 存储；探针环境未提供会让装载期就 fail——对齐生产而非放宽插件契约。
+if not _PROBE_ENV.get("AGENTOS_USER_ROOT"):
+    _probe_user_root = tempfile.mkdtemp(prefix="agentos-smoke-userroot-")
+    _PROBE_ENV["AGENTOS_USER_ROOT"] = _probe_user_root
 # 探针子进程必须能看到 src（工具实现）/ sdk（SDK 源码）/ plugins。
 # 不能用于串判断"是否已存在"——父进程 PYTHONPATH 含全部路径时会把
 # join 结果清成空串，导致子进程完全丢路径；必须按路径列表成员判断。

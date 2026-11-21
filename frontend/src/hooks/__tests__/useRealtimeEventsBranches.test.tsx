@@ -857,7 +857,7 @@ describe('useRealtimeEvents — 通知类事件', () => {
     vi.useRealTimers()
   })
 
-  it('user_input_send_timeout 缺 thread_id 时插入的 system 消息 sessionId 落空串', () => {
+  it('user_input_send_timeout 缺 thread_id 时消息流不插任何 system 错误气泡', () => {
     const pipelineId = 'pipe-branch-3'
     const cmid = 'cmid-branch-3'
     const ps = usePipelineMessageStore.getState()
@@ -873,11 +873,9 @@ describe('useRealtimeEvents — 通知类事件', () => {
       }),
     )
 
-    const err = usePipelineMessageStore
-      .getState()
-      .getMessages(pipelineId)
-      .find((m) => m.id === `send_failed_${cmid}`)
-    expect(err?.sessionId).toBe('')
+    const msgs = usePipelineMessageStore.getState().getMessages(pipelineId)
+    expect(msgs.some((m) => m.role === 'system')).toBe(false)
+    expect(msgs.find((m) => m.id === `send_failed_${cmid}`)).toBeUndefined()
     unmount()
   })
 
@@ -904,7 +902,7 @@ describe('useRealtimeEvents — 通知类事件', () => {
     unmount()
   })
 
-  it('user_input_send_timeout 有 pipeline_id 与 cmid：标记 failed、停流式、插 system 错误消息', () => {
+  it('user_input_send_timeout 有 pipeline_id 与 cmid：标记 failed、停流式、不插气泡', () => {
     const pipelineId = 'pipe-branch-2'
     const cmid = 'cmid-branch-2'
     const ps = usePipelineMessageStore.getState()
@@ -940,10 +938,9 @@ describe('useRealtimeEvents — 通知类事件', () => {
 
     const msgs = usePipelineMessageStore.getState().getMessages(pipelineId)
     expect(msgs.find((m) => m.id === cmid)?.status).toBe('failed')
-    const err = msgs.find((m) => m.id === `send_failed_${cmid}`)
-    expect(err?.role).toBe('system')
-    expect(err?.content).toContain('连接断开超过 20s')
-    expect(err?.content).toContain('这条消息没有发到服务器')
+    // 失败反馈不在消息流：流内只剩那条乐观 user 消息，无 system 错误气泡
+    expect(msgs).toHaveLength(1)
+    expect(msgs.find((m) => m.id === `send_failed_${cmid}`)).toBeUndefined()
     expect(usePipelineMessageStore.getState().streamingState[pipelineId]).toBeUndefined()
     unmount()
   })

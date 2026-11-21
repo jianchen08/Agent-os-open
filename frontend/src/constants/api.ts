@@ -8,7 +8,6 @@
  * （[来源: docs/decisions/2026-08-21-channel-api-retire-plugin-owned-http.md]）。
  */
 
-import { resolveApiBase } from '../services/shellApiBase'
 import {
   AGENT_MANAGER_ENDPOINTS,
   APPROVAL_SERVICE_ENDPOINTS,
@@ -20,6 +19,7 @@ import {
   TASK_SERVICE_ENDPOINTS,
   USER_ADMIN_ENDPOINTS,
 } from '../services/api/endpoints.generated'
+import { resolveApiBase } from '../services/shellApiBase'
 
 /**
  * API基础URL（从环境变量读取，空值时使用相对路径由Vite代理转发；
@@ -309,3 +309,14 @@ export const API_ENDPOINTS = {
  * API请求超时时间（毫秒）
  */
 export const API_TIMEOUT = 30000
+
+/**
+ * 登录请求超时时间（毫秒）
+ *
+ * 登录是「用户点一次必须进得去」的动作，容错要求与普通请求不同：内核 HTTP 面
+ * 在启动装配/繁忙期会整体停顿（实测单次 25s、≥60s 零字节，非停顿期亚毫秒-
+ * 毫秒级），通用 30s 超时落在停顿窗口内必然失败（用户实测：表单卡「登录中...」
+ * → 30s net::ERR_ABORTED）。此处单独放宽到 120s 覆盖实测停顿上限，其余端点
+ * 仍用 API_TIMEOUT——不给全局超时放水，只给这把唯一的进门钥匙留等待余量。
+ */
+export const AUTH_LOGIN_TIMEOUT = 120000

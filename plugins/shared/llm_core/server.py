@@ -4,10 +4,11 @@
 老代码从 src/plugins/shared/core/llm_core/plugin.py 原封不动复制到本目录，
 本文件只做接口适配：通过 MCP SDK 暴露为工具。
 
-LLM 调用通道（统一路径）：on_load 时向 plugin.py 注入 capability caller
-（``set_capability_caller``），execute 经内核 tool-executor 能力跨进程调用
-llm_service 的 llm.complete_stream；逐字流式由 llm_service 内部 event-bus
-推送（本插件不再维护 chunk 桥接/消费者队列）。
+LLM 调用通道（双服务面拓扑，主方案 §6.0）：on_load 时向 plugin.py 注入能力
+句柄（``set_capability_caller``）——管道面把它交给同进程适配服务面
+（``llm_adapter.execute(route="gateway")``），由适配面组装 ``llm.complete_stream``
+信封跨进程调用 llm_service；逐字流式由 llm_service 内部 event-bus 推送
+（本插件不维护 chunk 桥接/消费者队列）。
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import logging
 import os
 import sys
 from functools import lru_cache
+from typing import Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
@@ -28,7 +30,14 @@ sys.path.insert(0, _llm_dir)
 # 已拆除此依赖的进程）。
 sys.path.insert(0, _paths.plugin_dir)
 
-from plugin import LLMCore  # noqa: E402
+# 合宿裸名隔离：setter 必须与 LLMCore 同批在 exec 期绑定——成员目录此时在
+# sys.path 首位、他人裸名已被遮蔽；钩子运行期再 `from plugin import` 会命中
+# 先加载成员的 plugin.py（2026-11-09 云端/MuMu 实证 ImportError）。
+# 适配服务面（双服务面角色二，批 3）：同插件同进程第二入口——方言注册表 +
+# wire 机器所有者（复制改造件，锚点见 llm_wire/llm_stream/llm_adapter 文件头）。
+import llm_adapter  # noqa: E402
+import llm_wire  # noqa: E402
+from plugin import LLMCore, set_capability_caller  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -67,12 +76,10 @@ def _on_config_changed(config: dict) -> None:
 async def _on_load(params: dict) -> None:
     """Initialize llm_core plugin.
 
-    注入 capability caller：LLM 调用（llm.complete_stream）经内核
-    tool-executor 能力跨进程转发到 llm_service（统一路径唯一调用通道；
-    llm_core 不再直连 LLM API）。随后预热构建 LLMCore 单例。
+    注入能力句柄：管道面把它交给同进程适配服务面（``route="gateway"``），
+    适配面据此跨进程调用 llm_service 的 ``llm.complete_stream``（唯一 llm 服务
+    面，契约冻结；llm_core 不直连 LLM API）。随后预热构建 LLMCore 单例。
     """
-    from plugin import set_capability_caller  # noqa: PLC0415
-
     set_capability_caller(
         lambda method, params_, timeout=None: plugin.get_capability(
             "tool-executor"
@@ -84,10 +91,11 @@ async def _on_load(params: dict) -> None:
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup llm_core plugin."""
-    from plugin import set_capability_caller  # noqa: PLC0415
-
     set_capability_caller(None)
     get_instance.cache_clear()
+    # 适配面：单例槽位清空 + wire 连接池整池关闭（不留半开会话）
+    llm_adapter.reset_face()
+    await llm_wire.aclose_shared_client()
 
 
 @plugin.tool(
@@ -143,6 +151,103 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     if getattr(result, "skip_remaining", False):
         data["skip_remaining"] = True
     return data
+
+
+# ── 适配服务面入口（llm_adapter.execute）───────────────────────────────
+# 能力声明 = plugin.json capabilities.services（G2 双写校验：input_schema 与
+# 本工具 schema 必须逐字段同形）。服务入口为新增面，管道步骤 id 不变
+# （llm_core.execute 冻结）。
+_LLM_ADAPTER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "model": {
+            "type": "string",
+            "description": "Model id (llm.yaml models key; model_name forms are normalized)",
+        },
+        "messages": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Chat messages array",
+        },
+        "tools": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Optional tool schemas for function calling",
+        },
+        "stream": {
+            "type": "boolean",
+            "description": "True = SSE streaming (production path); False = non-streaming",
+        },
+        "dialect": {
+            "type": "string",
+            "description": "Explicit dialect key; empty = resolve from providers.<name>.type",
+        },
+        "params": {
+            "type": "object",
+            "description": "Sampling/thinking params (override llm.yaml model default_params)",
+        },
+        "route": {
+            "type": "string",
+            "enum": ["wire", "gateway"],
+            "description": (
+                "Exit route: wire = dialect wire execution (default, service face); "
+                "gateway = same-host in-process relay to llm.complete_stream "
+                "(production pipeline path)"
+            ),
+        },
+    },
+    "required": ["model", "messages"],
+}
+_LLM_ADAPTER_DESCRIPTION = (
+    "LLM adapter service face (pipeline_llm_core role 2): two exits — wire (dialect "
+    "routing + wire execution + stream consumption) or gateway (in-process relay to "
+    "llm.complete_stream; production pipeline path). Returns the llm.complete_stream-"
+    "shaped aggregate plus 'dialect' on the wire route (partial snapshot on "
+    "interruption/cancel)."
+)
+
+
+@plugin.tool(
+    name="llm_adapter.execute",
+    schema=_LLM_ADAPTER_SCHEMA,
+    description=_LLM_ADAPTER_DESCRIPTION,
+)
+async def llm_adapter_execute(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    stream: bool = True,
+    dialect: str = "",
+    params: dict[str, Any] | None = None,
+    route: str = llm_adapter.ROUTE_WIRE,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """适配服务面入口：按路线执行 LLM 调用并返回聚合响应。
+
+    Args:
+        model: 模型 id（llm.yaml models 段 key）。
+        messages: 对话消息列表。
+        tools: 工具 schema（可选）。
+        stream: True=SSE 流式（生产路径）；False=非流式（仅 wire 路线）。
+        dialect: 显式方言键（空=providers.<name>.type 解析；仅 wire 路线）。
+        params: 采样/思考参数（显式优先）。
+        route: ``wire``（方言 wire 直发，缺省）/ ``gateway``（网关出口；仅同宿主
+            进程内可用——MCP 调用方无网关句柄，传 gateway 即 fail-closed）。
+
+    Returns:
+        ``llm_adapter.LLMAdapterFace.execute`` 的聚合 dict（wire 路线增 dialect；
+        partial 非 None 表示中断/取消）。
+    """
+    return await llm_adapter.execute(
+        model,
+        messages,
+        tools=tools,
+        stream=stream,
+        dialect=dialect,
+        params=params,
+        route=route,
+        **kwargs,
+    )
 
 
 if __name__ == "__main__":

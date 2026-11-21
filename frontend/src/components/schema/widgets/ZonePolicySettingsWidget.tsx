@@ -14,8 +14,8 @@ import { Loader2, Plus, X } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/sonner'
-import { PIPELINE_SECURITY_CHECK_ENDPOINTS } from '@/services/api/endpoints.generated'
 import apiClient from '@/services/api/client'
+import { PIPELINE_SECURITY_CHECK_ENDPOINTS } from '@/services/api/endpoints.generated'
 
 const ZONES_ENDPOINT = PIPELINE_SECURITY_CHECK_ENDPOINTS.zone_policy_get
 

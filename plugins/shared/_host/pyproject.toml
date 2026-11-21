@@ -32,6 +32,14 @@ dependencies = [
     "docker>=7.0",         # isolation_service / pipeline_isolation_guard —
                            # 容器隔离底座（此前带外实装不在 lock，uv sync
                            # 修剪后实装门禁红；按门禁指令补声明归一）
+    "simurg>=1.0.4,<2",    # 共享根 _llm_streaming.py（流式退化检测，经
+                           # llm_provider.* 成员 import）— ADR
+                           # 2026-11-12-degen-detector-simurg-adoption
+    "sherpa-onnx>=2.0.1",  # multimodal_service — 本地 ASR（SenseVoiceSmall
+                           # int8 ONNX，纯 CPU；成员内函数级懒 import）
+    "paramiko>=3.4",       # sync_agent — 远端文件面 SFTP 传输
+                           # （/ext/sync_agent/fs/**）；此前带外实装不在 lock，
+                           # uv sync 修剪后实装门禁红，按门禁指令补声明归一
 ]
 
 # 本地 SDK 源映射（editable，与成员插件 pyproject 同轨）：

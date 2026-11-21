@@ -1206,6 +1206,7 @@ mod tests {
             enabled: None,
             activation: None,
             provides: None,
+            visibility: Default::default(),
             persistent_fields: vec![],
             export_fields: vec![],
             aux_venvs: Vec::new(),

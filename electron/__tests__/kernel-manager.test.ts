@@ -27,8 +27,13 @@ import {
   KERNEL_RESTART_STABLE_MS,
   KernelMissingError,
   KernelPortBusyError,
+  buildDevInstanceConfigYaml,
+  buildDevKernelEnv,
   buildKernelEnv,
+  devPluginRoots,
   ensurePackagedKernelRunning,
+  INSTANCE_CONFIG_ENV,
+  INSTANCE_CONFIG_FILENAME,
   kernelResourcePaths,
   planKernelRestart,
   probeKernelHealth,
@@ -40,6 +45,8 @@ import {
   seedConfigTree,
   shutdownManagedKernel,
   waitForKernelHealth,
+  writeDevInstanceConfig,
+  type DevInstanceConfig,
 } from "../kernel-manager";
 
 describe("kernelResourcePaths", () => {
@@ -55,6 +62,11 @@ describe("kernelResourcePaths", () => {
       path.join("plugins", "shared"),
     );
     expect(path.relative("C:\\app\\resources", p.configRoot)).toBe("config");
+    // MXC 执行器随包位（extraResources: build/mxc-runtime → resources/mxc）
+    expect(p.mxcExe).toBeDefined();
+    expect(path.relative("C:\\app\\resources", p.mxcExe as string)).toBe(
+      path.join("mxc", "x64", "wxc-exec.exe"),
+    );
   });
 
   it("linux/darwin：内核 exe 为无扩展名占位名（与 extraResources unix 产物名同口径）", () => {
@@ -64,6 +76,8 @@ describe("kernelResourcePaths", () => {
       expect(path.relative("/opt/app/resources", p.kernelExe)).toBe(
         path.join("kernel", "agentos-kernel"),
       );
+      // MXC 是 Windows 专属后端，非 Windows 不注入执行器
+      expect(p.mxcExe).toBeUndefined();
     }
   });
 
@@ -85,7 +99,7 @@ describe("kernelResourcePaths", () => {
 describe("buildKernelEnv", () => {
   const paths = kernelResourcePaths("C:\\app\\resources", "win32");
 
-  it("空白基座：写入绑定面/插件根/配置根/双源裁决/venv 自愈/空闲回收六个变量", () => {
+  it("空白基座：写入绑定面/插件根/配置根/venv 自愈/空闲回收等变量", () => {
     const env = buildKernelEnv({}, paths);
     expect(env.AGENTOS_BIND).toBe("127.0.0.1");
     expect(env.AGENTOS_PLUGINS_DIR).toBe(paths.pluginsDir);
@@ -93,9 +107,13 @@ describe("buildKernelEnv", () => {
     expect(env.AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS).toBe("300");
   });
 
-  it("双源裁决置内置优先（BUG-55：用户空间陈旧副本不得压过打包新版）", () => {
+  it("双源裁决 env 已退役：不再注入 AGENTOS_PLUGIN_SOURCE_PRIORITY（ADR 2026-11-07 §2.5）", () => {
     const env = buildKernelEnv({}, paths);
-    expect(env.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBe("builtin");
+    expect(env.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBeUndefined();
+    // ambient 残留值经 base 原样透传（本文件通用继承语义）——内核侧读者已
+    // 随裁决退役整体删除，透传值无消费面，无害。
+    const legacy = buildKernelEnv({ AGENTOS_PLUGIN_SOURCE_PRIORITY: "builtin" }, paths);
+    expect(legacy.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBe("builtin");
   });
 
   it("venv 自愈门开（装机链无 dev launcher，boot 后台 uv sync 重建缺 .venv 的 sidecar）", () => {
@@ -106,6 +124,16 @@ describe("buildKernelEnv", () => {
   it("AGENTOS_KERNEL_PORT 钉为解析端口：ambient 值不致内核监听与探测分叉", () => {
     const env = buildKernelEnv({ AGENTOS_KERNEL_PORT: "1" }, paths);
     expect(env.AGENTOS_KERNEL_PORT).toBe(String(KERNEL_PORT));
+  });
+
+  it("MXC 执行器注入：随包路径下发，ambient 显式设置优先", () => {
+    const env = buildKernelEnv({}, paths);
+    expect(env.AGENTOS_MXC_EXECUTOR).toBe(paths.mxcExe);
+    const pinned = buildKernelEnv(
+      { AGENTOS_MXC_EXECUTOR: "D:\\custom\\wxc-exec.exe" },
+      paths,
+    );
+    expect(pinned.AGENTOS_MXC_EXECUTOR).toBe("D:\\custom\\wxc-exec.exe");
   });
 
   it("保留基座既有变量（Windows 子进程需要 SystemRoot 等）", () => {
@@ -1009,5 +1037,137 @@ describe("seedConfigTree（包内出厂配置树首次播种到用户空间，�
 
       expect(fs.readFileSync(mineOnly, "utf-8")).toBe("name: mine\n");
     });
+  });
+
+  // ── markdown 内容资产版本裁决（ADR 2026-11-09-seed-version-content-assets）──
+  // md 首行 `<!-- seed-version: N -->` 与 yaml 顶层 version: 同权；无标记
+  // 维持 copy-if-missing，用户数据真值不被冲。
+
+  it("受管 md：用户副本无标记（=0）被包内覆盖，返回计数可观测", () => {
+    withTree(({ pkg, user }) => {
+      const pkgMd = path.join(pkg, "rules", "execution_review_rules.md");
+      const userMd = path.join(user, "rules", "execution_review_rules.md");
+      fs.mkdirSync(path.dirname(pkgMd), { recursive: true });
+      fs.writeFileSync(pkgMd, "<!-- seed-version: 2 -->\n新版规则\n", "utf-8");
+      fs.mkdirSync(path.dirname(userMd), { recursive: true });
+      fs.writeFileSync(userMd, "旧版规则（无标记）\n", "utf-8");
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userMd, "utf-8")).toBe(
+        "<!-- seed-version: 2 -->\n新版规则\n",
+      );
+      expect(result.overwritten).toBe(1);
+    });
+  });
+
+  it("受管 md：用户副本版本严格更大则保留（改完抬版本=声明所有权）", () => {
+    withTree(({ pkg, user }) => {
+      const pkgMd = path.join(pkg, "rules", "execution_review_rules.md");
+      const userMd = path.join(user, "rules", "execution_review_rules.md");
+      fs.mkdirSync(path.dirname(pkgMd), { recursive: true });
+      fs.writeFileSync(pkgMd, "<!-- seed-version: 2 -->\n包内规则\n", "utf-8");
+      fs.mkdirSync(path.dirname(userMd), { recursive: true });
+      fs.writeFileSync(userMd, "<!-- seed-version: 3 -->\n我的规则\n", "utf-8");
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userMd, "utf-8")).toContain("我的规则");
+      expect(result.overwritten).toBe(0);
+    });
+  });
+
+  it("非受管 md（包内无首行标记）维持 copy-if-missing，不覆盖用户副本", () => {
+    withTree(({ pkg, user }) => {
+      const pkgMd = path.join(pkg, "rules", "README.md");
+      const userMd = path.join(user, "rules", "README.md");
+      fs.mkdirSync(path.dirname(pkgMd), { recursive: true });
+      fs.writeFileSync(pkgMd, "# 出厂说明\n", "utf-8");
+      fs.mkdirSync(path.dirname(userMd), { recursive: true });
+      fs.writeFileSync(userMd, "# 用户改过的说明\n", "utf-8");
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userMd, "utf-8")).toBe("# 用户改过的说明\n");
+      expect(result.overwritten).toBe(0);
+    });
+  });
+
+  it("md 标记须在首个非空行：第二行标记不算受管声明", () => {
+    withTree(({ pkg, user }) => {
+      const pkgMd = path.join(pkg, "rules", "late_marker.md");
+      const userMd = path.join(user, "rules", "late_marker.md");
+      fs.mkdirSync(path.dirname(pkgMd), { recursive: true });
+      fs.writeFileSync(pkgMd, "# 标题\n<!-- seed-version: 9 -->\n", "utf-8");
+      fs.mkdirSync(path.dirname(userMd), { recursive: true });
+      fs.writeFileSync(userMd, "# 用户副本\n", "utf-8");
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userMd, "utf-8")).toBe("# 用户副本\n");
+      expect(result.overwritten).toBe(0);
+    });
+  });
+});
+
+describe("dev 实例启动配置（分级单副本刀 1+2，ADR 2026-11-07）", () => {
+  it("devPluginRoots：三根同指仓内 plugins/shared（dev 退化配置，ADR §2.2）", () => {
+    const roots = devPluginRoots(path.join("D:", "repo"));
+    expect(roots.tier1Root).toBe(path.join("D:", "repo", "plugins", "shared"));
+    expect(roots.tier2Root).toBe(roots.tier1Root);
+    expect(roots.sharedRoot).toBe(roots.tier1Root);
+  });
+
+  it("buildDevInstanceConfigYaml：schema 1 + 三根单引号包裹（Windows 反斜杠字面保留）", () => {
+    const shared = path.join("D:", "repo", "plugins", "shared");
+    const yaml = buildDevInstanceConfigYaml({
+      tier1Root: shared,
+      tier2Root: shared,
+      sharedRoot: shared,
+    });
+    expect(yaml).toContain("schema: 1");
+    expect(yaml).toContain(`tier1_root: '${shared}'`);
+    expect(yaml).toContain(`tier2_root: '${shared}'`);
+    expect(yaml).toContain(`shared_root: '${shared}'`);
+    // 单引号标量：无双引号转义歧义（yaml 解析侧字面保留反斜杠）
+    expect(yaml).not.toMatch(/tier1_root: "/);
+  });
+
+  it("writeDevInstanceConfig：写 <userRoot>/config/kernel/instance.yaml 并返回配置文件路径与三根", () => {
+    const user = fs.mkdtempSync(path.join(os.tmpdir(), "dev-instance-"));
+    const repo = path.join("D:", "repo");
+    const shared = path.join(repo, "plugins", "shared");
+    try {
+      const dev = writeDevInstanceConfig({ repoRoot: repo, userRoot: user });
+      expect(dev.configPath).toBe(
+        path.join(user, "config", "kernel", INSTANCE_CONFIG_FILENAME),
+      );
+      const body = fs.readFileSync(dev.configPath, "utf-8");
+      expect(body).toContain("schema: 1");
+      expect(body).toContain(`tier1_root: '${shared}'`);
+      expect(dev.tier2Root).toBe(dev.tier1Root);
+      // 幂等覆盖：重写不抛、内容一致
+      const again = writeDevInstanceConfig({ repoRoot: repo, userRoot: user });
+      expect(again.configPath).toBe(dev.configPath);
+      expect(fs.readFileSync(again.configPath, "utf-8")).toBe(body);
+    } finally {
+      fs.rmSync(user, { recursive: true, force: true });
+    }
+  });
+
+  it("buildDevKernelEnv：交付实例配置路径 + 三根载体（tier1/tier2），不修改 base", () => {
+    const base = { SYSTEMROOT: "C:/Windows" } as NodeJS.ProcessEnv;
+    const dev: DevInstanceConfig = {
+      configPath: path.join("D:", "repo", "user_root", "config", "kernel", "instance.yaml"),
+      tier1Root: path.join("D:", "repo", "plugins", "shared"),
+      tier2Root: path.join("D:", "repo", "plugins", "shared"),
+      sharedRoot: path.join("D:", "repo", "plugins", "shared"),
+    };
+    const env = buildDevKernelEnv(base, dev);
+    expect(env[INSTANCE_CONFIG_ENV]).toBe(dev.configPath);
+    expect(env.AGENTOS_PLUGINS_DIR).toBe(dev.tier1Root);
+    expect(env.AGENTOS_PLUGIN_TIER2_ROOT).toBe(dev.tier2Root);
+    expect(env.SYSTEMROOT).toBe("C:/Windows");
+    expect(base[INSTANCE_CONFIG_ENV]).toBeUndefined();
   });
 });

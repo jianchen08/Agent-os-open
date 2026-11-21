@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "note": "固定验证脚本的 EOL 归一 SHA-256。改动 skills/plugin-dev/scripts/ 或 skills/skill-dev-toolkit/scripts/spawn_test_kernel.py 须同步更新本表（test_verifier.py 有同文闸）。",
+  "files": {
+    "skills/plugin-dev/scripts/verify_host.py": "b92fc86c2eb6f481ba5915ea386c532ffe9c7967dfcfe8d716714796921f543b",
+    "skills/plugin-dev/scripts/verify_plugin.py": "b76888867dd3aaa662fad7756988beccd6068bbdb4642622a0f3349c81722019",
+    "skills/plugin-dev/scripts/frontend_probe.cjs": "2c9479b6794692f7965224076f424794b3e414e90134c4c9bd772e89566144f3",
+    "skills/skill-dev-toolkit/scripts/spawn_test_kernel.py": "991c0860b1bda8bc69cc2e7f1131b35a960bd1c7638237984e0e13222a235e0e"
+  }
+}

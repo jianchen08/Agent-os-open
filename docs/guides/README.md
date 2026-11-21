@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guides-index
+type: standard
+status: active
+---
+
 # 开发指南索引
 
 > 指南 = **横切规则 + 指针**：只承载跨模式公共契约与权威指针，写成可注入遵守的规则体。

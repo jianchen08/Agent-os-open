@@ -29,6 +29,7 @@ class OAuthAuthorizeTool:
         try:
             wait_seconds = _parse_wait(args.get("wait_seconds"))
             guidance_action = _parse_guidance_action(args.get("guidance_action"))
+            mode = _parse_mode(args.get("mode"))
             result = await flow.authorize(
                 server_url=str(args.get("server_url") or ""),
                 client_id=_optional_text(args.get("client_id")),
@@ -39,7 +40,31 @@ class OAuthAuthorizeTool:
                 resource_metadata_url=_optional_text(args.get("resource_metadata_url")),
                 guidance=self._guidance,
                 guidance_action=guidance_action,
+                mode=mode,
             )
+        except OAuthError as exc:
+            return create_failure_result(str(exc), exc.code)
+        return create_success_result(result)
+
+
+class OAuthPasteCallbackTool:
+    """``oauth(action='paste_callback')``：N3 粘贴回调双模式的兑换端。
+
+    用户在任意浏览器完成授权后，把浏览器最终跳转到的回调 URL（含 code/state）
+    作为 ``callback_url`` 粘回——与 http 回调同一闸门核（state/iss/PKCE）完成
+    兑换 + 落库 + grants 记账。
+    """
+
+    async def execute(self, args: dict[str, Any]) -> ToolExecutionResult:
+        callback_url = _optional_text(args.get("callback_url"))
+        if callback_url is None:
+            return create_failure_result(
+                "callback_url 必填：粘贴浏览器最终跳转到的回调 URL"
+                "（形如 http://127.0.0.1:9100/ext/oauth_broker/callback?code=…&state=…）",
+                "OPTION_INVALID",
+            )
+        try:
+            result = await flow.complete_pasted_callback(callback_url)
         except OAuthError as exc:
             return create_failure_result(str(exc), exc.code)
         return create_success_result(result)
@@ -81,4 +106,14 @@ def _parse_guidance_action(value: Any) -> str:
         return flow.GUIDANCE_ACTION_REGISTER_APP
     if text not in flow.GUIDANCE_ACTIONS:
         raise OAuthError("OPTION_INVALID", f"guidance_action 只接受 {'/'.join(flow.GUIDANCE_ACTIONS)}")
+    return text
+
+
+def _parse_mode(value: Any) -> str:
+    """``mode``（N3 登录模式）归一边界：缺省 browser；白名单外 → OPTION_INVALID。"""
+    text = _optional_text(value)
+    if text is None:
+        return flow.MODE_BROWSER
+    if text not in flow.AUTHORIZE_MODES:
+        raise OAuthError("OPTION_INVALID", f"mode 只接受 {'/'.join(flow.AUTHORIZE_MODES)}")
     return text

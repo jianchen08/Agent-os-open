@@ -74,7 +74,7 @@ def _spy_caller(calls: list[dict[str, Any]]) -> Any:
 
 
 def test_dangling_workspace_refuses_without_touching_service(tmp_path: Path) -> None:
-    """workspace 指向不存在的目录 → 返回 (None, None)，环境服务零触达（fail-closed）。"""
+    """workspace 指向不存在的目录 → (None, None, 错因)，环境服务零触达（fail-closed）。"""
     guard = _make_guard()
     dangling = tmp_path / "no_such_ws__wt_deadbeef"
     calls: list[dict[str, Any]] = []
@@ -82,7 +82,8 @@ def test_dangling_workspace_refuses_without_touching_service(tmp_path: Path) -> 
 
     out = _run(guard._get_or_create_container(str(dangling), _make_ctx()))
 
-    assert out == (None, None)
+    assert out[:2] == (None, None)
+    assert "悬空挂载防护" in out[2]
     assert calls == []
 
 
@@ -94,10 +95,11 @@ def test_existing_workspace_goes_through_service(tmp_path: Path) -> None:
     calls: list[dict[str, Any]] = []
     plugin_module.set_env_caller(_spy_caller(calls))
 
-    env_id, backend = _run(guard._get_or_create_container(str(ws), _make_ctx()))
+    env_id, backend, err = _run(guard._get_or_create_container(str(ws), _make_ctx()))
 
     assert env_id == "cua-real_ws"
     assert backend is None
+    assert err == ""
     assert len(calls) == 1
     assert calls[0]["tool_name"] == "isolation.create_env"
     assert calls[0]["args"]["workspace"] == str(ws)
@@ -108,5 +110,7 @@ def test_none_workspace_short_circuits(tmp_path: Path) -> None:
     guard = _make_guard()
     calls: list[dict[str, Any]] = []
     plugin_module.set_env_caller(_spy_caller(calls))
-    assert _run(guard._get_or_create_container(None, _make_ctx())) == (None, None)
+    out = _run(guard._get_or_create_container(None, _make_ctx()))
+    assert out[:2] == (None, None)
+    assert "workspace 未解析" in out[2]
     assert calls == []

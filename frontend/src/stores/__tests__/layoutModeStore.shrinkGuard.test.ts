@@ -11,8 +11,8 @@
  * - 用户主动关签（含单个关闭与关闭全部）仍按原语义持久化，闸门不误伤。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { WorkspaceTab } from '@/types/layout'
 import { userScopedKey as pk } from '@/utils/userScopedStorage'
+import type { WorkspaceTab } from '@/types/layout'
 
 /** R241 恢复集同形的 5 签基线（任务管理/导航/直播导演台/主城/记忆） */
 const BASE_TAB_IDS = [

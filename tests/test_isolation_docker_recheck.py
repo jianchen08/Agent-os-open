@@ -4,7 +4,7 @@
 背景 BUG：IsolationGuard._docker_available 仅在插件构造时（__init__）检测一次，
 之后整个进程生命周期不再刷新。当编排进程启动那一刻 Docker daemon 正好假死
 （docker version 超时），_detect_docker 返回 False 被永久钉死，导致此后所有
-要求容器隔离的工具（如 bash_execute）都被拦截为 docker_unavailable_container_required，
+要求容器隔离的工具（如 bash）都被拦截为 docker_unavailable_container_required，
 即便 daemon 已恢复、容器都在跑也无效——必须重启整个编排进程才能解除。
 
 修复（见 src/plugins/input/isolation_guard/plugin.py）：
@@ -63,11 +63,11 @@ def _fake_wsl_health(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     return fake
 
 
-def _make_ctx(tool="bash_execute"):
+def _make_ctx(tool="bash"):
     """创建 tool_execute 类型的 PluginContext。
 
     默认标 L2（子任务）：本文件用例测的是"docker 可用进容器 / 不可用 blocked"
-    这类子任务场景；主 agent（L1）的 bash_execute 一律走 host，不会进容器。
+    这类子任务场景；主 agent（L1）的 bash 一律走 host，不会进容器。
     """
     return PluginContext(
         state={
@@ -87,7 +87,7 @@ def _container_policy(plugin):
     plugin._decider.resolve = MagicMock(return_value=mock_policy)
     # 0.2 容器落地：provider=docker 后还需幂等获取/创建容器，失败会改标 denied。
     # 本文件测复检契约，容器创建一律 stub 成功（容器语义由 test_container_landing 覆盖）。
-    plugin._get_or_create_container = AsyncMock(return_value=("mock-container-1", None))
+    plugin._get_or_create_container = AsyncMock(return_value=("mock-container-1", None, ""))
 
 
 def _make_auto_plugin(detected: tuple[str, str] = ("absent", "")):

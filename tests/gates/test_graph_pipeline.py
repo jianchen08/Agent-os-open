@@ -10,6 +10,7 @@ frontmatter 合法性决定校验红绿。全部走 tmp 真实文件系统（真
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -73,7 +74,7 @@ def _make_repo(root: Path) -> None:
                 "requires_services": [],
                 "capabilities": {
                     "services": [],
-                    "tools": [{"name": "bash_execute", "description": "shell"}],
+                    "tools": [{"name": "bash", "description": "shell"}],
                 },
             },
             ensure_ascii=False,
@@ -89,7 +90,7 @@ def _make_repo(root: Path) -> None:
     _write(
         root,
         "config/agents/executor/general_agent.yaml",
-        "name: 通用执行者\ndescription: 执行任务\ntool_ids:\n- bash_execute\n",
+        "name: 通用执行者\ndescription: 执行任务\ntool_ids:\n- bash\n",
     )
     _write(
         root,
@@ -209,14 +210,14 @@ class TestExtractSource:
         assert sorted(d.dep for d in facts.crate_deps) == ["beta_c", "serde"]
 
     def test_agent_yaml_yields_node_and_tool_needs(self):
-        text = "name: 通用执行者\ntool_ids:\n- bash_execute\n- human_interaction\n"
+        text = "name: 通用执行者\ntool_ids:\n- bash\n- human_interaction\n"
         facts = graph_extract.extract_source(
             "config/agents/executor/general_agent.yaml", text
         )
         assert facts.kind == "agent"
         assert facts.nodes[0].label == "通用执行者"
         assert [t.tool_id for t in facts.tool_needs] == [
-            "bash_execute",
+            "bash",
             "human_interaction",
         ]
 
@@ -322,7 +323,7 @@ class TestBuildGraph:
         _make_repo(root)
         data, _, _ = build_graph(root)
         dep_edges = {(e["s"], e["t"]) for e in _edges(data, gm.REL_DEPENDS_ON)}
-        # tool_ids bash_execute → 提供方 bash 插件
+        # tool_ids bash → 提供方 bash 插件
         assert ("agent:general_agent", "plugin:bash") in dep_edges
 
     def test_crate_dependency_edge_internal_only(self, tmp_path):
@@ -532,10 +533,17 @@ class TestCheckGraph:
             ("plan", "archived", True),
             ("plan", "active", False),
             ("plan", "superseded", False),
+            ("plan", "deprecated", True),  # 墓碑件：plan 型文档废弃后留指针
+            ("report", "deprecated", True),
             ("report", "active", True),
             ("report", "draft", False),
             ("requirement", "active", True),
             ("design", "superseded", True),
+            # 2026-11-14 枚举扩展（文档治理方案 D1/D5）后的矩阵口径。
+            # standard 的路径约束由 test_standard_must_live_in_standards_roots 单测
+            # （本 parametrize 共用 _meta 的 docs/x.md 路径，不在此重测归属）。
+            ("adr", "deprecated", False),  # ADR 退出语义 = superseded/archived
+            ("design", "deprecated", True),
         ],
     )
     def test_type_status_matrix(self, type_, status, ok, tmp_path):
@@ -547,6 +555,26 @@ class TestCheckGraph:
         data = {"nodes": [], "edges": edges}
         findings = graph_check.check_graph(data, [meta], [])
         assert (findings == []) is ok, findings
+
+    def test_standard_must_live_in_standards_roots(self):
+        """type=standard 的归宿只有 docs/guides/ 与 docs/schemas/（§二类型=链位）。"""
+        inside = gm.DocMeta(
+            doc_id="20261114-std", type="standard", status="active",
+            path="docs/schemas/文档治理标准.md",
+        )
+        outside = gm.DocMeta(
+            doc_id="20261114-std2", type="standard", status="active",
+            path="docs/working/错位标准.md",
+        )
+        assert graph_check.check_graph({"nodes": [], "edges": []}, [inside], []) == []
+        findings = graph_check.check_graph({"nodes": [], "edges": []}, [outside], [])
+        assert any("type=standard" in f for f in findings), findings
+
+    def test_adr_deprecated_rejected(self):
+        """ADR 不得用 deprecated：退出语义只有被推翻(superseded)或停用(archived)。"""
+        meta = _meta("20261028-old-adr", "adr", "deprecated")
+        findings = graph_check.check_graph({"nodes": [], "edges": []}, [meta], [])
+        assert any("deprecated" in f for f in findings), findings
 
     def test_superseded_requires_supersedes_link(self, tmp_path):
         meta = _meta("20261028-old", "plan", "superseded")
@@ -571,6 +599,51 @@ class TestCheckGraph:
         # 无 doc_id 的 frontmatter（如 SKILL.md name/description）不在执法范围
         meta = gm.DocMeta(doc_id="", type="", status="", path="skills/s/SKILL.md")
         assert graph_check.check_graph({"nodes": [], "edges": []}, [meta], []) == []
+
+
+class TestFailClosedInputs:
+    """输入面残缺必须红（门禁不得退化成恒绿包装）。
+
+    意图：门禁的红绿承诺是"文档面有没有问题"；根目录指错、空检出、docs/ 缺失
+    三种形态下没有任何被执法者，此时"0 个问题"是假绿。故一律 fail-closed
+    判红（退出码 2）且不产出数据文件（残留 graph.js 会被误当新鲜数据）。
+    """
+
+    def test_missing_root_fails_closed(self, tmp_path):
+        out, state = tmp_path / "g.js", tmp_path / "s.json"
+        assert aggregate(tmp_path / "no_such_root", out, state) == 2
+        assert not out.exists(), "输入不可判定时不得产出数据文件"
+        assert not state.exists()
+
+    def test_empty_repo_fails_closed(self, tmp_path):
+        # 空检出（稀疏/浅检出）→ 零提取源，不得放行
+        out, state = tmp_path / "g.js", tmp_path / "s.json"
+        assert aggregate(tmp_path, out, state) == 2
+        assert not out.exists()
+
+    def test_repo_without_docs_fails_closed(self, tmp_path):
+        # 有源但文档面整体缺失（docs/ 被误删/指到非仓目录）→ 红
+        _write(tmp_path, "plugins/shared/solo/plugin.json", json.dumps({"id": "solo"}))
+        out, state = tmp_path / "g.js", tmp_path / "s.json"
+        assert aggregate(tmp_path, out, state) == 2
+
+    def test_param_error_is_nonzero(self):
+        # 参数错误（argparse 退出 2）——不得被吞成绿
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "graph_aggregate.py"), "--bogus-arg"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 2, f"参数错误必须非 0，实际 {proc.returncode}"
+
+    def test_real_repo_guard_does_not_misfire(self):
+        # 性质断言：守卫只拦"输入残缺"，不改变正常仓的判定语义——真实仓
+        # 必须能走到校验阶段（0 绿 / 1 有 finding 都算走到了；2 = 守卫误判）。
+        # 不断言 ==0：多会话并行仓的未跟踪残留可让校验合法变红（见 ADR 影响节）。
+        root = Path(__file__).resolve().parents[2]
+        out, state = root / ".zctmp" / "graph_guard_check.js", root / ".zctmp" / "graph_guard_state.json"
+        assert aggregate(root, out, state) in (0, 1), "真实仓被守卫误判为输入残缺"
 
 
 # ── 门禁挂载：run_gates fast 档 ───────────────────────────────────────

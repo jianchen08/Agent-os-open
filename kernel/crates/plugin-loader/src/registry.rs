@@ -844,57 +844,83 @@ impl ServiceSurface {
     /// 单插件 `requires_services` 首错（fail-closed）：条目无人提供即返回错误。
     pub fn first_error_for(&self, m: &PluginManifest) -> Option<ServiceDepError> {
         for item in &m.requires_services {
-            match parse_item(item) {
-                (ns, Some(method)) => {
-                    if !self.has_method(ns, method) {
-                        return Some(ServiceDepError::Unsatisfied {
-                            consumer: m.id.clone(),
-                            service: item.clone(),
-                            detail: format!(
-                                "service endpoint '{ns}.{method}' is not registered by any plugin"
-                            ),
-                        });
-                    }
-                }
-                (ns, None) => {
-                    if !self.has_role(ns) {
-                        return Some(ServiceDepError::Unsatisfied {
-                            consumer: m.id.clone(),
-                            service: item.clone(),
-                            detail: format!("capability role '{ns}' has no registered method"),
-                        });
-                    }
-                }
+            if !self.entry_satisfied(item) {
+                // 文案双形态保持存量契约：无点=角色级措辞，点分=端点级措辞
+                let detail = if item.contains('.') {
+                    format!("service endpoint '{item}' is not registered by any plugin")
+                } else {
+                    format!("capability role '{item}' has no registered method")
+                };
+                return Some(ServiceDepError::Unsatisfied {
+                    consumer: m.id.clone(),
+                    service: item.clone(),
+                    detail,
+                });
             }
         }
         None
     }
 
-    /// `requires_services` 条目 → 提供者插件 id 列表（服务面拓扑边用）。
-    pub fn provider_ids(&self, item: &str) -> Vec<String> {
-        let (ns, method) = parse_item(item);
-        match method {
-            Some(m) => self
-                .providers
-                .get(&format!("{ns}.{m}"))
-                .cloned()
-                .unwrap_or_default(),
-            None => {
-                // 角色级：收集该 ns 下所有端点/角色的提供者（去重）。
-                let mut out = Vec::new();
-                let prefix = format!("{ns}.");
-                for (endpoint, provs) in &self.providers {
-                    if endpoint == ns || endpoint.starts_with(&prefix) {
-                        for p in provs {
-                            if !out.contains(p) {
-                                out.push(p.clone());
-                            }
-                        }
-                    }
-                }
-                out
+    /// requires_services 条目满足判定（点分命名空间三形态并容）。
+    ///
+    /// 存量形态 `ns.method`（首点拆，ns 单段）与点分 ns 新形态（ADR
+    /// 2026-11-19-service-declaration-dotted-ns：提供方 provides 注册完整
+    /// 点分 namespace，如 `grants.ledger`）并存，按序三试：
+    /// ① 条目整体=已注册 namespace（角色满足）；
+    /// ② 首点拆 `ns.method`（存量口径）；
+    /// ③ 末点拆 `ns.method`（点分 ns 下点名方法）。
+    fn entry_satisfied(&self, item: &str) -> bool {
+        if self.has_role(item) {
+            return true;
+        }
+        if let Some((ns, method)) = item.split_once('.') {
+            if self.has_method(ns, method) {
+                return true;
             }
         }
+        if let Some((ns, method)) = item.rsplit_once('.') {
+            if self.has_method(ns, method) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `requires_services` 条目 → 提供者插件 id 列表（服务面拓扑边用）。
+    ///
+    /// 与 [`Self::entry_satisfied`] 同口径三形态并容：整体=endpoint 键直查、
+    /// 首点拆、末点拆；直查皆空再按整体 namespace 角色收集（前缀匹配）。
+    pub fn provider_ids(&self, item: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        fn push_distinct(out: &mut Vec<String>, provs: &[String]) {
+            for p in provs {
+                if !out.contains(p) {
+                    out.push(p.clone());
+                }
+            }
+        }
+        if let Some(provs) = self.providers.get(item) {
+            push_distinct(&mut out, provs);
+        }
+        if let Some((ns, m)) = item.split_once('.') {
+            if let Some(provs) = self.providers.get(&format!("{ns}.{m}")) {
+                push_distinct(&mut out, provs);
+            }
+        }
+        if let Some((ns, m)) = item.rsplit_once('.') {
+            if let Some(provs) = self.providers.get(&format!("{ns}.{m}")) {
+                push_distinct(&mut out, provs);
+            }
+        }
+        if out.is_empty() {
+            let prefix = format!("{item}.");
+            for (endpoint, provs) in &self.providers {
+                if endpoint == item || endpoint.starts_with(&prefix) {
+                    push_distinct(&mut out, provs);
+                }
+            }
+        }
+        out
     }
 
     /// 反向依赖查询（ADR 2026-09-14-config-ownership §2.4 卸载/禁用提醒的唯一数据源）：
@@ -1267,6 +1293,44 @@ mod tests {
         app.requires_services = vec!["audit".into()];
         let audit = svc_manifest("audit", &["audit.write"]);
         assert!(resolve_requires_services(&[app, audit]).is_ok());
+    }
+
+    /// 构造带 `provides.capabilities[]`（点分 namespace + 方法集）的 manifest
+    /// （真实形态：grants plugin.json 的 provides 声明）。
+    fn provides_manifest(id: &str, ns: &str, methods: &[&str]) -> PluginManifest {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "rust",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "services": [] },
+            "provides": { "capabilities": [ {
+                "namespace": ns,
+                "methods": methods.iter().map(|m| json!(m)).collect::<Vec<_>>()
+            } ] }
+        }))
+        .expect("valid manifest")
+    }
+
+    #[test]
+    fn test_service_dep_dotted_namespace_exact_entry() {
+        // 点分命名空间精确条目（ADR 2026-11-19-service-declaration-dotted-ns 运行时
+        // 同源口径）：提供方经 provides 注册 ns=`grants.ledger`（方法 request/revoke），
+        // 消费者 requires_services 写 `grants.ledger`——last-dot 拆分会误判为
+        // ns=`grants`+method=`ledger`，须按「item 整体=已注册 namespace」回退角色满足。
+        let mut app = svc_manifest("oauth_broker", &[]);
+        app.requires_services = vec!["grants.ledger".into(), "grants.ledger.request".into()];
+        let grants = provides_manifest("grants", "grants.ledger", &["request", "revoke"]);
+        assert!(resolve_requires_services(&[app.clone(), grants.clone()]).is_ok());
+        // 拓扑边：点分精确条目的提供者经角色回退可查（provider_ids 不丢边）
+        let surface = ServiceSurface::from_manifests(&[app, grants]);
+        assert_eq!(
+            surface.provider_ids("grants.ledger"),
+            vec!["grants".to_string()]
+        );
+        // 真不存在的点分条目仍然 fail-closed
+        let mut ghost = svc_manifest("ghost_consumer", &[]);
+        ghost.requires_services = vec!["grants.ghost".into()];
+        assert!(resolve_requires_services(&[ghost]).is_err());
     }
 
     #[test]
@@ -1815,6 +1879,7 @@ mod tests {
             enabled: None,
             activation: None,
             provides: None,
+            visibility: Default::default(),
             persistent_fields: vec![],
             export_fields: vec![],
             aux_venvs: Vec::new(),

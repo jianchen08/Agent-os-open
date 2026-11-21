@@ -48,17 +48,26 @@ logger = logging.getLogger(__name__)
 # "常量"这一事实，不建检测机制）。
 TODO_INSTRUCTIONS = (
     "## 任务清单（todo）约定\n"
-    "多步任务开始时用 GFM 任务清单（`- [ ] `）列出计划（聊天界面会渲染为"
-    "可折叠清单卡，系统自动建待办）；**每完成一项，单行 `- [x] 条目内容`"
-    " 即勾选**——只勾当前实际完成的，无需按顺序、无需重发全表；新增待办"
-    "单行 `- [ ] 新条目`（系统自动查重并入）。保持勾选与实际进度一致。\n"
+    "多步任务开始时用 `- [ ] ` 列计划（自动建待办）。每条待办只写两次："
+    "建卡 `- [ ] 条目`，勾销 `- [x] 条目`，逐字复用原文、不改措辞不加 ID。\n"
+    "**用户需求必须建待办**：提出即建，不得口头应承。\n"
     "**清单只能写 GFM 任务行**：禁止把清单包进 ```html/```todo 等代码围栏、"
-    "禁止输出 HTML 卡片或代码块形态（界面会按源码原样显示，状态也不会更新）。"
+    "禁止输出 HTML 卡片或代码块形态，也禁止把清单输出成文件。\n"
+    "**勾销门槛**：原始需求须用户确认后勾；中间步骤证据到位即勾。\n"
+    "**决策分流**：无决策→直接派；有问题要问、有决策要拍→第一优先级用 "
+    "`human_interaction` 交互工具出卡；待确认项下一轮批量确认；等外部条件"
+    "写明等什么。\n"
+    "**失效条目**：被取代的标「已失效」关闭；同一件事多口径合并为一条。"
 )
 
 # 注入动态变量的清单块头（权威标注：与模型历史正文里的旧清单并存时以
-# 本块为准）。
-_TODO_HEADER = "当前任务清单（以此为准，变更时整表重发）："
+# 本块为准）。1.2.28 修：「变更时整表重发」是 2026-10-24 增量协议裁定前
+# 整表替换时代的遗留，与 TODO_INSTRUCTIONS「无需重发全表」直接冲突——
+# 贴数据、每轮出现的指令面赢，模型逐轮重发整表，措辞漂移绕过精确查重，
+# 近重复条目累积（用户实测「很多重复的文本又不一样」根因）。
+# 约束：本行不得含字面 `- [ ]`/`- [x]`（_pending_lines 以 "- [ ]" in text
+# 判定空清单不注入；含字面语法会破「全完成清单块整体不注入」契约）。
+_TODO_HEADER = "当前任务清单（以此为准；已随每轮注入，无需重发整表——变更只写有变化的单行）："
 
 # 注入面预算裁选（2026-10-27 用户裁定：超长裁选只作用于注入面，前端显示
 # 面完整不截断）：未完成项超预算时保首尾、略中段——队首=计划顺序的下一步
@@ -68,9 +77,17 @@ _TODO_PENDING_BUDGET = 30
 _TODO_KEEP_HEAD = 10
 _TODO_KEEP_TAIL = 10
 
-# 清单状态版本（持久化声明键，见模块 docstring）：缺失/低于当前值 = 1.2.25
-# 及以前的每轮状态丢失现场，extract 从近轮消息重放增量协议重建基座。
-_TODO_STATE_VERSION = 1
+# 清单状态版本（持久化声明键，见模块 docstring）：缺失/低于当前值 = 提取面
+# 行为变更现场，extract 从近轮消息重放增量协议重建基座。
+# v2（2026-11-10 用户提出）：提取面只扫正文最终输出（跳过 thinking/reasoning
+# 段）——v1 状态面可能含思考段清单草稿的幽灵条目（同一事项多变体措辞堆积、
+# 正文按原文精确勾选永远匹配不上），迁移 = 旧基座作废、按修复后口径从近轮
+# 正文重放重建（幽灵清理的一次性自愈通道）。
+# v3（2026-11-16 用户实测 7fb38fe89e82：同条待办存 2~3 份副本）：新增查重面
+# 加匹配分兜底 + 归一化剥「— `任务ID`（状态）」尾注（todo_extract 1.2.32）——
+# v2 基座里已固化的重述副本按旧口径合并不掉，迁移 = 旧基座作废、按修复后
+# 口径从近轮正文重放重建（同 v2 一次性自愈通道）。
+_TODO_STATE_VERSION = 3
 _TODO_STATE_VERSION_KEY = "context.todo_state_v"
 
 # 自愈重放窗口（assistant 消息条数）：窗口越大越接近历史全量真值，但会把
@@ -137,26 +154,45 @@ class TodoTrackPlugin:
         base = _items_from_todo_text(state.get("context.todo_text"))
         changed = False
         if state.get(_TODO_STATE_VERSION_KEY) != _TODO_STATE_VERSION:
-            replayed = self._replay_items(state.get("messages"))
-            if replayed:
-                base = incremental_merge(replayed, base) or replayed
-                changed = True
-            if base:
-                updates[_TODO_STATE_VERSION_KEY] = _TODO_STATE_VERSION
+            # 版本迁移（一次性自愈）：旧基座作废——可能含提取面行为变更前的
+            # 污染条目（v1 时代思考段清单草稿被捕获成幽灵待办），从近轮
+            # assistant 消息按当前口径重放重建；近轮正文无清单 = 空基座，
+            # 注入源显式清空（旧污染不固化、不再随 fold 注入）。
+            base = self._replay_items(state.get("messages"))
+            updates[_TODO_STATE_VERSION_KEY] = _TODO_STATE_VERSION
+            changed = True
         if ops:
             merged = incremental_merge(base, ops)
             if merged is not None:
                 base = merged
                 changed = True
-        if changed and base:
-            lines = [_render_item(item) for item in base]
-            updates["context.todo_text"] = _TODO_HEADER + "\n" + "\n".join(lines)
-            pipeline_id = str(state.get("pipeline_id", "") or "")
-            if pipeline_id:
-                self._latest[pipeline_id] = {
-                    "items": base,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                }
+        if changed:
+            if base:
+                lines = [_render_item(item) for item in base]
+                updates["context.todo_text"] = _TODO_HEADER + "\n" + "\n".join(lines)
+                pipeline_id = str(state.get("pipeline_id", "") or "")
+                if pipeline_id:
+                    self._latest[pipeline_id] = {
+                        "items": base,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+            else:
+                # 空基座显式清空注入源（仅版本迁移路径可达：常规增量路径
+                # merged 非 None 才置 changed，base 必非空）；空串 falsy，
+                # 下轮 fold 不再注入清单块。面板载荷同步置空清单（状态面=
+                # 面板不变量：前端计划卡取数源 self._latest，状态已清而面板
+                # 残留旧清单即两面对用户不一致，残留项还可能经 latest_any
+                # 串桶；updated_at 保持推进 = latest_any 取到本管道空载荷
+                # 而非其他管道残留）。不变量以 pipeline_id 在场为前提——
+                # 缺失/空串时无键可写，面板残留属异常态残留边（上游同一
+                # pipeline 的 pipeline_id 恒定，正常流不可达）。
+                updates["context.todo_text"] = ""
+                pipeline_id = str(state.get("pipeline_id", "") or "")
+                if pipeline_id:
+                    self._latest[pipeline_id] = {
+                        "items": [],
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
         return updates
 
     def latest_payload(self, pipeline_id: str) -> dict[str, Any] | None:
@@ -285,18 +321,81 @@ def _items_from_todo_text(todo_text: Any) -> list[dict[str, Any]]:
 
 
 def _message_text(msg: dict[str, Any]) -> str:
-    """单条消息的文本面（multimodal list 取 text 部件拼接；非文本返回空串）。"""
+    """单条消息的文本面（multimodal list 取 text 部件拼接；非文本返回空串）。
+
+    提取面只扫正文最终输出（2026-11-10 用户提出）：剥 ``<think>`` 段（闭合
+    多段 + 流中断未闭合尾段）与纯思考兜底轮（llm/adapter 非流式把
+    reasoning_content 回填正文时 content==reasoning_content，无正文可扫）；
+    reasoning_content 独立字段本就不读（隔离通道）。
+    """
     content = msg.get("content")
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
+        text = content
+    elif isinstance(content, list):
         parts = [
             p.get("text", "")
             for p in content
             if isinstance(p, dict) and p.get("type") == "text"
         ]
-        return "\n".join(s for s in parts if s)
-    return ""
+        text = "\n".join(s for s in parts if s)
+    else:
+        return ""
+    reasoning = msg.get("reasoning_content")
+    if (
+        isinstance(reasoning, str)
+        and reasoning.strip()
+        and isinstance(content, str)
+        and content == reasoning
+    ):
+        # 纯思考兜底轮（raw 对 raw，剥离前）：llm/adapter 非流式把
+        # reasoning_content 回填正文时 content==reasoning_content，同文 =
+        # 无正文可扫。归一化基准必须一致——「剥离后正文对 raw reasoning」
+        # 的比对双向皆错（同文含 think 段的轮次漏判、reasoning 恰等于剥离
+        # 后正文的轮次误判丢正文），故以原始值同文判定；multimodal list
+        # 无 raw 同文语义，不参与兜底轮判定（该分支当前不可达：上游
+        # assistant content 恒为 str，llm_core 三处构造点均为 str；上游若
+        # 引入 multimodal assistant content 需重新评估）。
+        return ""
+    # 剥离后另行判定空正文（纯 think 块/未闭合尾段占满 = 无正文可扫）
+    return _strip_thinking(text)
+
+
+# think 标签族剥离正则——canonical 口径与 plugins/shared/llm/adapter_minimax.py
+# 的 _THINK_PATTERN / _THINK_PATTERN_NO_GT 同族实现（防漂移）：族一 = 开标签带
+# 属性 + 闭合变体（<think type="x">…</think...>），族二 = 开始标签无 > 形态
+# （<think␣…</think/>）。字面 <think> 单正则覆盖不了变体族，MiniMax 系恰是
+# 变体标签的主要产出方，漏变体 = 整段草稿漏进提取面。
+_THINK_BLOCK_RE = re.compile(
+    r"<think[^>]*>(.*?)</think[^>]*>",
+    re.DOTALL,
+)
+_THINK_BLOCK_NO_GT_RE = re.compile(
+    r"<think\s(.*?)</think[^>]*>",
+    re.DOTALL,
+)
+# 剥闭合块后残留开标签（流中断未闭合尾段）检测——同族宽口径：字面 <think> /
+# 带属性 <think …> / 无 > 的 <think␣ 三形态全命中。注：闭合 <thinking>…</thinking>
+# 会被 _THINK_BLOCK_RE 整块剥除（[^>]* 吸收 "ing"），但未闭合 <thinking> 残留
+# 不被本正则截断——thinking 非思考标签族（canonical 同款正则亦然），整段
+# 保留与误剥代价同口径（该轮漏提取，停更方向，无错误动作）。
+_THINK_OPEN_RE = re.compile(r"<think(?:\s[^>]*)?>|<think(?=\s)")
+
+
+def _strip_thinking(text: str) -> str:
+    """剥 thinking/reasoning 段——提取面只扫正文最终输出（任务 AC）。
+
+    think 标签族按 canonical 口径剥除（与 llm/adapter_minimax 同族实现）：
+    闭合块多段剥除（含带属性开标签、``</think...>`` 闭合变体、开始标签无
+    ``>`` 形态）；剥后残留的未闭合开标签（流中断半截）起全段视同思考剥至
+    末尾。正文含字面 ``<think>`` 示例文本的误剥代价 = 该轮漏提取（停更方向，
+    无错误动作），安全。
+    """
+    text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_BLOCK_NO_GT_RE.sub("", text)
+    open_m = _THINK_OPEN_RE.search(text)
+    if open_m:
+        text = text[: open_m.start()]
+    return text.strip()
 
 
 # 与 todo_extract._ITEM_RE 同口径的行解析（注入面回读，避免跨模块私有正则导出）

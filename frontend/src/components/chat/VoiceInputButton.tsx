@@ -4,7 +4,7 @@
  * 提供语音输入的交互界面，录音时呈现微信风呼吸脉冲圈动态效果。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Loader2, Mic, MicOff } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -70,16 +70,43 @@ const RecordingIndicator = () => (
 
 /**
  * 语音输入按钮组件
+ *
+ * 桌面（鼠标）：点按开始/停止切换；移动端（触屏）：微信式按住说话——
+ * 按下即录、松手即停并转写落输入框。两条路径经 pointerType 区分互不干扰
+ * （触屏的 pointerup 会跟发合成 click，由 suppressClick 哨兵吞掉防二次切换）。
  */
 export const VoiceInputButton = ({
   disabled = false,
   state = 'idle',
   error,
   onClick,
+  onPressStart,
+  onPressEnd,
   className,
 }: VoiceInputButtonProps) => {
   const isRecording = state === 'recording'
   const isTranscribing = state === 'transcribing'
+  /** 触屏按住模式进行中（pointerdown 已开录，等 pointerup 收） */
+  const holdModeRef = useRef(false)
+  /** 触屏松手后的合成 click 哨兵：吞掉防 click 路径二次切换 */
+  const suppressClickRef = useRef(false)
+
+  /** 触屏按下：开录（鼠标不走此路径，保留点按切换语义） */
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType === 'mouse') return
+    if (disabled || isTranscribing || isRecording) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    holdModeRef.current = true
+    suppressClickRef.current = true
+    onPressStart?.()
+  }
+
+  /** 触屏松手/被打断：停录并转写 */
+  const handlePointerRelease = () => {
+    if (!holdModeRef.current) return
+    holdModeRef.current = false
+    onPressEnd?.()
+  }
 
   /** 根据状态确定提示文本 */
   const getTooltip = () => {
@@ -113,7 +140,17 @@ export const VoiceInputButton = ({
             e.currentTarget.style.backgroundColor = 'var(--status-error)'
           }
         }}
-        onClick={onClick}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerRelease}
+        onPointerCancel={handlePointerRelease}
+        onClick={() => {
+          // 触屏按住松手后的合成 click 已由按压路径处理过，吞掉防二次切换
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false
+            return
+          }
+          onClick?.()
+        }}
         disabled={disabled || isTranscribing}
         title={getTooltip()}
         aria-label={getTooltip()}

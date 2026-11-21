@@ -35,21 +35,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = ROOT / ".github" / "pytest-failure-baseline.txt"
 
-LANES = (
-    "plugins-coverage",
-    "plugins-heavy",
-    # 插桩五分片（54d2db62 拆分）：基线键 plugins-coverage-{a..e}_failed 与
-    # run_gates 各分片 gate 的 --lane 实参对齐——缺项即 argparse exit 2，
-    # 分片门禁结构性恒红（2026-10-06 探针实锤）。
-    *(f"plugins-coverage-{s}" for s in "abcde"),
-)
+LANES = ("plugins-coverage", "plugins-heavy")
 
 # pytest 结尾汇总行，如：
 #   ================== 111 failed, 999 passed, 70 skipped, 4 xfailed, 1 warning, 14 errors in 108.75s ==================
-# 分片 gate 以 `-q` 静默口径跑，汇总行无 = 包裹（裸行 "6387 passed, 82
-# skipped, 10 deselected, 15 warnings in 183.67s (0:03:03)"）——= 前缀必须
-# 可选，否则恒解析失败按红处理（2026-10-06 探针实锤）。
-SUMMARY_RE = re.compile(r"^(?:=+\s+)?(?P<counts>(?:\d+\s+\w+(?:,)?\s+)*?\d+\s+\w+)\s+in\s+[\d:.]+.*$", re.MULTILINE)
+SUMMARY_RE = re.compile(r"^=+\s+(?P<counts>(?:\d+\s+\w+(?:,)?\s+)*?\d+\s+\w+)\s+in\s+[\d:.]+.*$", re.MULTILINE)
 COUNT_RE = re.compile(r"(?P<n>\d+)\s+(?P<kind>failed|passed|skipped|xfailed|xpassed|error|errors|warnings?)\b")
 
 

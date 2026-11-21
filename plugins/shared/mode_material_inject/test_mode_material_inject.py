@@ -463,6 +463,54 @@ class TestFactoryWritingPackageMaterial:
         assert "派发口径文件不可读" in caplog.text
 
 
+class TestFactoryCodingPackageMaterial:
+    """出厂种子 mode_coding 包：mode.yaml material 声明 + rules/dispatch.md
+    派发口径注入（模式升级方案 CU2-④/⑤ 补齐刀）。
+
+    env 钉死用户层根到 tmp → find_package_dir 双根回落出厂种子（真实包）。
+    """
+
+    def test_coding_mode_appends_dispatch_rules(self, env) -> None:
+        """端到端：mode=coding 激活 → 编码派发口径整文追加（基线保留）。"""
+        updates = _run(_state(mode="coding"))
+
+        prompt = _merged_prompt(_state(mode="coding"), updates)
+        assert prompt.startswith("基线提示词"), "基线提示词必须保留（追加非替换）"
+        assert "编码模式下主 agent 的任务派发" in prompt, "dispatch.md 标题进入注入"
+        assert "task_submit 必须声明验收指标" in prompt, "验收指标铁律正文进入注入"
+        assert updates["mode"] == "coding"
+
+    def test_coding_builder_direct_call_returns_rules_text(self, env) -> None:
+        """直调组装器（声明读自真实 mode.yaml）：返回 rules/dispatch.md 整文。"""
+        pkg = mode_material.find_package_dir("coding")
+        assert pkg is not None, "出厂种子包可达"
+        assert pkg.name == "mode_coding"
+        decl = mode_material_inject_mod.ModeMaterialInjectPlugin._read_material_decl(pkg)
+        builder = mode_material_inject_mod.ModeMaterialInjectPlugin._load_builder("coding", pkg, decl)
+        assert builder is not None, "mode.yaml material 声明与 material.py 实物相符"
+
+        text = builder({}, pkg)
+
+        assert "编码模式下主 agent 的任务派发" in text
+        assert "file_check" in text
+
+    def test_coding_builder_missing_rules_warns_empty(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """规则文件缺失（声明与实物不符）= warning + 空串（可归因零注入）。"""
+        spec = importlib.util.spec_from_file_location(
+            "mode_coding_material_missing_test", str(_SHARED / "mode_coding" / "material.py")
+        )
+        assert spec is not None
+        assert spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with caplog.at_level("WARNING"):
+            text = mod.build_injection({}, tmp_path)
+
+        assert text == ""
+        assert "派发口径文件不可读" in caplog.text
+
+
 # ── 4. 模式包组装器约定（架构核心） ────────────────────────────────────
 
 

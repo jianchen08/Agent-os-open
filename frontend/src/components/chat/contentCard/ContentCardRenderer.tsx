@@ -5,21 +5,21 @@
  * 输出按安全形态处理）；form=css：fence 内容以文本节点注入容器内 pre（零解析零
  * 注入面），声明 css 主题化；form=template：宿主通用模板解释器装配。头部条提供
  * 源码视图↔渲染视图切换（源码视图 = 未命中路径原样 defaultView，保真现状）。
- * webview 卡经 useElementVisible 懒挂载（视口外不建 iframe，长会话性能 §8）。
+ * webview 卡走全流渲染池（挂载 = 距视口最近 N 张，与是否在视窗内无关；容器
+ * 高度持久化——卸载/重挂载零布局变化，见 WebviewCardBody 与渲染池注）。
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { useElementVisible } from '@/hooks/useElementVisible'
-import {
-  CONTENT_CARD_ROOT_CLASS,
-  type ContentCardDeclaration,
-} from '@/services/schema/contentCard'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   bootstrapJs,
   CSP_META,
   WEBVIEW_MAX_HEIGHT,
   WEBVIEW_MIN_HEIGHT,
 } from '@/components/schema/widgets/WebviewWidget'
+import {
+  CONTENT_CARD_ROOT_CLASS,
+  type ContentCardDeclaration,
+} from '@/services/schema/contentCard'
 import { validateWebviewEvent } from '@/utils/postMessageSecurity'
 import { parseCsv } from './parseCsv'
 import { renderTemplate } from './templateRenderer'
@@ -35,6 +35,10 @@ export interface ContentCardRendererProps {
 /** 卡内容高度夹取界（与 WebviewWidget autoHeight 同界） */
 const CARD_MIN_HEIGHT = WEBVIEW_MIN_HEIGHT
 const CARD_MAX_HEIGHT = WEBVIEW_MAX_HEIGHT
+
+/** 未挂载/首报前占位高度（与原 h-80 占位一致）。挂载后由卡内自报高度接管，
+ *  卸载不再回跳此值——高度持久化消灭滚动边界处的布局突变。 */
+const CARD_PLACEHOLDER_HEIGHT = 320
 
 /**
  * 自报高度注入脚本：内容卡 webview 卡体的内容是**不可信模型输出**，卡内页
@@ -62,15 +66,94 @@ function autoresizeBootstrap(token: string): string {
   )
 }
 
-/** webview 形态卡体：沙箱 iframe（懒挂载 + 内容自报高度贴合，零空白） */
+// ── webview 卡渲染池 ────────────────────────────────────────────────────────
+// 全流池语义（用户裁定 2026-11-07）：池成员 = 整条消息流的全部卡（不看是否在
+// 视窗内），裁决 = 距视口距离排序，只挂"最近的 N 张"；已挂载的卡不因离开视窗
+// 卸载，只有跌出最近 N（= 太远）才卸。每张 iframe = 独立文档 + 脚本定时器，
+// 硬顶封死长会话堆叠。容器高度持久化——池内进出零布局突变（上拉闪烁根修的
+// 不变量，见 WebviewCardBody 注）。
+const WEBVIEW_CARD_POOL_LIMIT = 3
+
+interface WebviewCardPoolEntry {
+  el: HTMLElement
+  show: () => void
+  hide: () => void
+}
+
+const webviewCardPool = new Map<string, WebviewCardPoolEntry>()
+let poolScrollBound = false
+let poolTrimQueued = false
+
+/** 卡到视口的距离（px，视口内 = 0；上下离屏为正距离，越大越远） */
+function webviewCardViewportDistance(el: HTMLElement): number {
+  const r = el.getBoundingClientRect()
+  const vh = window.innerHeight || 1
+  if (r.top >= vh) return r.top - vh
+  if (r.bottom <= 0) return -r.bottom
+  return 0
+}
+
+/** 池裁决：按距离升序保留限额内者挂载，其余 hide；idempotent（show/hide 内部同值去重） */
+function trimWebviewCardPool(): void {
+  const ordered = [...webviewCardPool.entries()].sort(
+    (a, b) => webviewCardViewportDistance(a[1].el) - webviewCardViewportDistance(b[1].el),
+  )
+  ordered.forEach(([, entry], index) => {
+    if (index < WEBVIEW_CARD_POOL_LIMIT) entry.show()
+    else entry.hide()
+  })
+}
+
+function poolRequestTrim(): void {
+  if (poolTrimQueued) return
+  poolTrimQueued = true
+  requestAnimationFrame(() => {
+    poolTrimQueued = false
+    trimWebviewCardPool()
+  })
+}
+
+/** 共享滚动触发：池成员距离随滚动变化，捕获期监听（scroll 不冒泡）+ rAF 节流；
+ *  首张卡注册时挂上，池清空时摘除。 */
+function poolEnsureScrollTrigger(): void {
+  if (poolScrollBound) return
+  poolScrollBound = true
+  document.addEventListener(
+    'scroll',
+    () => poolRequestTrim(),
+    { capture: true, passive: true },
+  )
+  window.addEventListener('resize', () => poolRequestTrim())
+}
+
+function poolRegister(token: string, entry: WebviewCardPoolEntry): void {
+  poolEnsureScrollTrigger()
+  webviewCardPool.set(token, entry)
+  // 同步首裁决：注册即定型（jsdom 等无滚动环境确定性）
+  trimWebviewCardPool()
+}
+
+function poolUnregister(token: string): void {
+  if (webviewCardPool.delete(token)) trimWebviewCardPool()
+}
+
+/**
+ * webview 形态卡体：沙箱 iframe（全流渲染池 + 高度持久化）。
+ *
+ * 池成员 = 整条消息流的全部卡：挂载与否只由"距视口距离最近的 N 张"裁决，与
+ * 是否在视窗内无关——已挂卡滚出视窗不卸载（不闪不重载），跌出最近 N（太远）
+ * 才卸，滚近自动补位。卸载/重挂载因容器高度持久化而零布局变化——此不变量是
+ * "上拉到网页预览卡闪烁/拉不动"（用户实测 2026-11-07）的根修保证。
+ */
 function WebviewCardBody({ content }: { content: string }) {
-  const { ref, visible } = useElementVisible<HTMLDivElement>()
   const tokenRef = useRef<string>(
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `cc_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`,
   )
-  const [heightPx, setHeightPx] = useState(WEBVIEW_MIN_HEIGHT)
+  const elRef = useRef<HTMLDivElement | null>(null)
+  const [heightPx, setHeightPx] = useState(CARD_PLACEHOLDER_HEIGHT)
+  const [poolMounted, setPoolMounted] = useState(false)
   useEffect(() => {
     const handler = (event: MessageEvent): void => {
       const msg = validateWebviewEvent(event, tokenRef.current)
@@ -82,19 +165,39 @@ function WebviewCardBody({ content }: { content: string }) {
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
   }, [])
-  if (!visible) {
-    return <div ref={ref} className="border-border/40 bg-muted/30 h-80 w-full rounded-lg" />
-  }
+  const setRef = useCallback((node: HTMLDivElement | null) => {
+    elRef.current = node
+  }, [])
+  useEffect(() => {
+    const token = tokenRef.current
+    const el = elRef.current
+    if (!el) return
+    poolRegister(token, {
+      el,
+      show: () => setPoolMounted(true),
+      hide: () => setPoolMounted(false),
+    })
+    return () => poolUnregister(token)
+  }, [])
   return (
-    <div ref={ref} className="w-full overflow-hidden" style={{ height: `${heightPx}px` }}>
-      <iframe
-        srcDoc={`<!DOCTYPE html><html><head>${CSP_META}</head><body>${content}${autoresizeBootstrap(tokenRef.current)}</body></html>`}
-        title="content-card-preview"
-        // 关键安全：不开 allow-same-origin → opaque origin，模型输出无法触宿主
-        // DOM/cookie/localStorage（WebviewWidget/HtmlPreviewWidget 现役沙箱同款）
-        sandbox="allow-scripts allow-forms allow-popups allow-modals"
-        className="h-full w-full border-0 bg-transparent"
-      />
+    <div
+      ref={setRef}
+      data-testid="content-card-webview-body"
+      className="w-full overflow-hidden"
+      // 动态像素高度（卡内自报），静态类承载不了——动态计算值属内联豁免类
+      // eslint-disable-next-line no-restricted-syntax
+      style={{ height: `${heightPx}px` }}
+    >
+      {poolMounted && (
+        <iframe
+          srcDoc={`<!DOCTYPE html><html><head>${CSP_META}</head><body>${content}${autoresizeBootstrap(tokenRef.current)}</body></html>`}
+          title="content-card-preview"
+          // 关键安全：不开 allow-same-origin → opaque origin，模型输出无法触宿主
+          // DOM/cookie/localStorage（WebviewWidget/HtmlPreviewWidget 现役沙箱同款）
+          sandbox="allow-scripts allow-forms allow-popups allow-modals"
+          className="h-full w-full border-0 bg-transparent"
+        />
+      )}
     </div>
   )
 }

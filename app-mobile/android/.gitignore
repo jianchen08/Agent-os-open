@@ -105,3 +105,7 @@ app/src/main/jniLibs/
 
 # R5 proot 产品化：rootfs 种子资产（构建产物不入仓，digest 锁）
 app/src/main/assets/rootfs_seed.tar.zst
+
+# vendored 源交付物例外（非构建产物）：uia2-server 拍板件随壳分发
+# （调研报告 §四B 拍板，Apache-2.0，LICENSE 随行——见 assets/uia2-server/README.md）
+!app/src/main/assets/uia2-server/*.apk

@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-ci-cd
+type: standard
+status: active
+---
+
 # CI/CD 流水线指南
 
 > 灵汐系统（Agent OS）测试与持续集成完整手册
@@ -1069,9 +1075,9 @@ def test_with_context(log_context):
 |----|----------|------|
 | Rust | `rust-lint` / `rust-build` / `rust-test` / `rust-coverage` / `rust-deny` | fmt+clippy / 编译 / 测试 / lcov 基线 / 依赖许可门禁 |
 | Python | `python-lint` / `python-test` / `python-coverage` / `python-heavy-suites` | run_gates 车道（sdk-lint/sdk-mypy/sdk-test/plugins-coverage 族），基线锁见 §3.3 |
-| 前端 | `frontend-endpoints-sync` / `frontend-test` / `frontend-e2e` | 端点生成物一致性 + 主题色卫生闸（endpoints 车道触发面含 `plugins/**`，是仅改插件声明面时主题色门禁的唯一 CI 触达点；`run_gates --mode plugins` 本地同含此闸）/ vitest / Playwright |
+| 前端 | `frontend-endpoints-sync` / `frontend-test` / `frontend-e2e` | 端点生成物一致性 + 主题色卫生闸 + 主题对比度闸（endpoints 车道触发面含 `plugins/**`，是仅改插件声明面/web 资产时两主题门的唯一 CI 触达点；`run_gates --mode plugins` 本地同含两闸）/ vitest / Playwright。frontend-lint 携 eslint 基线锁：src 块全部纠偏规则 error 级（warn 棘轮已退役），存量 eslint_errors 棘轮只减不增（2026-11-16 升级，ADR 2026-11-16-lint-error-ratchet-electron-boundary-gate） |
 | 桌面 | `electron-compile` | 桌面壳编译门禁 |
-| 专项 | `timing` / `pre-commit` / `tdd-gate` / `traceability-gate` | 时序不变量 / 钩子 / TDD 合规 / 追溯标记 |
+| 专项 | `timing` / `pre-commit` / `tdd-gate` / `traceability-gate` | 时序不变量 / 钩子 / TDD 合规 / 追溯标记。traceability-gate 恒跑 job 另承载跨域静态闸（file-length-baseline / async-blocking / electron-boundary 等）：electron-boundary 为 Electron 主/渲染进程导入边界零容忍闸（互导/渲染侧 electron 包/preload 最小面，ADR 2026-11-16-lint-error-ratchet-electron-boundary-gate） |
 | 汇总 | `all-checks-passed` | 以上全部通过才绿 |
 
 ## 附录 B：代码质量工具配置参考

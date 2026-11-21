@@ -17,6 +17,8 @@ const { mockLayoutStore, mockUIStore } = vi.hoisted(() => ({
   mockUIStore: {
     workspaceCollapsed: false,
     setWorkspaceCollapsed: vi.fn(),
+    setSidebarCollapsed: vi.fn(),
+    setMobileWorkspaceOpen: vi.fn(),
   },
 }))
 vi.mock('@/stores/layoutModeStore', () => ({
@@ -178,5 +180,36 @@ describe('openPluginPage - 插件贡献页直达', () => {
     expect(
       useNotificationStore.getState().notifications.some((n) => n.message.includes('未声明 path 或 widget')),
     ).toBe(true)
+  })
+})
+
+
+describe('openWorkspacePanelByPath · 移动视口与顶栏前缀', () => {
+  beforeEach(() => {
+    mockUIStore.setSidebarCollapsed.mockClear()
+    mockUIStore.setMobileWorkspaceOpen.mockClear()
+    mockLayoutStore.workspaceTabs = []
+    mockLayoutStore.addWorkspaceTab.mockClear()
+    mockLayoutStore.setActiveTab.mockClear()
+  })
+
+  it('移动视口开面板成功 → 收侧栏抽屉并点亮工作区覆盖层', () => {
+    window.innerWidth = 375
+    try {
+      const opened = openWorkspacePanelByPath('/settings')
+      expect(opened).toBe(true)
+      expect(mockUIStore.setSidebarCollapsed).toHaveBeenCalledWith(true)
+      expect(mockUIStore.setMobileWorkspaceOpen).toHaveBeenCalledWith(true)
+    } finally {
+      window.innerWidth = 1024
+    }
+  })
+
+  it('桌面视口开面板成功 → 不动抽屉（仅面板打开）', () => {
+    window.innerWidth = 1440
+    const opened = openWorkspacePanelByPath('/settings')
+    expect(opened).toBe(true)
+    expect(mockUIStore.setSidebarCollapsed).not.toHaveBeenCalled()
+    expect(mockUIStore.setMobileWorkspaceOpen).not.toHaveBeenCalled()
   })
 })

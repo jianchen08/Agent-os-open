@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input'
 import { ROUTES } from '@/constants/routes'
 import { connectKernel } from '@/pages/settings/devices/connectKernel'
 import { classifyLoginFailure } from '@/services/api/loginFailure'
-import { validateServerBaseUrl } from '@/services/connectionProbe'
+import { isLoopbackOrigin, validateServerBaseUrl } from '@/services/connectionProbe'
 import { getServerBaseUrl } from '@/services/shellApiBase'
 import {
   loadShellLocalCredential,
@@ -131,9 +131,30 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
   const [localSwitchError, setLocalSwitchError] = useState<string | null>(null)
   /** 本机内核档凭据（壳设备侧生成；非本机档/无壳为 null，远程必填手输） */
   const [localCredential, setLocalCredential] = useState<ShellLocalCredential | null>(null)
+  /**
+   * 桌面装机档凭据（electronAPI.adminCredential，env 事实源，ADR
+   * 2026-10-02-packaged-auto-login-env-only）：dev/浏览器无桩恒 null。
+   * 2026-11-08 用户实证「升级后仍落登录页」：whenReady 先建窗、内核 ensure
+   * 异步在后——authStore 初始化的凭据登录与内核启动竞速，网络错误单发失败
+   * 即落登录页且桌面档无重试链（本链此前只接壳凭据），随机播种口令用户不可
+   * 能手输=结构性卡死。修复=桌面凭据并入本重试链（内核冷启动窗口内盲试至
+   * 就绪），与壳档同一长窗/状态行/放弃语义。
+   */
+  const [desktopCredential, setDesktopCredential] = useState<ShellLocalCredential | null>(null)
+  /** 免填链生效凭据：壳凭据（移动壳）优先，桌面装机档补位 */
+  const activeCredential = localCredential ?? desktopCredential
   /** 免填链等待态：真=链在飞，呈现内核状态行并压制连接错误（用户令 2026-10-26） */
   const [autoWaiting, setAutoWaiting] = useState(false)
   const [waitingSecs, setWaitingSecs] = useState(0)
+  /**
+   * 手动提交已等待秒数（0=不在等待）。
+   *
+   * 内核 HTTP 面在装配/繁忙期会整体停顿（实测单次 25s、≥60s 零字节），期间
+   * 提交按钮只显示「登录中...」而无任何进展反馈——用户无法区分「在等」与
+   * 「卡死」（实测被误判为登录不可用）。秒数走表让等待可见；与免填链状态行
+   * 语义分工：那边是内核没起来，这边是内核没应答。
+   */
+  const [submitSecs, setSubmitSecs] = useState(0)
   /** 壳桥上报的内核真实状态（连接前探面；null=桥不可用退化盲试） */
   const [kernelStatus, setKernelStatus] = useState<ShellKernelStatus | null>(null)
   /** 长窗等待超时的内核措辞终态（替代「无法连接」远程措辞） */
@@ -191,12 +212,29 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  // 本机内核档凭据加载：弹窗打开即取一次（异步；桥失败/非本机档 → null 回落手输）
+  // 免填凭据加载：弹窗打开即各取一次（异步；桥失败/非本机档 → null 回落手输）。
+  // 桌面装机档同窗补位：electronAPI.adminCredential 由主进程承载（打包件且 env
+  // 播种在位才非空，dev/浏览器恒 null）；自定义后端档豁免——对方实例账号体系
+  // 凭据必须手输（凭据外泄面），回环自填=本机内核豁免（同壳规则）。
   useEffect(() => {
     if (!open) return
     let cancelled = false
     void loadShellLocalCredential().then((cred) => {
       if (!cancelled) setLocalCredential(cred)
+    })
+    const customBase = getServerBaseUrl()
+    if (customBase !== null && !isLoopbackOrigin(customBase)) {
+      return () => {
+        cancelled = true
+      }
+    }
+    void Promise.resolve(
+      window.electronAPI?.adminCredential?.load?.(),
+    ).then((cred) => {
+      if (cancelled) return
+      if (cred?.username && cred.password) {
+        setDesktopCredential({ username: cred.username, password: cred.password })
+      }
     })
     return () => {
       cancelled = true
@@ -205,19 +243,21 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
 
   // 免填预填：凭据就绪且字段为空时填入一次（不回写用户手动清空的字段）
   useEffect(() => {
-    if (!open || !localCredential || didPrefillRef.current) return
+    if (!open || !activeCredential || didPrefillRef.current) return
     didPrefillRef.current = true
-    setUsername((u) => (u ? u : localCredential.username))
-    setPassword((p) => (p ? p : localCredential.password))
-  }, [open, localCredential])
+    setUsername((u) => (u ? u : activeCredential.username))
+    setPassword((p) => (p ? p : activeCredential.password))
+  }, [open, activeCredential])
 
-  // 本机内核档免填自动登录：连接前先探壳桥 KernelHost.status() 真实状态——
-  // 未 running 不空打登录（连接错误不再出现），状态行如实呈现启动阶段；内核
-  // running 才发登录，成功由 isAuthenticated 边沿关窗。10 分钟长窗：真机首启
-  // 解压+装配可远超 60s，窗内持续等待；超窗落「内核未能启动」终态。429 限速
-  // 锁与手动编辑仍是终态停链（登出旗标 shellAutoLoginDisabled 不进链）。
+  // 免填自动登录链（壳档+桌面档共用）：连接前先探壳桥 KernelHost.status() 真实
+  // 状态（桌面无壳桥 → host=null 走退化盲试）——未 running 不空打登录（连接错
+  // 误不再出现），状态行如实呈现启动阶段；内核 running 才发登录，成功由
+  // isAuthenticated 边沿关窗。10 分钟长窗：真机首启解压+装配可远超 60s，窗内
+  // 持续等待；超窗落「内核未能启动」终态。429 限速锁与手动编辑仍是终态停链
+  // （登出旗标 shellAutoLoginDisabled 不进链——logout 全局置位，桌面档同享
+  // 「登出意图优先」语义）。
   useEffect(() => {
-    if (!open || !localCredential || isAuthenticated) return
+    if (!open || !activeCredential || isAuthenticated) return
     if (shellAutoLoginDisabled()) return
     const host = getShellKernelHost()
     let cancelled = false
@@ -248,7 +288,7 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
         return
       }
       try {
-        await login(localCredential.username, localCredential.password)
+        await login(activeCredential.username, activeCredential.password)
       } catch (err) {
         if (classifyLoginFailure(err).kind === 'rate_limited') {
           rateLimited = true
@@ -311,7 +351,7 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
     }
     // HACK: 链只随「打开/凭据/认证态」边沿重建；login 等闭包读最新 store 即可
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, localCredential, isAuthenticated])
+  }, [open, activeCredential, isAuthenticated])
 
   // 等待秒数走表（状态行「已等待 X 秒」），链终态即停
   useEffect(() => {
@@ -320,6 +360,18 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
     const ticker = setInterval(() => setWaitingSecs((s) => s + 1), 1000)
     return () => clearInterval(ticker)
   }, [autoWaiting])
+
+  // 手动提交走表：isLoading 边沿起表，登录结束（成功或失败，store 都复位
+  // isLoading）即清零。免填链同经 isLoading，但其自有状态行呈现，渲染处按
+  // autoWaiting 互斥，不重复打扰。
+  useEffect(() => {
+    if (!isLoading) {
+      setSubmitSecs(0)
+      return
+    }
+    const ticker = setInterval(() => setSubmitSecs((s) => s + 1), 1000)
+    return () => clearInterval(ticker)
+  }, [isLoading])
 
   // 等待态硬上限（渲染层兜底，用户真机 716s 实证链可能被挂起）：链自身超时
   // 失效时，秒数越过上限+20s 仍强制裁断等待态——放弃机制不允许被绕过
@@ -403,14 +455,30 @@ export function LoginModal({ open, onClose, dismissible = true }: LoginModalProp
                 {kernelGiveUp}
               </div>
             ) : (
-              error && (
-                <div
-                  className="bg-destructive/10 text-destructive rounded-lg p-2.5 text-sm"
-                  data-testid="login-modal-error"
-                >
-                  {error}
-                </div>
-              )
+              <>
+                {error && (
+                  <div
+                    className="bg-destructive/10 text-destructive rounded-lg p-2.5 text-sm"
+                    data-testid="login-modal-error"
+                  >
+                    {error}
+                  </div>
+                )}
+                {/* 手动提交等待态（≥3s 才出现）：内核停顿期如实告知在等什么，
+                    低于 3s 属正常往返不打扰。免填链未手动编辑时由上面状态行
+                    呈现（三分支互斥）；用户手动编辑后免填链让位，此处如实
+                    呈现手动提交等待（含免填链在飞+手动编辑后手动提交的组合）。 */}
+                {isLoading && submitSecs >= 3 && (
+                  <div
+                    role="status"
+                    className="bg-muted/40 border-border text-muted-foreground rounded-lg border p-2.5 text-sm"
+                    data-testid="login-submit-waiting"
+                  >
+                    <span className="bg-primary mr-1.5 inline-block h-2 w-2 animate-pulse rounded-full align-middle" />
+                    内核启动中或繁忙，正在等待响应…（已等待 {submitSecs} 秒）
+                  </div>
+                )}
+              </>
             )}
 
             {/* 用户名 */}

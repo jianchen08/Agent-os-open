@@ -23,15 +23,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
+import json
 import logging
 import time as _time
 import uuid
+from collections import deque
 from typing import Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
+# 合宿裸名隔离：router_factory/wire_client 必须在 exec 期绑定（成员目录在
+# sys.path 首位、他人裸名已遮蔽）。钩子/懒加载运行期再 import 会命中先加载
+# 成员的 exceptions/key_pool 等同名模块（2026-11-09 云端/MuMu 实证 ImportError）。
+import router_factory  # noqa: E402
+import wire_client  # noqa: E402
 from _config_models import (  # noqa: E402
     ModelConfigLoaderShim,
     get_config,
@@ -57,9 +65,30 @@ plugin = AgentOSPlugin("llm_service")
 # 全局 Adapter 实例
 _adapter: Any = None
 
+# 已生效配置视图的指纹（None = 尚未应用过任何配置，首个调用必应用）。
+# 多管道/多租户并发复用同一实例：只有配置实质变化才重置 router/adapter，
+# 否则每次调用都清空重建（审计 2026-11-12 P2-12 的重复构建面）。
+_applied_config_fingerprint: str | None = None
+
+# 指纹层再剔除的调用瞬态键：SDK 已剔 inputs/_step_method/_pipe_hook；_pipe_check
+# 是引擎 check 触发的调用上下文 payload（at/action/state_delta/epoch），逐触发
+# 不同但同属调用瞬态——不剔则触发步每次调用都判「配置变更」重置。
+# 租户维不进指纹键：内核配置注入面无租户维（plugin-loader load_config =
+# factory 配置根 + 用户层叠加，同一安装内各租户视图内容相同），把 tenant_id
+# 纳入键只会在租户交替时做无谓重置（恰是本条审计的症状面）。
+_CONFIG_FINGERPRINT_TRANSIENT_KEYS = frozenset({"_pipe_check"})
+
 # 流式心跳间隔：chunk 静默超过该阈值即发 keepalive 事件（超时探活）。
 # 消费端以 keepalive 区分"上游活着但慢"与"连接死了"。
 KEEPALIVE_INTERVAL_SECONDS: float = 30.0
+
+# 流式事件队列上界（内存定案 §8 条款 3）：消费端（内核/前端）停摆时事件不允许
+# 无界积压——满载按「丢 keepalive → 合并相邻 delta → 丢最旧 + 降级标记」处置，
+# 计数经 _StreamPublisher.stats() 可观测。批 0 取证主嫌即无界队列（833MB 累积）。
+_STREAM_QUEUE_MAXSIZE: int = 1024
+
+# 满载时可合并的相邻 delta 事件（载荷带 index/text 的文本类增量）。
+_MERGEABLE_DELTA_EVENTS: frozenset[str] = frozenset({"text_delta", "reasoning_delta"})
 
 # 取消感知降级轮询间隔：主路径 = wait_run_stop 长轮询（事件驱动，感知延迟
 # ≈信号传播）；长轮询通道故障（旧内核/调用异常）时回退为本间隔的
@@ -70,7 +99,7 @@ CANCEL_POLL_INTERVAL_SECONDS: float = 0.5
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
     """Initialize LLM adapter on load."""
-    global _adapter
+    global _adapter, _applied_config_fingerprint
     config = plugin.get_config()
     logger.info("LLM service loaded, config keys: %s", list(config.keys()) if config else "(empty)")
 
@@ -79,35 +108,49 @@ async def _on_load(params: dict[str, Any]) -> None:
 
     # 重置 router_factory 模块级单例：on_load 在配置重注入时会重复触发，
     # 不重置则旧单例（旧 key/旧模型表）一直存活，新配置永不生效。
-    from router_factory import reset_router  # noqa: PLC0415
-
-    reset_router()
+    # 指纹基线一并清空：装载后的首次调用按调用期视图重新应用一次（幂等）。
+    router_factory.reset_router()
+    _applied_config_fingerprint = None
 
     # 共享 httpx 客户端池（F12 池化语义平移）：进程级单例连接复用——无池化时
     # 逐调用建连，半死连接残留即报 Unclosed（装机日志单日 140 次）。幂等，
     # 重复 on_load 复用活池。
-    import wire_client as _wire  # noqa: PLC0415
-
-    _wire._get_client()
+    wire_client._get_client()
     _adapter = None
+
+
+def _config_fingerprint(view: dict[str, Any]) -> str:
+    """配置视图指纹（确定性序列化；剔除调用瞬态键后同内容 → 同指纹）。
+
+    只做"内容是否实质变化"判定，不承载配置权威——权威仍是内核下发的视图本体。
+    """
+    stable = {k: v for k, v in view.items() if k not in _CONFIG_FINGERPRINT_TRANSIENT_KEYS}
+    payload = json.dumps(stable, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @plugin.on_config_changed
 def _on_config_changed(config: dict[str, Any]) -> None:
-    """每调用配置变更感知：刷新注入视图并重建 adapter/router。
+    """每调用配置变更感知：刷新注入视图并按需重建 adapter/router。
 
     内核每次调用现算下发用户空间叠加后的最新配置——不刷新则模型表/key 池
     冻结在 sidecar 启动快照，设置页新增模型/换 key 须重启才生效
     （2026-09-28 事故根因之二，llm_service 侧半边）。重建沿用 on_load 同款
-    语义：reset_router 清模块级单例，_adapter 置空由 _ensure_adapter 懒重建
+    语义：reset_router 重置单例槽位，_adapter 置空由 _ensure_adapter 懒重建
     （在途流持有旧对象引用不受影响，调用边界触发不引入中途换装）。
+
+    生效配置无实质变化（指纹相同，含仅调用瞬态键不同的跨管道/跨租户调用）
+    时直接返回：不重复 set_config/重置/重建。``reset_router`` 的外部语义
+    不变——配置真正变更时仍在此重置，下一次调用懒重建生效。
     """
-    global _adapter
+    global _adapter, _applied_config_fingerprint
+    fingerprint = _config_fingerprint(config)
+    if fingerprint == _applied_config_fingerprint:
+        return
+    _applied_config_fingerprint = fingerprint
     set_config(config)
 
-    from router_factory import reset_router  # noqa: PLC0415
-
-    reset_router()
+    router_factory.reset_router()
     _adapter = None
     logger.info("LLM 配置变更感知：router/adapter 已重置，下次调用懒重建")
 
@@ -118,9 +161,7 @@ async def _on_unload(params: dict[str, Any]) -> None:
     global _adapter
     _adapter = None
     # 共享池全路径关闭（连接与缓冲随 unload 释放，不留半开会话）
-    import wire_client as _wire  # noqa: PLC0415
-
-    await _wire.aclose_shared_client()
+    await wire_client.aclose_shared_client()
 
 
 def _ensure_adapter() -> Any:
@@ -128,8 +169,6 @@ def _ensure_adapter() -> Any:
     global _adapter
     if _adapter is not None:
         return _adapter
-
-    from router_factory import build_adapter  # noqa: PLC0415
 
     # provider 插件契约调用方注入（2026-11-04 网关化第二步）：via=plugin 模型
     # 经内核 CapabilityHandlerRegistry 路由到 provides 方（provides 注册表解析
@@ -146,7 +185,7 @@ def _ensure_adapter() -> Any:
     # 重注入保证懒构建拿到的一定是最新已解析值。
     set_config(plugin.get_config())
     model_loader = _ModelLoaderShim(get_config())
-    _adapter = build_adapter(model_loader)
+    _adapter = router_factory.build_adapter(model_loader)
     if hasattr(_adapter, "set_plugin_provider_caller"):
         _adapter.set_plugin_provider_caller(_pending_caller)
     logger.info("LLM adapter initialized: %s", type(_adapter).__name__)
@@ -179,12 +218,19 @@ def _resolve_envelope(arguments: dict[str, Any]) -> dict[str, str]:
 
 
 class _StreamPublisher:
-    """流式事件推送器：Queue + 独立消费者（对照 llm_core/server.py 既有模式）。
+    """流式事件推送器：有界队列 + 独立消费者（对照 llm_core/server.py 既有模式）。
 
     流式消费循环同步密集调 on_chunk，若直接 await notify 推送，task 会堆积
     到 LLM 循环结束才一起执行（事件循环没机会切换），导致所有 chunk 最后一次性
-    到达。Queue.put_nowait 是 O(1) 不阻塞，消费者协程 await get() 异步取出推送，
+    到达。队列入队是 O(1) 不阻塞，消费者协程 await 唤醒异步取出推送，
     与流式循环并发，实现真正逐字实时推送。
+
+    **队列有界（内存定案 §8 条款 3，批 3 最小补丁）**：上界
+    ``_STREAM_QUEUE_MAXSIZE``（构造可覆盖）；满载策略——
+    ① 先丢 keepalive（不占容量、不驱逐业务事件）；
+    ② 相邻同 index 的 text_delta/reasoning_delta 合并文本（不丢内容）；
+    ③ 仍满则丢最旧事件并置降级标记（``degraded``），计数经 :meth:`stats`
+    可观测。禁止无界入队。
 
     fire-and-forget：notify 失败（通道关闭等）静默降级——流式出口不阻断
     LLM 主流程。信封（thread_id/pipeline_id/message_id）由构造时确定，
@@ -200,17 +246,25 @@ class _StreamPublisher:
         bus: Any,
         envelope: dict[str, str],
         keepalive_interval: float | None = None,
+        maxsize: int | None = None,
     ) -> None:
         self._bus = bus
         # 信封在推送时补 sequence（int），故内部用宽松 dict
         self._envelope: dict[str, Any] = dict(envelope)
         # 模块级常量调用时读取（测试可 monkeypatch 模块属性生效）
         self._keepalive_interval = keepalive_interval if keepalive_interval is not None else KEEPALIVE_INTERVAL_SECONDS
-        self._queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+        self._maxsize = _STREAM_QUEUE_MAXSIZE if maxsize is None else max(1, int(maxsize))
+        self._queue: deque[tuple[str, dict[str, Any]]] = deque()
+        self._wakeup = asyncio.Event()
+        self._closed = False
         self._seq = 0
         self._last_event_monotonic = _time.monotonic()
         self._consumer: asyncio.Task[None] | None = None
         self._heartbeat: asyncio.Task[None] | None = None
+        # 满载处置计数（观测面；llm 指标面后续接 stats()）
+        self._dropped_keepalive = 0
+        self._dropped_events = 0
+        self._degraded = False
 
     def start(self) -> None:
         """启动消费者与心跳协程（在调用方事件循环上）。"""
@@ -220,10 +274,15 @@ class _StreamPublisher:
 
     async def _consume(self) -> None:
         while True:
-            item = await self._queue.get()
-            if item is None:
-                break  # 哨兵：流结束终止消费者
-            event, payload = item
+            if self._queue:
+                event, payload = self._queue.popleft()
+            elif self._closed:
+                break
+            else:
+                # 单事件循环内无 await 间隙：清标志与入队检查不会交错（无丢唤醒）
+                self._wakeup.clear()
+                await self._wakeup.wait()
+                continue
             try:
                 await self._bus.notify("emit", {"event": event, "payload": payload})
             except Exception:
@@ -237,12 +296,46 @@ class _StreamPublisher:
                 self.put("keepalive", {})
 
     def put(self, event: str, payload: dict[str, Any]) -> None:
-        """同步入队（O(1) 不阻塞，流式消费循环安全调用）。"""
+        """同步入队（O(1) 不阻塞，流式消费循环安全调用；满载按策略处置）。"""
+        if self._closed:
+            return
         envelope = dict(self._envelope)
         envelope["sequence"] = self._seq
         self._seq += 1
         self._last_event_monotonic = _time.monotonic()
-        self._queue.put_nowait((event, {**envelope, **payload}))
+        if event == "keepalive" and len(self._queue) >= self._maxsize:
+            self._dropped_keepalive += 1
+            return
+        if (
+            len(self._queue) >= self._maxsize
+            and event in _MERGEABLE_DELTA_EVENTS
+            and self._queue[-1][0] == event
+            and self._queue[-1][1].get("index") == payload.get("index")
+        ):
+            last_event, last_payload = self._queue[-1]
+            merged = dict(last_payload)
+            merged["text"] = str(last_payload.get("text") or "") + str(payload.get("text") or "")
+            self._queue[-1] = (last_event, merged)
+            return
+        if len(self._queue) >= self._maxsize:
+            dropped_event, _dropped_payload = self._queue.popleft()
+            if dropped_event == "keepalive":
+                self._dropped_keepalive += 1
+            else:
+                self._dropped_events += 1
+                self._degraded = True
+        self._queue.append((event, {**envelope, **payload}))
+        self._wakeup.set()
+
+    def stats(self) -> dict[str, int | bool]:
+        """队列观测面（在队深度/上界/满载处置计数/降级标记）。"""
+        return {
+            "queued": len(self._queue),
+            "maxsize": self._maxsize,
+            "dropped_keepalive": self._dropped_keepalive,
+            "dropped_events": self._dropped_events,
+            "degraded": self._degraded,
+        }
 
     def emit_plugin_error(self, error: dict[str, Any], plugin_id: str) -> None:
         """以现役 plugin_error 契约事件推送非终止警示（观测C，零新事件类型）。
@@ -267,12 +360,13 @@ class _StreamPublisher:
         )
 
     async def stop(self) -> None:
-        """发哨兵并等待消费者排空剩余事件（保证不丢末尾）。"""
+        """停止心跳并排空在队事件后终止消费者（保证不丢末尾）。"""
         if self._heartbeat is not None:
             self._heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat
-        self._queue.put_nowait(None)
+        self._closed = True
+        self._wakeup.set()
         if self._consumer is not None:
             with contextlib.suppress(Exception):
                 await self._consumer
@@ -419,10 +513,21 @@ class _StreamOutbound:
         self._translator = StreamTranslator()
         self._accumulator = _PartialAccumulator()
         self._cancel_event = cancel_event
+        self._repetition_notice_sent = False
 
     @property
     def accumulator(self) -> _PartialAccumulator:
         return self._accumulator
+
+    @property
+    def degeneration_flagged(self) -> bool:
+        """本轮是否被判定退化循环（流中截断或 finish 终判补拦）。"""
+        return self._translator.stopped
+
+    @property
+    def degeneration_suspect(self) -> bool:
+        """本轮是否存在 suspect 态通道（只标记不杀，含结构豁免降级）。"""
+        return self._translator.suspect
 
     def has_content(self) -> bool:
         return self._accumulator.has_content()
@@ -448,9 +553,68 @@ class _StreamOutbound:
         for event in self._translator.translate(chunk_data):
             if self._publisher is not None:
                 self._publisher.put(event.event, event.payload)
+        # 退化循环（单点守卫在共享翻译器）：返回 "stop" 由 adapter 截断生成；
+        # 用户可见信号先发，禁静默截断（禁静默降级纪律）。
+        if self._translator.stopped:
+            self._publish_repetition_notice()
+            return "stop"
         if self._cancel_event.is_set():
             raise StreamCancelledError("run suspended, stream cancelled")
         return None
+
+    def _publish_repetition_notice(self) -> None:
+        """退化循环截断的用户可见信号 + 截断现场留证（每次调用至多一条）。
+
+        零产出轮（正文与工具调用双空）**不叠提醒**：这种轮由 llm_core 抛错终止，
+        引擎侧 `plugin_step_failed` 已转成一条失败通知，再发「已自动截断」就是
+        同一事故两条通知。有半截内容的截断轮照常提醒——那才是「继续跑但被截断」
+        的信号（2026-11-10 用户裁定：修声明闸的同时去重）。
+        """
+        if self._repetition_notice_sent:
+            return
+        self._repetition_notice_sent = True
+        self._log_repetition_evidence()
+        snapshot = self._accumulator.build_snapshot()
+        if not (snapshot.get("text") or "").strip() and not snapshot.get("tool_calls"):
+            logger.info("[llm] 零产出退化轮：不叠截断提醒（失败通知由引擎侧发出）")
+            return
+        if self._publisher is None:
+            return
+        self._publisher.emit_plugin_error(
+            {
+                "code": "LLM_STREAM_REPETITION",
+                "message": "模型输出检测到退化循环，已自动截断本次生成",
+                "source": "llm",
+                "retryable": True,
+            },
+            "llm_service",
+        )
+
+    def _log_repetition_evidence(self) -> None:
+        """截断现场落日志：命中通道 + 判定信息（reasons/onset/豁免）+ 原文尾部。
+
+        截断内容不进 assistant 消息（零产出轮 llm_core 直接抛错），不留证则
+        事后无法判定真退化/误判（2026-11-10 实测 8 次命中零现场）。留证窗口
+        与判定同源同缓冲（旧自研守卫分析窗 3000 > 留证窗 2000 的自证缺口已
+        随 simurg 引擎换代消除）；reasons 为引擎自带可读判定原因，onset 为
+        环起点绝对字符位，豁免与否决信息（重复单元结构占比/周期）一并落证。
+        """
+        evidence = self._translator.repetition_evidence()
+        tail = evidence["tail"]
+        logger.warning(
+            "[llm] 退化循环截断留证 channel=%s chars=%d tail_chars=%d state=%s "
+            "onset_char=%s exempted=%s unit_ratio=%s unit_period=%s reasons=%s\n%s",
+            evidence["channel"],
+            evidence["chars"],
+            len(tail),
+            evidence["state"],
+            evidence["onset_char"],
+            evidence["exempted"],
+            evidence["unit_structural_ratio"],
+            evidence["unit_period"],
+            ";".join(evidence["reasons"]) or "-",
+            tail,
+        )
 
     def _publish_fallback_notice(self, notice: dict[str, Any]) -> None:
         """key 失败→Router fallback 的用户可见信号（观测C，禁静默降级）。
@@ -732,7 +896,19 @@ async def llm_complete_stream(
                 poll_task = asyncio.create_task(_watch_run_cancel(poll_handle, run_id, cancel_event))
 
         temperature, max_tokens, model_entry = _backfill_model_defaults(model, temperature, max_tokens, kwargs)
-        messages = _normalize_inbound_messages(messages, model_entry, envelope["pipeline_id"], model)
+        # 归一化含 CPU 重活（历史复读正则扫描），必须出事件循环线程：CPython 的
+        # re 匹配全程持 GIL，长历史扫描实测 30s+ 会冻住合宿宿主心跳（watchdog
+        # 30s 判停滞即整组 os._exit，同宿无关成员的在飞调用全部 response channel
+        # closed）。to_thread 复制当前 contextvars（日志 _log_ctx 不丢）、异常与
+        # 返回值语义不变；扫描成本另有确定性字符预算（见 _message_normalizer
+        # 折叠节注释），保证单次正则调用的阻塞上限。
+        messages = await asyncio.to_thread(
+            _normalize_inbound_messages,
+            messages,
+            model_entry,
+            envelope["pipeline_id"],
+            model,
+        )
         # rc 回放档位（2026-10-21 默认档=回放）：按模型条目解析（条目声明 >
         # provider 剥离名单 > 默认回放）。专用参数传适配器——**不得进 call_kwargs**
         # （会随 kwargs 进上游请求体触发参数拒绝）。
@@ -793,6 +969,15 @@ async def llm_complete_stream(
         "thinking_text": response.thinking_text,
         "usage": response.usage or {},
         "finish_reason": map_finish_reason(getattr(response, "finish_reason", None)),
+        # 退化循环截断标记（共享翻译器判定）：llm_core 据此判退化轮终态，
+        # 不读此字段则截断对上层不可见（2026-11-07 事故：信号死在网关边界）。
+        # 并入 finish 终判补拦（短于首检长度的退化流流中不触发，收尾终判置
+        # translator.stopped——短应答连发「重复×60」确属退化内容，同判退化轮）。
+        "stream_repetition": bool(getattr(response, "stream_repetition", False))
+        or outbound.degeneration_flagged,
+        # suspect 态标记（只标记不杀；含结构豁免降级的通道）：流照常完成，
+        # 结果面留痕供上层观测（llm_core 不读则仅随返回值透传）。
+        "stream_degeneration_suspect": outbound.degeneration_suspect,
         # 正常完成：partial 恒为 None（半截快照只在异常/取消路径返回）
         "partial": None,
     }
@@ -928,7 +1113,10 @@ async def _handle_config_llm(
     # /api/v1/plugins/llm_service/config/llm，provider key 走 /api/v1/config/env。
     if method == "GET" and sub.startswith("/providers/") and sub.endswith("/remote-models"):
         provider_id = sub[len("/providers/") : -len("/remote-models")]
-        return _ok(_json_response(rlc.get_remote_models(provider_id)))
+        # 该端点内部是同步 httpx.get（timeout=8s）：直调会冻住合宿宿主事件循环
+        # （并发几次即触及 watchdog 30s 判停滞）。下放线程池，异常照常上抛。
+        remote_models = await asyncio.to_thread(rlc.get_remote_models, provider_id)
+        return _ok(_json_response(remote_models))
     logger.warning("llm http.handle: no config/llm route for sub=%s method=%s", sub, method)
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 

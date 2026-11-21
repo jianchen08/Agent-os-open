@@ -8,6 +8,8 @@ WSL 健康探测与 Docker daemon 管理
 - probe_wsl_alive: WSL 存活探测（对标 wsl_alive_probe.ps1）
 - check_wsl_kernel_health: WSL 内核健康检查（对标 wsl_health_probe.sh）
 - ensure_dockerd: 确保 dockerd 运行（对标 wsl_start_daemon.sh）
+- ensure_docker_engine: 确保 docker 引擎可达（保活自愈 + 发行版冻结时
+  wsl --shutdown 最后一级兜底，见 ADR 2026-11-13-wsl-freeze-shutdown-fallback）
 - setup_port_forward: 设置 netsh portproxy 端口转发
 """
 
@@ -241,6 +243,13 @@ def get_wsl_ip() -> str | None:
 _ENGINE_ENSURE_COOLDOWN = 30.0
 # 上一次真正拉起/等待的单调时钟（模块级：跨插件实例共享，防多实例风暴）
 _last_engine_ensure: float = 0.0
+# 冻结兜底冷却（秒）：wsl --shutdown 的最小重触发间隔。窗口内即便二次取证命中
+# 也不二次 shutdown——人工并发 wsl --export 与发行版卡死同貌，冷却保证即便误判
+# 一次窗口内最多杀一次（爆炸半径封顶）；env 覆盖沿用模块加载期读取模式（同
+# _WSL_DISTRO/_last_engine_ensure 戳模式）。
+_FREEZE_SHUTDOWN_COOLDOWN = float(os.environ.get("WSL_FREEZE_SHUTDOWN_COOLDOWN", "600"))
+# 上一次 wsl --shutdown 的单调时钟（模块级：跨插件实例共享冷却）
+_last_freeze_shutdown: float = 0.0
 # 保活会话句柄（模块级强引用）：Popen 句柄即弃既触发 GC ResourceWarning，
 # 又让插件卸载时无从终止 sleep infinity 残留——拉起者负责终止
 # （terminate_keepalive，isolation 插件 on_unload 调用）。
@@ -324,6 +333,14 @@ def _keepalive_running() -> bool:
         return False
 
 
+def _spawn_keepalive_session() -> subprocess.Popen[bytes]:
+    """detached 拉起 WSL 保活会话（wsl.exe ... sleep infinity，持有 VM 防回收）。"""
+    return subprocess.Popen(
+        ["wsl.exe", "-d", _WSL_DISTRO, "--exec", "/bin/sh", "-c", "sleep infinity"],
+        creationflags=_CREATE_NO_WINDOW,
+    )
+
+
 def ensure_docker_engine(timeout: float = 30.0) -> bool:
     """确保 docker 引擎可达（幂等，供插件运行时自愈调用）。
 
@@ -333,14 +350,24 @@ def ensure_docker_engine(timeout: float = 30.0) -> bool:
     - 保活会话已存在 → 只等待 daemon 就绪（dockerd 由 WSL systemd 随 VM 启动）；
     - 无保活会话 → detached 拉起一个持有 VM 后等待就绪。
 
+    发行版冻结兜底（Windows-only，ADR 2026-11-13-wsl-freeze-shutdown-fallback）：
+    等待循环中两段式取证——信号A（廉价）=保活会话进程已退出（本轮拉起的用
+    poll()，既存会话用 _keepalive_running()）且 docker 仍不可达；信号B（昂贵，
+    仅信号A命中后一次）=probe_wsl_alive(timeout=8) 复核 rc=124 才确认冻结
+    （防 VM 冷启动慢被误判）。确认且冻结冷却窗口（_FREEZE_SHUTDOWN_COOLDOWN，
+    env WSL_FREEZE_SHUTDOWN_COOLDOWN 可覆盖）外执行 wsl.exe --shutdown 清态，
+    重拉保活会话（失败不致命，交由轮询重试）并至多重置一次等待 deadline
+    （shutdown 后 VM 重启需暖机）。
+
     平台门控：保活会话（wsl.exe）与 PowerShell 探测是 Windows-only 语义
     （wsl.exe 持有 WSL2 VM 防空闲回收）；Linux 原生 docker 无 VM 回收问题，
     自愈环节短路跳过，可达性检测走 is_docker_reachable 即可。
 
-    返回最终可达性；Windows 上阻塞最长 timeout 秒（wsl.exe/powershell，
-    与模块既有函数同假设；调用方应放线程池或依赖冷却保证低成本）。
+    返回最终可达性；Windows 上阻塞最长 ≈2×timeout 秒（deadline 至多重置一次，
+    wsl.exe/powershell，与模块既有函数同假设；调用方应放线程池或依赖冷却
+    保证低成本）。
     """
-    global _last_engine_ensure
+    global _last_engine_ensure, _keepalive_proc, _last_freeze_shutdown
     if is_docker_reachable():
         return True
     now = time.monotonic()
@@ -353,20 +380,57 @@ def ensure_docker_engine(timeout: float = 30.0) -> bool:
         # 当前可达性（powershell/wsl.exe 在 Linux 上不存在， subprocess 必然抛错）
         logger.info("[wsl_health] 非 Windows 平台，跳过 WSL 保活自愈，走 docker 可达性")
         return is_docker_reachable(timeout=timeout)
+    keepalive_handle: subprocess.Popen[bytes] | None = None
     if _keepalive_running():
         logger.info("[wsl_health] 保活会话存在但 docker 不可达，等待 daemon 就绪")
     else:
         # 保活会话有意常驻（持有 WSL VM），不设超时；VM 回收由会话生命周期自洽
-        global _keepalive_proc
-        _keepalive_proc = subprocess.Popen(
-            ["wsl.exe", "-d", _WSL_DISTRO, "--exec", "/bin/sh", "-c", "sleep infinity"],
-            creationflags=_CREATE_NO_WINDOW,
-        )
+        _keepalive_proc = keepalive_handle = _spawn_keepalive_session()
         logger.info("[wsl_health] 已拉起 WSL 保活会话（%s），等待 docker 就绪", _WSL_DISTRO)
     deadline = time.monotonic() + timeout
+    deadline_reset_done = False
     while time.monotonic() < deadline:
         if is_docker_reachable(timeout=3.0):
             return True
+        # 发行版级冻结取证（见 docstring）：发行版卡死时保活会话创建被拒即刻
+        # 退出，干等永不可能就绪，只有 Windows 侧 wsl --shutdown 能清态。
+        if keepalive_handle is not None:
+            keepalive_dead = keepalive_handle.poll() is not None
+        else:
+            keepalive_dead = not _keepalive_running()
+        if keepalive_dead and probe_wsl_alive(timeout=8).rc == 124:
+            now = time.monotonic()
+            if now - _last_freeze_shutdown >= _FREEZE_SHUTDOWN_COOLDOWN:
+                logger.warning(
+                    "[wsl_health] WSL 发行版冻结确认（保活会话退出+probe 超时），"
+                    "执行 wsl --shutdown 最后一级自愈（会杀全部发行版）"
+                )
+                try:
+                    subprocess.run(
+                        ["wsl.exe", "--shutdown"],
+                        timeout=30,
+                        creationflags=_CREATE_NO_WINDOW,
+                        check=False,
+                    )
+                except Exception as e:
+                    # shutdown 未生效：不落冷却戳、不动会话与 deadline，交由
+                    # 等待循环继续取证
+                    logger.warning("[wsl_health] wsl --shutdown 执行失败: %s", e)
+                else:
+                    _last_freeze_shutdown = now
+                    try:
+                        _keepalive_proc = keepalive_handle = _spawn_keepalive_session()
+                        logger.info("[wsl_health] 已重拉 WSL 保活会话（%s）", _WSL_DISTRO)
+                    except Exception as e:
+                        # 重拉失败不致命（shutdown 后 WSL_E_DISTRO_NOT_FOUND 竞态
+                        # 实测存在），句柄保持旧值（已退出），交由轮询自然重试
+                        logger.warning(
+                            "[wsl_health] 保活会话重拉失败（交由轮询重试）: %s", e
+                        )
+                    if not deadline_reset_done:
+                        # shutdown 后 VM 重启需暖机，重新计满 timeout（至多一次）
+                        deadline = now + timeout
+                        deadline_reset_done = True
         time.sleep(2)
     return False
 

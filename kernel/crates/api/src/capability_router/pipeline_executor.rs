@@ -44,6 +44,10 @@ impl KernelCapabilityRouter {
                 self.handle_pipeline_executor_is_pipeline_viewed(params.clone())
                     .await,
             ),
+            "is_pipeline_active" => Some(
+                self.handle_pipeline_executor_is_pipeline_active(params.clone())
+                    .await,
+            ),
             "delete_pipeline" => Some(
                 self.handle_pipeline_executor_delete_pipeline(params.clone())
                     .await,
@@ -367,14 +371,29 @@ impl KernelCapabilityRouter {
         // 误导为「token 持有者已删除」，resume 路径全堵死（装机 2026-11-02 实证：
         // TaskTool continue 三连拒 user_id= 空）。审批翻面/幂等空转分支不派发，
         // 不需要身份，不受此拦。
-        let user_id = agentos_tenant::current()
+        let injected_user = agentos_tenant::current()
             .and_then(|c| c.user_id)
             .filter(|u| !u.is_empty());
+        // 启动期系统面（插件装载自愈恢复，2026-11-11 排空自动恢复）没有执行
+        // 上下文身份：回落到管道持久化的属主 task.submitted_by（任务出生/提交
+        // 面写入）。身份仍不由调用方提供，信任模型不变（params.user_id 依旧
+        // 不可指派）；属主不可解析才 fail-fast。
+        let user_id = match injected_user {
+            Some(u) => Some(u),
+            None => store
+                .load_pipeline_state(pipeline_id, &tenant_id)
+                .await
+                .ok()
+                .and_then(|fields| fields.get("task.submitted_by").cloned())
+                .and_then(|v| v.as_str().map(str::to_string))
+                .filter(|u| !u.is_empty()),
+        };
         let Some(user_id) = user_id else {
             return Err(McpError::Protocol {
                 message: format!(
-                    "resume_pipeline 拒绝派发：调用链未携带用户身份（执行上下文无注入 user；\
-                     反调面身份由内核 scope 注入，params.user_id 已退役）pipeline={pipeline_id}"
+                    "resume_pipeline 拒绝派发：调用链未携带用户身份且管道无持久化属主\
+                     （task.submitted_by）可回落（反调面身份由内核 scope 注入，\
+                     params.user_id 已退役）pipeline={pipeline_id}"
                 ),
             });
         };
@@ -448,6 +467,11 @@ impl KernelCapabilityRouter {
             message: "wait_run_stop disabled: kernel store not injected".to_string(),
         })?;
         let hub = crate::run_signal::RunSignalHub::global();
+        // state 行可能已被删除（会话/任务删除后清库）：权威状态查不到时不能
+        // 当作"未停止"——信号中枢的取消记忆优先，删除后的在途 run 据此收尾。
+        if hub.is_cancelled(&run_id) {
+            return Ok(json!({ "status": "suspended", "run_id": run_id }));
+        }
         let wait_fut = hub.wait(&run_id, std::time::Duration::from_secs_f64(timeout_secs));
         let run = store
             .get_run(&run_id)
@@ -482,6 +506,26 @@ impl KernelCapabilityRouter {
         Ok(json!({ "pipeline_id": pipeline_id, "viewed": viewed }))
     }
 
+    /// pipeline-executor.is_pipeline_active：管道是否有在途执行链（活跃 run）。
+    ///
+    /// 消费方 = notify_judge 的通知出队冲刷（2026-11-18 批次 5）：判定 worthy
+    /// 打标晚于 new_message 帧（post 时序错位）导致通知押单等下一事件捎出——
+    /// 空闲（无在途链）即补发通知帧，流式进行中押单不打断。真值源 =
+    /// RunChainRegistry::has_chain（派发受理到 run 建行的空窗一并计活跃）。
+    async fn handle_pipeline_executor_is_pipeline_active(
+        &self,
+        params: Value,
+    ) -> Result<Value, McpError> {
+        let pipeline_id = params
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::Protocol {
+                message: "is_pipeline_active 缺少 pipeline_id 参数".to_string(),
+            })?;
+        let active = crate::run_chain::RunChainRegistry::global().has_chain(pipeline_id);
+        Ok(json!({ "pipeline_id": pipeline_id, "active": active }))
+    }
+
     /// pipeline-executor.delete_pipeline：任务删除语义（0.2 任务 = 管道），删除
     /// 该管道全部执行数据并清内存 registry 条目。幂等：无记录返回 ok。
     async fn handle_pipeline_executor_delete_pipeline(
@@ -499,6 +543,24 @@ impl KernelCapabilityRouter {
             message: "delete_pipeline disabled: kernel store not injected".to_string(),
         })?;
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        // 删除前先挂起在途 run（含血缘后代）：删除只清数据，不挂起时 run 会在
+        // 删后继续回写 state / 派生新管道。挂起失败不阻断删除——数据面由 store
+        // 删除墓碑写屏障兜底。
+        match store.suspend_pipeline_runs(pipeline_id).await {
+            Ok(run_ids) => {
+                let hub = crate::run_signal::RunSignalHub::global();
+                for run_id in &run_ids {
+                    hub.signal(run_id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    pipeline = %pipeline_id,
+                    error = %e,
+                    "删除管道前挂起在途 run 失败（继续删除，写屏障兜底）"
+                );
+            }
+        }
         // 返回值 = 实际删除清单（含血缘后代子任务管道），逐个逐出内存注册表
         let deleted_ids =
             store

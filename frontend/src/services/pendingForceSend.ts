@@ -26,19 +26,21 @@ export async function forceSendPendingInput(opts: ForceSendPendingOptions): Prom
   const target = (usePendingInputStore.getState().byPipeline[pipelineId] ?? []).find(
     (i) => i.id === inputId,
   )
+  // 本地队列视图只是镜像，不是发送前置条件（2026-11-14）：条目不在本地视图
+  // （事件漏接/对账滞后/多端并发）时旧实现只提示不发——按钮点了没反应。
+  // 现在恒发帧由内核裁决：条目真在队列则强发生效；已消费则回 route_error
+  // 通知（后端原因可见），同时刷新本地视图收敛。
   if (!target) {
-    // 条目已被消费（队列视图滞后）：对账收敛即愈，不发重复消息
-    void usePendingInputStore.getState().load(pipelineId)
     useNotificationStore.getState().addNotification({
-      title: '未发送该消息',
-      message: '该条目已不在队列中（可能已被消费），队列视图已刷新',
+      title: '正在发送该消息',
+      message: '本地队列视图未命中该条目（可能已消费），已提交后端裁决并按回执收敛',
       priority: 'normal',
       category: 'alert',
       isBlocking: false,
       autoDismissMs: 6000,
       sourceLabel: '系统',
     })
-    return
+    void usePendingInputStore.getState().load(pipelineId)
   }
   globalWS.sendForcePendingInput(sessionId, { pipelineId, inputId })
 }

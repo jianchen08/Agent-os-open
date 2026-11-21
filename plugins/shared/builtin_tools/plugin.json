@@ -2,11 +2,12 @@
   "id": "agentos-builtin-tools",
   "requires_services": [
     "packaging",
-    "project.load_zones"
+    "project.load_zones",
+    "multimodal"
   ],
   "name": "Builtin Tools",
-  "description": "7 个高频内置工具（文件读写/搜索/文件管理）MCP 封装",
-  "version": "1.0.8",
+  "description": "7 个高频内置工具（文件读写/搜索/文件管理）MCP 封装。1.1.0 增（R20 定稿）：file_read 图像模态按当前模型视觉输入上限做原生分辨率网格切分（原图+分块一次注入，multimodal.split_image 消费）",
+  "version": "1.1.0",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -16,7 +17,7 @@
     "tools": [
       {
         "name": "file_read",
-        "description": "读取文件内容；路径为目录时返回该目录条目列表（名称/类型/大小）。查看工作空间或目录结构直接用本工具，读文件/列目录不要用 Shell 命令代替",
+        "description": "读取文件内容；路径为目录时返回该目录条目列表（名称/类型/大小）。查看工作空间或目录结构直接用本工具，读文件/列目录/看图不要用 Shell 命令代替；图片（png/jpeg/gif/webp/bmp，≤20MB）与 docx/pdf 也可直接读。大图直喂会被模型 API 端视觉编码器缩放、丢失文字细节：系统按当前模型视觉输入上限自动把超规格图片做原生分辨率网格切分（原图+分块一次性注入，无缩放损失，分块带行列拼合标注；图块进上下文后成为前缀的一部分，后续轮次前缀缓存命中复用，不产生额外调用）",
         "render": {
           "card": "read"
         },
@@ -122,6 +123,40 @@
             "base64_data": {
               "type": "string",
               "description": "图片模态读取时的 base64 内容"
+            },
+            "image_grid": {
+              "type": "object",
+              "properties": {
+                "rows": {
+                  "type": "integer"
+                },
+                "cols": {
+                  "type": "integer"
+                }
+              },
+              "description": "图片切分：等分网格（行×列）"
+            },
+            "tile_count": {
+              "type": "integer",
+              "description": "图片切分：分块数量（images 数组长度）"
+            },
+            "images": {
+              "type": "array",
+              "description": "图片切分：原生分辨率分块列表（行优先序，每块 {base64, mime_type, path}）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "base64": {
+                    "type": "string"
+                  },
+                  "mime_type": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              }
             }
           }
         }

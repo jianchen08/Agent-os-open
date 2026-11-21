@@ -849,7 +849,6 @@ mod tests {
     #[tokio::test]
     async fn chat_contract_output_schema_gates_handler_responses() {
         use agentos_core::traits::StorageBackend;
-        use agentos_core::types::PendingInputSource;
         use agentos_mcp::CapabilityHandler;
         use agentos_session::router::PipelineDispatcher;
         use std::sync::{Arc, Mutex};
@@ -860,17 +859,7 @@ mod tests {
         impl PipelineDispatcher for NoopDispatcher {
             async fn dispatch_user_input(
                 &self,
-                _t: &str,
-                _u: &str,
-                _c: &str,
-                _p: &str,
-                _ts: &str,
-                _ec: Option<&Value>,
-                _ov: Option<&Value>,
-                _a: &str,
-                _pipeline_config_id: Option<&str>,
-                _cmid: &str,
-                _source: PendingInputSource,
+                _request: agentos_core::types::DispatchRequest,
             ) -> Result<(), String> {
                 Ok(())
             }

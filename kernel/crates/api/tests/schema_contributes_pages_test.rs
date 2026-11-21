@@ -52,6 +52,7 @@ fn manifest_with_contributes(plugin_id: &str, contributes: Option<Value>) -> Plu
         aux_venvs: Vec::new(),
         // 基线要求:PluginManifest 字面量必须带 provides 字段(见 core/src/traits.rs:825)
         provides: None,
+        visibility: Default::default(),
     }
 }
 

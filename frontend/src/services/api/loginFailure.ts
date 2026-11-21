@@ -12,6 +12,11 @@ export type LoginFailureKind = 'rate_limited' | 'credential' | 'network' | 'unkn
 
 export interface LoginFailure {
   kind: LoginFailureKind
+  /**
+   * network 类的细分：true=超时（请求发出但内核未在超时窗口内应答）、
+   * false/缺省=连不上（连接被拒/网络不可达）。只影响文案，不影响 kind。
+   */
+  timedOut?: boolean
   /** 429 时内核 Retry-After 提示（秒，auth.rs TooManyRequests 恒带）；缺失为 undefined */
   retryAfterSecs?: number
 }
@@ -34,6 +39,8 @@ const RATE_LIMITED_CODES = new Set(['TOO_MANY_REQUESTS', '429'])
 const CREDENTIAL_CODES = new Set(['BAD_REQUEST', 'UNAUTHORIZED', '400', '401'])
 /** 网络失败：无 HTTP 响应的 axios 错误码（超时/断连） */
 const NETWORK_CODES = new Set(['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'])
+/** 网络类中的"超时"子族：请求已发出、内核未在窗口内应答（与连不上区分） */
+const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT'])
 
 /** 分类登录失败错误（总判定入口；未知形状一律 unknown 不误判） */
 export function classifyLoginFailure(error: unknown): LoginFailure {
@@ -46,7 +53,12 @@ export function classifyLoginFailure(error: unknown): LoginFailure {
     }
   }
   if (CREDENTIAL_CODES.has(code)) return { kind: 'credential' }
-  if (NETWORK_CODES.has(code) || e.message === 'Network Error') return { kind: 'network' }
+  if (NETWORK_CODES.has(code) || e.message === 'Network Error') {
+    // 超时（ECONNABORTED/ETIMEDOUT）= 内核在但没及时答（装配/繁忙期整体停顿）；
+    // ERR_NETWORK = 根本连不上。两者用户该做的事不同（等一等重试 / 查服务是否起），
+    // 故分类保留，文案分流。
+    return { kind: 'network', timedOut: TIMEOUT_CODES.has(code) }
+  }
   return { kind: 'unknown' }
 }
 
@@ -70,6 +82,11 @@ export function loginFailureBanner(
         : '尝试过多已锁定，请等待锁定期结束或重启应用'
     case 'network': {
       const target = apiBase ? `（目标：${apiBase}）` : ''
+      // 超时=内核在但没及时应答（装配/繁忙期整体停顿，实测停顿可达 60s 级）：
+      // 让用户"再点一次"才是有效动作，说"无法连接"会误导去查服务是否启动。
+      if (failure.timedOut) {
+        return `内核响应超时${target}（启动中或繁忙），请再点一次登录`
+      }
       return `无法连接内核${target}，请确认服务已启动或检查服务器地址`
     }
     case 'credential':

@@ -1,5 +1,6 @@
 config_id: general_agent
 name: 通用任务执行者
+icon: wrench
 display_name: 通用任务执行者
 description: '通用任务执行Agent（L3），负责执行各类通用任务。
 
@@ -18,12 +19,9 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   {{project_agents_md_anchor}}
 
-
   # 你是通用任务执行者
 
-
   ## 核心职责
-
 
   1. **任务理解**：理解任务描述、目标和验收标准
 
@@ -33,9 +31,7 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   4. **结果评估**：使用 task_evaluate 评估任务完成情况
 
-
   ## 执行流程
-
 
   1. **理解任务**【自己执行】：分析任务描述，明确目标和验收标准
 
@@ -47,70 +43,50 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   5. **评估完成**【自己执行】：调用 task_evaluate 评估
 
-
   ## 工作空间
-
 
   {{storage_overview}}
 
-
   '
-static_vars:
-  enabled: true
-  items:
-  - name: 可扩展工具索引
-    type: reference
-    content: '## 可扩展工具索引
-
-      以下为扩展能力索引。resource_search 只检索资源不加载工具——能力是否可用以本 agent 的 tool_ids 为准，未持有的能力在任务输出中向调度方反馈（改派或触发资源准备流程），禁止假设搜到即可用。
-
-
-      - schema_evaluator: 验证JSON/YAML格式或正则模式校验
-
-
-      如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，
-
-      工具将自动加载到当前会话，下一轮即可直接调用。
-
-      '
 dynamic_vars:
   enabled: true
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
+  - '任务ID: {{state:context.task_id}}'
 tool_ids:
+# ── 直接面（2026-11-18 用户裁定：缩减 tool_ids，其余工具经两步法动态可达）──
+# 保留判据：高频核心（每次任务几乎都用）/ 多模态产出（file_read 图片注入经
+# call_tool 转发会丢模态，必须直接）/ 交互与闸门（human_interaction 审批卡、
+# task_evaluate 评估证据）/ 两步法本体。其余（文件管理四件套、检索外部源、
+# web_operate/phone_control、browser_tool、desktop_*×17、eval 桩、dsh 桥）
+# 一律经 resource_search(mode=detailed) 拿定义 → call_tool 转发调用（环境键
+# 注入由管道注入级 tool_args_inject 统一完成，动态/原生同一份代码；call_tool
+# 只解析参数并透传，ADR 2026-11-18-dynamic-tool-passthrough-injection）。
 - file_read
 - file_write
-- copy_file
-- move_file
-- delete_file
-- create_directory
-- bash_execute
+- bash
+- log
+- input
+- kill
 - enhanced_search
-- web_operate
-# browser_tool 整注（tool_ids 条目=插件 id → 该插件声明面全量入面，capability_router
-# "一行接入配法"）。与下方 computer_use 显式列名的差别：browser_tool 的 plugin.json
-# 声明即安全边界（六件=Bridge 白名单同名集合，无隐藏工具），整注无旁路面。
-- browser_tool
-# computer_use（external MCP：Windows-MCP 动态导入）。显式列名而非插件 id——
-# 上游还带 Shell/PowerShell/FileSystem 等工具，整注等于在 LLM 面开安全旁路
-- Snapshot
-- Screenshot
-- Click
-- Type
-- Scroll
-- Move
-- Shortcut
-- Wait
-- App
 - memory
 - task_evaluate
 - human_interaction
-- eval_sleep
-- eval_echo
-# 大输出恢复：工具结果被 spill_guard 替换为摘要时，按 tool_call_id 取回原文
-# （工具面审查 2026-10-19 缺口补配：此前无任何出厂 agent 持有，spill 后取不回）
-- spill_retrieve
+# 两步法（缺一整链失效：call_tool 门禁只认本次运行已由 resource_search 引入的动态
+# 工具——引入一次跨轮持续有效，不必重复搜索）
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物
@@ -137,7 +113,7 @@ recommended_metrics:
   default_params:
     path: '{{workspace}}/reports/{{task_id}}_report.md'
     type: markdown
-version: 2.0.0
+version: 2.1.0
 is_active: true
 status: active
 max_iterations: 500

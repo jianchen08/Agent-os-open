@@ -15,6 +15,13 @@ vitest 覆盖率%（Lines）只升不降。
     python scripts/check_frontend_baseline.py                                  # 本地：自跑 vitest+eslint 并检查
     python scripts/check_frontend_baseline.py --vitest-file A --eslint-file B   # CI：复用已 tee 的输出
     python scripts/check_frontend_baseline.py --init                            # 用当前结果写入/收紧基线
+
+ESLINT_EXIT 退出码标记协议：--eslint-file 的产物须由调用方捕获 eslint 退出码
+并追加末行 ``ESLINT_EXIT=<code>``（run_gates frontend-lint shell 与本地
+count_eslint_errors 均已内置）。汇总行缺失时靠标记消歧：标记 0 = 干净通过
+记 0；标记非 0 = eslint 未产出汇总（配置崩/二进制缺失）→ 抛错；无标记且无
+汇总行 = 无法区分干净与崩溃 → 抛错（2026-11-16 修复原 fail-open 假绿：
+eslint 崩溃输出无 "problems" 行曾被静默记 0 error 过闸）。
 """
 
 from __future__ import annotations
@@ -54,9 +61,11 @@ def parse_vitest_failures(output: str) -> int:
 def parse_eslint_errors(output: str) -> int:
     """从 ESLint 输出文本解析 error 数。匹配 "✖ 853 problems (33 errors, 820 warnings)"。
 
-    无 "problems" 汇总行 = 0 error（干净通过）；有汇总行但正则不命中 = 输出异常，
-    抛错而非静默返回 0（与 parse_vitest_failures 同口径，避免基线锁误判）。
+    汇总行缺失时靠 ESLINT_EXIT 标记消歧（协议见模块 docstring）：标记 0 =
+    干净通过记 0；标记非 0 或标记缺失 = eslint 未正常产出，抛错而非静默返回
+    0（与 parse_vitest_failures 同口径，避免基线锁误判"全部通过"）。
     """
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)  # 去 ANSI 颜色码
     m = re.search(r"\((\d+)\s+errors?,", output)
     if m:
         return int(m.group(1))
@@ -65,7 +74,20 @@ def parse_eslint_errors(output: str) -> int:
         print("原始输出尾部：")
         print(output[-1500:])
         raise RuntimeError("ESLint 输出格式异常，无法解析 error 数")
-    return 0
+    exit_codes = re.findall(r"^ESLINT_EXIT=(\d+)$", output, re.MULTILINE)
+    if exit_codes and exit_codes[-1] == "0":
+        return 0
+    print("⚠️ ESLint 输出无 problems 汇总行且无法确认干净通过")
+    print("原始输出尾部：")
+    print(output[-1500:] if output.strip() else "(空输出)")
+    if exit_codes:
+        raise RuntimeError(
+            f"eslint 退出码 {exit_codes[-1]} 且无 problems 汇总行（崩溃/配置错误），拒绝记 0"
+        )
+    raise RuntimeError(
+        "ESLint 输出缺 ESLINT_EXIT 退出码标记，无法区分干净通过与 eslint 崩溃"
+        "（调用方须按模块 docstring 协议捕获退出码）"
+    )
 
 
 def parse_eslint_warnings(output: str) -> int | None:
@@ -93,7 +115,7 @@ def count_vitest_failures() -> int:
 
 
 def count_eslint_errors() -> int:
-    """运行 ESLint 并解析 error 数。"""
+    """运行 ESLint 并解析 error 数（退出码标记协议，见 parse_eslint_errors）。"""
     result = subprocess.run(
         ["npm", "run", "lint"],
         capture_output=True,
@@ -103,7 +125,7 @@ def count_eslint_errors() -> int:
         cwd=FRONTEND,
         check=False,
     )
-    return parse_eslint_errors(result.stdout + result.stderr)
+    return parse_eslint_errors(result.stdout + result.stderr + f"\nESLINT_EXIT={result.returncode}")
 
 
 def parse_vitest_coverage_pct(output: str) -> float | None:
@@ -145,15 +167,37 @@ def read_baseline() -> tuple[int, int, float, int]:
 
 
 def write_baseline(vitest: int, eslint: int, coverage: float) -> None:
-    """写入基线文件（注释口径见调用方——--init 时保留原文件注释不在此重建）。"""
-    BASELINE_FILE.write_text(
-        f"# 前端测试基线（vitest 失败数/eslint 错误数只减不增；\n"
-        f"# 覆盖率%只升不降。见 scripts/check_frontend_baseline.py）\n"
-        f"vitest_failures={vitest}\n"
-        f"eslint_errors={eslint}\n"
-        f"vitest_coverage_pct={coverage:.2f}\n",
-        encoding="utf-8",
-    )
+    """更新基线文件数值键：原位替换三键，保留全部注释行与其它键行。
+
+    历史实现整文件重写只落三键——eslint_warnings 棘轮行与全部收紧归因注释
+    被静默抹掉（2026-11-16 修复）。归因注释链是棘轮账本"只减不增"的取证
+    载体，--init 不得重建；仅文件不存在时写入最小新账本。
+    """
+    keys = {
+        "vitest_failures": str(vitest),
+        "eslint_errors": str(eslint),
+        "vitest_coverage_pct": f"{coverage:.2f}",
+    }
+    if BASELINE_FILE.exists():
+        lines = BASELINE_FILE.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = [
+            "# 前端测试基线（vitest 失败数/eslint 错误数只减不增；",
+            "# 覆盖率%只升不降。见 scripts/check_frontend_baseline.py）",
+        ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = ""
+        if "=" in line and not line.lstrip().startswith("#"):
+            key = line.split("=", 1)[0].strip()
+        if key in keys:
+            out.append(f"{key}={keys[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    out.extend(f"{k}={keys[k]}" for k in keys if k not in seen)
+    BASELINE_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -175,12 +219,14 @@ def main() -> int:
 
     if args.vitest_file or args.eslint_file:
         # CI 模式：复用 frontend-test job 已 tee 的输出（N1 修复，避免重跑）。
+        # 声明了产物来源而文件为空 = 度量链断裂：parse_* 对空输入抛错
+        # （vitest 缺总结行/ESLint 缺标记均 fail-loud），不静默记 0 过闸。
         vitest_out = Path(args.vitest_file).read_text(encoding="utf-8", errors="replace") if args.vitest_file else ""
         eslint_out = Path(args.eslint_file).read_text(encoding="utf-8", errors="replace") if args.eslint_file else ""
-        cur_v = parse_vitest_failures(vitest_out) if vitest_out else 0
-        cur_e = parse_eslint_errors(eslint_out) if eslint_out else 0
-        cur_w = parse_eslint_warnings(eslint_out) if eslint_out else None
-        cur_c = parse_vitest_coverage_pct(vitest_out) if vitest_out else None
+        cur_v = parse_vitest_failures(vitest_out) if args.vitest_file else 0
+        cur_e = parse_eslint_errors(eslint_out) if args.eslint_file else 0
+        cur_w = parse_eslint_warnings(eslint_out) if args.eslint_file else None
+        cur_c = parse_vitest_coverage_pct(vitest_out) if args.vitest_file else None
     else:
         print("运行 vitest（约 30s）...")
         cur_v = count_vitest_failures()

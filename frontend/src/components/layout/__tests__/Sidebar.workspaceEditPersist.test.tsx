@@ -11,14 +11,14 @@
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sidebar } from '@/components/layout/Sidebar'
+import { openDropdownMenu } from '@/components/session/__tests__/sessionTestUtils'
 import { getSessions, getThreadSchema } from '@/services/api/session'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
-import { openDropdownMenu } from '@/components/session/__tests__/sessionTestUtils'
 import type * as sessionMod from '@/services/api/session'
+import type { ThreadField } from '@/services/api/session'
 import type * as errorReportingMod from '@/services/errorReporting'
 import type { Session } from '@/types'
-import type { ThreadField } from '@/services/api/session'
 
 vi.mock('@/services/errorReporting', async (importOriginal) => {
   const actual = await importOriginal<errorReportingMod>()

@@ -61,9 +61,9 @@ from agentos_builtin_tools.result import ToolResult
 _SHARED_ROOT = find_shared_root(Path(__file__).resolve())
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
-from _root_api import (
-    resolve_repo_root,  # noqa: E402
-    resolve_uploads_url,  # noqa: E402
+from _root_api import (  # noqa: E402  # sys.path 注入共享根后才能导入（上方两行）
+    resolve_repo_root,
+    resolve_uploads_url,
 )
 from _root_api import zone_policy as _zone_policy  # noqa: E402
 
@@ -71,11 +71,99 @@ from _root_api import zone_policy as _zone_policy  # noqa: E402
 # 服务；server.py on_load 注入 async (method, args) -> dict，on_unload 摘除）。
 _zones_service_caller: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
 
+# 图像切分服务调用方（R20：multimodal.split_image 原图+分块一次注入；
+# server.py on_load 注入 async (base64, mime, max_pixels) -> dict，on_unload 摘除）。
+_split_image_caller: Callable[[str, str, int], Awaitable[dict[str, Any]]] | None = None
+
+
+# ── 容器路由（R11）：会话存在外部容器绑定时，fs 原语进收养容器执行 ──
+# guard 服务端注入 _container_id/_container_workdir（与 bash 同款信任链，
+# LLM 面被 param_inject 剥除）。路径语义：容器绝对路径（/app/...）直通；
+# 相对路径锚到绑定 workdir。传输走 docker exec argv（positional $1/$2，
+# 不经字符串拼 shell）；写经 base64 stdin（容器无 python3 也可用）。
+_CONTAINER_EXEC_TIMEOUT = 60.0
+
+
+async def _container_exec_raw(
+    container_id: str,
+    script: str,
+    *,
+    args: list[str] | None = None,
+    stdin_data: str | None = None,
+    timeout: float = _CONTAINER_EXEC_TIMEOUT,
+) -> tuple[int, bytes, bytes]:
+    """docker exec argv 直传原始字节面（宿主侧无 shell；容器内 sh -c script $args）。
+
+    stdout/stderr 不解码——二进制安全面（file_read 容器分支图片模态分流
+    R14 的读取底座）；文本面调用方走 [`_container_exec`] 解码包装。
+    """
+    import asyncio as _asyncio
+
+    argv = ["docker", "exec"]
+    if stdin_data is not None:
+        # 无 -i 不读 stdin：docker exec 立即给容器侧 EOF，base64 -d 写出空文件
+        # （真内核探针实证）。stdin 面与 -i 绑定出现。
+        argv.append("-i")
+    argv += [container_id, "sh", "-c", script, "sh", *(args or [])]
+    proc = await _asyncio.create_subprocess_exec(
+        *argv,
+        stdout=_asyncio.subprocess.PIPE,
+        stderr=_asyncio.subprocess.PIPE,
+        stdin=_asyncio.subprocess.PIPE if stdin_data is not None else _asyncio.subprocess.DEVNULL,
+    )
+    try:
+        # stdin_data 必经 communicate(input=...) 进容器侧 stdin（base64 -d 写面
+        # 依赖；漏传会立即 EOF 写出空文件——真内核探针实证）
+        data = stdin_data.encode("utf-8") if stdin_data is not None else None
+        out, err = await _asyncio.wait_for(proc.communicate(input=data), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        return 124, b"", b"container exec timeout"
+    return (proc.returncode or 0, out, err)
+
+
+async def _container_exec(
+    container_id: str,
+    script: str,
+    *,
+    args: list[str] | None = None,
+    stdin_data: str | None = None,
+    timeout: float = _CONTAINER_EXEC_TIMEOUT,
+) -> tuple[int, str, str]:
+    """docker exec 文本面（utf-8 replace 解码；二进制安全读取走 raw 版）。"""
+    rc, out, err = await _container_exec_raw(
+        container_id, script, args=args, stdin_data=stdin_data, timeout=timeout
+    )
+    return (
+        rc,
+        out.decode("utf-8", errors="replace"),
+        err.decode("utf-8", errors="replace"),
+    )
+
+
+def _container_target(path: str, workdir: str | None) -> str:
+    """路径锚定：容器绝对路径直通；相对路径锚绑定 workdir（缺省 /）。"""
+    import posixpath
+
+    p = (path or "").strip()
+    if not p:
+        return p
+    if p.startswith("/"):
+        return p
+    base = (workdir or "/").rstrip("/") or "/"
+    return posixpath.join(base, p)
+
 
 def set_zones_service_caller(caller: Any) -> None:
     """注入/清除授权名单服务调用方（server on_load 调用）。"""
     global _zones_service_caller  # noqa: PLW0603
     _zones_service_caller = caller
+
+
+def set_split_image_caller(caller: Any) -> None:
+    """注入/清除图像切分服务调用方（server on_load 调用，R20）。"""
+    global _split_image_caller  # noqa: PLW0603
+    _split_image_caller = caller
 
 
 async def _load_zone_lists() -> dict[str, list[str]]:
@@ -223,13 +311,16 @@ async def _read_relative_fallback(
     拼接到任何前缀根下都不会出界，无需二次前缀校验。zones 为调用方一次取
     全的名单三节（T6a：project.load_zones 服务），本函数不再自取。
 
+    阻塞面（候选 resolve/exists）下放 to_thread（D 盘重载实测秒级——
+    2026-11-16 方案文档 P0 配方）。
+
     Returns:
         (是否命中, 拒绝原因, 候选绝对路径)；未命中 = (False, "", None)。
     """
     zone_lists = zones or {"entries": [], "read_deny": [], "read_allow": []}
     for base in _fallback_bases(zone_lists["entries"]):
-        candidate = (Path(base) / target).resolve()
-        if not candidate.exists():
+        candidate = await asyncio.to_thread(_resolve_candidate, base, target)
+        if not await asyncio.to_thread(candidate.exists):
             continue
         allow, deny_reason = _read_outside_verdict(
             candidate,
@@ -244,6 +335,35 @@ async def _read_relative_fallback(
         if deny_reason is not None:
             return False, deny_reason, str(candidate)
     return False, "", None
+
+
+# workspace 根 resolve 幂等缓存（root_str → resolved Path）：每轮重复 resolve
+# 同一根是纯浪费（D 盘重载下 resolve 本身秒级——2026-11-16 方案文档 P0 配方）。
+# 命中即零 I/O；未命中经 to_thread 解析并写入缓存（同输入同输出，幂等）。
+_WORKSPACE_ROOT_RESOLVE_CACHE: dict[str, Path] = {}
+
+
+def _resolve_workspace_root_cached(root_str: str) -> Path:
+    """根 resolve（线程池内执行）：解析 + 写缓存，同 root_str 恒同 resolved。"""
+    resolved = Path(root_str).resolve()
+    _WORKSPACE_ROOT_RESOLVE_CACHE[root_str] = resolved
+    return resolved
+
+
+def _resolve_candidate(base: str, target: Path) -> Path:
+    """回退候选解析（线程池内执行）：(base / target).resolve()。"""
+    return (Path(base) / target).resolve()
+
+
+def _resolve_target_against_root(target: Path, root: Path) -> Path:
+    """目标路径解析（线程池内执行）：绝对路径原样 resolve，相对路径锚定根。"""
+    return target.resolve() if target.is_absolute() else (root / target).resolve()
+
+
+def _read_file_head(file_path: Path, nbytes: int = 64 * 1024) -> bytes:
+    """文件头嗅探读取（线程池内执行）：NUL 探测的 64KB 预读。"""
+    with file_path.open("rb") as fh:
+        return fh.read(nbytes)
 
 
 async def _check_workspace_path(
@@ -284,7 +404,11 @@ async def _check_workspace_path(
             None,
         )
 
-    root = Path(root_str).resolve()
+    root = _WORKSPACE_ROOT_RESOLVE_CACHE.get(root_str)
+    if root is None:
+        # 根 resolve 是文件系统重操作（D 盘重载下秒级），未命中缓存时下放
+        # 线程池（2026-11-16 方案文档 P0 配方；幂等缓存见 _resolve_workspace_root_cached）。
+        root = await asyncio.to_thread(_resolve_workspace_root_cached, root_str)
     # WSL 挂载混入形态归一（zone_policy 单源同语义）：脏形态 `D:\mnt\d\X`
     # 不归一则锚匹配失败、存在性检查恒 404。
     path = _zone_policy.normalize_windows_mixed_path(path)
@@ -295,7 +419,7 @@ async def _check_workspace_path(
         path = str(root) + path[len("/workspace") :]
         logger.info("[fs_tools] 容器挂载点 /workspace 重映射到宿主工作空间 | -> %s", path)
     target = Path(path)
-    resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
+    resolved = await asyncio.to_thread(_resolve_target_against_root, target, root)
     sensitive = _sensitive_file_reason(resolved)
     if sensitive:
         return False, sensitive, str(resolved)
@@ -354,7 +478,11 @@ async def _check_workspace_path(
         )
     # 相对路径在工作空间内落空（目标不存在）→ 白名单前缀根回退解析一次
     # （仅读操作；工作空间内已存在则优先，回退不遮蔽本地副本）。
-    if operation in _READ_OPERATIONS and not target.is_absolute() and not resolved.exists():
+    if (
+        operation in _READ_OPERATIONS
+        and not target.is_absolute()
+        and not await asyncio.to_thread(resolved.exists)
+    ):
         hit, reason, fallback_candidate = await _read_relative_fallback(
             target,
             _parse_authorized_zones(authorized_read_zones),
@@ -450,6 +578,29 @@ FILE_READ_OUTPUT_SCHEMA: dict[str, Any] = {
         "path": {"type": "string", "description": "图片模态读取时的文件绝对路径"},
         "mime_type": {"type": "string", "description": "图片模态读取时的 MIME 类型"},
         "base64_data": {"type": "string", "description": "图片模态读取时的 base64 内容"},
+        # R20 图像切分字段（仅超规格切分时出现；向后兼容，常规读取无这些键）
+        "image_grid": {
+            "type": "object",
+            "properties": {"rows": {"type": "integer"}, "cols": {"type": "integer"}},
+            "description": "图片切分：等分网格（行×列）",
+        },
+        "tile_count": {
+            "type": "integer",
+            "description": "图片切分：分块数量（images 数组长度）",
+        },
+        "images": {
+            "type": "array",
+            "description": "图片切分：原生分辨率分块列表（行优先序，"
+            "每块 {base64, mime_type, path}）",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "base64": {"type": "string"},
+                    "mime_type": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+            },
+        },
     },
 }
 
@@ -473,29 +624,80 @@ def _sniff_image_mime(head: bytes) -> str | None:
     return None
 
 
-def _read_binary_by_modality(file_path: Path, head: bytes) -> ToolResult:
-    """二进制按模态分流（2026-09-14 用户裁定）。
+async def _call_split_image(
+    base64_data: str, mime_type: str, max_pixels: int
+) -> dict[str, Any] | None:
+    """调 multimodal.split_image（切分属增强面）：不可用/异常 → None 降级原样单图。
 
-    图片模态 → base64_data + mime_type 契约（tool_core inject_multimodal 按
-    state.llm_supports_vision 注图或给文本引导）；非模态二进制维持干净拒绝。
+    降级策略 warn 留痕可观测，不阻断 file_read 主功能（读图路径与 R14 既往
+    行为一致）；服务返回 error 键（解码失败/参数非法）同判。
     """
-    size = file_path.stat().st_size
-    mime = _sniff_image_mime(head)
-    if mime is None:
-        return ToolResult.failure_result(f"Binary file or encoding issue: {file_path}")
+    if _split_image_caller is None:
+        return None
+    try:
+        result = await _split_image_caller(base64_data, mime_type, max_pixels)
+    except Exception as exc:  # noqa: BLE001 — 增强面故障降级可见（warn 级留痕）
+        logger.warning("[fs_tools] 图像切分服务调用失败，按原样单图注入: %s", exc)
+        return None
+    if not isinstance(result, dict) or "error" in result:
+        logger.warning(
+            "[fs_tools] 图像切分服务返回失败，按原样单图注入: %s",
+            result.get("error") if isinstance(result, dict) else type(result).__name__,
+        )
+        return None
+    return result
+
+
+async def _read_image_modality(
+    path_label: str,
+    raw: bytes,
+    mime: str,
+    max_pixels: int | None,
+    container_id: str | None = None,
+) -> ToolResult:
+    """图片模态契约装配单点（宿主/容器双分支共用，R20 定稿：原图+分块一次注入）。
+
+    无规格（max_pixels 非法/未注入）→ 原样单图契约（path/mime_type/base64_data/
+    size[/container]），与 R14 既往行为逐键一致（向后兼容）。
+    有规格 → 调 multimodal.split_image：超规格时返回 原图(base64_data，前端
+    卡片与 tool_core 注图首图)+分块(images[]，tool_core 注图随后的块)+切分标注
+    （content 键：serialize_for_content 文本直通通道，行/列与坐标拼合关系随
+    工具消息进上下文）；未超规格/服务降级 → 同原样单图。
+    """
+    size = len(raw)
     if size > _MAX_IMAGE_EMBED_BYTES:
         return ToolResult.failure_result(
-            f"Image too large to inline: {file_path} ({size} bytes, 上限 {_MAX_IMAGE_EMBED_BYTES})"
+            f"Image too large to inline: {path_label} ({size} bytes, 上限 {_MAX_IMAGE_EMBED_BYTES})"
         )
-    raw = file_path.read_bytes()
-    return ToolResult.success_result(
+    result: dict[str, Any] = {
+        "path": path_label,
+        "mime_type": mime,
+        "base64_data": base64.b64encode(raw).decode("ascii"),
+        "size": size,
+    }
+    if container_id:
+        result["container"] = container_id
+    # 规格合法性内联（mypy 收窄：bool 是 int 子类，显式排除后 max_pixels: int > 0）
+    if not isinstance(max_pixels, int) or isinstance(max_pixels, bool) or max_pixels <= 0:
+        return ToolResult.success_result(result)
+    split = await _call_split_image(result["base64_data"], mime, max_pixels)
+    tiles = (split or {}).get("tiles") or []
+    if not split or not split.get("tiled") or not tiles:
+        return ToolResult.success_result(result)
+    result["image_grid"] = split.get("grid") or {}
+    result["tile_count"] = len(tiles)
+    result["content"] = str(split.get("annotation") or "")
+    # tool_core collect_pending_images 契约键：images[].base64（tile 键名
+    # base64_data 经此映射）；注入顺序 = base64_data 原图在前、分块按行优先在后。
+    result["images"] = [
         {
-            "path": str(file_path.resolve()),
-            "mime_type": mime,
-            "base64_data": base64.b64encode(raw).decode("ascii"),
-            "size": size,
+            "base64": tile.get("base64_data", ""),
+            "mime_type": tile.get("mime_type", "image/png"),
+            "path": path_label,
         }
-    )
+        for tile in tiles
+    ]
+    return ToolResult.success_result(result)
 
 
 def _read_directory(
@@ -576,17 +778,26 @@ async def file_read(
     pattern: str | None = None,
     offset: int | None = None,
     limit: int | None = None,
+    llm_vision_max_pixels: int | None = None,
     workspace: str | None = None,
     project_root: str | None = None,
     authorized_read_zones: str | None = None,
+    _container_id: str | None = None,
+    _container_workdir: str | None = None,
 ) -> ToolResult:
     """读取文件内容；路径为目录时返回该目录条目列表。
 
     文件模式支持行范围/尾部读取；目录模式返回 items+文本树（查工作空间/
     目录结构用，无需 Shell）。二进制按模态/文档分流（2026-09-14 用户裁定 +
-    文档回退）：图片走 base64 模态契约（tool_core inject_multimodal 按
-    state.llm_supports_vision 注图或给文本引导）；docx/pdf 转 markdown 进
-    content（非视觉模型可读）；其余二进制干净拒绝。
+    文档回退；R14 起容器分支同款）：图片走 base64 模态契约（tool_core
+    inject_multimodal 按 state.llm_supports_vision 注图或给文本引导）；
+    R20/R21 定稿：注入规格 llm_vision_max_pixels（服务端注入，非 LLM 可见参数；R21 起总像素口径）
+    且图片超规格时，经 multimodal.split_image 做**原生分辨率等分网格切分**，
+    原图+分块一次注入（大图直喂会被模型 API 端视觉编码器缩放丢文字细节；
+    分块带行列拼合标注，无缩放损失）——规格来源 llm.yaml
+    multimodal.max_pixels，模型切换自动跟随；无规格/未超规格/切分服务降级
+    时维持原样单图契约。
+    docx/pdf 转 markdown 进 content（非视觉模型可读）；其余二进制干净拒绝。
     未注入 workspace/project_root 时直接报错（fail-closed，无 cwd 兜底）。
     返回的 file 字段恒为宿主侧绝对路径（容器挂载路径 /workspace/* → 宿主
     工作空间、相对路径 → 根锚定）——前端工具卡片按 file 字段直读宿主
@@ -599,6 +810,54 @@ async def file_read(
         start_line = offset if offset is not None else 1
     if end_line is None and limit is not None:
         end_line = start_line + max(int(limit), 0) - 1
+
+    # 容器路由（R11）：绑定会话读收养容器内文件（cat，行范围/尾部客户端切片）。
+    # R14：读取走原始字节面 + 模态分流（对齐宿主分支同款契约）——图片魔数命中
+    # → base64_data+mime_type（tool_core 按 state.llm_supports_vision 注图或
+    # 文本引导）；此前 PNG 按 utf-8 replace 解码成一屏乱码文本直吐模型（终跑
+    # 887b8135f4c5 实证），图片注入双重断裂的第二断点。
+    if _container_id:
+        target = _container_target(path, _container_workdir)
+        rc, raw, rerr = await _container_exec_raw(
+            _container_id, 'cat "$1"', args=[target], timeout=30.0
+        )
+        if rc != 0:
+            detail = (
+                rerr.decode("utf-8", errors="replace").strip()
+                or raw.decode("utf-8", errors="replace").strip()
+                or f"exit {rc}"
+            )
+            return ToolResult.failure_result(f"Read error: {detail}")
+        mime = _sniff_image_mime(raw[:64])
+        if mime is not None:
+            # 图片模态：与宿主分支同上限同契约（装配单点 _read_image_modality，
+            # R20 起含原图+分块一次注入）。
+            return await _read_image_modality(
+                target, raw, mime, llm_vision_max_pixels, container_id=_container_id
+            )
+        if b"\x00" in raw[:64 * 1024]:
+            # 非模态二进制（NUL 探测，git 同款）：干净拒绝，不吐乱码文本。
+            return ToolResult.failure_result(f"Binary file or encoding issue: {target}")
+        out = raw.decode("utf-8", errors="replace")
+        size = len(out.encode("utf-8"))
+        lines = out.splitlines()
+        total = len(lines)
+        newline = chr(10)
+        if tail is not None:
+            container_content = newline.join(lines[-int(tail):]) if int(tail) > 0 else ""
+        else:
+            end = int(end_line) if end_line is not None else total
+            start = max(int(start_line) - 1, 0)
+            container_content = newline.join(lines[start:end])
+        return ToolResult.success_result(
+            {
+                "file": target,
+                "content": container_content,
+                "lines": total,
+                "size": size,
+                "container": _container_id,
+            }
+        )
 
     # 工作空间约束（读路径：根外放行但记录；无注入上下文一律拒绝）
     allowed, reason, resolved = await _check_workspace_path(
@@ -614,18 +873,17 @@ async def file_read(
         path = resolved
 
     file_path = Path(path)
-    if not file_path.exists():
+    if not await asyncio.to_thread(file_path.exists):
         return ToolResult.failure_result(f"File not found: {path}")
-    if file_path.is_dir():
+    if await asyncio.to_thread(file_path.is_dir):
         return _read_directory(file_path, include_hidden=include_hidden, pattern=pattern)
 
-    size = file_path.stat().st_size
+    size = (await asyncio.to_thread(file_path.stat)).st_size
 
     # 二进制闸（git 同款 NUL 探测）：NUL 是合法 UTF-8 码点，纯解码异常
     # 检测不出含 NUL 的二进制——先嗅探文件头再读文本（2026-09-14 用户裁定）。
     try:
-        with file_path.open("rb") as fh:
-            head = fh.read(64 * 1024)
+        head = await asyncio.to_thread(_read_file_head, file_path)
     except OSError as e:
         return ToolResult.failure_result(f"Read error: {e}")
 
@@ -654,7 +912,7 @@ async def file_read(
             md_text, fmt = converted
             return ToolResult.success_result(
                 {
-                    "file": str(file_path.resolve()),
+                    "file": str(await asyncio.to_thread(file_path.resolve)),
                     "converted": True,
                     "source_format": fmt,
                     "lines": md_text.count("\n") + 1 if md_text else 0,
@@ -662,7 +920,13 @@ async def file_read(
                     "content": md_text,
                 },
             )
-        return _read_binary_by_modality(file_path, head)
+        mime = _sniff_image_mime(head)
+        if mime is None:
+            return ToolResult.failure_result(f"Binary file or encoding issue: {file_path}")
+        raw = await asyncio.to_thread(file_path.read_bytes)
+        return await _read_image_modality(
+            str(await asyncio.to_thread(file_path.resolve)), raw, mime, llm_vision_max_pixels
+        )
 
     all_lines = content.split("\n")
     total = len(all_lines)
@@ -681,7 +945,7 @@ async def file_read(
 
     return ToolResult.success_result(
         {
-            "file": str(file_path.resolve()),
+            "file": str(await asyncio.to_thread(file_path.resolve)),
             "lines": len(selected),
             "size": size,
             "content": "\n".join(selected),
@@ -754,12 +1018,76 @@ async def file_write(
     workspace: str | None = None,
     project_root: str | None = None,
     authorized_zones: str | None = None,
+    _container_id: str | None = None,
+    _container_workdir: str | None = None,
 ) -> ToolResult:
     """写入/编辑文件。workspace/project_root 可用时禁止根外路径（B5）。
 
     写文件语义自包含：write/append/insert 在目标父目录缺失时自动创建
     （parents）；search_replace/delete_lines 只改已存在文件，不建目录。
     """
+    # 容器路由（R11）：绑定会话写收养容器内文件——cat 读旧内容、base64 stdin
+    # 写新内容（动作语义客户端复刻，与宿主 write/append/search_replace/
+    # insert/delete_lines 一致；容器侧无备份面）。
+    if _container_id:
+        target = _container_target(path, _container_workdir)
+        rc, existing, err = await _container_exec(
+            _container_id, 'cat "$1" 2>/dev/null || true', args=[target], timeout=30.0
+        )
+        if rc != 0:
+            existing = ""
+        new_content = existing
+        removed = 0
+        newline = chr(10)
+        if action == "write":
+            new_content = content
+        elif action == "append":
+            new_content = existing + content
+        elif action == "search_replace":
+            if old_str is None:
+                return ToolResult.failure_result("old_str is required for search_replace")
+            if old_str not in existing:
+                return ToolResult.failure_result(f"old_str not found in {path}")
+            new_content = existing.replace(old_str, new_str if new_str is not None else "")
+        elif action == "insert":
+            if line is None:
+                return ToolResult.failure_result("line is required for insert")
+            lines = existing.split(newline)
+            lines.insert(min(max(line, 0), len(lines)), content)
+            new_content = newline.join(lines)
+        elif action == "delete_lines":
+            if start_line is None:
+                return ToolResult.failure_result("start_line is required for delete_lines")
+            lines = existing.split(newline)
+            end = end_line if end_line is not None else len(lines)
+            del lines[start_line - 1 : end]
+            new_content = newline.join(lines)
+            removed = end - start_line + 1
+        else:
+            return ToolResult.failure_result(f"Unsupported action: {action}")
+        b64 = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+        rc, _out, werr = await _container_exec(
+            _container_id,
+            'mkdir -p "$(dirname "$1")" && base64 -d > "$1"',
+            args=[target],
+            stdin_data=b64,
+            timeout=30.0,
+        )
+        if rc != 0:
+            return ToolResult.failure_result(f"Write error: {werr.strip() or f'exit {rc}'}")
+        return ToolResult.success_result(
+            {
+                "file": target,
+                "added": content.count(newline) + 1 if content else 0,
+                "removed": removed,
+                "size": len(new_content.encode("utf-8")),
+                "backup": "",
+                "old_content": existing,
+                "new_content": new_content,
+                "container": _container_id,
+            }
+        )
+
     # 工作空间约束（写路径：根外一律拒绝；相对路径以根锚定后执行）
     allowed, reason, resolved = await _check_workspace_path(
         path, workspace, project_root, operation="write", authorized_zones=authorized_zones
@@ -771,20 +1099,24 @@ async def file_write(
 
     file_path = Path(path)
     if action in ("write", "append", "insert"):
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(file_path.parent.mkdir, parents=True, exist_ok=True)
 
     try:
         if action == "write":
-            existing = file_path.read_text("utf-8") if file_path.exists() else ""
-            backup = _maybe_backup(file_path, create_backup)
+            existing = (
+                await asyncio.to_thread(file_path.read_text, "utf-8")
+                if await asyncio.to_thread(file_path.exists)
+                else ""
+            )
+            backup = await asyncio.to_thread(_maybe_backup, file_path, create_backup)
             await asyncio.to_thread(file_path.write_text, content, "utf-8")
             added = content.count("\n") + 1 if content else 0
             return ToolResult.success_result(
                 {
-                    "file": str(file_path.resolve()),
+                    "file": str(await asyncio.to_thread(file_path.resolve)),
                     "added": added,
                     "removed": 0,
-                    "size": _disk_size(file_path),
+                    "size": await asyncio.to_thread(_disk_size, file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": content,
@@ -792,15 +1124,19 @@ async def file_write(
             )
 
         if action == "append":
-            backup = _maybe_backup(file_path, create_backup)
-            existing = file_path.read_text("utf-8") if file_path.exists() else ""
-            file_path.write_text(existing + content, "utf-8")
+            backup = await asyncio.to_thread(_maybe_backup, file_path, create_backup)
+            existing = (
+                await asyncio.to_thread(file_path.read_text, "utf-8")
+                if await asyncio.to_thread(file_path.exists)
+                else ""
+            )
+            await asyncio.to_thread(file_path.write_text, existing + content, "utf-8")
             return ToolResult.success_result(
                 {
-                    "file": str(file_path.resolve()),
+                    "file": str(await asyncio.to_thread(file_path.resolve)),
                     "added": content.count("\n") + 1 if content else 0,
                     "removed": 0,
-                    "size": _disk_size(file_path),
+                    "size": await asyncio.to_thread(_disk_size, file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": existing + content,
@@ -810,10 +1146,10 @@ async def file_write(
         if action == "search_replace":
             if old_str is None:
                 return ToolResult.failure_result("old_str is required for search_replace")
-            if not file_path.exists():
+            if not await asyncio.to_thread(file_path.exists):
                 return ToolResult.failure_result(f"File not found: {path}")
-            backup = _maybe_backup(file_path, create_backup)
-            existing = file_path.read_text("utf-8")
+            backup = await asyncio.to_thread(_maybe_backup, file_path, create_backup)
+            existing = await asyncio.to_thread(file_path.read_text, "utf-8")
             replacement = new_str if new_str is not None else ""
             count_replace = existing.count(old_str)
             if count_replace == 0:
@@ -822,13 +1158,13 @@ async def file_write(
                     backup=backup or "",
                 )
             new_content = existing.replace(old_str, replacement)
-            file_path.write_text(new_content, "utf-8")
+            await asyncio.to_thread(file_path.write_text, new_content, "utf-8")
             return ToolResult.success_result(
                 {
-                    "file": str(file_path.resolve()),
+                    "file": str(await asyncio.to_thread(file_path.resolve)),
                     "added": 0,
                     "removed": 0,
-                    "size": _disk_size(file_path),
+                    "size": await asyncio.to_thread(_disk_size, file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": new_content,
@@ -839,18 +1175,22 @@ async def file_write(
         if action == "insert":
             if line is None:
                 return ToolResult.failure_result("line is required for insert")
-            backup = _maybe_backup(file_path, create_backup)
-            existing = file_path.read_text("utf-8") if file_path.exists() else ""
+            backup = await asyncio.to_thread(_maybe_backup, file_path, create_backup)
+            existing = (
+                await asyncio.to_thread(file_path.read_text, "utf-8")
+                if await asyncio.to_thread(file_path.exists)
+                else ""
+            )
             lines = existing.split("\n")
             insert_idx = min(max(line, 0), len(lines))
             lines.insert(insert_idx, content)
-            file_path.write_text("\n".join(lines), "utf-8")
+            await asyncio.to_thread(file_path.write_text, "\n".join(lines), "utf-8")
             return ToolResult.success_result(
                 {
-                    "file": str(file_path.resolve()),
+                    "file": str(await asyncio.to_thread(file_path.resolve)),
                     "added": content.count("\n") + 1 if content else 0,
                     "removed": 0,
-                    "size": _disk_size(file_path),
+                    "size": await asyncio.to_thread(_disk_size, file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": "\n".join(lines),
@@ -860,20 +1200,20 @@ async def file_write(
         if action == "delete_lines":
             if start_line is None:
                 return ToolResult.failure_result("start_line is required for delete_lines")
-            if not file_path.exists():
+            if not await asyncio.to_thread(file_path.exists):
                 return ToolResult.failure_result(f"File not found: {path}")
-            backup = _maybe_backup(file_path, create_backup)
-            existing = file_path.read_text("utf-8")
+            backup = await asyncio.to_thread(_maybe_backup, file_path, create_backup)
+            existing = await asyncio.to_thread(file_path.read_text, "utf-8")
             lines = existing.split("\n")
             end = end_line if end_line is not None else len(lines)
             del lines[start_line - 1 : end]
-            file_path.write_text("\n".join(lines), "utf-8")
+            await asyncio.to_thread(file_path.write_text, "\n".join(lines), "utf-8")
             return ToolResult.success_result(
                 {
-                    "file": str(file_path.resolve()),
+                    "file": str(await asyncio.to_thread(file_path.resolve)),
                     "added": 0,
                     "removed": end - start_line + 1,
-                    "size": _disk_size(file_path),
+                    "size": await asyncio.to_thread(_disk_size, file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": "\n".join(lines),
@@ -919,8 +1259,19 @@ async def create_directory(
     workspace: str | None = None,
     project_root: str | None = None,
     authorized_zones: str | None = None,
+    _container_id: str | None = None,
+    _container_workdir: str | None = None,
 ) -> ToolResult:
     """创建目录（幂等：目录已存在直接返回成功；相对路径以注入根锚定）。"""
+    # 容器路由（R11）：绑定会话 mkdir -p 收养容器内目录
+    if _container_id:
+        target = _container_target(path, _container_workdir)
+        rc, _out, err = await _container_exec(
+            _container_id, 'mkdir -p "$1"', args=[target], timeout=30.0
+        )
+        if rc != 0:
+            return ToolResult.failure_result(f"Create error: {err.strip() or f'exit {rc}'}")
+        return ToolResult.success_result({"path": target, "container": _container_id})
     allowed, reason, resolved = await _check_workspace_path(
         path, workspace, project_root, operation="write", authorized_zones=authorized_zones
     )
@@ -932,7 +1283,7 @@ async def create_directory(
     except OSError as e:
         return ToolResult.failure_result(f"Create error: {e}")
 
-    return ToolResult.success_result({"path": str(dir_path.resolve())})
+    return ToolResult.success_result({"path": str(await asyncio.to_thread(dir_path.resolve))})
 
 
 # ═════════════════════════════════════════════════════════════
@@ -970,8 +1321,49 @@ async def copy_file(
     workspace: str | None = None,
     project_root: str | None = None,
     authorized_zones: str | None = None,
+    _container_id: str | None = None,
+    _container_workdir: str | None = None,
 ) -> ToolResult:
     """复制文件或目录。源与目标均以注入根锚定（无注入报错）。"""
+    # 容器路由（R11）：绑定会话 cp -a 收养容器内复制（overwrite=false 时先测存在）
+    if _container_id:
+        if copies:
+            container_results: list[dict[str, Any]] = []
+            for item in copies:
+                r = await copy_file(
+                    item["source"],
+                    item["destination"],
+                    overwrite=overwrite,
+                    _container_id=_container_id,
+                    _container_workdir=_container_workdir,
+                )
+                container_results.append(
+                    {
+                        "source": item["source"],
+                        "destination": item["destination"],
+                        "success": r.success,
+                    }
+                )
+            return ToolResult.success_result({"results": container_results})
+        if not source or not destination:
+            return ToolResult.failure_result("source and destination are required (or use copies)")
+        src_t = _container_target(source, _container_workdir)
+        dst_t = _container_target(destination, _container_workdir)
+        if not overwrite:
+            rc, _out, _err = await _container_exec(
+                _container_id, 'test -e "$2"', args=[src_t, dst_t], timeout=30.0
+            )
+            if rc == 0:
+                return ToolResult.failure_result(f"Destination exists: {dst_t}")
+        cp_script = 'mkdir -p "$(dirname "$2")" && cp -a "$1" "$2"'
+        rc, _out, err = await _container_exec(
+            _container_id, cp_script, args=[src_t, dst_t], timeout=60.0
+        )
+        if rc != 0:
+            return ToolResult.failure_result(f"Copy error: {err.strip() or f'exit {rc}'}")
+        return ToolResult.success_result(
+            {"source": src_t, "destination": dst_t, "container": _container_id}
+        )
     if copies:
         results: list[dict[str, Any]] = []
         for item in copies:
@@ -1006,13 +1398,13 @@ async def copy_file(
 
     src = Path(await _anchor(source, "move"))
     dst = Path(await _anchor(destination, "write"))
-    if not src.exists():
+    if not await asyncio.to_thread(src.exists):
         return ToolResult.failure_result(f"Source not found: {source}")
-    if dst.exists() and not overwrite:
+    if await asyncio.to_thread(dst.exists) and not overwrite:
         return ToolResult.failure_result(f"Destination already exists: {destination}")
 
     try:
-        if src.is_dir():
+        if await asyncio.to_thread(src.is_dir):
             await asyncio.to_thread(shutil.copytree, src, dst, dirs_exist_ok=overwrite)
         else:
             await asyncio.to_thread(shutil.copy2, src, dst)
@@ -1057,8 +1449,49 @@ async def move_file(
     workspace: str | None = None,
     project_root: str | None = None,
     authorized_zones: str | None = None,
+    _container_id: str | None = None,
+    _container_workdir: str | None = None,
 ) -> ToolResult:
     """移动或重命名文件/目录。源与目标均须在 workspace/project_root 内（B5）。"""
+    # 容器路由（R11）：绑定会话 mv 收养容器内移动/重命名
+    if _container_id:
+        if moves:
+            container_results: list[dict[str, Any]] = []
+            for item in moves:
+                r = await move_file(
+                    item["source"],
+                    item["destination"],
+                    overwrite=overwrite,
+                    _container_id=_container_id,
+                    _container_workdir=_container_workdir,
+                )
+                container_results.append(
+                    {
+                        "source": item["source"],
+                        "destination": item["destination"],
+                        "success": r.success,
+                    }
+                )
+            return ToolResult.success_result({"results": container_results})
+        if not source or not destination:
+            return ToolResult.failure_result("source and destination are required (or use moves)")
+        src_t = _container_target(source, _container_workdir)
+        dst_t = _container_target(destination, _container_workdir)
+        if not overwrite:
+            rc, _out, _err = await _container_exec(
+                _container_id, 'test -e "$2"', args=[src_t, dst_t], timeout=30.0
+            )
+            if rc == 0:
+                return ToolResult.failure_result(f"Destination exists: {dst_t}")
+        mv_script = 'mkdir -p "$(dirname "$2")" && mv -f "$1" "$2"'
+        rc, _out, err = await _container_exec(
+            _container_id, mv_script, args=[src_t, dst_t], timeout=60.0
+        )
+        if rc != 0:
+            return ToolResult.failure_result(f"Move error: {err.strip() or f'exit {rc}'}")
+        return ToolResult.success_result(
+            {"source": src_t, "destination": dst_t, "container": _container_id}
+        )
     # 工作空间约束：move 同时改动源（移出）与目标（写入），两端都校验；
     # 相对路径以根锚定后执行（校验的路径 = 实际操作的路径）
     if source:
@@ -1099,18 +1532,26 @@ async def move_file(
 
     src = Path(source)
     dst = Path(destination)
-    if not src.exists():
+    if not await asyncio.to_thread(src.exists):
         return ToolResult.failure_result(f"Source not found: {source}")
-    if dst.exists() and not overwrite:
+    if await asyncio.to_thread(dst.exists) and not overwrite:
         return ToolResult.failure_result(f"Destination already exists: {destination}")
 
-    try:
+    def _sync_move() -> None:
+        """覆盖分支（删目录/删文件）+ 移动在同一线程体内跑完。
+
+        两段都是阻塞文件操作（覆盖目标可能是大目录），逐段跨线程无收益；
+        OSError 语义由调用方同层 except 原样承接。
+        """
         if overwrite and dst.exists():
             if dst.is_dir():
                 shutil.rmtree(dst)
             else:
                 dst.unlink()
-        await asyncio.to_thread(shutil.move, str(src), str(dst))
+        shutil.move(str(src), str(dst))
+
+    try:
+        await asyncio.to_thread(_sync_move)
     except OSError as e:
         return ToolResult.failure_result(f"Move error: {e}")
 
@@ -1149,8 +1590,34 @@ async def delete_file(
     workspace: str | None = None,
     project_root: str | None = None,
     authorized_zones: str | None = None,
+    _container_id: str | None = None,
+    _container_workdir: str | None = None,
 ) -> ToolResult:
     """删除文件或目录。workspace/project_root 可用时禁止根外路径（B5）。"""
+    # 容器路由（R11）：绑定会话 rm 收养容器内删除
+    if _container_id:
+        container_targets = paths if paths else [path] if path else []
+        if not container_targets:
+            return ToolResult.failure_result("path or paths is required")
+        flag = "-rf" if recursive else "-f"
+        container_results: list[dict[str, Any]] = []
+        for tp in container_targets:
+            t = _container_target(tp, _container_workdir)
+            rc, _out, err = await _container_exec(
+                _container_id, f'rm {flag} "$1"', args=[t], timeout=30.0
+            )
+            container_results.append(
+                {"path": t, "success": rc == 0, "error": err.strip() if rc != 0 else ""}
+            )
+        failed = [r for r in container_results if not r["success"]]
+        if failed:
+            deleted_ok = [r["path"] for r in container_results if r["success"]]
+            return ToolResult.failure_result(
+                f"Delete error: {failed[0]['error']}",
+                deleted=deleted_ok,
+            )
+        return ToolResult.success_result({"deleted": [r["path"] for r in container_results]})
+
     target_paths = paths if paths else [path] if path else []
     if not target_paths:
         return ToolResult.failure_result("path or paths is required")
@@ -1172,20 +1639,20 @@ async def delete_file(
 
     for p in target_paths:
         target = Path(p)
-        if not target.exists():
+        if not await asyncio.to_thread(target.exists):
             results.append({"path": p, "deleted": False, "error": "not found"})
             all_success = False
             continue
         try:
-            if target.is_dir():
+            if await asyncio.to_thread(target.is_dir):
                 if recursive:
                     await asyncio.to_thread(shutil.rmtree, target)
                 else:
-                    target.rmdir()  # 仅删除空目录
+                    await asyncio.to_thread(target.rmdir)  # 仅删除空目录
             else:
                 if force:
-                    target.chmod(0o644)
-                target.unlink()
+                    await asyncio.to_thread(target.chmod, 0o644)
+                await asyncio.to_thread(target.unlink)
             results.append({"path": p, "deleted": True})
         except OSError as e:
             results.append({"path": p, "deleted": False, "error": str(e)})

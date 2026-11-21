@@ -233,7 +233,9 @@ describe('贡献页 1.5s 轮询热注册', () => {
 
 describe('折叠 rail：插件入口与高亮切换', () => {
   async function renderRail() {
-    useUIStore.setState({ sidebarCollapsed: true })
+    // sidebarActiveView 已迁 uiStore（跨挂载持久，真值单源）：arrange 显式归位，
+    // 不再依赖旧 useState「新挂载即 sessions」的隐含语义
+    useUIStore.setState({ sidebarCollapsed: true, sidebarActiveView: 'sessions' })
     await registerPluginPages()
     renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
   }

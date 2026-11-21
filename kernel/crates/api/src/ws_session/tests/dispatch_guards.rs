@@ -79,19 +79,17 @@ async fn dispatch_store_error_fails_closed_with_ack_then_auth_reject_close() {
     let dispatcher = EngineDispatcher::new(state);
 
     let err = dispatcher
-        .dispatch_user_input(
-            "T1",
-            "u1",
-            "hi",
-            "P-1",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cm-err",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("P-1").to_string(),
+            content: ("hi").to_string(),
+            client_message_id: ("cm-err").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap_err();
     assert!(
@@ -135,19 +133,17 @@ async fn dispatch_deleted_user_rejected_without_close() {
     let dispatcher = EngineDispatcher::new(state);
 
     let err = dispatcher
-        .dispatch_user_input(
-            "T1",
-            "u1",
-            "hi",
-            "P-1",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cm-del",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T1").to_string(),
+            user_id: ("u1").to_string(),
+            pipeline_id: ("P-1").to_string(),
+            content: ("hi").to_string(),
+            client_message_id: ("cm-del").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap_err();
     assert!(err.contains("不存在"), "拒绝原因必须归因用户不存在: {err}");
@@ -174,19 +170,17 @@ async fn dispatch_resolves_non_default_tenant_for_dynamic_user() {
     let dispatcher = EngineDispatcher::new(state);
 
     dispatcher
-        .dispatch_user_input(
-            "T1",
-            "u-b",
-            "hi",
-            "P-1",
-            "",
-            None,
-            None,
-            "",
-            None,
-            "cm-b",
-            PendingInputSource::User,
-        )
+        .dispatch_user_input(agentos_core::types::DispatchRequest {
+            thread_id: ("T1").to_string(),
+            user_id: ("u-b").to_string(),
+            pipeline_id: ("P-1").to_string(),
+            content: ("hi").to_string(),
+            client_message_id: ("cm-b").to_string(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        })
         .await
         .unwrap();
     let args = mock.seen_tenant_args.lock().unwrap().clone();
@@ -1259,6 +1253,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 
@@ -1996,26 +1991,25 @@ async fn dispatch_stop_returns_pending_queue_with_event() {
         .unwrap();
     let mk_input = |id: &str, content: &str| agentos_core::types::PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: "ps".to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: content.to_string(),
-        thread: "T1".to_string(),
-        source: agentos_core::types::PendingInputSource::User,
-        agent_id: String::new(),
-        route_id: "ps".to_string(),
-        thinking_strength: String::new(),
-        client_message_id: String::new(),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "T1".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: "ps".to_string(),
+            content: content.to_string(),
+            client_message_id: String::new(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     };
     store
-        .enqueue_pending_input("default", "ps", &mk_input("p_q1", "排队一"))
+        .enqueue_pending_input("default", &mk_input("p_q1", "排队一"))
         .unwrap();
     store
-        .enqueue_pending_input("default", "ps", &mk_input("p_q2", "排队二"))
+        .enqueue_pending_input("default", &mk_input("p_q2", "排队二"))
         .unwrap();
 
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2072,20 +2066,19 @@ async fn drain_pending_queue_notifies_waiters_on_pop_failure() {
     *mock.pop_pending_err.lock().unwrap() = true;
     *mock.list_pending_result.lock().unwrap() = Ok(vec![agentos_core::types::PendingInputRecord {
         id: "p_drain_1".to_string(),
-        pipeline_id: "p-drain".to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: "排队消息".to_string(),
-        thread: "T1".to_string(),
-        source: agentos_core::types::PendingInputSource::User,
-        agent_id: String::new(),
-        route_id: "p-drain".to_string(),
-        thinking_strength: String::new(),
-        client_message_id: "cm-drain-fail-1".to_string(),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "T1".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: "p-drain".to_string(),
+            content: "排队消息".to_string(),
+            client_message_id: "cm-drain-fail-1".to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     }]);
     let store = Arc::new(mock) as Arc<dyn StorageBackend>;
 
@@ -2097,8 +2090,8 @@ async fn drain_pending_queue_notifies_waiters_on_pop_failure() {
         agentos_core::types::TenantContext::new("default".to_string(), "T1".to_string()),
         "T1".to_string(),
         "p-drain".to_string(),
-        "u1".to_string(),
         store,
+        crate::run_chain::RunChainRegistry::global(),
     )
     .await;
 
@@ -2148,17 +2141,7 @@ struct NoopDispatcher;
 impl PipelineDispatcher for NoopDispatcher {
     async fn dispatch_user_input(
         &self,
-        _thread_id: &str,
-        _user_id: &str,
-        _content: &str,
-        _pipeline_id: &str,
-        _thinking_strength: &str,
-        _execution_context: Option<&serde_json::Value>,
-        _state_overlay: Option<&serde_json::Value>,
-        _agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: agentos_core::types::PendingInputSource,
+        _request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         Ok(())
     }

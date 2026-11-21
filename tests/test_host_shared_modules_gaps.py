@@ -28,9 +28,7 @@
 结构性不可达/环境依赖残留（逐条说明，勿硬凑）：
 1. ``proc_tree._taskkill_fallback`` 只在 os.name == "nt" 触发；本车道在
    Windows 跑得到，Linux CI 不可达（跨平台分支，非缺陷）。
-2. ``user_space._os_data_dir`` 的 macOS 分支（``sys.platform == "darwin"``）
-   与 Linux XDG 分支互斥于平台，同一进程只能命中一条。
-3. ``project_registry.remove_project_folder`` 的 onerror 回退分支只在
+2. ``project_registry.remove_project_folder`` 的 onerror 回退分支只在
    Python < 3.12 生效（``shutil.rmtree`` 无 onexc 参数）；本环境 3.12 恒走
    onexc。以 monkeypatch 替换 rmtree 签名验证分发判据与回退闭包契约。
 """
@@ -977,79 +975,33 @@ class TestUserSpaceResolution:
     @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
     def test_blank_env_treated_as_unset(self, raw: str, tmp_path: Path, shared: Path,
                                         monkeypatch: pytest.MonkeyPatch) -> None:
-        """空白 env（对齐 Rust trim().is_empty()）→ 视为未设，走 OS 目录推导。"""
+        """空白 env（对齐 Rust trim().is_empty()）→ 视为未设 = None（零回落）。"""
         us = importlib.import_module("user_space")
         monkeypatch.setenv(us.USER_ROOT_ENV, raw)
         monkeypatch.setenv(us.USER_DATA_DIR_ENV, raw)
 
-        root = us.user_root()
-        assert root is None or str(root) != raw
+        assert us.user_root() is None
         assert us._env_path(us.USER_ROOT_ENV) is None
 
-    def test_root_derived_from_os_data_dir(self, tmp_path: Path, shared: Path,
-                                           monkeypatch: pytest.MonkeyPatch) -> None:
-        """无 env → <OS 数据目录>/agentos，四根同基（相对布局契约）。"""
-        us = importlib.import_module("user_space")
-        monkeypatch.delenv(us.USER_ROOT_ENV, raising=False)
-        monkeypatch.delenv(us.USER_CONFIG_DIR_ENV, raising=False)
-        monkeypatch.delenv(us.USER_DATA_DIR_ENV, raising=False)
-        monkeypatch.delenv(us.USER_PLUGINS_DIR_ENV, raising=False)
-        os_dir = tmp_path / "osdata"
-        os_dir.mkdir()
-        monkeypatch.setattr(us, "_os_data_dir", lambda: os_dir)
+    def test_no_env_zero_fallback_all_roots_none(self, tmp_path: Path, shared: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """无 env → 四根全 None（零回落，ADR 2026-11-07 §2.2）。
 
-        root = us.user_root()
-        assert root == os_dir / "agentos"
-        assert us.user_config_dir() == root / "config"
-        assert us.user_data_dir() == root / "data"
-        assert us.user_plugins_dir() == root / "plugins"
-
-    def test_os_data_dir_unavailable_propagates_none(self, shared: Path,
-                                                     monkeypatch: pytest.MonkeyPatch) -> None:
-        """OS 数据目录不可得（极端环境）→ 各根返回 None 供调用方回退。"""
+        OS 数据目录推导已删除（%APPDATA%\\agentos 回落 = dev 扫到装机目录
+        陈旧副本的事故机制根，2026-11-18 Python 侧对齐 Rust 同刀清除）——
+        APPDATA 存在也不得参与。
+        """
         us = importlib.import_module("user_space")
         for name in (us.USER_ROOT_ENV, us.USER_CONFIG_DIR_ENV, us.USER_DATA_DIR_ENV,
                      us.USER_PLUGINS_DIR_ENV):
             monkeypatch.delenv(name, raising=False)
-        monkeypatch.setattr(us, "_os_data_dir", lambda: None)
+        monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
 
         assert us.user_root() is None
         assert us.user_config_dir() is None
         assert us.user_data_dir() is None
         assert us.user_plugins_dir() is None
-
-    def test_win32_appdata_and_absent_appdata(self, shared: Path,
-                                              monkeypatch: pytest.MonkeyPatch) -> None:
-        """Windows 取 %APPDATA%（Roaming）；缺失该变量时返回 None（非 LOCALAPPDATA 回落）。"""
-        us = importlib.import_module("user_space")
-        monkeypatch.setattr(us.sys, "platform", "win32")
-        monkeypatch.setenv("APPDATA", r"C:\Users\u\AppData\Roaming")
-        assert us._os_data_dir() == Path(r"C:\Users\u\AppData\Roaming")
-
-        monkeypatch.delenv("APPDATA", raising=False)
-        assert us._os_data_dir() is None
-
-    def test_linux_xdg_override_and_default(self, shared: Path,
-                                            monkeypatch: pytest.MonkeyPatch) -> None:
-        """Linux：XDG_DATA_HOME 有值取之（strip 后）；未设回落 ~/.local/share。"""
-        us = importlib.import_module("user_space")
-        monkeypatch.setattr(us.sys, "platform", "linux")
-        monkeypatch.setenv("XDG_DATA_HOME", "  /xdg/data  ")
-        assert us._os_data_dir() == Path("/xdg/data")
-
-        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-        assert us._os_data_dir() == Path.home() / ".local" / "share"
-
-        monkeypatch.setenv("XDG_DATA_HOME", "   ")
-        assert us._os_data_dir() == Path.home() / ".local" / "share"
-
-    def test_macos_app_support_dir(self, shared: Path,
-                                   monkeypatch: pytest.MonkeyPatch) -> None:
-        """macOS：~/Library/Application Support（对齐 dirs::data_dir）。"""
-        us = importlib.import_module("user_space")
-        monkeypatch.setattr(us.sys, "platform", "darwin")
-
-        assert us._os_data_dir() == Path.home() / "Library" / "Application Support"
 
 
 # ══════════════════════════ state_fields ══════════════════════════

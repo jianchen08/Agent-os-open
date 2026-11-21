@@ -15,7 +15,9 @@ task_submit 工具的单元测试
 
 import asyncio
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -162,6 +164,21 @@ def test_workspace_description_points_to_inherit_from():
 # ─────────────────────────── 解析层验证 ───────────────────────────
 
 
+@contextmanager
+def _injected_state_rows(rows: list[dict[str, Any]]):
+    """经官方注入缝 ``set_state_reader`` 注入 state 聚合行，用后复位。
+
+    读取桥真身在 acceptance 职责域子模块的全局 ``_state_reader``（tool.py
+    拆分后其模块面的同名符号只是导入绑定，patch 它不再可达读取桥）——
+    注入必须走 ``set_state_reader`` 钩子。
+    """
+    _tool_mod.set_state_reader(lambda: rows)
+    try:
+        yield
+    finally:
+        _tool_mod.set_state_reader(None)
+
+
 def _run_execute_capture_error_code(inputs: dict) -> str:
     """运行 execute 并返回错误码。"""
     tool = TaskSubmitTool()
@@ -190,7 +207,7 @@ def test_inherit_source_missing_rejected():
     旧实现对继承源缺失只降级为「对话历史为空」——静默降级会让人以为继承了
     其实没继承。
     """
-    with patch.object(_tool_mod, "_state_reader", lambda: []):
+    with _injected_state_rows([]):
         error_code = _run_execute_capture_error_code(_build_inputs(inherit_from="src-task-001"))
 
     assert error_code == "INHERIT_SOURCE_NOT_FOUND", f"实际错误码={error_code}"
@@ -204,7 +221,7 @@ def test_inherit_retired_mode_ignored():
     """
     inputs = _build_inputs(inherit_from="src-task-001")
     inputs["inherit_mode"] = ["pipe", "workspace"]
-    with patch.object(_tool_mod, "_state_reader", lambda: []):
+    with _injected_state_rows([]):
         error_code = _run_execute_capture_error_code(inputs)
 
     assert error_code != "INVALID_INHERIT_MODE", f"撤下参数不应报模式非法，实际={error_code}"

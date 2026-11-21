@@ -40,7 +40,6 @@ import { useThemeStore } from '@/stores/themeStore'
 import { toolCallToActivity } from '@/utils/activityConverter'
 import { formatTimestamp } from '@/utils/format'
 import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
-import { expandTruncatedToolResult } from '@/utils/toolResultBackfill'
 import { buildTruncatedResultDetailBlock, resolveTruncatedToolResultForDisplay } from '@/utils/toolResultTruncate'
 import ActivityCard from './ActivityCard'
 import { CompressionOriginalsButton } from './CompressionOriginalsButton'
@@ -51,6 +50,7 @@ import { MessageEditor } from './MessageEditor'
 import { MESSAGE_STYLE_METADATA_KEY, PluginMessageCard, resolveMessageStyle } from './PluginMessageCard'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
 import { StreamActivityIndicator } from './StreamActivityIndicator'
+import { TaskSceneStatusRow } from './TaskSceneStatusRow'
 import { ToolTailActivity } from './ToolTailActivity'
 import type { MessageItemProps } from './types'
 import type { PresenterAvatar, PresenterProfile } from '@/services/api/presenterProfiles'
@@ -507,7 +507,7 @@ export const MessageItem = memo(function MessageItem({
     const toolStatus: string = message.status || 'completed'
     const resolvedStatus = resolveToolStatus(toolStatus)
     // 截断标记解析（数据面瘦身批次 1.2）：结果体超阈值时是「预览+标记」，
-    // 标记对象不进渲染分支；展开经 expandTruncatedToolResult 单条回取，
+    // 标记对象不进渲染分支；展开只显示与 LLM 所见一致的预览（2026-11-18 裁定），
     // 取回的全量消息按 id 替换桶内截断版，本卡随 store 更新显示全量。
     const rawToolResult: unknown = message.toolResult || message.metadata?.result || message.metadata?.output
     const resolvedTool = resolveTruncatedToolResultForDisplay(rawToolResult, message.toolResultData)
@@ -537,13 +537,8 @@ export const MessageItem = memo(function MessageItem({
         ...activity,
         details: [
           ...(activity.details ?? []),
-          buildTruncatedResultDetailBlock(mark, () =>
-            expandTruncatedToolResult({
-              messageId: message.id,
-              callId: message.toolCallId || message.id,
-              sequence: mark.sequence,
-            }),
-          ),
+          // 2026-11-18 用户裁定：展开只显示与 LLM 所见一致的预览（不回取全文）
+          buildTruncatedResultDetailBlock(mark),
         ],
       }
     }
@@ -632,7 +627,7 @@ export const MessageItem = memo(function MessageItem({
     >
       {isAssistant && <PresenterAwareBadge agent={agent ?? null} />}
 
-      <span className="text-muted-foreground/70">{formatTimestamp(message.timestamp)}</span>
+      <span className="text-muted-foreground/70" data-testid="message-time">{formatTimestamp(message.timestamp)}</span>
 
       {!readOnly && activeSessionId && (
         <div className="flex items-center gap-2">
@@ -928,7 +923,7 @@ export const MessageItem = memo(function MessageItem({
                           </>
                         ) : (
                           <StreamActivityIndicator
-                            label={isCompressing ? '压缩中...' : '思考中...'}
+                            label={isCompressing ? '压缩中' : '执行中'}
                             anchorMs={streamAnchorMs}
                           />
                         )}
@@ -952,7 +947,23 @@ export const MessageItem = memo(function MessageItem({
                       streamAnchorMs={streamAnchorMs}
                     />
                   )}
-                  <ToolTailActivity streaming={renderContext.isStreaming} parts={message.parts} pendingInteraction={hasPendingInteraction} compressing={isCompressing} streamAnchorMs={streamAnchorMs} />
+                  {/* 空内容占位已承载「执行中」；仅在有可见片段时补底部活动行，
+                      避免同一消息出现两条执行中指示（规格三） */}
+                  {renderContext.fragments.length > 0 && (
+                    (isLast && isAssistant ? (
+                        // 最新 AI 气泡：状态行兼作任务现场主入口 + 一条现场预览
+                        // （用户裁定 2026-11-20：消息流为任务现场主入口）
+                        <TaskSceneStatusRow
+                          taskId={taskId}
+                          streaming={renderContext.isStreaming}
+                          pendingInteraction={hasPendingInteraction}
+                          compressing={isCompressing}
+                          streamAnchorMs={streamAnchorMs}
+                        />
+                      ) : (
+                        <ToolTailActivity streaming={renderContext.isStreaming} parts={message.parts} pendingInteraction={hasPendingInteraction} compressing={isCompressing} streamAnchorMs={streamAnchorMs} />
+                      ))
+                  )}
                 </div>
               )
             })()}

@@ -11,7 +11,6 @@
  * 漂移检查（断链场景构建期报错）：
  *     python scripts/check_frontend_plugin_pages_sync.py
  */
-/* eslint-disable */
 
 /**
  * 壳层可引用的声明页键（嵌套 pluginId → pageId，与注册表 pluginId+id
@@ -41,6 +40,9 @@ export const PLUGIN_DECLARED_PAGES = {
   },
   dsh_adapter: {
     dsh_plugin_manager: { pluginId: 'dsh_adapter', pageId: 'dsh_plugin_manager', path: '/p/dsh_plugin_manager' },
+  },
+  grants: {
+    grants_admin: { pluginId: 'grants', pageId: 'grants_admin' },
   },
   hindsight_memory_service: {
     memory: { pluginId: 'hindsight_memory_service', pageId: 'memory' },

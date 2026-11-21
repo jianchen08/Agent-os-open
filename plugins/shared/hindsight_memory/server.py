@@ -9,13 +9,14 @@
 - hindsight.recall — 检索记忆（memory_type 可选客户端过滤）
 - hindsight.reflect — 触发反思/巩固
 - hindsight.delete — 删除记忆
-- hindsight.import_document — 文档切块导入（~2000 字符/块）
+- hindsight.import_document — 文档导入（整文档单次 retain，切块/抽取归 bank 所配原生管线）
 
 韧性设计：hindsight 包可能未安装——on_load 内 try/except 懒导入，
 失败时 _client=None，所有工具检测 None 后返回降级字典，sidecar 永不崩溃。
-on_load in-flight 期间（冷启动窗，hindsight-api 子进程首启 26-40s 级）
-工具面有界等待初始化完成（共享就绪事件），超时才降级——冷启动窗内
-等待后就成功，而非必失败。
+就绪等待后台化（装机 2026-11-20 启动优化 B）：on_load 秒级返回不阻内核
+boot，spawn + /health 就绪轮询（慢档 150s 级）移后台任务；初始化在途期间
+（冷启动窗，hindsight-api 子进程首启 26-40s 级）工具面有界等待初始化完成
+（共享就绪事件），超时才降级——冷启动窗内等待后就成功，而非必失败。
 
 bank_id 是多租户隔离 key（来自内核的 tenant_id），缺省回落到默认值。
 
@@ -67,11 +68,15 @@ plugin = AgentOSPlugin("hindsight_memory_service")
 _client: Any = None
 # hindsight-api 服务器子进程（on_load 启动,on_unload 终止）
 _api_process: Any = None
-# on_load in-flight 就绪事件：on_load 运行期间非 None，任何出口（成功/失败/
-# 异常）必 set + 清引用。工具面 _client is None 时依此有界等待——冷启动窗
+# 初始化在途就绪事件：on_load 进入起至后台初始化出结果（成功/失败/异常）
+# 期间非 None（就绪等待后台化后，生命周期长于 on_load 本身）。任何出口必
+# set + 清引用。工具面 _client is None 时依此有界等待——冷启动窗
 # （hindsight-api 子进程首启 26-40s 级）内等待而非必失败；多等待者共享同一
-# 事件，等待期间 on_load 不重入、不重复 spawn。
+# 事件，等待期间初始化不重入、不重复 spawn。
 _init_inflight: asyncio.Event | None = None
+# 后台自连任务强引用（asyncio 只弱引用任务，无强引用可能被 GC 中途回收）；
+# 亦作测试驱动锚点（await 它等待后台初始化出结果）。
+_init_task: asyncio.Task[None] | None = None
 # 冷启动窗有界等待上限（秒）：覆盖 _wait_api_ready 的轮询窗 + bank 建立。
 # 实测冷启动（装机 2026-10-20 夜间轮）：快档 30-50s，慢档（pg0 首启建库 +
 # LiteLLM 远程 cost map 拉取退避）可达 150s+——等待窗取 150s 与就绪轮询窗
@@ -94,13 +99,6 @@ _DEFAULT_REFLECT_QUERY = "总结最近的记忆和经验"
 
 # 缺省回落 "default" 的一次性告警开关（租户隔离未生效必须可观测）
 _bank_default_warned = False
-
-# 文档切块大小（字符）
-_CHUNK_SIZE = 2000
-
-# 导入切块并发 retain 上限（服务端并行抽取，实测 ~16s/chunk 串行、并发 3 提速
-# 2.4x；大文档串行必然撞工具 300s 超时）
-_IMPORT_CONCURRENCY = 6
 
 # 允许导入的文件扩展名
 _ALLOWED_DOC_EXTS = (".txt", ".md")
@@ -224,23 +222,6 @@ def _resolve_bank_id(bank_id: str | None) -> str:
                 "回落 'default'——多租户隔离未生效"
             )
     return fallback
-
-
-def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE) -> list[str]:
-    """按字符数切分文本（朴素滑窗，~chunk_size 字符/块）。
-
-    Args:
-        text: 原始文本
-        chunk_size: 每块字符数上限
-
-    Returns:
-        文本块列表（空文本返回 []）
-    """
-    # 算式单一来源在 knowledge_base._chunk_text（模块名仓内唯一，裸名导入无抢占面；
-    # 懒导入避免装载环——knowledge_base 不反向依赖本模块）
-    import knowledge_base as kb  # noqa: PLC0415
-
-    return kb._chunk_text(text, chunk_size)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -864,7 +845,8 @@ async def _resolve_unit_document_id(bank_id: str, memory_id: str) -> str | None:
             },
         },
     },
-    description="Chunk and import a text document into a hindsight bank",
+    description="Import a text document into a hindsight bank (single whole-document "
+    "retain; chunking and extraction follow the bank's native pipeline config)",
 )
 async def hindsight_import_document(
     bank_id: str = "",
@@ -872,7 +854,12 @@ async def hindsight_import_document(
     file_path: str | None = None,
     knowledge_name: str | None = None,
 ) -> dict[str, Any]:
-    """Import a document: read file (txt/md only) or use text, chunk, retain each.
+    """Import a document: read file (txt/md only) or use text, single whole-document retain.
+
+    客户端零切块（切块/抽取归 bank 所配的上游原生摄取管线——concise/verbatim/
+    chunks 由 bank 级 retain_extraction_mode 决定，本工具不干预）。标题双通道
+    （与 KB 域同款，ADR 2026-11-19 决策5）：内容头部前置 ``# {name}``（首 chunk
+    向量化含标题语义）+ aretain context=name（逐条 fact 记录携带归属）。
 
     Rejects non-txt/md file paths with an error dict (no retain).
     """
@@ -896,7 +883,7 @@ async def hindsight_import_document(
         except Exception as e:
             return {"error": f"failed to read file: {e}", "chunks_imported": 0}
 
-    if not raw_text:
+    if not raw_text or not raw_text.strip():
         return {
             "error": "no text provided (pass text or file_path)",
             "chunks_imported": 0,
@@ -904,31 +891,19 @@ async def hindsight_import_document(
 
     try:
         bank = _resolve_bank_id(bank_id)
-        chunks = [c for c in _chunk_text(raw_text) if c.strip()]
         name = knowledge_name or "document"
-        total = len(chunks)
-        sem = asyncio.Semaphore(_IMPORT_CONCURRENCY)
-
-        async def _retain_chunk(idx: int, chunk: str) -> None:
-            meta = {
+        await _client.aretain(
+            bank_id=bank,
+            content=f"# {name}\n\n{raw_text.strip()}",
+            context=name,
+            metadata={
                 "memory_type": "semantic",
                 "knowledge_name": name,
-                # MemoryItem.metadata 是 dict[str,str] pydantic 校验面——
-                # 数字/布尔值必 422，全部字符串化
-                "chunk_index": str(idx),
-                "chunk_total": str(total),
                 "source": "import_document",
-            }
-            async with sem:
-                await _client.aretain(
-                    bank_id=bank,
-                    content=chunk,
-                    metadata=meta,
-                    tags=["type:semantic"],
-                )
-
-        await asyncio.gather(*(_retain_chunk(i, c) for i, c in enumerate(chunks)))
-        return {"chunks_imported": total, "knowledge_name": name}
+            },
+            tags=["type:semantic"],
+        )
+        return {"chunks_imported": 1, "knowledge_name": name}
     except Exception as e:
         logger.warning("[hindsight.import_document] 导入失败 | error=%s", e)
         return {"chunks_imported": 0, "knowledge_name": knowledge_name, "error": str(e)}
@@ -1048,7 +1023,7 @@ async def hindsight_get_documents(
 
 @plugin.tool(
     name="hindsight.list_banks",
-    schema={"type": "object", "properties": {}, "required": []},
+    schema={"type": "object", "properties": {}},
     description="List all memory bank ids in the hindsight instance (bank discovery for cross-bank listing surfaces)",
 )
 async def hindsight_list_banks() -> dict[str, Any]:
@@ -1627,18 +1602,23 @@ async def _wait_api_ready(
     """轮询 /health 直至就绪（最多 _API_READY_WAIT_S 秒）；子进程提前退出则带 stderr tail 抛错。
 
     stderr 由父侧排空线程写轮转日志（逐条 flush），崩溃 tail 直接读落盘
-    路径；本函数不持有任何文件句柄。
+    路径；本函数不持有任何文件句柄。健康探针（urlopen timeout=2）经
+    ``asyncio.to_thread`` 下放，不占宿主事件循环。
     """
     import asyncio as _aio  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
+    def _probe() -> bool:
+        """同步健康探针（线程内执行）；非 200 视为未就绪。"""
+        with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+            return resp.status == 200
+
     for _attempt in range(_API_READY_WAIT_S):
         await _aio.sleep(1)
         try:
-            with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
-                if resp.status == 200:
-                    logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
-                    return
+            if await _aio.to_thread(_probe):
+                logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
+                return
         except Exception:
             # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
             # 字符）——崩溃原因可见，不再只有裸 exit code。
@@ -1906,25 +1886,27 @@ async def _on_load(params: dict[str, Any]) -> None:
     - hindsight-api(main 入口)启动 HTTP 服务器,内部用 pg0 嵌入式 PostgreSQL
     - hindsight_client.Hindsight(base_url) 是 HTTP 客户端,aretain/arecall 调服务器
 
-    本 on_load:
+    本 on_load（秒级返回不阻内核 boot，装机 2026-11-20 启动优化 B）:
     1. 配置 LLM/embedding env(GLM OpenAI 兼容端点)
-    2. 启动 hindsight-api 子进程(后台,监听 _HINDSIGHT_PORT)
-    3. 创建 Hindsight(base_url) 客户端,确保 bank 存在
-    4. 任一步失败 → _client=None,所有工具降级,sidecar 不崩
+    2. spawn + /health 就绪轮询 + 建客户端 + 建 bank 全部移交后台任务
+       （hindsight-api 子进程监听 _HINDSIGHT_PORT；任务强引用存 _init_task）
+    3. 后台就绪自连成功；失败 warn 留痕进降级（下次 on_load 重试）
 
     冷启动窗等待面：进入即立共享就绪事件（工具面 _client is None 期间有界
-    等待它），任何出口（成功/失败/异常）finally 必唤醒全部等待者并清引用，
-    等待者醒来复查 _client。
+    等待它）；未移交后台任务的出口（成功/失败/异常）由 finally 唤醒全部
+    等待者并清引用，移交后由后台任务出口唤醒——等待者醒来复查 _client。
     """
     global _init_inflight
 
     ready = asyncio.Event()
     _init_inflight = ready
+    handed_off = False
     try:
-        await _on_load_init()
+        handed_off = await _on_load_init(ready)
     finally:
-        _init_inflight = None
-        ready.set()
+        if not handed_off:
+            _init_inflight = None
+            ready.set()
 
 
 async def _connect_backend(port: str, data_dir: str) -> None:
@@ -1952,16 +1934,21 @@ async def _connect_backend(port: str, data_dir: str) -> None:
         logger.debug("[hindsight] 创建默认 bank(可能已存在): %s", be)
 
     logger.info(
-        "[hindsight] on_load 完成 | base_url=%s bank=%s model=%s",
+        "[hindsight] 后端自连完成 | base_url=%s bank=%s model=%s",
         base_url,
         _DEFAULT_BANK_ID,
         os.environ.get("HINDSIGHT_API_LLM_MODEL"),
     )
 
 
-async def _on_load_init() -> None:
-    """on_load 初始化主体（配置装配 + spawn api + 建客户端；失败降级不崩）。"""
-    global _client, _DEFAULT_BANK_ID, _api_process
+async def _on_load_init(ready: asyncio.Event) -> bool:
+    """on_load 初始化主体（配置装配 + 初始化分派；失败降级不崩）。
+
+    返回值 = 事件所有权是否已移交后台任务：True（主路径）时 on_load 秒级
+    返回，等待者由 _connect_then_ready 出口唤醒；False（辅助 venv 后台自愈
+    分支）由 on_load 出口立即唤醒——供给期工具面快速降级，既有语义不变。
+    """
+    global _client, _DEFAULT_BANK_ID, _api_process, _init_task
 
     config = plugin.get_config() or {}
     # 单键：default_bank_id（与 env HINDSIGHT_DEFAULT_BANK_ID 同名）。
@@ -1990,16 +1977,36 @@ async def _on_load_init() -> None:
             os.path.join(_THIS_DIR, ".venv-hindsight"),
         )
         asyncio.get_running_loop().create_task(_provision_then_connect(_THIS_DIR, str(port), data_dir))
-        return
+        return False
 
+    # 就绪等待后台化（装机 2026-11-20 启动优化 B）：spawn + /health 轮询
+    # （装机实测慢档 150s 级）不再阻塞内核 boot——on_load 此处秒级返回；事件
+    # 所有权随任务移交，工具面冷启动窗有界等待语义不变（BUG-63 契约）。
+    _init_task = asyncio.get_running_loop().create_task(_connect_then_ready(str(port), data_dir, ready))
+    return True
+
+
+async def _connect_then_ready(port: str, data_dir: str, ready: asyncio.Event) -> None:
+    """后台自连任务体（on_load 移交的初始化）：spawn/复用 api + 建客户端。
+
+    出口契约：成功建 client；任何失败 warn 留痕保持降级（_client=None，下次
+    on_load 重试）——两态都必唤醒工具面等待者（事件 set + 清引用）。
+    CancelledError 不吞（except Exception 不接 BaseException），被取消时
+    照常传播，finally 只收口事件面。
+    """
+    global _init_inflight, _client
     try:
-        await _connect_backend(str(port), data_dir)
-    except Exception as e:
+        await _connect_backend(port, data_dir)
+    except Exception as e:  # noqa: BLE001 — 失败收口为降级，warn 留痕可观测
         _client = None
         logger.warning(
-            "[hindsight] 初始化失败,sidecar 进入降级模式 | error=%s",
+            "[hindsight] 后台初始化失败,sidecar 进入降级模式（下次 on_load 重试） | error=%s",
             e,
         )
+    finally:
+        if _init_inflight is ready:
+            _init_inflight = None
+        ready.set()
 
 
 @plugin.on_unload

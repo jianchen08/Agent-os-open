@@ -23,6 +23,7 @@ import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { toRenderableMessages } from '@/utils/messageDisplay'
 import { collectSegmentSwitcherAnchors } from '@/utils/segmentAnchor'
+import { AwaitingReplyShell } from './AwaitingReplyShell'
 import { readCompressionRef } from './CompressionOriginalsButton'
 import { MessageItem } from './MessageItem'
 import {
@@ -31,7 +32,7 @@ import {
   resolveMessageStyle,
 } from './PluginMessageCard'
 import { SegmentOriginals } from './SegmentOriginals'
-import { resolveStreamAnchorMs } from './streamAnchor'
+import { resolveStreamDisplayAnchorMs } from './streamAnchor'
 import type { MessageListProps } from './types'
 import type { Message } from '@/types/models'
 
@@ -100,6 +101,11 @@ export interface ExtendedMessageListProps extends MessageListProps {
   onRegenerate?: () => void
   /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
   onRollbackTo?: (userMessageId: string) => void
+  /** 等待 AI 响应壳锚点（ADR 2026-11-17-awaiting-reply-render-shell）：
+   *  >0 = 直跑 user 气泡已落定、AI 真气泡（stream_start）未出现，消息尾渲染
+   *  思考中壳补齐 AI 侧即时反馈；0/缺省 = 不渲染。上游 ChatContainer 已收敛
+   *  流式中/排队两条件，此处只补「尾消息确为本次发送的 user 消息」一门。 */
+  awaitingReplySince?: number
 }
 
 /**
@@ -119,6 +125,7 @@ export const MessageList = ({
   onEdit,
   onRegenerate,
   onRollbackTo,
+  awaitingReplySince = 0,
   jumpTarget,
   onJumpConsumed,
 }: ExtendedMessageListProps) => {
@@ -306,10 +313,12 @@ export const MessageList = ({
       const isLast = index === total - 1
       const isHighlighted = message.id === highlightedMessageId
       // 流式总耗时锚点（2026-11-06 用户裁定）：仅流式尾消息解析（O(1) 门槛，
-      // 非尾消息不付 O(n) 前扫），值 = 触发消息发出时刻，圈消失计时同葬
+      // 非尾消息不付 O(n) 前扫），值 = 触发消息发出时刻与 run 执行起点中较新者
+      // （重新生成/回退/编辑重发靠 run 起点归位，2026-11-07 用户纠偏），
+      // 圈消失计时同葬
       const isStreamingTail = isGenerating && isLast && message.role === 'assistant'
       const streamAnchorMs = isStreamingTail
-        ? resolveStreamAnchorMs(displayMessages, message.id)
+        ? resolveStreamDisplayAnchorMs(displayMessages, message.id, activePipelineId)
         : null
       return (
         <div
@@ -354,6 +363,7 @@ export const MessageList = ({
       highlightedMessageId,
       segmentSwitcherAnchors,
       displayMessages,
+      activePipelineId,
     ],
   )
 
@@ -853,6 +863,8 @@ export const MessageList = ({
   }, [tabId])
 
   /** 空状态 / 加载中 / 加载失败态渲染 */
+  // data-chat-flow-region：消息流区边界标记（ContextUsageIndicator 等输入区
+  // 浮窗据此夹紧定位——浮窗只落在消息流区内）。四个渲染态根节点同标记。
   if (messages.length === 0) {
     // X1-F1：当前管道加载失败时渲染错误态而非欢迎空态——空态会让用户误以为
     // 消息丢失；错误提示 + 重新加载按钮给用户可见反馈与手动自愈入口。
@@ -861,6 +873,7 @@ export const MessageList = ({
         <div
           className={`flex flex-1 items-center justify-center ${className}`}
           data-testid="message-list-load-error"
+          data-chat-flow-region=""
         >
           <div className="text-muted-foreground text-center">
             <AlertCircle className="mx-auto mb-3 h-12 w-12 opacity-50" />
@@ -883,7 +896,11 @@ export const MessageList = ({
     // 空 ≠ 加载（OBS-R258-1 四态约定），「开始新的对话」只在确认无消息后出现
     if (activePipelineInitialLoading || tabMessagesLoading) {
       return (
-        <div className={cn('flex flex-1 flex-col', className)} data-testid="message-list-initial-loading">
+        <div
+          className={cn('flex flex-1 flex-col', className)}
+          data-testid="message-list-initial-loading"
+          data-chat-flow-region=""
+        >
           <div className="mx-auto w-full max-w-[var(--chat-content-max-w)] space-y-4 px-4 py-6">
             {['w-[80%]', 'w-[60%]', 'w-[72%]', 'w-[48%]'].map((widthClass, i) => (
               <div
@@ -903,6 +920,7 @@ export const MessageList = ({
       <div
         className={`flex flex-1 items-center justify-center ${className}`}
         data-testid="message-list-empty"
+        data-chat-flow-region=""
       >
         <div className="text-muted-foreground text-center">
           <div className="mb-4 text-4xl">{'\uD83D\uDCAC'}</div>
@@ -914,7 +932,7 @@ export const MessageList = ({
   }
 
   return (
-    <div className={cn('relative flex min-h-0 flex-col', className)}>
+    <div className={cn('relative flex min-h-0 flex-col', className)} data-chat-flow-region="">
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -942,6 +960,18 @@ export const MessageList = ({
         {/* 消息列表（压缩块按段归组为小条+原文还原；其余渲染合并后的气泡，
             连续 assistant 合为一条） */}
         {renderedRows}
+
+        {/* 等待 AI 响应壳（ADR 2026-11-17-awaiting-reply-render-shell）：直跑
+            user 气泡已上屏、AI 真气泡（stream_start）未出现的三阶段缝隙窗口，
+            消息尾渲染思考中壳补齐 AI 侧即时反馈；stream_start 同 commit 替换。
+            只认尾消息确为本次发送的 user 消息（历史浏览/触发器注入不亮壳）。 */}
+        {(() => {
+          if (awaitingReplySince <= 0) return null
+          const last = messages[messages.length - 1]
+          if (!last || last.role !== 'user') return null
+          if (last.status === 'failed' || last.status === 'error') return null
+          return <AwaitingReplyShell since={awaitingReplySince} />
+        })()}
 
         <div className="h-icon-md" />
       </div>

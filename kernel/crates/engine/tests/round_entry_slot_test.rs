@@ -60,6 +60,7 @@ struct SlotRecorder {
 
 enum Event {
     Start(RoundStart, Vec<MessageRecord>),
+    #[allow(dead_code)] // 记录面保留 End 快照；当前断言只消费 starts
     End(RoundEnd),
 }
 
@@ -83,6 +84,7 @@ impl SlotRecorder {
             .collect()
     }
 
+    #[allow(dead_code)] // 预留断言面，当前用例未消费
     fn ends(&self) -> Vec<RoundEnd> {
         self.events
             .lock()
@@ -117,6 +119,9 @@ impl RoundEvents for SlotRecorder {
 /// 同款两轮形态）。`silent_llm = true` 时 llm_core 零 messages 产出（真零产出轮）。
 struct RoundInvoker {
     calls: Mutex<Vec<String>>,
+    /// 每次插件调用时 state 内的本轮消息槽位（`_message_seq`）快照：
+    /// 断言 tool_core 能读到与 stream_start.sequence 同源的权威值。
+    seen_seqs: Mutex<Vec<(String, Option<i64>)>>,
     silent_llm: bool,
 }
 
@@ -124,6 +129,7 @@ impl RoundInvoker {
     fn new() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            seen_seqs: Mutex::new(Vec::new()),
             silent_llm: false,
         }
     }
@@ -131,8 +137,13 @@ impl RoundInvoker {
     fn silent() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            seen_seqs: Mutex::new(Vec::new()),
             silent_llm: true,
         }
+    }
+
+    fn seen_seqs(&self) -> Vec<(String, Option<i64>)> {
+        self.seen_seqs.lock().unwrap().clone()
     }
 }
 
@@ -144,6 +155,10 @@ impl PluginInvoker for RoundInvoker {
         _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         self.calls.lock().unwrap().push(plugin_id.to_string());
+        self.seen_seqs.lock().unwrap().push((
+            plugin_id.to_string(),
+            _ctx.state.get("_message_seq").and_then(|v| v.as_i64()),
+        ));
         let count = self
             .calls
             .lock()
@@ -400,6 +415,64 @@ async fn round_start_creates_streaming_placeholder_with_reserved_seq() {
         );
         assert_eq!(slot.run_id, "run_slot_entry", "占位行 run_id=当前 run");
     }
+}
+
+// ── 契约 1b：本轮槽位随 state 透传给插件（工具事件载荷来源）──────
+
+/// tool_core 只能经 state 拿本轮消息槽位：`_message_seq` 必须与
+/// stream_start.sequence 同源（开轮保留值），工具事件据此携带宿主 seq，
+/// 工具卡容器才不在中断后因缺 seq 垫底。
+#[tokio::test]
+async fn plugins_read_round_message_seq_from_state() {
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    let recorder = Arc::new(SlotRecorder::new(store.clone()));
+    let invoker = Arc::new(RoundInvoker::new());
+    let executor = make_executor(
+        invoker.clone(),
+        store.clone(),
+        recorder.clone(),
+        "run_slot_state_seq",
+    );
+    let compiled = compile_pipeline(
+        &two_round_config("slot_state_seq"),
+        &Default::default(),
+        executor.plugin_ids(),
+    )
+    .expect("compile ok");
+    executor
+        .run_compiled(&compiled, initial_state("p_slot_state"))
+        .await
+        .expect("run ok");
+
+    let starts = recorder.starts();
+    let seq_of = |plugin: &str| -> Vec<Option<i64>> {
+        invoker
+            .seen_seqs()
+            .into_iter()
+            .filter(|(p, _)| p == plugin)
+            .map(|(_, seq)| seq)
+            .collect()
+    };
+    // 首轮开轮保留 1（user seq 0 + 1），次轮保留 3（前三消息 max 2 + 1）——
+    // 与 round_start 事件同值；两轮形态见 two_round_config。
+    assert_eq!(
+        seq_of("pipeline_llm_core"),
+        vec![Some(1), Some(3)],
+        "LLM 步读到本轮保留槽位"
+    );
+    assert_eq!(
+        seq_of("pipeline_tool_core"),
+        vec![Some(1), Some(3)],
+        "tool_core 读到宿主消息槽位（工具事件载荷 sequence 来源）"
+    );
+    assert_eq!(
+        seq_of("pipeline_llm_core"),
+        starts
+            .iter()
+            .map(|(s, _)| Some(s.sequence))
+            .collect::<Vec<_>>(),
+        "state 槽位与 RoundStart.sequence（stream_start.sequence）同源"
+    );
 }
 
 // ── 契约 2：轮末投影同 seq UPDATE，绝不双行 ─────────────────────

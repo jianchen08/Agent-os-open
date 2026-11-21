@@ -39,3 +39,4 @@ port-sync | kernel-port-sync | covered | 整改K4 落地（electron KERNEL_DEFAU
 api-docs | openapi-drift | covered | 整改§6 落地（openapi.yaml 生成式+漂移闸；security 复用 P-2 鉴权分类；/ext 动态面经 /api/v1/schema 运行时发现）
 file-size | file-length-baseline | covered | 2026-10-12 落地（新/存分档四档：新文件 1500/3000 硬 + 存量触线 2500/5000 + 冻结件基线棘轮 + 豁免归因；同日三次裁定，ADR 2026-10-12-file-length-mechanical-gate.md）；2026-10-15 增补触碰即拆第五维（>5000 非测试/测试同线文件含冻结件被 diff 触碰即红，同 ADR 增补节）
 commit-convention | - | exempt | 行业可选；本仓 traceability-gate+tdd-gate 提供更高价值替代
+boundary-electron | electron-boundary | covered | 2026-11-16 落地（electron↔frontend 互导禁令 + 渲染侧 electron 包运行时引用禁令 + preload 最小面，零容忍无基线，恒跑 traceability-gate job，ADR 2026-11-16-lint-error-ratchet-electron-boundary-gate）

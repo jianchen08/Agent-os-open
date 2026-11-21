@@ -213,20 +213,66 @@ impl PipelineFile {
                 step_hooks.push((format!("{body_id}:{step_id}"), hooks));
             }
         }
+        let config = PipelineConfig {
+            name: self.name,
+            loop_bodies,
+            checkpoint: self.checkpoint,
+            initial_state: self.initial_state,
+            max_rounds: self.max_rounds,
+        };
+        // 刀4 启动期 fail-fast（装机版缺陷清偿计划 20261015 §一刀4）：归一后
+        // 静态扫描——启动加载与保存面校验（validate_pipeline_config_data）同走
+        // 本归一路径，漏配即拦。
+        validate_task_terminal_routes(&config)?;
         Ok((
-            PipelineConfig {
-                name: self.name,
-                loop_bodies,
-                checkpoint: self.checkpoint,
-                initial_state: self.initial_state,
-                max_rounds: self.max_rounds,
-            },
+            config,
             PipelineHooks {
                 body_hooks,
                 step_hooks,
             },
         ))
     }
+}
+
+/// 终态收束路由的会话管道防护（刀4 启动期 fail-fast，装机版缺陷清偿计划
+/// 20261015 §一刀4）：`then: end` 且 when 依据 `task.status` 判定终态
+/// （completed/failed/cancelled）的路由，必须带 `task.id` 限定——BUG-45 家族
+/// 实锤（1015 chat 事故）：无限定的终态收束会吞会话聊天管道 LLM 刚产出的
+/// tool_calls（dropped_tool_calls 源头之一）。非收束路由（then=loop/step/
+/// phase）与任务域无关的 end（缺省 True）不受限；合规形态 =
+/// `task.id != none and (task.status == 'completed' or ...)`（autonomous.yaml
+/// 现行形态，condition.rs 文法回归测试同锁该表达式）。
+fn validate_task_terminal_routes(config: &PipelineConfig) -> Result<(), PipelineLoadError> {
+    fn check(routes: &[Route], location: &str) -> Result<(), PipelineLoadError> {
+        const TERMINAL: [&str; 3] = ["completed", "failed", "cancelled"];
+        for (i, route) in routes.iter().enumerate() {
+            if route.then.next != RouteNext::End {
+                continue; // 非收束路由（loop/step/phase）不属防护面
+            }
+            let when = &route.when;
+            let is_task_terminal =
+                when.contains("task.status") && TERMINAL.iter().any(|s| when.contains(s));
+            if is_task_terminal && !when.contains("task.id") {
+                return Err(PipelineLoadError::InvalidConfig(format!(
+                    "{location} / 路由[{i}]: 终态收束路由缺少 task.id 限定——when 依据 task.status \
+                     判定终态（completed/failed/cancelled）且 then=end 的路由会吞会话聊天管道的\
+                     工具调用（BUG-45 家族，装机版缺陷清偿计划刀4）；请改写为 \
+                     \"task.id != none and (task.status == 'completed' or ...)\" 形态"
+                )));
+            }
+        }
+        Ok(())
+    }
+    for body in &config.loop_bodies {
+        check(&body.exit_routes, &format!("循环体 '{}'", body.id))?;
+        for step in &body.steps {
+            check(
+                &step.routes,
+                &format!("循环体 '{}' / step '{}'", body.id, step.id),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// 校验管道配置 JSON（PUT `/api/v1/config/pipelines/{name}` 写盘前调用）。
@@ -1049,6 +1095,109 @@ loop_bodies:
         }
     }
 
+    /// 刀4 启动期 fail-fast（装机版缺陷清偿计划 20261015 §一刀4）：终态收束
+    /// 路由（`then: end` 且 when 依据 `task.status` 判定 completed/failed/
+    /// cancelled）必须带 `task.id` 限定——BUG-45 家族实锤（1015 chat 事故）：
+    /// 无限定的终态收束会吞会话聊天管道 LLM 刚产出的 tool_calls（dropped_
+    /// tool_calls 源头）。漏配在加载/保存期即拦，不等运行期首撞。
+    #[test]
+    fn test_task_terminal_end_route_requires_task_id_guard() {
+        // 漏配形态：三终态词逐一拦截。
+        for status in ["completed", "failed", "cancelled"] {
+            let yaml = format!(
+                r#"
+name: leaky_terminal
+loop_bodies:
+  - id: main
+    steps:
+      - id: post
+        steps: [llm]
+        next:
+          - when: "task.status == '{status}'"
+            then: end
+"#
+            );
+            let err = serde_yaml::from_str::<PipelineFile>(&yaml)
+                .unwrap()
+                .to_internal()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("task.id"),
+                "终态词 {status} 漏配必须报 task.id 限定指引，实际 {err}"
+            );
+        }
+        // 合规形态：task.id != none 限定在位 → 通过（autonomous.yaml 现行形态）。
+        let guarded = r#"
+name: guarded_terminal
+loop_bodies:
+  - id: main
+    steps:
+      - id: post
+        steps: [llm]
+        next:
+          - when: "task.id != none and (task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled')"
+            then: end
+"#;
+        serde_yaml::from_str::<PipelineFile>(guarded)
+            .unwrap()
+            .to_internal()
+            .expect("task.id 限定在位的终态收束路由应通过");
+        // 非收束路由不受限：task.status 判定 + then=loop（纯文本轮不终局形态）。
+        let loops = r#"
+name: loop_form
+loop_bodies:
+  - id: main
+    steps:
+      - id: post
+        steps: [llm]
+        next:
+          - when: "task.status != 'completed'"
+            then: loop
+"#;
+        serde_yaml::from_str::<PipelineFile>(loops)
+            .unwrap()
+            .to_internal()
+            .expect("then=loop 的 task.status 判定路由不属收束面，不应拦截");
+        // 与任务域无关的缺省 end 不受限。
+        let plain = r#"
+name: plain_end
+loop_bodies:
+  - id: main
+    steps:
+      - id: post
+        steps: [llm]
+        next:
+          - when: "True"
+            then: end
+"#;
+        serde_yaml::from_str::<PipelineFile>(plain)
+            .unwrap()
+            .to_internal()
+            .expect("与 task.status 无关的 end 路由不应拦截");
+        // step 级路由同受校验（不只 body 出口路由）；同 step 内 loop 路由不误伤。
+        let step_level = r#"
+name: step_level_leak
+loop_bodies:
+  - id: main
+    steps:
+      - id: post
+        steps: [llm]
+        next:
+          - when: "task.status == 'completed'"
+            then: loop
+          - when: "task.status == 'failed'"
+            then: end
+"#;
+        let err = serde_yaml::from_str::<PipelineFile>(step_level)
+            .unwrap()
+            .to_internal()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("task.id"),
+            "step 级漏配同样须拦截，实际 {err}"
+        );
+    }
+
     /// validate_no_name_conflicts：无冲突 → Ok。
     #[test]
     fn test_validate_no_conflicts_ok() {
@@ -1333,13 +1482,15 @@ loop_bodies:
             "bodies: {:?}",
             cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
         );
-        // main / post：DSL next 归一为 routes（9 条：任务终态收束 + 工具迭代
+        // main / post：DSL next 归一为 routes（10 条：任务终态收束 + 工具迭代
         // 收尾回写 + 对话挂起 + 对话清除 + 工具调用回环 + 新输入回 LLM +
-        // duplicate 回 LLM + 纯文本轮不终局 + 缺省 end；形态拆分
-        // 2026-10-10-pipeline-shape-split-core-type 后 post 显式路由 core_type
-        // 决定下一迭代形态，tool_exec 并行 for-each 在迭代内居于 llm 之前，
-        // post 须有 raw_tool_calls 回环路由把控制送回下一迭代——否则聊天会话
-        // （task.id=none、conversation_mode 未激活）兜底 end 吞调用）
+        // duplicate 回 LLM + LLM 失败轮回环 + 纯文本轮不终局 + 缺省 end；形态
+        // 拆分 2026-10-10-pipeline-shape-split-core-type 后 post 显式路由
+        // core_type 决定下一迭代形态，tool_exec 并行 for-each 在迭代内居于 llm
+        // 之前，post 须有 raw_tool_calls 回环路由把控制送回下一迭代——否则聊天
+        // 会话（task.id=none、conversation_mode 未激活）兜底 end 吞调用；
+        // R13 起 LLM 失败轮（无工具调用）回 LLM 重试至 duplicate_check 熔断，
+        // 兜底 end 不再吞失败轮）
         let main = cfg
             .loop_bodies
             .iter()
@@ -1352,7 +1503,7 @@ loop_bodies:
             .iter()
             .find(|s| s.id == "post")
             .expect("post step");
-        assert_eq!(post.routes.len(), 9, "post next 九条");
+        assert_eq!(post.routes.len(), 10, "post next 十条");
         // 任务终态当轮收束置顶（用户裁定 2026-08-29：成功/失败/取消立即 end；
         // task.id != none 限定任务管道——会话聊天管道无 task.id 不终态收束；
         // 2026-10-21 960ec2a36 并入 task_evaluation_completed 投影键——评估
@@ -1404,14 +1555,23 @@ loop_bodies:
             Some(&serde_json::json!(false)),
             "回 LLM 分支自清路由键防残留"
         );
-        // 任务管道纯文本轮不终局（D2 一次性终局修复 221a776d6，兜底 end 前置轮回规则）
+        // LLM 失败轮回环（R13）：失败轮（无工具调用）回 LLM 重试至 duplicate_check
+        // 熔断（llm_fail_loop / model_unavailable 署名 → run Failed）——兜底 end
+        // 不再吞失败轮（TB 终跑 887b8135f4c5 失败轮折算 completed 实证根修）
         assert_eq!(post.routes[7].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[7].when, "router.llm_fail_streak.count > 0");
         assert_eq!(
-            post.routes[7].when,
+            post.routes[7].then.set.get("core_type"),
+            Some(&serde_json::json!("llm_call"))
+        );
+        // 任务管道纯文本轮不终局（D2 一次性终局修复 221a776d6，兜底 end 前置轮回规则）
+        assert_eq!(post.routes[8].then.next, RouteNext::Loop);
+        assert_eq!(
+            post.routes[8].when,
             "task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'"
         );
-        assert_eq!(post.routes[8].then.next, RouteNext::End);
-        assert_eq!(post.routes[8].when, "True", "缺省 when 归一为 True");
+        assert_eq!(post.routes[9].then.next, RouteNext::End);
+        assert_eq!(post.routes[9].when, "True", "缺省 when 归一为 True");
         // core 步骤静态化：动态 core_plugin 项退役，只余工具缓存命中的门控直出；
         // 工具执行核移至 tool_exec 并行 for-each（单调用契约，内容移植自
         // sync/open-main-20261008 9101f86a9）

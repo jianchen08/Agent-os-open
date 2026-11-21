@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,71 @@ class TestDualRootAgentConfig:
         plugin = mod.AgentConfigLoadPlugin(config={})
         res = _run(plugin.execute(_ctx({"agent.id": "no-such-agent"})))
         assert res.state_updates["context.is_project"] is True
+
+
+class TestRelativeEnvResolution:
+    """相对 AGENTOS_CONFIG_ROOT 的内核解析基还原（2026-11-16 R6 返修）。
+
+    真内核实测根因：内核对显式相对 config root 不规范化，sidecar（cwd=插件
+    目录）原样继承 → Path("config")/agents 落到插件目录下幻影路径 → agent
+    yaml 双根全空 → 工具面/模型档静默回退（tb_eval_agent 绑定会话跑成无工具
+    纯文本）。修复 = 按 instance.yaml 启动契约标记从 cwd/插件目录祖先还原。
+    """
+
+    def test_relative_config_root_resolves_via_cwd_anchor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """相对 env + cwd 锚（tmp 工作区含 instance.yaml）→ 正确装载 tmp agent。"""
+        ws = tmp_path / "ws"
+        cfg = ws / "config"
+        (cfg / "kernel").mkdir(parents=True)
+        (cfg / "kernel" / "instance.yaml").write_text(
+            "schema: 1\ntier1_root: ../../plugins/shared\n"
+            "tier2_root: ../../plugins/shared\nshared_root: ../../plugins/shared\n",
+            encoding="utf-8",
+        )
+        agents = cfg / "agents" / "system"
+        agents.mkdir(parents=True)
+        (agents / "tb_probe_agent.yaml").write_text(
+            "config_id: tb_probe_agent\nmodel_tier: small\ntool_ids:\n- bash\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", "config")  # 相对（宿主 repro 形态）
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "no-such-user-root"))
+        monkeypatch.chdir(ws)  # sidecar 视角：cwd 锚含 instance.yaml 标记
+
+        mod = _load_plugin_module()
+        plugin = mod.AgentConfigLoadPlugin(config={})
+        cfg_loaded = plugin._load_agent_config("tb_probe_agent")
+        assert cfg_loaded, "相对 config root 必须经内核解析基还原装载（静默回退=bug）"
+        assert cfg_loaded.get("model_tier") == "small"
+        assert cfg_loaded.get("tool_ids") == ["bash"]
+
+    def test_absolute_config_root_unchanged(
+        self, isolated_roots: tuple[Path, Path]
+    ) -> None:
+        """绝对 env（既有形态）行为不回归：tmp factory 直接命中。"""
+        _user_root, factory = isolated_roots
+        _write_agent(factory, "abs_probe", "model_tier: large\n")
+        mod = _load_plugin_module()
+        plugin = mod.AgentConfigLoadPlugin(config={})
+        cfg_loaded = plugin._load_agent_config("abs_probe")
+        assert cfg_loaded.get("model_tier") == "large"
+
+    def test_unresolvable_relative_falls_back_to_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """还原失败（无 instance.yaml 标记）→ 保留原值按 cwd 解析（不劣于修复前）。"""
+        mod = _load_plugin_module()
+        helper = mod._resolve_kernel_relative_path
+        monkeypatch.chdir(Path(tempfile.mkdtemp()))  # 孤立 tmp：祖先链无标记
+        raw = Path("nonexistent-cfg")
+        resolved = helper(raw)
+        assert resolved == raw  # 原样返回，行为与修复前一致
+
+    def test_absolute_passthrough(self, tmp_path: Path) -> None:
+        """绝对路径直通（不做标记探测）。"""
+        mod = _load_plugin_module()
+        absolute = tmp_path / "anywhere" / "config"
+        assert mod._resolve_kernel_relative_path(absolute) == absolute
 
 
 def test_resolve_project_roots_service_stub(monkeypatch):

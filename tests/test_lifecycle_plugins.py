@@ -115,7 +115,9 @@ async def test_workspace_init_rebuilds_when_workspace_dir_missing(plugins):
     ws = ws_mod.WorkspaceLifecyclePlugin()
 
     class _OkManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             return {"mode": "plain", "path": workspace, "task_id": task_id}
 
     monkeypatch = pytest.MonkeyPatch()
@@ -297,7 +299,9 @@ async def test_workspace_init_task_mirrors_task_ws_meta(plugins, monkeypatch):
     ws = plugins["ws"]
 
     class _OkManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             return {"mode": "plain", "path": workspace, "task_id": task_id}
 
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
@@ -333,7 +337,9 @@ async def test_workspace_init_task_mirror_failure_not_blocking(plugins, monkeypa
     ws = plugins["ws"]
 
     class _OkManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             return {"mode": "plain", "path": workspace, "task_id": task_id}
 
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
@@ -591,7 +597,9 @@ async def test_workspace_init_task_creation_exception_errors(plugins, monkeypatc
     ws = plugins["ws"]
 
     class _BoomManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             raise RuntimeError("git 崩了")
 
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _BoomManager())
@@ -617,7 +625,9 @@ async def test_workspace_init_task_invalid_ws_meta_errors(plugins, monkeypatch):
     ws = plugins["ws"]
 
     class _BadManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             return {"mode": "plain"}  # 缺 path = 无效工作空间
 
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _BadManager())
@@ -843,7 +853,9 @@ async def test_workspace_init_task_passes_inherited_parent_ws_meta(plugins, monk
     captured: dict[str, Any] = {}
 
     class _CaptureManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             captured["task_data"] = task_data
             return {"mode": "shared", "path": "D:/ws/parent"}
 
@@ -876,7 +888,9 @@ async def test_workspace_init_task_inherited_parent_ws_meta_json_string_restored
     captured: dict[str, Any] = {}
 
     class _CaptureManager:
-        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+        def on_task_start(
+            self, task_id: str, workspace: str, task_data: dict, mode_packages: list | None = None
+        ) -> dict:
             captured["task_data"] = task_data
             return {"mode": "shared", "path": "D:/ws/parent"}
 

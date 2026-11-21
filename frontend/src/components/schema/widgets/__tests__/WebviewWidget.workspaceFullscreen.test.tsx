@@ -13,8 +13,8 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '@/services/api/client'
-import { findDownMessage, postUp as bridgePostUp } from './webviewTestBridge'
 import { useUIStore } from '@/stores/uiStore'
+import { findDownMessage, postUp as bridgePostUp } from './webviewTestBridge'
 import type { Mock } from 'vitest'
 
 vi.mock('@/services/api/client', () => ({

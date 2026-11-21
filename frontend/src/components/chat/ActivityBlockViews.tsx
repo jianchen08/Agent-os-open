@@ -79,6 +79,51 @@ const FileBlockView: FC<{ path: string }> = ({ path }) => {
  * /uploads src 经鉴权取流解析（useAuthedAttachmentUrl → blob，/uploads 需鉴权
  * ADR 2026-10-10），其余 src 透传。
  */
+/**
+ * 图片灯箱（遮罩 + 原图，点遮罩关闭）。
+ *
+ * 从 ImageBlockView 抽出复用件：任务现场页的截图缩略图与对话卡共用同一灯箱
+ * （不各写一套交互与 z-index/token），调用方只负责缩略图。
+ */
+export const ImageLightbox: FC<{ src: string; alt?: string; onClose: () => void }> = ({
+  src,
+  alt,
+  onClose,
+}) => (
+  <div
+    className="bg-[var(--overlay-strong)] fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center p-6"
+    onClick={onClose}
+    role="dialog"
+    aria-modal="true"
+    aria-label="图片预览"
+    data-testid="image-lightbox"
+  >
+    <img
+      src={src}
+      alt={alt ?? '大图预览'}
+      decoding="async"
+      className="max-h-[85vh] max-w-[90vw] rounded object-contain shadow-2xl"
+    />
+  </div>
+)
+
+/**
+ * src 是否可直接交给 <img> 加载（浏览器可解析的地址）。
+ *
+ * 判定面：
+ * - `/uploads` 鉴权直链（经 useAuthedAttachmentUrl 取 blob）；
+ * - `http(s):` / `data:` / `blob:` 协议；
+ * - `/` 开头的站内绝对路径（`/ext/...` 端点或静态资源）。
+ *
+ * 其余一律按**文件系统路径**处理（Windows `D:\x.png`、POSIX `/mnt/d/x.png`
+ * 之外的相对路径如 `assets/a.png`）——这类来源浏览器加载必失败，只有统一
+ * 文件打开入口（按扩展名路由查看器）能正确打开。
+ */
+function isDirectImageSrc(src: string): boolean {
+  if (/^[a-zA-Z]:[\\/]/.test(src)) return false
+  return /^(https?:|data:|blob:)/i.test(src) || src.startsWith('/')
+}
+
 const ImageBlockView: FC<{ src: string }> = ({ src }) => {
   const [open, setOpen] = useState(false)
   const [decodeFailed, setDecodeFailed] = useState(false)
@@ -86,7 +131,10 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
   const { url: authedUrl, failed: fetchFailed } = useAuthedAttachmentUrl(src)
   const failed = fetchFailed || decodeFailed
 
-  if (failed) {
+  // 文件系统路径（宿主绝对路径 / 工作区相对路径）不是浏览器可直接加载的 src：
+  // 直接塞 <img> 必然破图，旧行为退化成纯文本文件行（点开也没接到统一打开入口）。
+  // 这类来源的唯一正确落点是「统一文件打开入口」——按扩展名路由到图片查看器页签。
+  if (!isDirectImageSrc(src) || failed) {
     return <FileBlockView path={src} />
   }
 
@@ -104,22 +152,7 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
         onClick={() => setOpen(true)}
         className="ring-border/40 max-h-40 cursor-zoom-in rounded object-contain transition-shadow hover:ring-1"
       />
-      {open && (
-        <div
-          className="bg-[var(--overlay-strong)] fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center p-6"
-          onClick={() => setOpen(false)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="图片预览"
-        >
-          <img
-            src={authedUrl}
-            alt="大图预览"
-            decoding="async"
-            className="max-h-[85vh] max-w-[90vw] rounded object-contain shadow-2xl"
-          />
-        </div>
-      )}
+      {open && <ImageLightbox src={authedUrl} onClose={() => setOpen(false)} />}
     </>
   )
 }

@@ -71,6 +71,13 @@ def _anchored_rglob(root: Path, pattern: str) -> list[str]:
 #: 是素材模板语法而非双链，进图只会制造恒悬空红点并让数据文件膨胀。
 _EXCLUDED_SOURCE_PREFIXES: tuple[str, ...] = ("docs/working/rp_prompt_material/",)
 
+#: 模板件豁免（同 check_doc_frontmatter「模板件不是文档实例」口径）：文件名
+#: 含字面量 ``{{task_id}}`` 的是任务书派发模板形态（真实实例必是替换后的
+#: task_id，见 AGENTS.md 产物路径任务唯一），不是文档实例——进图会让模板
+#: doc_id 与派生实例 doc_id 相撞（2026-11-17 实证：任务现场入口交互方案
+#: 模板件与 fbec2299bf7a 实例件同 doc_id 触发 doc_id 冲突红）。
+_TEMPLATE_DOC_MARKER = "{{task_id}}"
+
 
 def discover_files(root: Path) -> list[str]:
     """发现全部提取源（方案 §4.2 源表 + docs 下全部 md），posix 相对路径。"""
@@ -92,7 +99,11 @@ def discover_files(root: Path) -> list[str]:
     files.update(_glob("config/pipelines/*.yaml"))
     files.update(_glob("config/steps/*.yaml"))
     files.update(_rglob("docs/**/*.md"))
-    return sorted(rel for rel in files if not rel.startswith(_EXCLUDED_SOURCE_PREFIXES))
+    return sorted(
+        rel
+        for rel in files
+        if not rel.startswith(_EXCLUDED_SOURCE_PREFIXES) and _TEMPLATE_DOC_MARKER not in rel
+    )
 
 
 def _read_text(path: Path) -> str:
@@ -304,8 +315,36 @@ def _load_state(state_path: Path) -> dict:
 # ── 三合一入口 ────────────────────────────────────────────────────────
 
 
+def _precheck_inputs(root: Path) -> tuple[list[str], int]:
+    """输入面前置校验：不可判定即红（返回 ``(sources, 退出码)``）。
+
+    门禁的红绿承诺是"文档面有没有问题"，输入面残缺时"0 个问题"是假绿——
+    根目录指错、空检出（稀疏/浅检出）、docs/ 整体缺失三种形态下没有任何
+    被执法者，此时放行等于把门禁退化成恒绿包装。故这三类一律 fail-closed
+    判红（2），且**不产出数据文件**（免得残留 graph.js 被误当新鲜数据）。
+    """
+    if not root.is_dir():
+        print(f"graph-check: 根目录不存在或不是目录: {root}", file=sys.stderr)
+        return [], 2
+    sources = discover_files(root)
+    if not sources:
+        print(f"graph-check: 未发现任何提取源（root={root}）——空输入不放行", file=sys.stderr)
+        return [], 2
+    if not any(rel.startswith("docs/") for rel in sources):
+        print(
+            f"graph-check: 未发现 docs/ 文档源（root={root}，源 {len(sources)} 个）——文档面缺失不放行",
+            file=sys.stderr,
+        )
+        return [], 2
+    return sources, 0
+
+
 def aggregate(root: Path, out_path: Path, state_path: Path) -> int:
-    """增量聚合 → 落盘 graph.js → 校验红绿。返回进程退出码（0 绿 / 1 红）。
+    """增量聚合 → 落盘 graph.js → 校验红绿。
+
+    退出码三值：0 = 绿（零问题）；1 = 校验红（有 finding）；2 = 输入不可判定
+    （根不存在/空源集合/文档面缺失，fail-closed 红）。run_gates 对非 0 一律
+    判门禁失败，两者都是"红"，分码只为排障时区分"文档有问题"与"没看到文档"。
 
     校验红时数据文件仍落盘（副产物语义：图永远有新鲜数据，红绿由退出码
     表达，供 run_gates / 手动跑判定）。
@@ -314,11 +353,15 @@ def aggregate(root: Path, out_path: Path, state_path: Path) -> int:
     out_path = Path(out_path)
     state_path = Path(state_path)
 
+    sources, code = _precheck_inputs(root)
+    if code:
+        return code
+
     cached = _load_state(state_path).get("files", {})
     entries: dict[str, dict] = {}
     facts_list: list[gm.SourceFacts] = []
     extracted = 0
-    for rel in discover_files(root):
+    for rel in sources:
         content = _read_text(root / rel)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
         entry = cached.get(rel)

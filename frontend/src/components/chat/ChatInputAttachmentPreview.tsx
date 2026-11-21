@@ -37,6 +37,7 @@ export const AttachmentPreview = ({
           ? 'bg-destructive/10 border-destructive/50 border'
           : 'bg-muted/50 border-border/30 hover:border-border/50 border hover:shadow-sm',
       )}
+      data-testid="attachment-preview"
     >
       {/* 预览图标/缩略图 */}
       {previewUrl ? (

@@ -8,7 +8,9 @@
 #   （7/2/1/3/2/1/6），非新增直读；治本=套件清单改 config_files 注入，随该插件
 #   触碰批次清偿。
 # - 下列测试文件增量均为「测试引用真实配置路径」夹具/文档字面量，非运行时直读：
-#   test_zone_gate 4→7（危险路径规则表新增 config/ 夹具行）、
+#   test_zone_gate 4→7（危险路径规则表新增 config/ 夹具行）、4→7 后 99596f7479
+#   夹具再增 1 处（写区授权卡用例自建 repo 夹具下 config/llm.yaml 路径字面量，
+#   测试引用真实配置路径，非运行时直读）→ 8、
 #   test_routes_llm_config_gaps 1→2 与 test_orchestration 2→3 与
 #   test_fs_read_whitelist 9→11（配置单源化/白名单场景新引用真实路径）、
 #   test_persona_placeholder 1 与 test_session_workspace_placeholder 2
@@ -37,6 +39,10 @@
 # 2026-10-15-kernel-db-read-contract），文件不存在即键永久归零。
 plugins/sdk/src/agentos_plugin_sdk/adapter_config.py: 7
 plugins/sdk/src/agentos_plugin_sdk/bridge_client.py: 1
+# 2026-11-17 推送轮豁免归因：env_face 0→6——SDK 诊断面（定位仓库根后读
+# llm.yaml 模型名清单的 dev 助手，docstring/提示文案/路径常量字面量），
+# 非插件运行时配置注入路径。
+plugins/sdk/src/agentos_plugin_sdk/env_face.py: 6
 plugins/sdk/src/agentos_plugin_sdk/isolation_policy.py: 3
 plugins/sdk/src/agentos_plugin_sdk/permission_policy.py: 1
 plugins/shared/mode_evolution/batch_run.py: 7
@@ -67,9 +73,13 @@ plugins/shared/prompt_build/test_project_agents_anchor.py: 2
 # 测试（{{path:config/...}} 仍按系统根解析）新增包内同名 config/ 夹具字面量，
 # 非运行时直读。
 plugins/shared/prompt_build/test_pack_relative_path.py: 2
+# 2026-11-17 推送轮豁免归因：test_path_boundary 0→4——{{path:config/...}}
+# 路径边界注入测试的夹具路径字面量（合法系统根内解析/越界两向用例），
+# 非运行时直读。
+plugins/shared/prompt_build/test_path_boundary.py: 4
 plugins/shared/security_check/plugin.py: 7
 plugins/shared/security_check/test_dangerous_operations_config.py: 1
-plugins/shared/security_check/test_zone_gate.py: 7
+plugins/shared/security_check/test_zone_gate.py: 8
 plugins/shared/workspace_lifecycle/test_plugin.py: 2
 plugins/shared/spill_guard/src/lib.rs: 1
 plugins/shared/project_registry.py: 2
@@ -137,11 +147,15 @@ plugins/shared/resource_merge/test_resource_merge.py: 8
 plugins/shared/resource_merge/test_resource_merge_gaps.py: 6
 plugins/shared/resource_merge/tool.py: 4
 plugins/shared/search/tool.py: 1
+# 2026-11-17 推送轮豁免归因：test_external_mcp_dynamic 0→2——外部 MCP
+# 描述文案与生成标记字符串提及 config/mcp.json 字面量，非运行时直读。
+plugins/shared/search/test_external_mcp_dynamic.py: 2
 plugins/shared/task_evaluate/_executor.py: 2
 plugins/shared/task_evaluate/test_metrics_path_layouts.py: 2
 plugins/shared/task_evaluate/server.py: 1
 plugins/shared/task_evaluate/tool.py: 1
-plugins/shared/task_submit/tool.py: 2
+# e2ab643d1 拆分：task_submit 直读自 tool.py 迁 acceptance.py（评估指标配置读取，行为未变仅搬位置）
+plugins/shared/task_submit/acceptance.py: 2
 # T6b（2026-10-16）：worktree_merge 私有化迁入 task_evaluate，原
 # plugins/shared/worktree_merge.py: 2 条目随路径改名（命中串不变，仍为
 # _ensure_git_user 的 git config 命令字面量）。
@@ -178,14 +192,14 @@ plugins/shared/_libs/mode_tests/test_roleplay_panel_v31.py: 1
 #     （文档字面量非 IO）；
 #   - llm/test_direct_hosts_sso.py 2 = 真机断言常驻测试（读真实 llm.yaml 核对
 #     派生律，2026-10-09 test_main_prompt_mode_routing 同款豁免）；
-#   - mode_roleplay/server.py 1 = llm.yaml join 路径构造（存量生产码入账）；
+#   - mode_roleplay/rp_cards.py 1 = llm.yaml join 路径构造（存量生产码入账；e2ab643d1 拆分自 server.py，行为未变仅搬位置）；
 #   - security_check/test_default_rules_fallback.py 1 = 真实
 #     security_rules.yaml 回退语义核对路径构造（测试即真值核对器）。
 plugins/shared/_libs/evaluation_metrics_path.py: 2
 plugins/shared/task_evaluate/test_metrics_path_parity.py: 1
 plugins/shared/mode_evolution/ledger_db.py: 1
 plugins/shared/llm/test_direct_hosts_sso.py: 2
-plugins/shared/mode_roleplay/server.py: 1
+plugins/shared/mode_roleplay/rp_cards.py: 1
 plugins/shared/security_check/test_default_rules_fallback.py: 1
 #
 # 2026-10-17 推送前核账归因（区间新增 23 处，db_read 漏键回补）：
@@ -198,7 +212,7 @@ plugins/shared/security_check/test_default_rules_fallback.py: 1
 #   新增 config/agents 路径描述行；
 # - project_create_tool.py 5 / project_registry.py 2 = 类型配方表运行时直读
 #   （_PROJECT_ROOT join config/tools/project_create.yaml，真值单源设计
-#   「新增类型=加条目不改代码」，mode_roleplay/server.py 同款存量生产码
+#   「新增类型=加条目不改代码」，mode_roleplay/rp_cards.py 同款存量生产码（e2ab643d1 拆分自 server.py）
 #   入账）+ 根探测 docstring/报错串字面量；
 # - test_project_create.py 1 = 配方表 docstring 与隔离夹具路径构造字面量。
 plugins/shared/db_read.py: 1
@@ -239,4 +253,27 @@ plugins/shared/project_manager/server.py: 2
 #   config_agent_yaml_files() 读仓内出厂 agent 面（repo_root/"config"/"agents"
 #   join），agent-tool-ids 门禁消费面=测试真值核对器，非插件运行时直读
 #   （test_main_prompt_mode_routing 真机断言同款豁免）。
-plugins/shared/_libs/testing/tool_ids_contract.py: 1
+# 2026-11-18 推送轮归因：tool_ids_contract.py 1→2 = 61 行注释提及
+#   config/mcp.json（外部桌面通道真名来源说明，SLASH_FORM 文档字面量
+#   非 IO；运行时直读仍仅 config_agent_yaml_files() 一处）。
+plugins/shared/_libs/testing/tool_ids_contract.py: 2
+
+# 2026-11-07 测试夹具豁免：isolation 工具链种子契约测试断言 Dockerfile COPY
+# 行（config/ 读取发生在镜像构建期，非插件运行期直读）；provider 运行面已改
+# 注入交付（wsl_native_provider.py 回落已删，见同行刀 5 收敛）。
+plugins/shared/isolation/test_toolchain_persistence.py: 1
+
+# 2026-11-13 打包链本地 CI 门（PACKAGE-FAST）首扫暴露的存量五文件（基线
+# 2026-09-24 重建时漏登记，非新增直读；打包链 00ca6b32e 触发插件域车道
+# 首次全量执法）：三测试文件 = tmp_path 夹具构造/断言临时 config 树
+# （运行时零直读，夹具自建自清）；sync_agent 两处 = 文档字面量
+# （remote_fs.py 模块 docstring 提及 remote_fs.yaml、server.py 远端文件面
+# 未配置错误文案提及 settings.yaml），零真实读面。
+plugins/shared/agent_manager/test_put_loop_liveness.py: 1
+plugins/shared/plugin_verifier/test_verifier.py: 4
+plugins/shared/security_check/test_security_check_state_reads_slice.py: 3
+plugins/shared/sync_agent/remote_fs.py: 1
+plugins/shared/sync_agent/server.py: 1
+plugins/shared/grants/test_grants_policy.py: 1
+plugins/shared/grants/policy.py: 1
+plugins/shared/security_check/test_security_grants_wiring.py: 2

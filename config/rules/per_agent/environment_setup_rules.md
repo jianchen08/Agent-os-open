@@ -1,3 +1,4 @@
+<!-- seed-version: 1 -->
 # Environment Setup Agent 规则文件
 
 本文档定义了 environment_setup_agent 在执行环境配置任务时必须遵守的规则。

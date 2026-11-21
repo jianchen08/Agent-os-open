@@ -1,7 +1,7 @@
 {
   "id": "pipeline_notify_judge",
   "name": "Notify Judge",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -26,7 +26,8 @@
   "host_group": "light",
   "state": {
     "reads": [
-      "messages"
+      "messages",
+      "trigger.origin"
     ]
   }
 }

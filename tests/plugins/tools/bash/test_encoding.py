@@ -71,12 +71,14 @@ class TestDecodeOutput:
         assert EncodingHandler.decode_output_line(data) == "中文目录结构"
 
     def test_mostly_utf8_with_few_bad_bytes_uses_surrogateescape(self) -> None:
-        # WSL 输出经 cmd /c 污染：长 UTF-8 文本混入 1 个坏字节（<15%）→ 保留
+        # WSL 输出经 cmd /c 污染：长 UTF-8 文本混入 1 个坏字节（<15%）→
+        # surrogateescape 分支接受后出口清洗孤立代理为 U+FFFD（8ed6af99f 起
+        # 出口保证可严格 UTF-8 编码 = JSON/pydantic 可序列化，防 MCP stdio 炸退）
         valid = "hello world this line is fine " * 3  # 87 chars, all ASCII/UTF-8
         data = valid.encode("utf-8") + b"\xff"
         result = EncodingHandler.decode_output_line(data)
-        assert result.startswith(valid)
-        assert "\udcff" in result  # 坏字节以 surrogate 保留，可回溯重编码
+        assert result == valid + "\ufffd"  # 合法段逐字保留，坏字节变 U+FFFD
+        result.encode("utf-8")  # 出口无孤立代理，可无抛严格编码
 
     def test_windows_codepage_fallback_loop(self, monkeypatch) -> None:
         # 系统编码 utf-8（非 Windows 代码页路径）+ Windows 平台 → 轮试 cp936

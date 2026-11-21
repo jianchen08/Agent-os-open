@@ -64,6 +64,7 @@ fn manifest_with_commands(plugin_id: &str, commands: Vec<Value>) -> PluginManife
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 

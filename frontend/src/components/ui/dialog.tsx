@@ -14,7 +14,7 @@ const DialogClose = DialogPrimitive.Close
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(({ className, ...props }, ref) => (
+>(({ className, style, ...props }, ref) => (
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
@@ -24,6 +24,7 @@ const DialogOverlay = React.forwardRef<
     style={{
       backgroundColor: `var(--dialog-overlay-bg)`,
       opacity: `var(--dialog-overlay-opacity, 0.8)`,
+      ...style,
     }}
     {...props}
   />
@@ -32,10 +33,19 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { width?: string }
->(({ className, children, width, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+    width?: string
+    /**
+     * 弹窗层级（内容与遮罩同层，默认 50）。
+     * 审批卡详情窗挂在 GlobalInteractionOverlay（z-[10000]）之上触发：
+     * 默认 50 会被底部交互层盖住——点选项只看到背景变暗、弹窗不可见，
+     * 故调用方可传入高于交互层的值（如 10001）。
+     */
+    zIndex?: number
+  }
+>(({ className, children, width, zIndex = 50, ...props }, ref) => (
   <DialogPortal>
-    <DialogOverlay />
+    <DialogOverlay style={{ zIndex }} />
     <DialogPrimitive.Content
       ref={ref}
       onPointerDownOutside={(e) => e.preventDefault()}
@@ -47,7 +57,7 @@ const DialogContent = React.forwardRef<
         transform: 'translate(-50%, -50%)',
         width: width ?? '500px',
         maxWidth: '90vw',
-        zIndex: 50,
+        zIndex,
         backgroundColor: 'hsl(var(--popover))',
         borderRadius: 'var(--dialog-radius, 1rem)',
         boxShadow: 'var(--dialog-shadow)',

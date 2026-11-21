@@ -12,15 +12,19 @@
  * 草稿持久化：drafts 走 localStorage persist——刷新页面后输入框
  * 未发送内容不丢（用户"刷新后输入框应该还在"）。
  *
- * 职责三：发送态生命周期（2026-11-04 落定语义重定义）。
+ * 职责三：发送态生命周期（2026-11-04 落定语义重定义；2026-11-18 并发抢占修订）。
  * 发送态终点 = 消息落进消息流（气泡经 user_message_confirmed 认领上屏 / 队列条
  * 经 pending_inputs_changed 出现），不是前端受理。受理（beginSend）只开始发送态：
  *   - 落定（landSendByCmid）= 成功：撤发送态，输入清空经 outcome 订阅在 ChatInput
  *     侧按快照比对执行（组件不存活时草稿清空在本 store 落地，按 draftKey 生效）；
- *   - 5s 未落定（SEND_LANDING_TIMEOUT_MS）= 判死（用户裁定 2026-11-04「超时代表
- *     后端这条消息坏了，应该停止run」）：撤发送态 + timeout outcome（操作点报错）；
- *     宿主层订阅终局驱动既有停止链（停当前 run + 队列退回，同停止按钮路径）。
- *     判死即终局：迟到落定不触碰输入框（消息流以气泡为准，输入文本归属用户重试）；
+ *   - 5s 未落定 = 判死出口：撤发送态 + timeout outcome（操作点报错）。**超时不再
+ *     自动停 run**（2026-11-18 用户裁定修订 2026-11-04「超时=消息已坏应停止」：
+ *     闸门满载/通道拥塞场景实测多为「消息活着、信号被挤丢」，自动停 run 制造
+ *     零执行取消与连带误杀；停止权交还用户）；
+ *   - ack 对账宽限：user_input_ack(ok:true) 到达 = 内核已受理，落定计时放宽到
+ *     30s（SEND_LANDING_ACKED_GRACE_MS，闸门等待/抢占腾槽的启动延迟窗口）；
+ *     宽限内仍未落定按 acked 专属 reason 判死（文案不诱导重发，消息在服务端
+ *     排队/执行中）；
  *   - 失败（endSendByCmid，ack ok:false / 20s ack 看门狗）= 判死出口：撤发送态 +
  *     failed outcome，文本从未离开输入框，天然可重试。
  * 判死终局唯一（timeout/failed 先到先算），20s 看门狗对已判死 cmid 幂等零动作。
@@ -32,9 +36,14 @@ import { truncateCitationExcerpt } from '@/utils/citationCompose'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { CitationKind } from '@/utils/citationKind'
 
-/** 落定超时：5s 未落定 → 判死（撤发送态+操作点报错+宿主停止链）。超时=消息在
- *  派发链上大概率已坏（用户裁定 2026-11-04），不再保留「可能仍在途中」的模糊态 */
+/** 落定超时：5s 未落定 → 判死出口（撤发送态+操作点报错）。超时**不再自动停
+ *  run**（2026-11-18 用户裁定修订）：ack 已受理的消息另有 30s 宽限窗口（见
+ *  markSendAcked），停止权交还用户（超时≠消息已坏，不代内核杀执行） */
 export const SEND_LANDING_TIMEOUT_MS = 5000
+
+/** ack 已受理消息的落定宽限：闸门等待/抢占腾槽期间启动延迟可达数十秒，
+ *  ack 到达即把落定计时放宽到此刻起 25s（受理总窗口 ≤ ~30s 有界） */
+export const SEND_LANDING_ACKED_GRACE_MS = 25_000
 
 /** 单条发送在途记录 */
 export interface SendInFlightEntry {
@@ -48,7 +57,7 @@ export interface SendInFlightEntry {
 }
 
 /** 发送终局记录：ChatInput 订阅消费（landed=清空+撤锁；timeout/failed=判死+报错）。
- *  timeout 另由宿主层（router HomePage）订阅驱动停止链；failed 不触发停止。 */
+ *  timeout **不触发停止链**（2026-11-18 修订：超时≠消息已坏，停止权交还用户）。 */
 export interface SendOutcome {
   /** 单调递增：ChatInput 按 id 去重消费（重挂载重放历史 outcome 收敛视图） */
   id: number
@@ -114,7 +123,7 @@ interface ChatInputState {
    * 由发送态覆盖（转圈+锁定），消除「消息进黑洞」体感。
    */
   sendInFlightByPipeline: Record<string, SendInFlightEntry[]>
-  /** 发送终局序列（landed/timeout/failed 追加；ChatInput 与宿主停止链按 id 增量消费） */
+  /** 发送终局序列（landed/timeout/failed 追加；ChatInput 按 id 增量消费） */
   sendOutcomes: SendOutcome[]
   /** 外部调用：请求向 ChatInput 插入文本 */
   requestInsert: (text: string) => void
@@ -147,6 +156,9 @@ interface ChatInputState {
   beginSend: (pipelineId: string, clientMessageId: string, content?: string, draftKey?: string) => void
   /** 落定：消息已进消息流（认领上屏/队列条出现），按 cmid 撤发送态（幂等） */
   landSendByCmid: (clientMessageId: string) => void
+  /** ack 受理对账（2026-11-18）：user_input_ack(ok:true) 到达登记并落定计时
+   *  放宽到宽限窗口（幂等；条目已撤下则仅记账零动作） */
+  markSendAcked: (clientMessageId: string) => void
   /** 失败判死：ack ok:false / 20s 看门狗按 cmid 撤发送态并落 failed（幂等；
    *  已判死（timeout/failed）的 cmid 零动作） */
   endSendByCmid: (clientMessageId: string, reason?: string) => void
@@ -179,12 +191,46 @@ const SEND_OUTCOMES_CAP = 50
 /** 5s 落定超时计时器（cmid → timer；不进 state，随条目撤下而清理） */
 const landingTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
+/** ack 已受理的 cmid（GlobalWebSocket ack ok:true 登记；终局随条目清除）。
+ *  模块级不进 state：发送态瞬态，持久化无意义 */
+const ackedCmids = new Set<string>()
+
 function disarmLandingTimer(clientMessageId: string): void {
   const timer = landingTimers.get(clientMessageId)
   if (timer) {
     clearTimeout(timer)
     landingTimers.delete(clientMessageId)
   }
+}
+
+/** 落定超时点火：撤在途 + timeout outcome（条目即终局，迟到落定/看门狗幂等
+ *  零动作）。ack 已受理的消息带专属 reason——文案不诱导重发（消息在服务端
+ *  排队/执行中），未受理的走默认超时文案（未确认送达，可重试） */
+function fireLandingTimeout(clientMessageId: string): void {
+  useChatInputStore.setState((state) => {
+    const located = locateEntry(state, clientMessageId)
+    if (!located) return state
+    const [pid, idx] = located
+    const entry = state.sendInFlightByPipeline[pid][idx]
+    const outcome: SendOutcome = {
+      id: ++sendOutcomeSeq,
+      clientMessageId,
+      pipelineId: pid,
+      kind: 'timeout',
+      content: entry.content,
+      ...(entry.draftKey ? { draftKey: entry.draftKey } : {}),
+      ...(ackedCmids.has(clientMessageId)
+        ? { reason: '消息已受理，执行启动较慢（并发繁忙）——稍候可在会话中查看结果，无需重发' }
+        : {}),
+    }
+    return {
+      sendInFlightByPipeline: {
+        ...state.sendInFlightByPipeline,
+        [pid]: state.sendInFlightByPipeline[pid].filter((_, i) => i !== idx),
+      },
+      sendOutcomes: [...state.sendOutcomes, outcome].slice(-SEND_OUTCOMES_CAP),
+    }
+  })
 }
 
 /** 在全部管道中定位条目：返回 [pipelineId, index] */
@@ -302,43 +348,39 @@ export const useChatInputStore = create<ChatInputState>()(
             },
           }
         })
-        // 5s 落定超时 = 判死（用户裁定 2026-11-04）：撤在途 + timeout outcome，
-        // 条目即终局——不保留超时登记，迟到落定/20s 看门狗对本 cmid 幂等零动作。
-        // 宿主层（router HomePage）订阅 timeout outcome 驱动停止链。
+        // 5s 落定超时 = 判死出口（2026-11-18 修订：超时不自动停 run）。ack 到达
+        // 经 markSendAcked 把计时放宽到宽限窗口；点火逻辑见 fireLandingTimeout。
         if (!landingTimers.has(clientMessageId)) {
           landingTimers.set(
             clientMessageId,
             setTimeout(() => {
               landingTimers.delete(clientMessageId)
-              set((state) => {
-                const located = locateEntry(state, clientMessageId)
-                if (!located) return state
-                const [pid, idx] = located
-                const entry = state.sendInFlightByPipeline[pid][idx]
-                const outcome: SendOutcome = {
-                  id: ++sendOutcomeSeq,
-                  clientMessageId,
-                  pipelineId: pid,
-                  kind: 'timeout',
-                  content: entry.content,
-                  ...(entry.draftKey ? { draftKey: entry.draftKey } : {}),
-                }
-                return {
-                  sendInFlightByPipeline: {
-                    ...state.sendInFlightByPipeline,
-                    [pid]: state.sendInFlightByPipeline[pid].filter((_, i) => i !== idx),
-                  },
-                  sendOutcomes: [...state.sendOutcomes, outcome].slice(-SEND_OUTCOMES_CAP),
-                }
-              })
+              fireLandingTimeout(clientMessageId)
             }, SEND_LANDING_TIMEOUT_MS),
           )
         }
       },
 
+      /** ack ok:true 对账（GlobalWebSocket 回执处理器调用）：登记受理 + 落定
+       *  计时放宽到宽限窗口（闸门等待/抢占腾槽的启动延迟有界兜底） */
+      markSendAcked: (clientMessageId) => {
+        if (!clientMessageId || ackedCmids.has(clientMessageId)) return
+        ackedCmids.add(clientMessageId)
+        if (!landingTimers.has(clientMessageId)) return
+        disarmLandingTimer(clientMessageId)
+        landingTimers.set(
+          clientMessageId,
+          setTimeout(() => {
+            landingTimers.delete(clientMessageId)
+            fireLandingTimeout(clientMessageId)
+          }, SEND_LANDING_ACKED_GRACE_MS),
+        )
+      },
+
       landSendByCmid: (clientMessageId) => {
         if (!clientMessageId) return
         disarmLandingTimer(clientMessageId)
+        ackedCmids.delete(clientMessageId)
         set((state) => {
           // 判死即终局：超时/失败撤下后在途查无此条 → 迟到落定零动作
           // （不触碰输入框：消息已判死，文本归属用户重试；气泡上屏由消息流自洽）
@@ -378,6 +420,7 @@ export const useChatInputStore = create<ChatInputState>()(
       endSendByCmid: (clientMessageId, reason) => {
         if (!clientMessageId) return
         disarmLandingTimer(clientMessageId)
+        ackedCmids.delete(clientMessageId)
         set((state) => {
           const located = locateEntry(state, clientMessageId)
           // 判死即终局：timeout/failed 先到先算，后到的看门狗/拒收幂等零动作

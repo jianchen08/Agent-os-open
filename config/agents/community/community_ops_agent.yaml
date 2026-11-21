@@ -1,3 +1,4 @@
+version: 1
 config_id: community_ops_agent
 name: 社区运营专员
 display_name: 社区运营专员
@@ -94,3 +95,5 @@ tool_ids:
 - trigger_setup
 - review_ops
 - task_evaluate
+- resource_search
+- call_tool

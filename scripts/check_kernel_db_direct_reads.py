@@ -58,6 +58,9 @@ EXEMPT_FILES = {
     "plugins/shared/trace_ingestion/trace_ingest_store.py",
     "plugins/shared/_libs/testing/db_read_fake.py",
     "plugins/shared/sync_relay/exec_token_store.py",
+    # grants/ledger.py：授权账本自有 SQLite 存储面（插件自建自读自写，非内核库）。
+    # ADR 2026-11-19-grants-gate-exemptions-registration。
+    "plugins/shared/grants/ledger.py",
 }
 
 CONNECT_CALL = re.compile(r"\bsqlite3\s*\.\s*connect\s*\(")

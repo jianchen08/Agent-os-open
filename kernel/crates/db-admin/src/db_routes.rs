@@ -716,12 +716,16 @@ fn serde_json_to_sql(v: &Value) -> Box<dyn rusqlite::ToSql> {
 
 // ─── 全量执行数据清理（clear_execution_data） ────────────────────────
 
-/// 执行数据清理白名单（7 表；users 刻意保留——与 2026-08-22 手动清库同口径）。
+/// 执行数据清理白名单（9 表；users 刻意保留——与 2026-08-22 手动清库同口径）。
 /// runs/branches 已退役（ADR 2026-09-18），不在清单。
+///
+/// 清理面与 engine store 的 `delete_pipelines_cascade` 删除面保持同集：
+/// `message_segments`（段行残留 = 孤儿内容留存）与 `pipeline_pending_inputs`
+/// （队列残留会在重启后被消费，令已清任务复活）必须同清。
 ///
 /// 走专用方法而非 SQL 执行器：execute 的"全表 DELETE 一律 403"是泛化防线，
 /// 本方法以白名单常量显式声明"清什么"，与 engine store.rs 的 DDL 同仓演进。
-pub const EXECUTION_DATA_TABLES: [&str; 7] = [
+pub const EXECUTION_DATA_TABLES: [&str; 9] = [
     "traces",
     "blobs",
     "sessions",
@@ -729,6 +733,8 @@ pub const EXECUTION_DATA_TABLES: [&str; 7] = [
     "pipeline_state",
     "pipeline_checkpoints",
     "message_slots",
+    "message_segments",
+    "pipeline_pending_inputs",
 ];
 
 /// 清空前快照备份（`VACUUM INTO`，须在事务外执行）；内存库返回 None。

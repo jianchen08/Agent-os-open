@@ -63,7 +63,12 @@ doc_id 形态 / type 枚举 / status 枚举 / frontmatter 字段白名单 / type
 "不存在只校验不出图的独立入口"。
 
 **落盘**：`window.GRAPH_DATA = <json>;`，meta 带 `generated_at` + `commit`
-（git 不可得时留空串，仅影响底栏显示）。
+（git 不可得时留空串，仅影响底栏显示）。另同目录多落 `backlinks.json`
+（反链精简投影，`build_backlinks` 对同一遍装配的边集做反转——不新增扫描；
+`by_target` 按目标节点 id 分组、条目不带正文，`path_to_id` 供前端以当前文件
+路径定位节点 id，`id_to_path` 反查节点 id → 真实路径（doc_id 形态双链的点击
+跳转解析唯一真值——渲染层不发明路径约定，审查 MF-1 修复面）；
+gitignored 派生物，随 graph.js 同批再生）。
 
 ## 结构
 

@@ -1,4 +1,4 @@
-# @feature: L5 超时后处置语义 | @ci: python-coverage
+# @feature: FP-0.2.〇 L5 超时后处置语义(首块/流超时归入既有重试/兜底链+兜底全程预算约束) | @ci: python-coverage
 """首块/流超时归入既有重试/兜底链 + 兜底全程预算约束（设计 2026-11-05 §5.8/L3）。
 
 装机 2026-11-05 实证（kernel.log：19 次 ``Stream first chunk timeout`` 全部

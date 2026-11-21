@@ -210,16 +210,23 @@ class TestLoadAsrConfig:
         assert cfg.api_key == "sk-on-yaml-error"
         assert cfg.enabled is True
 
-    def test_default_path_reads_repo_config(self):
-        """无参调用：按默认路径读仓库 config/models/asr.yaml（真实配置冒烟）。"""
+    def test_default_path_reads_repo_config(self, tmp_path, monkeypatch):
+        """无参调用：按默认路径读仓库 config/models/asr.yaml（真实配置冒烟）。
+
+        空用户根：不消费宿主 %APPDATA% 用户空间（避免依赖外部环境配置）。
+        """
         import asr
 
+        monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
         cfg = asr.load_asr_config()
 
         assert isinstance(cfg, asr.ASRConfig)
+        assert cfg.enabled is True
+        assert cfg.default_provider == "local"  # 工厂配置：本地优先
+        assert cfg.providers["local"].type == "local"
         assert cfg.api_base.startswith("https://")
         assert bool(cfg.model)
-        assert not (cfg.enabled and not cfg.api_key)  # 性质：enabled ⇒ 有 key
 
 
 class TestASRServiceConfigProperty:
@@ -306,9 +313,12 @@ class TestTranscribeErrorAndFallback:
 class TestGetAsrServiceSingleton:
     """get_asr_service 单例工厂。"""
 
-    def test_creates_then_returns_cached_instance(self):
+    def test_creates_then_returns_cached_instance(self, tmp_path, monkeypatch):
         import asr
 
+        # 空用户根：默认构造读工厂配置，不消费宿主 %APPDATA% 用户空间
+        monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
         asr.reset_asr_service()
         try:
             svc1 = asr.get_asr_service()

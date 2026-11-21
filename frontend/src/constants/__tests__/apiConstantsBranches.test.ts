@@ -9,7 +9,7 @@
  * 环境分支用 vi.resetModules() + vi.stubEnv 后动态 import 验证（模块级常量
  * 只在首次求值时读取 env，必须先改 env 再 import）。
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AGENT_MANAGER_ENDPOINTS,
   APPROVAL_SERVICE_ENDPOINTS,
@@ -51,7 +51,7 @@ describe('constants/api — API_BASE_URL 环境派生', () => {
 })
 
 describe('constants/api — API_BASE_URL 壳基址回落（移动壳本地直用）', () => {
-  const SHELL_BASE = 'http://162.14.69.153'
+  const SHELL_BASE = 'http://203.0.113.153'
 
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).LINGXI_SHELL_CONFIG

@@ -177,7 +177,7 @@ export interface RenderContext {
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
 
-/** terminal 卡 payload（DSH canonicalBashResult 字族 + 灵汐 bash_execute 字族）。 */
+/** terminal 卡 payload（DSH canonicalBashResult 字族 + 灵汐 bash 字族）。 */
 export function terminalPayload(ctx: RenderContext, intent: ToolRenderIntent): Record<string, unknown> | null {
   const command = str(pickField('command', ['args.command', 'args.cmd'], ctx, intent))
   if (command === undefined) return null
@@ -652,6 +652,21 @@ export function deriveCardMeta(ctx: RenderContext, intent: ToolRenderIntent): Ca
         icon: 'task',
       }
     }
+    case 'form': {
+      // 发消息卡（task_manage 等 form 卡型）：向某个管道发消息后，卡片要能跳到
+      // 那个管道——目标 id 优先取参数（args.task_id/args.task_ids 首个），其次取
+      // 结果投影（result.pipeline_id/result.task_id）。带 message 才是「发消息」
+      // 语义（查/停/删不发消息，不给跳转闸门）；两处都没有 = 无目标，不给入口
+      const message = str(pickField('message', ['args.message'], ctx, intent))
+      if (!message) return {}
+      const idsArg = pickField('taskIds', ['args.task_ids'], ctx, intent)
+      const firstOfIds = Array.isArray(idsArg) ? str(idsArg[0]) : undefined
+      const pipelineId = str(pickField('targetPipelineId', [
+        'args.task_id', 'result.pipeline_id', 'result.task_id',
+      ], ctx, intent)) ?? firstOfIds
+      if (!pipelineId) return {}
+      return { summary: message, pipelineId, taskId: pipelineId }
+    }
     default:
       return {}
   }
@@ -705,14 +720,15 @@ export function renderIntentToBlocks(
       return [{ label: intent.title ?? (intent.card === 'image' ? '图片' : '文件'), content: '', contentType: intent.card, path }]
     }
     case 'file_card': {
-      // 展开形态二分（对齐成熟 AI 编码产品的文件卡）：新建文件（无基线
-      // old_content）→ 全文预览；修改已有文件 → 改前/改后 diff。在途调用
-      //（无写后全文）产不出块 → 空数组级联回后续声明分支。
+      // 展开形态二分（对齐成熟 AI 编码产品的文件卡）：修改已有文件 → 改前/
+      // 改后 diff；新建文件（old_content 空串）→ 全新增 diff（绿色新增行，
+      // 与 chat_card 声明路径同口径）。在途调用（无写后全文）产不出块 →
+      // 空数组级联回后续声明分支。
       const newText = typeof payload.newText === 'string' ? payload.newText : null
       const oldText = typeof payload.oldText === 'string' ? payload.oldText : null
       if (newText === null) return []
       const label = intent.title ?? basenameOf(typeof payload.path === 'string' ? payload.path : '')
-      if (oldText === null || oldText === '') {
+      if (oldText === null) {
         return [{
           id: 'file-card-preview',
           label,

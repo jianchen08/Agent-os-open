@@ -19,22 +19,22 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from pim_parse import parse_iso_dt
 from pim_recurrence import next_occurrence
-from pim_store import EVENT_ACTIVE_STATUSES, PimStore
+from pim_store import EVENT_ACTIVE_STATUSES, TODO_ACTIVE_STATUSES, PimStore
 
 from agentos_plugin_sdk import get_settings
 
 logger = logging.getLogger(__name__)
 
 _PIM_SOURCE = "mode_personal"
-_TODO_ACTIVE_STATUSES = ("backlog", "today")
 _ENTITIES = ("todo", "event")
 
 
@@ -64,6 +64,45 @@ def _fact_message(entity: str, record: dict[str, Any], occurrence: str) -> str:
         lines.append(f"repeat={repeat}")
     lines.append("无需打扰（已处理/免问/不紧急）时可不通知。")
     return "\n".join(lines)
+
+
+def _first_scheduled_slot(repeat: str, base: datetime) -> datetime | None:
+    """repeat 首个 >= base 的默认发生槽（无结构化时刻的到点合成）。
+
+    每日 = 当日 09:00（base 本身）；weekly:N 推进到首个目标周几；monthly:N
+    推进到首个目标日（当月 N 日早于 base 则顺延下月）。非法 repeat = None。
+    """
+    if repeat == "daily":
+        return base
+    if repeat.startswith("weekly:"):
+        try:
+            weekday = int(repeat.split(":", 1)[1])
+        except ValueError:
+            return None
+        if not 0 <= weekday <= 6:
+            return None
+        slot = base
+        while slot.weekday() != weekday:
+            slot += timedelta(days=1)
+        return slot
+    if repeat.startswith("monthly:"):
+        try:
+            day = int(repeat.split(":", 1)[1])
+        except ValueError:
+            return None
+        if not 1 <= day <= 31:
+            return None
+        year, month = base.year, base.month
+        for _ in range(1200):  # 百年量级上界（防呆；正常首个合法月即命中）
+            if day <= calendar.monthrange(year, month)[1]:
+                slot = datetime(year, month, day, base.hour, base.minute)
+                if slot >= base:
+                    return slot
+            month += 1
+            if month > 12:
+                month, year = 1, year + 1
+        return None
+    return None
 
 
 class PimTriggerSync:
@@ -171,9 +210,11 @@ class PimTriggerSync:
         repeat = str(record.get("repeat") or "")
         if not repeat:
             return
-        if str(record.get("status") or "") not in (*_TODO_ACTIVE_STATUSES, "doing"):
+        if str(record.get("status") or "") not in TODO_ACTIVE_STATUSES:
             return
-        if str(record.get("due") or "") != occurrence:
+        due = str(record.get("due") or "")
+        if due and due != occurrence:
+            # due 已对齐其他坐标（人工改期等）→ 迟到 fired 不做序列推进
             return
         next_value = next_occurrence(repeat, occurrence, self._clock())
         if next_value is None:
@@ -249,6 +290,13 @@ class PimTriggerSync:
         record = self._store.get(entity, item_id)
         trigger_id = trigger_id_for(entity, item_id)
         existing = await self._find_trigger(item_id)
+        if record is not None and str(record.get("reminder_mode") or "direct") == "direct":
+            # P0④分流：direct（含缺省）到点直接弹卡（今日页轮询面），不经 LLM
+            # 事实消息管道 → 不注册触发器；此前注册过的（改档遗留）注销。
+            if existing is not None and existing.get("status") in ("active", "pending"):
+                await self._call("unregister", {"trigger_id": trigger_id})
+            self._pending.discard((entity, item_id))
+            return
         occurrence = self._occurrence(entity, record) if record is not None else ""
         if record is None or not occurrence or not self._is_active(entity, record):
             if existing is not None and existing.get("status") in ("active", "pending"):
@@ -390,15 +438,33 @@ class PimTriggerSync:
             base["scheduled_at"] = due_aware.isoformat()
         return base
 
-    @staticmethod
-    def _occurrence(entity: str, record: dict[str, Any]) -> str:
+    def _occurrence(self, entity: str, record: dict[str, Any]) -> str:
+        """到点坐标：due/at 透传；repeat 卡无结构化时刻 → 默认槽合成。
+
+        合成规则（P0①，时间来源=卡片结构化时刻或合理默认）：当日 09:00 起
+        首个匹配槽；未到点用该槽，已过取下一次发生（确定性随 clock 注入）。
+        """
         field = "due" if entity == "todo" else "at"
-        return str(record.get(field) or "")
+        value = str(record.get(field) or "")
+        if value:
+            return value
+        repeat = str(record.get("repeat") or "")
+        if not repeat:
+            return ""
+        now = self._clock()
+        base = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        slot = _first_scheduled_slot(repeat, base)
+        if slot is None:
+            return ""
+        if slot > now:
+            return slot.strftime("%Y-%m-%d %H:%M")
+        nxt = next_occurrence(repeat, slot.strftime("%Y-%m-%d %H:%M"), now)
+        return str(nxt or "")
 
     @staticmethod
     def _is_active(entity: str, record: dict[str, Any]) -> bool:
         if entity == "todo":
-            return str(record.get("status") or "") in _TODO_ACTIVE_STATUSES
+            return str(record.get("status") or "") in TODO_ACTIVE_STATUSES
         return str(record.get("status") or "") in EVENT_ACTIVE_STATUSES
 
     async def _is_main_pipeline(self, pipeline_id: str) -> bool:

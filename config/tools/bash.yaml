@@ -1,0 +1,73 @@
+# -*- coding: utf-8 -*-
+# bash 工具独立配置文件
+# 来源参考：config/tools/builtin_tools_config.yaml（已含完整定义）
+# 本文件为工具独立声明，便于按工具维度管理与查阅
+# 只读副本：以 config/tools/builtin_tools_config.yaml 为唯一事实源，本文件不参与运行时加载
+# 出厂播种版本（seedConfigTree 裁决：用户副本严格大于才保留）
+version: 1
+
+name: bash
+description: 执行 Shell 命令。前台阻塞到完成或等待上限；超时/后台返回 running+handle，进程不死，凭 handle 用 log 读输出、input 发交互输入、kill 终止。不要手动 nohup/setsid/disown/行尾&（本工具自带 background=true，手动后台化会使进程脱离管理）。危险命令（rm -rf /、format、dd if= 等）会被拦截。
+category: system
+level: user
+requires_approval: true
+dangerous_operations:
+  - rm -rf
+  - format
+  - del /q
+  - shutdown
+  - reboot
+  - mkfs
+  - dd if=
+  - '> /dev/sd'
+  - curl
+  - wget
+tags:
+  - bash
+  - shell
+  - command
+  - dangerous
+  - interactive
+  - long-running
+capabilities:
+  - shell_command_execution
+  - long_running_process
+  - interactive_input
+  - background_execution
+  - dangerous_command_intercept
+execution_defaults:
+  default_timeout_seconds: 30
+  max_timeout_seconds: 600
+  persistent_log: session-keyed absolute path
+  background_mode: built-in
+  manual_background_forbidden:
+    - nohup
+    - setsid
+    - disown
+    - append_ampersand
+sensitive_input_handling:
+  auto_mask: true
+  support_types:
+    - confirm_prompt
+    - password_prompt
+platform_notes:
+  windows_command_syntax: different_from_unix
+  unix_command_syntax: standard_shell
+approval:
+  requires_approval: true
+  typical_approvers:
+    - admin
+    - developer
+when_to_use:
+  - 执行系统命令（ls/cat/grep/pip/npm 等）
+  - 运行脚本
+  - 查看系统信息
+  - 安装依赖
+  - 编译构建项目
+  - 需要长时间运行的后台进程（由工具自行管理）
+  - 需要交互式输入确认/密码的场景
+when_not_to_use:
+  - 仅需读取文件（使用 file_read）
+  - 仅需搜索文件（使用 enhanced_search）
+  - 危险操作（rm -rf /、format、dd if= 等）
+  - 需要手动 nohup/setsid/disown/& 化的后台进程

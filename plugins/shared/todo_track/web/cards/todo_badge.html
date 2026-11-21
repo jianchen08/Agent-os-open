@@ -15,8 +15,13 @@
   只发生在分组列表内部）。
   高宽经 webview.resize 上行回报（autoHeight 容器；经 bootstrap 桥携实例
   令牌，宽度取内容首子元素实测宽——body.scrollWidth 有 clientWidth 下限
-  棘轮，收起态会残成展开宽长条）。渲染按开合+折叠态+数据指纹去重（轮询
+  棘轮，收起态会残成展开宽长条；量测避开入场动画 pop 的缩放窗口，动画
+  结束/font 就绪再补报终值）。渲染按开合+折叠态+数据指纹去重（轮询
   重渲染不重播入场动画）。
+  文档色彩方案：宿主深色时浏览器会把未声明 color-scheme 的 iframe 画布涂成
+  近白实色（透明底圆角四角出方块）。新宿主经 bootstrap 注入 meta+内联
+  colorScheme（含 theme.sync 的 scheme 字段）；旧宿主无此注入，本页在
+  theme.sync 时按 --ag-bg 亮度兜底声明，不覆盖宿主已设值。
 -->
 <html lang="zh-CN">
 <head>
@@ -181,6 +186,30 @@
     });
   }
 
+  // 色彩方案探测（旧宿主兜底，见 theme.sync 处理）：用探针元素把任意 CSS 颜色
+  // 归一成计算后的 rgb()，按相对亮度判明暗。无法解析（如未解析的 var()）返回 null。
+  var probeEl = null;
+  function schemeOf(cssColor) {
+    if (!cssColor) return null;
+    if (!probeEl) {
+      probeEl = document.createElement('span');
+      probeEl.style.cssText = 'position:fixed;left:-9999px;top:0;visibility:hidden';
+      document.body.appendChild(probeEl);
+    }
+    var v;
+    try {
+      probeEl.style.color = '';
+      probeEl.style.color = cssColor;
+      v = getComputedStyle(probeEl).color;
+    } catch (e) { return null; }
+    var m = /^rgba?\(([^)]+)\)$/i.exec(v || '');
+    if (!m) return null;
+    var p = m[1].split(/[,\s/]+/).filter(Boolean);
+    if (p.length < 3) return null;
+    var lum = (0.2126 * parseFloat(p[0]) + 0.7152 * parseFloat(p[1]) + 0.0722 * parseFloat(p[2])) / 255;
+    return lum < 0.5 ? 'dark' : 'light';
+  }
+
   function li(it) {
     return '<li class="' + (it.done ? 'done' : '') + '"><span class="box">' +
       (it.done ? '✓' : '') + '</span><span class="txt">' + esc(it.text) + '</span></li>';
@@ -256,7 +285,10 @@
       // body.scrollWidth 有 clientWidth 下限棘轮（展开过 260 后收起态仍量出
       // 260 残成长条），首子元素宽才是真实内容宽——收起=圆钮固有宽、展开=
       // 面板固定 260、无单=0；高度取 body.scrollHeight（body 高由内容驱动，
-      // 无此棘轮）。
+      // 无此棘轮）。量测点必须避开入场动画：pop 的 scale(.95→1) 期间
+      // getBoundingClientRect 量出的是缩放后尺寸（面板 260→247/255），宿主
+      // 据此刻板 iframe 视口 → 右缘被裁 ~5px、右侧圆角被切平。故动画结束补报
+      // 终值（font 就绪也补报：字体度量晚到会改 body.scrollHeight）。
       var el = document.getElementById('root').firstElementChild;
       var post = function () {
         var el2 = document.getElementById('root').firstElementChild;
@@ -266,6 +298,12 @@
         });
       };
       post();
+      if (el && el.classList && el.classList.contains('panel')) {
+        el.addEventListener('animationend', post, { once: true });
+      }
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(post).catch(function () { /* 静默容错 */ });
+      }
       // 80ms 补报一次：容器宽从收起态过渡到面板宽的窗口里，首报的量测基准
       // 还是旧视口；文档滚动条已被 overflow:hidden 根除，补报即终值自校正
       setTimeout(post, 80);
@@ -300,18 +338,24 @@
     refresh();
   });
 
-  // 宿主下行主题令牌同步（主题配色由宿主按当前主题下发，字面量仅为首帧兜底）
+  // 宿主下行主题令牌同步：tokens 全键逐条落 --ag-*（含 --ag-bg，夜间=深色，
+  // 形态同 todo_plan.html），:root 字面量仅为首帧兜底，theme.sync 补推即覆盖。
   window.addEventListener('message', function (ev) {
     var d = ev.data;
     if (!d || d.__agentos_webview !== true || typeof d.method !== 'string') return;
     if (d.method === 'theme.sync' && d.params && d.params.tokens) {
-      var t = d.params.tokens;
-      Object.keys({ fg: 1, muted: 1, border: 1, primary: 1, 'primary-soft': 1 }).forEach(function (k) {
-        var v = t['--ag-' + k];
-        if (v) document.documentElement.style.setProperty('--ag-' + k, v);
+      Object.keys(d.params.tokens).forEach(function (k) {
+        document.documentElement.style.setProperty(k, d.params.tokens[k]);
       });
-      if (t['--ag-bg-elevated']) {
-        document.documentElement.style.setProperty('--ag-bg', t['--ag-bg-elevated']);
+      // 文档色彩方案兜底（旧宿主不注入 color-scheme）：宿主深色而 iframe 文档
+      // 未声明 color-scheme 时，Chromium 把文档画布涂成近白实色——透明底圆钮/
+      // 面板的四角随即出现实色方块（"圆角到直角区域有色"）。新宿主经 bootstrap
+      // 已落内联 colorScheme（权威），此处只在缺失时兜底，不覆盖。
+      if (!document.documentElement.style.colorScheme) {
+        var scheme = d.params.scheme === 'dark' || d.params.scheme === 'light'
+          ? d.params.scheme
+          : schemeOf(d.params.tokens['--ag-bg']);
+        if (scheme) document.documentElement.style.colorScheme = scheme;
       }
       render(true);
     }

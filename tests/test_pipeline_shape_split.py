@@ -315,14 +315,15 @@ class TestToolExecLoopConfig:
 def test_pipeline_declares_max_rounds():
     """max_rounds 顶层声明在场——预算口径随形态拆分管道自声明。
 
-    1200 = 轮次预算唯一所有者 stop_check（按 LLM 调用次数计，2026-10-17 用户
-    裁定）之下的引擎机械硬顶兜底：500 次调用 ≤ 1000 迭代，1200 留 ~20% 余量
-    （错误轮/重试也占迭代），确保硬顶永不先于预算触发。
+    2400 = 轮次预算唯一所有者 stop_check（按 LLM 调用次数计，2026-10-17 用户
+    裁定）之下的引擎机械硬顶兜底：1000 次调用 ≤ 2000 迭代（mode_coding/
+    mode_godot 编排 agent 预算 2026-11-14 用户裁定上调至 1000），2400 留 ~20%
+    余量（错误轮/重试也占迭代），确保硬顶永不先于预算触发。
     """
     cfg = _load()
-    assert cfg.get("max_rounds") == 1200, (
-        "autonomous.yaml 顶层必须声明 max_rounds: 1200（2026-10-17 用户裁定）："
-        "缺声明即回落引擎缺省 200，形态拆分下 500 次调用预算会被硬顶截断"
+    assert cfg.get("max_rounds") == 2400, (
+        "autonomous.yaml 顶层必须声明 max_rounds: 2400（2026-11-14 用户裁定）："
+        "缺声明即回落引擎缺省 200，形态拆分下 1000 次调用预算会被硬顶截断"
     )
 
 

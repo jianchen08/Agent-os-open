@@ -296,7 +296,7 @@ class TestBaseScanHardFloor:
         from plugin import SecurityCheckPlugin
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
-        result = await plugin.execute(_ctx_with_args("bash_execute", {"command": command}))
+        result = await plugin.execute(_ctx_with_args("bash", {"command": command}))
         reason = _decision_view(result).get("reason", "")
         assert "CMD 风格重定向被拦截" in reason, f"{command!r} 应命中 nul 重定向拦截"
         assert "2>/dev/null" in reason, "拦截反馈应提示改用 2>/dev/null"
@@ -331,7 +331,7 @@ class TestBaseScanHardFloor:
                 "patterns": [{"type": "keyword", "value": "rm -rf"}],
             }],
         })
-        result = await plugin.execute(_ctx_with_args("bash_execute", {"command": command}))
+        result = await plugin.execute(_ctx_with_args("bash", {"command": command}))
         decision = _decision_view(result)
         assert decision["allowed"] is True
         assert "soft_block" not in decision.get("reason", "")
@@ -402,10 +402,10 @@ class TestSoftBlockToleratesStringArgs:
             state={
                 "core_type": "tool_execute",
                 "raw_tool_calls": [
-                    {"name": "bash_execute", "id": "c-str", "args": "plain args string"},
-                    {"name": "bash_execute", "id": "c-dict", "args": {"path": "../../x"}},
+                    {"name": "bash", "id": "c-str", "args": "plain args string"},
+                    {"name": "bash", "id": "c-dict", "args": {"path": "../../x"}},
                 ],
-                "execution_contexts": [{"provider": "host", "tool_name": "bash_execute"}],
+                "execution_contexts": [{"provider": "host", "tool_name": "bash"}],
                 "messages": [],
             },
             _services={},

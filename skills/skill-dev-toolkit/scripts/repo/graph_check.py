@@ -64,10 +64,18 @@ def _check_matrix(
 ) -> list[str]:
     """type-status 合法矩阵（文档类型规范 §六）+ superseded 必有取代指向。"""
     findings: list[str] = []
-    if meta.type == "plan" and meta.status in gm.DOC_STATUSES and meta.status not in {"draft", "archived"}:
-        findings.append(f"{path}: plan 的 status 须为 draft/archived，现 {meta.status}（§六矩阵）")
+    if meta.type == "plan" and meta.status in gm.DOC_STATUSES and meta.status not in {"draft", "archived", "deprecated"}:
+        findings.append(f"{path}: plan 的 status 须为 draft/archived/deprecated，现 {meta.status}（§六矩阵）")
     if meta.type == "report" and meta.status == "draft":
         findings.append(f"{path}: report 产出即终态，不得 draft（§六矩阵）")
     if meta.status == "superseded" and meta.doc_id not in supersede_sources:
         findings.append(f"{path}: status=superseded 必有 [[目标|取代]] 双链指向（§六）")
+    if meta.type == "adr" and meta.status == "deprecated":
+        findings.append(
+            f"{path}: adr 不得用 status=deprecated（ADR 退出语义 = superseded 被推翻 / archived 停用，§六矩阵）"
+        )
+    if meta.type == "standard" and not str(meta.path or "").startswith(gm.STANDARD_ROOTS):
+        findings.append(
+            f"{path}: type=standard 的归宿只有 docs/guides/ 与 docs/schemas/（§二类型=链位），现路径越界"
+        )
     return findings

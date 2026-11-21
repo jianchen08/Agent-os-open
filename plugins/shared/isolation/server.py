@@ -174,6 +174,14 @@ async def _on_unload(params: dict[str, Any]) -> None:
                 "enum": ["isolated", "non_isolated"],
                 "description": "隔离级别（默认 isolated）",
             },
+            "execution_profile": {
+                "type": "string",
+                "enum": ["linux-bash", "native-win"],
+                "description": (
+                    "执行档（可选，MXC 后端按 profile→backend 注册表选择；"
+                    "缺省 linux-bash。非 MXC 后端忽略此参数）"
+                ),
+            },
         },
         "required": ["task_id"],
     },
@@ -191,6 +199,7 @@ async def isolation_create_env(
     metadata: dict[str, Any] | None = None,
     parent_task_id: str | None = None,
     tool_name: str | None = None,
+    execution_profile: str | None = None,
 ) -> dict[str, Any]:
     """创建或复用隔离环境（同 workspace 共享容器）。
 
@@ -208,6 +217,12 @@ async def isolation_create_env(
     if isolation_level:
         level = IsolationLevel(isolation_level)
 
+    # 执行档并入 metadata（provider 读取；非 MXC 后端忽略）：profile 是环境
+    # 选择参数，不是新的服务方法入参，保持 provider 契约不变。
+    env_metadata = dict(metadata or {})
+    if execution_profile:
+        env_metadata["execution_profile"] = execution_profile
+
     try:
         env = await _manager.get_or_create_environment(
             task_id=task_id,
@@ -218,7 +233,7 @@ async def isolation_create_env(
             parent_workspace=parent_workspace,
             is_root_task=is_root_task,
             isolation_level=level,
-            metadata=metadata,
+            metadata=env_metadata or None,
             parent_task_id=parent_task_id,
             tool_name=tool_name,
         )
@@ -296,6 +311,84 @@ async def isolation_execute(
         tool_name=tool_name,
     )
     return result.to_dict()
+
+
+@plugin.tool(
+    name="isolation.bind_external_env",
+    schema={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "绑定的任务 ID（会话面可用 session 兜底键）"},
+            "workspace": {"type": "string", "description": "任务工作空间（宿主真实存在路径）"},
+            "container": {"type": "string", "description": "外部容器名或 id（Harbor 任务容器）"},
+            "workdir": {
+                "type": "string",
+                "description": "容器内工作目录（isolation.execute 默认 cwd，默认 /workspace）",
+            },
+        },
+        "required": ["task_id", "workspace", "container"],
+    },
+    description="绑定外部指定容器（Terminal-Bench 通道）：此后该任务/工作空间的隔离请求收养该容器执行",
+)
+async def isolation_bind_external_env(
+    task_id: str,
+    workspace: str,
+    container: str,
+    workdir: str = "/workspace",
+) -> dict[str, Any]:
+    """登记外部容器绑定（bind 即 docker inspect 验证，不可达显式失败）。
+
+    外部容器生命周期归调用方（Harbor）所有：销毁面只解登记，永不删除容器。
+    业务失败显式 success=False（与 create_env/destroy_env 同信封约定）。
+    """
+    if _manager is None:
+        return {"success": False, "error": "隔离服务未初始化"}
+    return await _manager.bind_external_env(
+        task_id=task_id, workspace=workspace, container=container, workdir=workdir
+    )
+
+
+@plugin.tool(
+    name="isolation.query_external_binding",
+    schema={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "任务 ID"},
+            "workspace": {"type": "string", "description": "工作空间路径"},
+        },
+    },
+    description="查询外部容器绑定（fs 工具路由判据面）：bound=True 时返回收养容器名与锚定工作目录",
+)
+async def isolation_query_external_binding(
+    task_id: str | None = None,
+    workspace: str | None = None,
+) -> dict[str, Any]:
+    """查询外部容器绑定（幂等只读；找不到 bound=False）。"""
+    if _manager is None:
+        return {"bound": False, "container_name": "", "workdir": ""}
+    return _manager.lookup_external_binding(task_id=task_id, workspace=workspace)
+
+
+@plugin.tool(
+    name="isolation.unbind_external_env",
+    schema={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "任务 ID"},
+            "workspace": {"type": "string", "description": "工作空间路径"},
+        },
+    },
+    description="解除外部容器绑定（只删绑定记录，不碰容器）",
+)
+async def isolation_unbind_external_env(
+    task_id: str | None = None,
+    workspace: str | None = None,
+) -> dict[str, Any]:
+    """解除外部容器绑定（幂等：绑定不存在也返回成功）。"""
+    if _manager is None:
+        return {"success": False, "error": "隔离服务未初始化"}
+    removed = _manager.unbind_external_env(task_id=task_id, workspace=workspace)
+    return {"success": True, "removed": removed, "task_id": task_id or "", "workspace": workspace or ""}
 
 
 @plugin.tool(
@@ -462,26 +555,107 @@ async def isolation_checkpoint(
     if action == "create":
         if not task_id or not workspace:
             return {"error": "create 需要 task_id 和 workspace"}
-        cp = _checkpoint_mgr.create_checkpoint(task_id, workspace, files_to_backup)
+        # 全树扫描 + 逐文件备份与工作空间体量线性（分钟级），必须出事件循环：
+        # 本 handler 是 async，同步跑在合宿宿主循环上会饿死 watchdog（审计 A-2）。
+        cp = await asyncio.to_thread(
+            _checkpoint_mgr.create_checkpoint, task_id, workspace, files_to_backup
+        )
         return {"created": True, "checkpoint_id": cp.task_id}
 
     if action == "restore":
         if not task_id:
             return {"error": "restore 需要 task_id"}
-        ok = _checkpoint_mgr.restore_checkpoint(task_id)
+        ok = await asyncio.to_thread(_checkpoint_mgr.restore_checkpoint, task_id)
         return {"restored": ok}
 
     if action == "cleanup":
         if not task_id:
             return {"error": "cleanup 需要 task_id"}
-        ok = _checkpoint_mgr.cleanup_checkpoint(task_id)
+        ok = await asyncio.to_thread(_checkpoint_mgr.cleanup_checkpoint, task_id)
         return {"cleaned": ok}
 
     if action == "list":
+        # 有界目录列举 + 小 manifest 读取（条数=检查点数，不随工作空间体量增长），
+        # 不属 >10s 阻塞面，保持同步以零额外线程开销。
         checkpoints = _checkpoint_mgr.list_checkpoints()
         return {"checkpoints": checkpoints, "total": len(checkpoints)}
 
     return {"error": f"未知操作: {action}"}
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/isolation/external/** (Terminal-Bench 外部容器通道正门)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """外部容器通道 REST 正门（/ext/isolation/external/**）。
+
+    POST /ext/isolation_service/external/bind    {task_id, workspace, container, workdir}
+    POST /ext/isolation_service/external/unbind  {task_id?, workspace?}
+
+    响应经 http_json 标准助手包成内核期望的 HttpHandleResponse（body base64）；
+    JSON 解析失败 400，绑定失败 422，未知路由 404。供本机外部进程（Harbor
+    BaseAgent 适配器）经内核 http_endpoints 动态路由调用（acp_quota_pool
+    同款形态）。
+    """
+    del plugin_id, headers, query  # 通道无额外头/query 消费
+
+    # 共享根注入（workspace.py 同款形态）：http_json 族经 _root_api 显式出口消费（E2 闸）
+    _shared_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _shared_root not in sys.path:
+        sys.path.insert(0, _shared_root)
+    from _root_api import decode_body as _decode_body, error as _http_error, json_response as _json_response, ok as _ok
+
+    if _manager is None:
+        return _ok(_json_response({"error": "隔离服务未初始化"}, 503))
+
+    route = (path, method.upper())
+    if route == ("/ext/isolation_service/external/bind", "POST"):
+        try:
+            body = _decode_body(raw_body, strict_object=True)
+        except ValueError as exc:
+            return _ok(_json_response({"error": str(exc)}, 400))
+        result = await _manager.bind_external_env(
+            task_id=str(body.get("task_id") or ""),
+            workspace=str(body.get("workspace") or ""),
+            container=str(body.get("container") or ""),
+            workdir=str(body.get("workdir") or "/workspace"),
+        )
+        if not result.get("success"):
+            return _ok(_json_response({"error": result.get("error", "绑定失败")}, 422))
+        return _ok(_json_response(result))
+
+    if route == ("/ext/isolation_service/external/unbind", "POST"):
+        try:
+            body = _decode_body(raw_body)
+        except ValueError as exc:
+            return _ok(_json_response({"error": str(exc)}, 400))
+        removed = _manager.unbind_external_env(
+            task_id=str(body.get("task_id") or "") or None,
+            workspace=str(body.get("workspace") or "") or None,
+        )
+        return _ok(_json_response({"success": True, "removed": removed}))
+
+    logger.warning("http.handle: no route for path=%s method=%s", path, method)
+    return _http_error(f"not found: {path} {method}", 404)
 
 
 @plugin.tool(

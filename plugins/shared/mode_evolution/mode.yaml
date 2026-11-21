@@ -12,6 +12,11 @@ panel_page_id: evolution_panel
 # 选项——本模式只在后台运作（进化轮经宿主 cron/面板触发），不经前台选择出生；
 # 缺省 = 可选（向后兼容），显式声明才隐藏。
 foreground_selectable: false
+# 外部工具注入（按激活模式挂载；工具由别的插件注册，故不进本包 plugin.json
+# ——避免 G2 声明↔实现比对误判）。任务/会话管道都并入：进化域无宿主 bash 的
+# 执行者借 plugin_verify 走受约束的 scratch 装载验证。
+inject_tool_ids:
+  - plugin_verify
 chain:
   entry: evolution
   # 评测编排照实声明（单节点自执行）：进化任务入口即包内进化引擎 agent

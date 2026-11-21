@@ -38,6 +38,7 @@ import logging
 import os
 import platform
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -60,6 +61,44 @@ _DEVICE_ID_ENV = "AGENTOS_DEVICE_ID"
 def _tree_device_id() -> str:
     """统一树编址的本端设备 id（D9' 设备前缀；解析序与 sync_agent/router 同式）。"""
     return os.environ.get(_DEVICE_ID_ENV, "").strip() or platform.node()
+
+
+def _active_mode(state: Any) -> str:
+    """当前生效模式 id：execution_context.mode 标签集主标签 → agent 键 → 空。
+
+    语义单点在 mode_keys.resolve_active_mode（与 mode_material_inject 激活
+    判定同式：标签集末元素优先、字符串旧形态兼容、agent 键派生需包存在）。
+    """
+    from _root_api import resolve_active_mode  # noqa: PLC0415
+
+    return resolve_active_mode(state)
+
+
+def _mode_package_dirs(state: Any) -> list[Path] | None:
+    """当前模式包目录（技能源收窄面）；无模式/包未命中 → None（全量回退）。
+
+    模式 id 先过 MODE_ID_RE 形态闸再拼包目录（杜绝 `../` 穿越出厂根）；
+    find_mode_package_dir 是出厂/用户双根单源解析（用户副本优先）。
+    """
+    mode = _active_mode(state)
+    if not mode:
+        return None
+    try:
+        _ensure_isolation_path()
+        from _root_api import MODE_ID_RE, find_mode_package_dir  # noqa: PLC0415
+
+        if MODE_ID_RE.match(mode) is None:
+            logger.warning(
+                "[WorkspaceLifecycle] 模式 id 形态非法，按无模式处理 | mode=%r", mode
+            )
+            return None
+        package = find_mode_package_dir(mode)
+    except Exception as exc:  # 包解析不可得 → 全量回退（技能可访问性优先）
+        logger.warning(
+            "[WorkspaceLifecycle] 模式包解析失败（全量回退）| mode=%s | err=%s", mode, exc
+        )
+        return None
+    return [package] if package is not None else None
 
 
 def _resolve_ws_anchor_base(workspace_path: str) -> Path | None:
@@ -115,6 +154,12 @@ def _session_workspace_key(state: dict[str, Any]) -> str:
 
 # ── state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
 _state_reader: Any = None
+# 当前 execute 的管道 state（sync 消费端 task_tree 的唯一 state 来源）。
+# ContextVar 而非实例字段：同 sidecar 实例被多管道并发复用，实例字段会在
+# await 处被其他管道的 execute 覆盖（每条 asyncio 任务各持独立 context 副本）。
+_current_pipeline_state: ContextVar[dict[str, Any] | None] = ContextVar(
+    "workspace_lifecycle_pipeline_state", default=None
+)
 # 最近一次聚合行快照（async 上下文刷新，sync 消费端只读缓存——
 # 消费链 task_tree.get_task 是同步库接口，直接调用 async reader 会产生
 # 永不 await 的协程（RuntimeWarning）且恒降级为空）
@@ -181,7 +226,9 @@ class _ExecutionContextTaskTree:
         return list(_state_rows_cache)
 
     def get_task(self, task_id: str):
-        state = self._plugin._last_state or {}
+        # 本管道 state 走 ContextVar（execute 绑定）：实例字段会被并发管道的
+        # execute 覆盖，父链兜底会读到别的任务身份。
+        state = _current_pipeline_state.get() or {}
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id（点号键）
         current_id = state.get("task.id")
         rows = self._read_rows()
@@ -230,7 +277,6 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         """
         self._config = config or {}
         self._manager: Any = None
-        self._last_state: dict[str, Any] | None = None
 
     @property
     def name(self) -> str:
@@ -289,16 +335,19 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
         """按 current_phase 分发 init/exit 阶段。"""
-        self._last_state = ctx.state
-        # 刷新聚合行快照：init/exit 体内 task_tree.get_task 走 sync 缓存读
-        await refresh_state_rows()
-        phase = ctx.state.get("current_phase", "")
-        if phase == "init":
-            return await self._bootstrap(ctx)
-        if phase == "exit":
-            return await self._finalize(ctx)
-        # 其它循环体（main）：生命周期插件不参与，零产出
-        return PluginResult()
+        token = _current_pipeline_state.set(ctx.state)
+        try:
+            # 刷新聚合行快照：init/exit 体内 task_tree.get_task 走 sync 缓存读
+            await refresh_state_rows()
+            phase = ctx.state.get("current_phase", "")
+            if phase == "init":
+                return await self._bootstrap(ctx)
+            if phase == "exit":
+                return await self._finalize(ctx)
+            # 其它循环体（main）：生命周期插件不参与，零产出
+            return PluginResult()
+        finally:
+            _current_pipeline_state.reset(token)
 
     async def prepare_task_workspace(
         self,
@@ -324,8 +373,6 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             PluginResult：成功带 ``workspace`` + ``task.ws_meta`` 坐标；
             失败带 error（无降级路径，调用方据其回传失败）。
         """
-        self._last_state = {**state, "pipeline_id": pipeline_id}
-        await refresh_state_rows()
         ctx = PluginContext(
             state={
                 **state,
@@ -335,7 +382,12 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             },
             config=self._config,
         )
-        return await self._bootstrap(ctx)
+        token = _current_pipeline_state.set(ctx.state)
+        try:
+            await refresh_state_rows()
+            return await self._bootstrap(ctx)
+        finally:
+            _current_pipeline_state.reset(token)
 
     # ── init：创建/解析工作空间 ────────────────────────────────
 
@@ -485,7 +537,9 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         manager = self._get_manager(base_path_hint=None)
         if manager is not None:
             try:
-                await ctx_await(manager.on_session_start, _ws_root)
+                await ctx_await(
+                    manager.on_session_start, _ws_root, mode_packages=_mode_package_dirs(state)
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[WorkspaceLifecycle] 主会话 skills 同步失败（工作区仍生效）| error=%s",
@@ -554,7 +608,13 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # task_data 字段形态与 task_submit → task_data 一致。
         task_data = self._build_task_data(state, ec, ws_spec, mode)
         try:
-            ws_meta = await ctx_await(manager.on_task_start, task_id, source_path, task_data)
+            ws_meta = await ctx_await(
+                manager.on_task_start,
+                task_id,
+                source_path,
+                task_data,
+                mode_packages=_mode_package_dirs(state),
+            )
         except Exception as exc:
             logger.error(
                 "[WorkspaceLifecycle] 工作空间创建失败 | task=%s | error=%s",

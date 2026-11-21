@@ -12,6 +12,9 @@ import type { RetryOptions } from '@/utils/retry'
 export interface AgentResponse {
   id: string
   name: string
+  /** 图标配置（config/agents/**\/*.yaml 的 `icon`：emoji 优先，其次内置图标名；
+   *  未配置由前端缺省图标兜底） */
+  icon?: string
   description?: string
   agent_type: string
   status: 'active' | 'inactive' | 'error'

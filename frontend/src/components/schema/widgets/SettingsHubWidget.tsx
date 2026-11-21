@@ -65,6 +65,8 @@ export interface SettingsHubWidgetProps {
 export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: SettingsHubWidgetProps) {
   const [active, setActive] = useState<NavKey>(initialActive)
   const [pluginPanels, setPluginPanels] = useState<SettingsPanelEntry[]>([])
+  /** 声明页集合签名：DSH 槽位页等动态注册页在 schema 之后到达，签名变化触发导航重算 */
+  const [declaredSignature, setDeclaredSignature] = useState('')
   /** 移动端导航抽屉开关：md 以下 aside 变滑出层（双栏在 375px 会把内容列挤碎） */
   const [navOpen, setNavOpen] = useState(false)
 
@@ -90,11 +92,23 @@ export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: Settings
     [pluginPanels],
   )
 
+  // 动态注册页到达检测：轮询 settings 空间页面 id 签名（同 WorkspaceNavPage 模式）
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const signature = contributionRegistry
+        .getPagesBySpace('settings')
+        .map((p) => p.id)
+        .join(',')
+      setDeclaredSignature((prev) => (prev === signature ? prev : signature))
+    }, 1500)
+    return () => window.clearInterval(id)
+  }, [])
+
   // 插件直接声明的 settings 页（contributes.pages space=settings，非 config_files）
   const declaredPages = useMemo(
     () => contributionRegistry.getPagesBySpace('settings').filter((p) => !p.legacyFrom),
-    // pluginPanels 在 loadFromSchema 后设置，作为「声明已加载」的触发器
-    [pluginPanels],
+    // pluginPanels 在 loadFromSchema 后设置；declaredSignature 在动态注册页到达时变化
+    [pluginPanels, declaredSignature],
   )
   const declaredNav: NavItem[] = useMemo(
     () =>

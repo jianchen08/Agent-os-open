@@ -427,11 +427,13 @@ class TestSessionWsMetaSurvival:
         session_ws = tmp_path / "sessions" / "thread-x"
         session_ws.mkdir(parents=True)
         plugin = mod.WorkspaceLifecyclePlugin(config={})
-        plugin._last_state = {
-            "task.id": "sub0000000001",
-            "pipeline_id": "sub0000000001",
-            "lineage.parent_pipeline_id": "pipe1",
-        }
+        token = mod._current_pipeline_state.set(
+            {
+                "task.id": "sub0000000001",
+                "pipeline_id": "sub0000000001",
+                "lineage.parent_pipeline_id": "pipe1",
+            }
+        )
         mod._state_rows_cache = [
             {
                 "pipeline_id": "pipe1",
@@ -449,11 +451,14 @@ class TestSessionWsMetaSurvival:
             ws_meta_store={},
             base_path=str(tmp_path),
         )
-        meta = manager.on_task_start(
-            "sub0000000001",
-            str(tmp_path / "default_root"),
-            {"is_root": False, "workspace_mode": "plain"},
-        )
+        try:
+            meta = manager.on_task_start(
+                "sub0000000001",
+                str(tmp_path / "default_root"),
+                {"is_root": False, "workspace_mode": "plain"},
+            )
+        finally:
+            mod._current_pipeline_state.reset(token)
         assert meta["mode"] == "shared"
         assert meta["path"] == str(session_ws)
 
@@ -676,3 +681,119 @@ class TestBirthTimeWorkspacePrepare:
         assert first.error is None
         assert second.error is None
         assert first.state_updates["workspace"] == second.state_updates["workspace"]
+
+
+class TestModeScopedSkillSources:
+    """技能按模式复制（2026-11-11）：只复制当前 mode 包的 skills/ + 仓根/用户根。
+
+    钉的是「调用面传递」：mode 标签解析（execution_context.mode 优先、agent
+    键回退）→ 模式包双根解析 → 作为 on_task_start 的 mode_packages 传参。
+    """
+
+    def _user_mode_pkg(self, tmp_path: Path, mode: str, skill: str) -> Path:
+        pkg = tmp_path / "userroot" / "plugins" / "modes" / f"mode_{mode}"
+        (pkg / "skills" / skill).mkdir(parents=True)
+        (pkg / "skills" / skill / "SKILL.md").write_text(skill, encoding="utf-8")
+        (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+        return pkg
+
+    def test_active_mode_prefers_execution_context(self) -> None:
+        mod = _load_module()
+        state = {
+            "execution_context": {"mode": "coding"},
+            "agent.id": "mode_evolution/evolution",
+        }
+        assert mod._active_mode(state) == "coding"
+
+    def test_active_mode_reads_tag_set_primary(self) -> None:
+        """前端发送形态 = 单元素标签集；主标签取末元素（最新激活优先）。"""
+        mod = _load_module()
+        assert mod._active_mode({"execution_context": {"mode": ["coding"]}}) == "coding"
+        assert mod._active_mode(
+            {"execution_context": {"mode": ["evolution", "coding"]}}
+        ) == "coding"
+
+    def test_active_mode_falls_back_to_agent_key(self) -> None:
+        mod = _load_module()
+        assert mod._active_mode({"agent.id": "mode_research/research_agent"}) == "research"
+        assert mod._active_mode({"agent.id": "code_writer"}) == ""
+
+    def test_mode_package_dirs_resolves_user_mode(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        mod = _load_module()
+        pkg = self._user_mode_pkg(tmp_path, "coding", "s_mode")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "userroot"))
+        dirs = mod._mode_package_dirs({"execution_context": {"mode": "coding"}})
+        assert dirs == [pkg]
+
+    def test_mode_package_dirs_reads_tag_set(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        mod = _load_module()
+        pkg = self._user_mode_pkg(tmp_path, "coding", "s_mode")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "userroot"))
+        dirs = mod._mode_package_dirs({"execution_context": {"mode": ["coding"]}})
+        assert dirs == [pkg]
+
+    def test_mode_package_dirs_rejects_bad_mode_shape(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """形态闸：`../` 形态不得进入包目录拼装（无模式 → 全量回退）。"""
+        mod = _load_module()
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "userroot"))
+        assert mod._mode_package_dirs({"execution_context": {"mode": "../evil"}}) is None
+
+    async def test_task_workspace_copies_only_active_mode_skills(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        mod = _load_module()
+        (tmp_path / "skills" / "s_root").mkdir(parents=True)
+        (tmp_path / "skills" / "s_root" / "SKILL.md").write_text("r", encoding="utf-8")
+        self._user_mode_pkg(tmp_path, "coding", "s_coding")
+        self._user_mode_pkg(tmp_path, "research", "s_research")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "userroot"))
+        plugin = _make_root_plugin(mod, tmp_path)
+        ws_dir = tmp_path / "plain_ws"
+        result = await plugin.prepare_task_workspace(
+            pipeline_id="task000000005",
+            state={"task.id": "task000000005"},
+            execution_context={
+                "mode": "coding",
+                "workspace": {
+                    "source_path": str(ws_dir),
+                    "mode": "plain",
+                    "explicit": True,
+                },
+            },
+        )
+        assert result.error is None, result.error
+        assert (ws_dir / "skills" / "s_root" / "SKILL.md").is_file()
+        assert (ws_dir / "skills" / "s_coding" / "SKILL.md").is_file()
+        assert not (ws_dir / "skills" / "s_research").exists()
+
+    async def test_session_workspace_passes_mode_packages(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """主会话同一收窄面：execution_context.mode 解析后传给 on_session_start。"""
+        import isolation.workspace as iw
+
+        mod = _load_module()
+        pkg = self._user_mode_pkg(tmp_path, "coding", "s_coding")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "userroot"))
+        monkeypatch.setattr(iw, "get_workspace_base_dir", lambda: tmp_path / "wsbase")
+        calls: dict[str, Any] = {}
+
+        class _Manager:
+            def on_session_start(self, *args: Any, **kwargs: Any) -> None:
+                calls["args"] = args
+                calls["kwargs"] = kwargs
+
+        plugin = mod.WorkspaceLifecyclePlugin(config={"base_path": str(tmp_path)})
+        plugin._get_manager = lambda *_a, **_k: _Manager()  # type: ignore[method-assign]
+        state = {"session_id": "thread-x", "execution_context": {"mode": "coding"}}
+        result = await plugin._bootstrap_session_workspace(
+            mod.PluginContext(state=state, config={}), state
+        )
+        assert result.error is None
+        assert calls["kwargs"]["mode_packages"] == [pkg]

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        窗口背景（移动端视觉 P0-5：附件按钮点击 WebView 整屏黑，MuMu 实测
+        docs/working/移动端视觉审计_shots/08）：文件选择器（系统 DocumentsUI）
+        Activity 启动/关闭转场期间本 Activity 的 windowBackground 会露出，
+        DayNight 主题深色模式默认近黑（截图取色 #202124 吻合 Google 深色底），
+        露出即「整屏黑」。取值对齐前端 design-tokens.css 默认底色
+        （浅 background 变量 #F4F7FB / 深 .dark background 变量 #04060F），转场帧
+        与页面底色一致，肉眼不可辨。深色值由 values-night/colors.xml 覆盖。
+    -->
+    <color name="agentos_window_bg">#F4F7FB</color>
+</resources>

@@ -8,6 +8,7 @@
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
+from agentos_plugin_sdk.blocking import run_blocking
 from agentos_plugin_sdk.builtin_tool import BuiltinTool, register_builtin_tool
 from agentos_plugin_sdk.capability import (
     STANDARD_CAPABILITIES,
@@ -114,6 +115,7 @@ __all__ = [
     "get_logger",
     "get_settings",
     "register_builtin_tool",
+    "run_blocking",
     "safe_enum_value",
     "setup_logging",
     "tool",

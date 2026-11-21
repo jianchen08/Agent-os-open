@@ -30,9 +30,12 @@ llm_core 发送前解析。
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import builtins
 import importlib.util
 import sys
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -1160,3 +1163,114 @@ class TestSharedRootBootstrap:
         finally:
             sys.path[:] = original
             sys.modules.pop(mod_name, None)
+
+
+# ── 事件循环活性：文本附件整读不冻合宿心跳 ──────────────────────
+#
+# 审计 P2-3 同族：``execute`` 是 async handler（合宿 light 组同宿主连坐），
+# ``_extract_text_from_attachment`` 的整附件读是同步 ``open().read()``——附件
+# 体积量级（前端上传闸 10MB 级）读+解码可达秒级，阻塞超 watchtick 阈值即整组
+# ``os._exit(1)``。锁面 = 读取段出事件循环（心跳 tick 间隔不出现 ≥0.1s 空窗）。
+
+_MAX_TICK_GAP = 0.1
+_BLOCK_SECS = 0.3
+
+
+class _Ticker:
+    """心跳协程：记录 tick 间隔 + 被测段收尾时刻（末段计入，防整段停滞漏判）。"""
+
+    def __init__(self, interval: float = 0.01) -> None:
+        self._interval = interval
+        self._ticks: list[float] = []
+        self._stop: asyncio.Event | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._end = 0.0
+
+    async def __aenter__(self) -> _Ticker:
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._run())
+        await asyncio.sleep(self._interval * 3)
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        assert self._stop is not None
+        assert self._task is not None
+        self._end = time.monotonic()
+        self._stop.set()
+        await self._task
+
+    async def _run(self) -> None:
+        assert self._stop is not None
+        while not self._stop.is_set():
+            self._ticks.append(time.monotonic())
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
+            except TimeoutError:
+                continue
+
+    @property
+    def max_gap(self) -> float:
+        points = [*self._ticks, self._end]
+        return max(
+            (b - a for a, b in zip(points, points[1:], strict=False)), default=0.0
+        )
+
+
+def _slow_open(delay: float) -> Any:
+    """``builtins.open`` 假身：等 delay 秒后转真实 open（观测读取是否出循环）。"""
+    real_open = builtins.open
+
+    def _opener(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(delay)
+        return real_open(*args, **kwargs)
+
+    return _opener
+
+
+async def test_ticker_detects_blocking_call() -> None:
+    """仪器的区分度自证：协程内同步 sleep 必被 max_gap 捕获。"""
+    async with _Ticker() as ticker:
+        time.sleep(_BLOCK_SECS)
+    assert ticker.max_gap >= 0.2
+
+
+async def test_plain_text_attachment_read_keeps_event_loop_ticking(tmp_path, monkeypatch):
+    """文本附件整读（0.3s 量级）期间心跳持续打点；提取结果与体积语义不变。"""
+    payload = "正文" * 1024
+    (tmp_path / "note.txt").write_text(payload, encoding="utf-8")
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    monkeypatch.setattr(builtins, "open", _slow_open(_BLOCK_SECS))
+    pre = MultimodalPreprocessor()
+
+    async with _Ticker() as ticker:
+        result = await pre.execute(
+            _make_ctx("", [{"url": "/uploads/note.txt", "mime_type": "text/plain"}])
+        )
+
+    assert ticker.max_gap < _MAX_TICK_GAP, (
+        f"附件整读冻结事件循环（期间心跳最大空窗 {ticker.max_gap:.3f}s）"
+    )
+    assert result.state_updates["multimodal_content"] == [{"type": "text", "text": payload}]
+
+
+async def test_plain_text_attachment_read_error_stays_offloop_and_reports_notice(tmp_path, monkeypatch):
+    """读取 OSError 跨线程语义不变：仍产出显式占位块，且阻塞段出事件循环。"""
+    (tmp_path / "note.txt").write_bytes(b"hello")
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(_BLOCK_SECS)
+        raise OSError("disk error")
+
+    monkeypatch.setattr(builtins, "open", _boom)
+    pre = MultimodalPreprocessor()
+
+    async with _Ticker() as ticker:
+        result = await pre.execute(
+            _make_ctx("", [{"url": "/uploads/note.txt", "mime_type": "text/plain"}])
+        )
+
+    assert ticker.max_gap < _MAX_TICK_GAP
+    assert result.state_updates["multimodal_content"] == [
+        {"type": "text", "text": "[附件 /uploads/note.txt 解析失败：文件读取失败]"}
+    ]

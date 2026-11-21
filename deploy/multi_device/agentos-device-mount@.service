@@ -36,21 +36,27 @@ Wants=network-online.target
 # allow_other=no 会把 ubuntu 挡在外面——挂载点属主必须与消费进程同用户）
 User=ubuntu
 Group=ubuntu
-Type=forking
+# Type=simple + sshfs -f（前台）: sshfs 3.x daemonizes by default and has
+# REMOVED "-o daemon" (fuse: unknown option). With Type=forking systemd cannot
+# track the self-daemonized process - proven 2026-11-13 in WSL: killing sshfs
+# left the unit "Deactivated successfully" and Restart=on-failure never fired.
+Type=simple
 Restart=on-failure
 RestartSec=10s
 # 根下锚点目录创建需 root：systemd "+" 前缀 = 该行无视 User 以 root 执行
 ExecStartPre=+/usr/bin/mkdir -p /%i
 ExecStartPre=+/usr/bin/chown ubuntu:ubuntu /%i
-ExecStart=/usr/bin/sshfs -p 2222 \
+ExecStart=/usr/bin/sshfs -f -p 2222 \
   -o reconnect \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
   -o connecttimeout=30 \
-  -o daemon \
   <desktop-user>@127.0.0.1:<sftp 路径形态的桌面领地根> \
   /%i
-ExecStop=/usr/bin/fusermount -u /%i
+# A crashed sshfs leaves the FUSE mountpoint stale ("Transport endpoint is not
+# connected") and the next mount then fails - proven 2026-11-13 in WSL.
+# -z = lazy unmount; the "-" prefix tolerates "not mounted" errors.
+ExecStopPost=-/usr/bin/fusermount3 -u -z /%i
 
 [Install]
 WantedBy=multi-user.target

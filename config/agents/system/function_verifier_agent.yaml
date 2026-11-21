@@ -28,6 +28,7 @@ dynamic_vars:
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
+  - '任务ID: {{state:context.task_id}}'
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
@@ -47,8 +48,8 @@ system_prompt: |-
   在开始任何验证工作之前，先评估当前可用工具能否覆盖本次验证需求：
 
   1. **梳理验证内容类型**：根据需求描述，识别需要验证的功能涉及哪些类型（后端API、前端UI、数据库、文件系统、CLI命令等）
-  2. **审查工具覆盖范围**：对照可用工具列表（file_read、file_write、bash_execute、web_operate 等），逐项检查每种验证内容是否有合适的工具支撑
-  3. **探测前端验证栈**（前端/UI 项目必做）：通过 bash_execute + file_read 探测项目是否具备 playwright CLI 栈：
+  2. **审查工具覆盖范围**：对照可用工具列表（file_read、file_write、bash 等；其余工具经 resource_search 动态引入后 call_tool 调用），逐项检查每种验证内容是否有合适的工具支撑
+  3. **探测前端验证栈**（前端/UI 项目必做）：通过 bash + file_read 探测项目是否具备 playwright CLI 栈：
      - **Node 栈**：项目有 `package.json` 且依赖含 `@playwright/test` 或 `playwright` → 可用 `npx playwright test <spec>` 跑测试
      - **Python 栈**：项目有 `pyproject.toml`/`requirements.txt` 且依赖含 `playwright` → 可用 `pytest` 跑测试
      - 同时探测项目是否已有 playwright spec 文件（如 `e2e/**/*.spec.ts`、`tests/**/test_*.py`），可直接复用
@@ -154,13 +155,26 @@ system_prompt: |-
   {{path:config/rules/per_agent/function_verify_rules.md}}
 
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：enhanced_search/web_operate 经两步法动态可达 ──
 - file_read
 - file_write
-- bash_execute
-- enhanced_search
-- web_operate
+- bash
+- log
+- input
+- kill
 - resource_search
+- call_tool
 - task_evaluate
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 必须设计 1 条完整用户旅程（3-7 步串联操作），禁止只测独立场景
 - 用户旅程中的步骤必须有状态传递，禁止硬编码动态值
@@ -174,7 +188,7 @@ hard_constraints:
 - capability_gaps 不能为空（如果真没有就写"无"）；有能力缺口时必须在结论中同时给出 covered / unverified 两项计数，unverified>0 时结论不得写"全部通过"
 - 不可验证的关键功能存在时，结论不能写"全部通过"
 - 禁止用 Python 模块 import 检查冒充功能验证（import 成功不等于功能正确）
-- 即使不能调用完整系统，也必须通过 bash_execute 用 mock 数据验证模块调用链（如 python3 -c "from tool import TaskTool; result=tool._method(mock_data); assert result正确"），发现参数名不匹配、逻辑错误等问题
+- 即使不能调用完整系统，也必须通过 bash 用 mock 数据验证模块调用链（如 python3 -c "from tool import TaskTool; result=tool._method(mock_data); assert result正确"），发现参数名不匹配、逻辑错误等问题
 - 报告中存在不可验证项（因环境/工具缺失）时，禁止静默跳过，必须在报告中明确向上级请求补充环境或工具，格式为"缺少XXX能力，无法验证YYY，请求上级在ZZZ环境中补充端到端测试"
 - 收到的任务描述缺少"输入→预期输出/状态变化"的功能验证场景（只有结构检查项如枚举覆盖、schema一致）时，必须在报告中明确指出"本任务描述缺少功能验证场景，仅能执行结构检查"，并建议编排者补充用户场景描述；禁止编排者给什么就做什么而不指出缺陷
 soft_constraints:
@@ -225,23 +239,20 @@ input_schema:
   - expected_result
 deliverables:
 - name: verification_script
-  description: 可复现的验证脚本。后端/CLI/配置类用 Python 脚本；前端/UI 类若通过 playwright CLI 验证，可改为生成 spec 文件（e2e/*.spec.ts 或 tests/test_*.py），并在报告中给出可一键复跑的命令（如 `npx playwright test e2e/xxx.spec.ts` / `pytest tests/test_xxx.py`），verify_reproduce.py 中记录该命令与 spec 路径即可
-  output_path: '{{workspace}}/verify_reproduce.py'
+  description: 可复现的验证脚本。后端/CLI/配置类用 Python 脚本；前端/UI 类若通过 playwright CLI 验证，可改为生成 spec 文件（e2e/*.spec.ts 或 tests/test_*.py），并在报告中给出可一键复跑的命令（如 `npx playwright test e2e/xxx.spec.ts` / `pytest tests/test_xxx.py`），验证脚本中记录该命令与 spec 路径即可
+  output_path: '{{workspace}}/docs/working/verify_reproduce_{{task_id}}.py'
   type: python
   required: true
 - name: verification_report
   description: 功能验证报告（Markdown，含验证结论、工具能力评估、用户旅程结果、不可验证项）
-  output_path: '{{workspace}}/docs/working/function_verify_report.md'
+  output_path: '{{workspace}}/docs/working/{{task_id}}_function_verify_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
-    action: read
-    path: '{{workspace}}/docs/working/function_verify_report.md'
-- metric_id: semantic_check
-  default_params:
-    criteria: 验证报告必须包含 tool_capability_assessment、semantic_evaluation、user_journey 字段，且验证场景与用户真实使用一致
+    check: not_empty
+    path: '{{workspace}}/docs/working/{{task_id}}_function_verify_report.md'
 version: 2.1.0
 is_active: true
 status: active

@@ -9,7 +9,7 @@ use agentos_core::traits::EnvConfigField;
 use agentos_core::traits::{PluginLoader, PluginManifest};
 use agentos_core::types::PluginError;
 use serde_json::{json, Value};
-use tracing::warn;
+use tracing::error;
 
 /// 全量配置装载（[`injected_config`] 的第一步独立化）：config root 递归扫描 +
 /// 用户层叠加。错误分级语义（PARSE 上抛 / 其余降级空对象）在此单点承载——
@@ -30,7 +30,9 @@ pub async fn load_full_config(loader: &dyn PluginLoader) -> Result<Value, Plugin
                     source: Some("plugin-invoker".to_string()),
                 });
             }
-            warn!(
+            // 全配置装载失败 = 所有插件拿到空配置（系统级故障，必须显眼）：
+            // 2026-11-13 装机事故中这条降级只留 warn，被大量插件注入日志淹没。
+            error!(
                 "Failed to load plugin config for injection, using empty: {}",
                 e
             );
@@ -224,15 +226,53 @@ pub fn declared_reads(manifest: &PluginManifest) -> Option<&[String]> {
 /// （Owned）；未声明 → 全量 state 借用（Borrowed，零拷贝——迁移期默认，
 /// 行为与开销零变化）。
 pub fn state_feed_payload<'a>(manifest: &PluginManifest, ctx_state: &'a Value) -> Cow<'a, Value> {
+    state_feed_payload_with_base(manifest, ctx_state, None)
+}
+
+/// 带迭代共享基座的投喂载荷（并行 for-each 写集克隆路径）。
+///
+/// 迭代 state 只含写集（只读大键在 [`PluginContext::base_state`]）；切片
+/// 组装时声明键在 state 缺失即从基座回填——插件视角与全量 state 一致，
+/// 但基座只克隆一次、N 个迭代共享。
+pub fn state_feed_payload_with_base<'a>(
+    manifest: &PluginManifest,
+    ctx_state: &'a Value,
+    base: Option<&'a serde_json::Map<String, Value>>,
+) -> Cow<'a, Value> {
     match declared_reads(manifest) {
-        Some(reads) => Cow::Owned(assemble_state_slice(ctx_state, reads)),
-        None => Cow::Borrowed(ctx_state),
+        Some(reads) => Cow::Owned(assemble_state_slice_with_base(ctx_state, base, reads)),
+        None => match base {
+            // 未声明读取的插件本应全量；共享启用前已校验 body 插件均有 reads，
+            // 此分支仅为防御正确性（合并基座 + 迭代写集，语义等价全量）。
+            Some(base) if !base.is_empty() => {
+                let mut merged = base.clone();
+                if let Some(obj) = ctx_state.as_object() {
+                    for (k, v) in obj {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+                Cow::Owned(Value::Object(merged))
+            }
+            _ => Cow::Borrowed(ctx_state),
+        },
     }
 }
 
 /// native 路径的投喂 state JSON 串（PluginCtx.state_json）。
 pub fn pipeline_state_json(manifest: &PluginManifest, ctx_state: &Value) -> String {
     match state_feed_payload(manifest, ctx_state) {
+        Cow::Owned(v) => serde_json::to_string(&v).unwrap_or_else(|_| "{}".into()),
+        Cow::Borrowed(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
+    }
+}
+
+/// 带迭代共享基座的 native 投喂串（同上回填语义）。
+pub fn pipeline_state_json_with_base(
+    manifest: &PluginManifest,
+    ctx_state: &Value,
+    base: Option<&serde_json::Map<String, Value>>,
+) -> String {
+    match state_feed_payload_with_base(manifest, ctx_state, base) {
         Cow::Owned(v) => serde_json::to_string(&v).unwrap_or_else(|_| "{}".into()),
         Cow::Borrowed(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
     }
@@ -264,30 +304,68 @@ fn resolve_state_key<'a>(state: &'a Value, key: &str) -> Option<&'a Value> {
 ///
 /// 同键重复声明后者覆盖前者（声明序确定，无歧义）。
 pub fn assemble_state_slice(full_state: &Value, reads: &[String]) -> Value {
+    assemble_state_slice_with_base(full_state, None, reads)
+}
+
+/// 带共享基座的切片组装：state 命中优先（迭代写集），缺失回填基座。
+pub fn assemble_state_slice_with_base(
+    full_state: &Value,
+    base: Option<&serde_json::Map<String, Value>>,
+    reads: &[String],
+) -> Value {
     let mut out = serde_json::Map::new();
     for key in STATE_SLICE_CONTROL_KEYS {
-        if let Some(v) = resolve_state_key(full_state, key) {
+        if let Some(v) = resolve_state_key_with_base(full_state, base, key) {
             out.insert((*key).to_string(), v.clone());
         }
     }
     for entry in reads {
-        if let Some((key, value)) = resolve_read_entry(full_state, entry) {
+        if let Some((key, value)) = resolve_read_entry_with_base(full_state, base, entry) {
             out.insert(key, value);
         }
     }
     Value::Object(out)
 }
 
-/// 解析单条 reads 声明为 (投喂键, 值)；非法/缺键返回 None（调用方省略）。
-fn resolve_read_entry(state: &Value, entry: &str) -> Option<(String, Value)> {
+/// 平键优先 + 基座回填取值：state 未命中时查迭代共享基座（只读大键）。
+fn resolve_state_key_with_base<'a>(
+    state: &'a Value,
+    base: Option<&'a serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<&'a Value> {
+    resolve_state_key(state, key).or_else(|| base.and_then(|b| resolve_in_map(b, key)))
+}
+
+/// 在对象 map 上做平键优先 + 点链取值（基座回填用，零分配）。
+fn resolve_in_map<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a Value> {
+    if let Some(v) = map.get(key) {
+        return Some(v);
+    }
+    let mut segs = key.split('.');
+    let mut cur = map.get(segs.next()?)?;
+    for seg in segs {
+        cur = cur.get(seg)?;
+    }
+    Some(cur)
+}
+
+/// 带共享基座的单条 reads 解析：`messages_tail:N` / 键名均支持基座回填。
+fn resolve_read_entry_with_base(
+    state: &Value,
+    base: Option<&serde_json::Map<String, Value>>,
+    entry: &str,
+) -> Option<(String, Value)> {
     if let Some(n) = entry.strip_prefix("messages_tail:") {
         let n: usize = n.parse().ok()?;
-        let arr = state.get("messages")?.as_array()?;
+        let arr = state
+            .get("messages")
+            .or_else(|| base.and_then(|b| b.get("messages")))?
+            .as_array()?;
         let start = arr.len().saturating_sub(n);
         return Some(("messages".to_string(), Value::Array(arr[start..].to_vec())));
     }
     // 键名形态（含 "messages" 全量——键名直取本身就是数组全量语义）。
-    resolve_state_key(state, entry).map(|v| (entry.to_string(), v.clone()))
+    resolve_state_key_with_base(state, base, entry).map(|v| (entry.to_string(), v.clone()))
 }
 
 /// 构造步骤服务调用的额外 config：在既有 config 对象上设置约定字段
@@ -347,6 +425,7 @@ mod tests {
             enabled: None,
             activation: None,
             provides: None,
+            visibility: Default::default(),
             persistent_fields: vec![],
             aux_venvs: Vec::new(),
             export_fields: vec![],

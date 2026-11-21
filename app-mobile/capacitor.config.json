@@ -10,11 +10,14 @@
       "enabled": true
     },
     "ShellConfig": {
-      "apiBase": "http://162.14.69.153",
-      "_note": "apiBase=壳 apiBase 声明单点（syncweb 生成 www/shell-config.js；原生侧运行时经 ShellConfigWebViewClient 钉死本面，生成物/残留值不进运行时）。安全现状：公网明文 HTTP 过渡态（无 TLS，存在中间人面；server.androidScheme=http 同为明文，是混合内容拦截不成立的前提），TLS 待立项=审查总册 P1-14③【需拍板节奏】。本键为元数据，Capacitor PluginConfig 按键取值不受影响。"
+      "apiBase": "http://203.0.113.153",
+      "_note": "apiBase=壳 apiBase 声明单点（syncweb 生成 www/shell-config.js；原生侧运行时经 ShellConfigWebViewClient 钉死本面，生成物/残留值不进运行时）。出厂值=TEST-NET-3 保留段占位（203.0.113.0/24，不可路由）：真基址属部署面私有信息，不进开源仓——真机云档构建经 LINGXI_API_BASE 环境变量单点注入（syncweb.mjs env 覆盖；本机档=http://127.0.0.1:<port> 同通道）。安全现状：公网明文 HTTP 过渡态（无 TLS，存在中间人面；server.androidScheme=http 同为明文，是混合内容拦截不成立的前提），TLS 待立项=审查总册 P1-14③【需拍板节奏】。本键为元数据，Capacitor PluginConfig 按键取值不受影响。"
     },
     "SystemBars": {
       "insetsHandling": "disable"
+    },
+    "Keyboard": {
+      "resizeOnFullScreen": true
     }
   }
 }

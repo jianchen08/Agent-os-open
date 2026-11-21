@@ -4,6 +4,8 @@
 # 创建项目时显式传 project_type=<类型> 即路由到对应初始化；缺省 auto 按
 # detect_file 自动识别项目目录中已有的类型清单文件。初始化失败整体报错
 # （fail-closed），同路径重跑幂等补装。
+# 出厂播种版本（seedConfigTree 裁决：用户副本严格大于才保留）
+version: 1
 
 project_types:
   godot:

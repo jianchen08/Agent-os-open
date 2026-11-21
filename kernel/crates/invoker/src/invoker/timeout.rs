@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 超时体系 L1 让位 invoker 面 | @ci: rust-test
 //! 调用超时解析与有界等待纯函数族：工具声明超时解析序、非流式总时长包装、
 //! 原生反调桥等待界与慢调用告警的两段有界等待、管道步壳可抬高 deadline。
 //!
@@ -63,6 +64,77 @@ pub(super) async fn with_capability_timeout<T>(
             source: Some("plugin-invoker".to_string()),
         }),
     }
+}
+
+/// 派发前置面挂死护栏（毫秒）：sidecar 工具调用「进入 sidecar 传输前」的
+/// 内核侧等待段（宿主获取/spawn 锁排队/客户端读锁等待）的固定上界。
+///
+/// 取值 = 分类学 ipc 活性档 300s（ADR
+/// 2026-11-05-timeout-taxonomy-and-merge），大于宿主启动窗缺省 120s
+/// （`DEFAULT_HOST_START_TIMEOUT_SECS`，合法冷启动不被误切）。与业务总时长
+/// 界（[`tool_timeout_ms`]，可被 `timeout_ms: Some(0)` 豁免）正交：业务豁免
+/// 只豁免「执行可长」，不重开「派发挂死」的无界驻留（对齐桥面界哲学，ADR
+/// 2026-09-28——护栏界不可豁免）。
+pub(super) const PRE_DISPATCH_TIMEOUT_MS: u64 = 300_000;
+
+/// 派发前置面超时结构化错误（错误码 PRE_DISPATCH_TIMEOUT，source=plugin-invoker；
+/// 错误面含插件 id 与工具名可定位，语义=派发失败可重试）。
+pub(super) fn pre_dispatch_timeout_error(
+    timeout_ms: u64,
+    plugin_id: &str,
+    tool_name: &str,
+) -> PluginError {
+    PluginError {
+        message: format!(
+            "派发前置面超时（{timeout_ms}ms 内未完成宿主获取/锁等待，未进入 sidecar 传输）: \
+             plugin '{plugin_id}' tool '{tool_name}'——按派发失败处理，可重试"
+        ),
+        code: Some("PRE_DISPATCH_TIMEOUT".to_string()),
+        source: Some("plugin-invoker".to_string()),
+    }
+}
+
+/// 派发前置面挂死护栏生产入口（绑 [`PRE_DISPATCH_TIMEOUT_MS`] 固定档）。
+pub(super) async fn with_pre_dispatch_timeout<T>(
+    plugin_id: &str,
+    tool_name: &str,
+    fut: impl std::future::Future<Output = Result<T, PluginError>>,
+) -> Result<T, PluginError> {
+    with_pre_dispatch_timeout_ms(PRE_DISPATCH_TIMEOUT_MS, plugin_id, tool_name, fut).await
+}
+
+/// 派发前置面挂死护栏包装（Result 形 future；时长参数化供测试注入短窗）。
+/// 到点放弃等待 future 返回结构化 `PRE_DISPATCH_TIMEOUT`——按派发失败处理
+/// （调用方返回结构化错误给 agent，可重试）。
+pub(super) async fn with_pre_dispatch_timeout_ms<T>(
+    timeout_ms: u64,
+    plugin_id: &str,
+    tool_name: &str,
+    fut: impl std::future::Future<Output = Result<T, PluginError>>,
+) -> Result<T, PluginError> {
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), fut).await {
+        Ok(result) => result,
+        Err(_) => Err(pre_dispatch_timeout_error(timeout_ms, plugin_id, tool_name)),
+    }
+}
+
+/// 派发前置面挂死护栏生产入口（非 Result 形 future，如客户端读锁获取）：
+/// 到点放弃等待返回 None，调用方经 [`pre_dispatch_timeout_error`] 映射同一
+/// 结构化错误（错误面单点）。
+pub(super) async fn with_pre_dispatch_timeout_opt<T>(
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    with_pre_dispatch_timeout_ms_opt(PRE_DISPATCH_TIMEOUT_MS, fut).await
+}
+
+/// 非 Result 形护栏（时长参数化供测试注入短窗）：到点 None。
+pub(super) async fn with_pre_dispatch_timeout_ms_opt<T>(
+    timeout_ms: u64,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::time::timeout(Duration::from_millis(timeout_ms), fut)
+        .await
+        .ok()
 }
 
 /// 原生反调桥的等待界（毫秒）：被调工具声明的超时解析序 > 内核默认。
@@ -152,7 +224,7 @@ pub fn state_plugin_call_timeout(state: &Value) -> Option<Duration> {
 /// （预算/配置外层壳，A6）在引擎侧嵌套合成，各管一事：基础界归插件调用
 /// 模块，run 级知识（预算锚）归引擎。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedCallLimit {
+pub(super) enum ResolvedCallLimit {
     /// 显式收紧：固定界，不让位。
     Fixed(Duration),
     /// 缺省档/声明档：可让位抬高的初始界。
@@ -160,7 +232,7 @@ pub enum ResolvedCallLimit {
 }
 
 /// 单一解析点（M3）：manifest 自报 ∩ state 显式收紧 → 有效界。
-pub fn resolve_call_limit(declared: Option<u64>, state: &Value) -> ResolvedCallLimit {
+pub(super) fn resolve_call_limit(declared: Option<u64>, state: &Value) -> ResolvedCallLimit {
     let base = declared
         .filter(|s| *s > 0)
         .map(Duration::from_secs)
@@ -179,7 +251,7 @@ pub fn resolve_call_limit(declared: Option<u64>, state: &Value) -> ResolvedCallL
 /// 的单点）；消费点 = 管道步壳的让位查询（同 pipeline_id 的在飞最大声明
 /// 需求）。计数多集语义：并行 for-each 迭代各自登记/递减，max 只看键集。
 #[derive(Default)]
-pub(crate) struct RaisedCallNeeds {
+pub(super) struct RaisedCallNeeds {
     in_flight: RwLock<HashMap<String, HashMap<u64, usize>>>,
 }
 
@@ -211,7 +283,7 @@ impl RaisedCallNeeds {
 }
 
 /// RAII 登记 guard：drop 递减在飞计数，键集空则摘除管道条目。
-pub(crate) struct RaisedNeedGuard<'a> {
+pub(super) struct RaisedNeedGuard<'a> {
     registry: &'a RaisedCallNeeds,
     pipeline_id: String,
     need_secs: u64,
@@ -236,7 +308,7 @@ impl Drop for RaisedNeedGuard<'_> {
 
 /// 从工具调用参数解析让位登记键：`_call_context.pipeline_id` 在场（非空）且
 /// 声明毫秒界折算秒 ≥1 才登记（亚秒界对缺省壳无让位意义）。
-pub(crate) fn raised_need_from_inputs(
+pub(super) fn raised_need_from_inputs(
     inputs: &Value,
     bound_ms: Option<u64>,
 ) -> Option<(String, u64)> {
@@ -608,5 +680,71 @@ mod pipeline_call_limit_tests {
         .await
         .expect("deadline 已抬高的壳不得因让位源消失而缩档");
         assert_eq!(out, 1);
+    }
+
+    // ── 派发前置面挂死护栏（run 生命周期防线②，台账第 183/186 轮）──
+
+    /// Result 形护栏：限内完成原样透传；到点切挂死 future 并返回结构化
+    /// PRE_DISPATCH_TIMEOUT（message 含插件与工具可定位、语义=派发失败可重试）。
+    /// 时长注入短窗（护栏窗本身参数化，生产绑 300s 常量）。
+    #[tokio::test]
+    async fn pre_dispatch_guard_cuts_hang_and_passes_within() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // 限内完成：原样透传。
+        let ok: Result<u8, PluginError> = Ok(7);
+        let out = with_pre_dispatch_timeout_ms(1000, "p_fast", "tool_ok", async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            ok
+        })
+        .await
+        .expect("限内完成不得被切");
+        assert_eq!(out, 7);
+
+        // 到点切挂：前置段挂死（模拟 spawn 锁/读锁饥饿），错误面结构化。
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered2 = entered.clone();
+        let err = with_pre_dispatch_timeout_ms(50, "p_hang", "tool_stuck", async move {
+            entered2.store(true, Ordering::SeqCst);
+            std::future::pending::<Result<u8, PluginError>>().await
+        })
+        .await
+        .expect_err("到点必须切挂死的前置段");
+        assert!(entered.load(Ordering::SeqCst));
+        assert_eq!(err.code.as_deref(), Some("PRE_DISPATCH_TIMEOUT"));
+        assert!(err.message.contains("50ms"), "错误面须含护栏窗时长");
+        assert!(err.message.contains("p_hang"), "错误面须含插件 id");
+        assert!(err.message.contains("tool_stuck"), "错误面须含工具名");
+        assert!(err.message.contains("可重试"), "错误面须声明可重试语义");
+    }
+
+    /// Option 形护栏（读锁获取段）：限内拿到 guard；写锁长持超窗 → None
+    /// （调用方映射 `pre_dispatch_timeout_error` 同一结构化错误）。
+    #[tokio::test]
+    async fn pre_dispatch_guard_opt_resolves_lock_or_none() {
+        let lock = Arc::new(tokio::sync::RwLock::new(42u8));
+        let got = with_pre_dispatch_timeout_ms_opt(1000, lock.read()).await;
+        assert_eq!(*got.expect("无竞争读锁必须限时拿到"), 42);
+
+        // 写锁长持（200ms）超过护栏窗（50ms）：读锁获取段到点放弃。
+        let writer = Arc::clone(&lock);
+        let holder = tokio::spawn(async move {
+            let _w = writer.write().await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await; // 写者先进
+        let got = with_pre_dispatch_timeout_ms_opt(50, lock.read()).await;
+        assert!(got.is_none(), "写锁长持超护栏窗时读锁获取段必须到点放弃");
+        holder.await.expect("写者任务正常收尾");
+    }
+
+    /// 错误构造面单点：码与语义字段齐备（两个护栏形态共用）。
+    #[test]
+    fn pre_dispatch_error_face() {
+        let err = pre_dispatch_timeout_error(300_000, "p_x", "t_y");
+        assert_eq!(err.code.as_deref(), Some("PRE_DISPATCH_TIMEOUT"));
+        assert_eq!(err.source.as_deref(), Some("plugin-invoker"));
+        assert!(err.message.contains("300000"), "错误面须含护栏毫秒数");
+        assert!(err.message.contains("p_x") && err.message.contains("t_y"));
     }
 }

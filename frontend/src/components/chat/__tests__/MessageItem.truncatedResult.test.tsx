@@ -1,9 +1,10 @@
 /** @feature FP-T12 前端组件补测 | @ci: frontend-test */
 /**
  * 工具消息「结果已截断」渲染补测（数据面瘦身批次 1.2）：
- * - 结果体是截断标记（预览 + 标记）时，卡内出现「结果已截断…展开加载全文」详情块，
- *   标记对象本身不进渲染内容；
- * - 点展开触发单条回取；回取不可用（无活跃管道）时如实落失败态并保留预览。
+ * - 结果体是截断标记（预览 + 标记）时，卡内出现「结果已截断…显示与 LLM
+ *   所见一致」详情块，标记对象本身不进渲染内容；
+ * - 展开详情块显示与 LLM 所见一致的预览（2026-11-18 用户裁定：展开纯渲染，
+ *   不发起回取请求——缺省不接线 onExpand，拿不到的数据本就不该拿）。
  *
  * mock 边界与 MessageItemToolCard 同族（重依赖子面桩化），被测分支走真实链路。
  */
@@ -61,20 +62,19 @@ describe('MessageItem — 截断结果的预览与展开', () => {
     // 展开卡片看详情
     fireEvent.click(screen.getByText('Search'))
 
-    const label = await screen.findByText(/结果已截断（共 32\.0 KB），展开加载全文/)
+    const label = await screen.findByText(/结果已截断（共 32\.0 KB），显示与 LLM 所见一致/)
     expect(label).toBeInTheDocument()
     expect(screen.queryByText(/__truncated/)).not.toBeInTheDocument()
   })
 
-  it('点展开 → 触发回取；无活跃管道时如实失败并保留预览', async () => {
+  it('点开详情块 → 显示与 LLM 所见一致的预览（纯渲染，不回取全文）', async () => {
     renderWithProviders(<MessageItem message={makeTruncatedToolMessage()} />)
     fireEvent.click(screen.getByText('Search'))
 
-    fireEvent.click(await screen.findByText(/结果已截断（共 32\.0 KB），展开加载全文/))
+    fireEvent.click(await screen.findByText(/结果已截断（共 32\.0 KB），显示与 LLM 所见一致/))
 
-    expect(
-      await screen.findByText('完整结果加载失败，当前显示预览'),
-    ).toBeInTheDocument()
     expect(screen.getByText('{"rows": "预览内容"}')).toBeInTheDocument()
+    // 2026-11-18 裁定撤销了回取接线：通用工具卡的截断展开不再有失败/回退路径
+    expect(screen.queryByText('完整结果加载失败，当前显示预览')).not.toBeInTheDocument()
   })
 })

@@ -226,6 +226,7 @@ export function NotificationItemComponent({
                     'h-full rounded-full transition-all duration-300',
                     progress >= 100 ? 'bg-status-success/100' : 'bg-primary',
                   )}
+                  // eslint-disable-next-line no-restricted-syntax -- 进度条宽度=运行时计算值（progress 钳位百分比），编码纪律动态值例外
                   style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
                 />
               </div>

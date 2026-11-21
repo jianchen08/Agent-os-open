@@ -9,6 +9,7 @@ import 面（llm 内部 + 测试）；出口经共享根显式 API（``_root_api
 from __future__ import annotations
 
 from _root_api import (  # noqa: F401 —— 兼容 shim 全量转出
+    DegenerationDetector,
     StreamEvent,
     StreamTranslator,
     map_finish_reason,

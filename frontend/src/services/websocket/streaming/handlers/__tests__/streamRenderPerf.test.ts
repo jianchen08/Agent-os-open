@@ -155,12 +155,14 @@ describe('流式渲染性能：store 更新开销 vs 历史消息数', () => {
       'equality误判true次数': r.equalityTrueCount,
     })))
 
-    // 趋势断言：append 耗时随消息数增长（数组重建 O(n)）
+    // 趋势断言（2026-11-12 延迟序列化后）：每次 set 不再触发全量序列化，
+    // 单次 append 开销不随历史消息数实质增长（残余的数组重建 O(n) 在 300 条
+    // 量级下 <0.1ms）。旧断言「线性增长」量化的是已被移除的每帧全量序列化。
     const append10 = results[0].appendAvgMs
     const append300 = results[4].appendAvgMs
     console.log(`\nappend 耗时 10条→300条: ${append10.toFixed(3)}ms → ${append300.toFixed(3)}ms`)
-    // 增长倍数应远大于 1（线性增长特征）
-    expect(append300).toBeGreaterThan(append10 * 1.5)
+    // 增长封顶：每帧全量序列化若回归（随条数线性涨），该断言即红
+    expect(append300).toBeLessThan(append10 * 10 + 0.1)
   })
 
   it('模拟"积压爆发"：100条历史 + 60个chunk不flush，测量一次性flush的峰值耗时', () => {

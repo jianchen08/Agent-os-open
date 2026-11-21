@@ -356,19 +356,29 @@ def test_sweep_stale_logs_keeps_unremovable_file(tmp_path: Path, monkeypatch) ->
     assert old_log.exists()
 
 
-def test_unlink_command_log_swallows_os_error(tmp_path: Path, monkeypatch) -> None:
-    mgr = _make_manager(tmp_path)
-    target = tmp_path / "bash_9.log"
+def test_startup_sweep_tolerates_unlink_failure(tmp_path: Path, monkeypatch, caplog) -> None:
+    """清扫：单文件 unlink 失败 → 告警保留现场，不清空其余候选。
+
+    （原 _unlink_command_log 容错语义随宽限删除机制退役，并入启动清扫——
+    unlink 现仅存于 _sweep_stale_logs 的孤儿清理路径。）
+    """
+    target = tmp_path / "logs" / "bash_9.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("x", encoding="utf-8")
+    old = time.time() - 8 * 24 * 3600.0
+    os.utime(target, (old, old))
+
+    real_unlink = Path.unlink
 
     def fake_unlink(self: Path, missing_ok: bool = False) -> None:
         if self == target:
             raise OSError("permission denied")
-        raise AssertionError("不应删除其他文件")
+        return real_unlink(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", fake_unlink)
-    mgr._unlink_command_log(target)
+    _make_manager(tmp_path)  # 构造即清扫
     assert target.exists()
+    assert any("过期日志删除失败" in r.getMessage() for r in caplog.records)
 
 
 def test_write_log_header_failure_does_not_raise(tmp_path: Path) -> None:
@@ -756,7 +766,7 @@ async def test_reap_after_kill_failure_does_not_report_terminated(tmp_path: Path
     info.log_file.write_text("# Bash Command Log\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError):
-        await mgr._reap_after_kill(191, info)
+        await mgr._reap_after_kill(191, info, "orphan")
 
     assert info.status == "running", "reap 失败不得谎报 terminated"
     assert "terminated by watchdog" not in info.log_file.read_text(encoding="utf-8")
@@ -797,7 +807,7 @@ async def test_shutdown_all_swallows_terminate_exception(
     mgr = _make_manager(tmp_path)
     _register(mgr, 222, process=FakeProcess(pid=222))
 
-    async def boom(pid: int, force: bool = False) -> tuple[bool, str | None]:
+    async def boom(pid: int, force: bool = False, reason: str | None = None) -> tuple[bool, str | None]:
         raise RuntimeError("terminator exploded")
 
     monkeypatch.setattr(mgr, "terminate_process", boom)
@@ -819,8 +829,8 @@ async def test_watchdog_kill_without_backend_falls_back_to_terminate(
     await mgr._watchdog_kill(2**22, info, "orphan")
 
     assert info.status == "terminated"
-    # 回退路径走 terminate_process → 日志记 "by user"（非 _reap_after_kill 的 "by watchdog"）
-    assert "# Process terminated by user" in info.log_file.read_text(encoding="utf-8")
+    # 回退路径走 terminate_process：真实原因穿透，终止行 = watchdog+具体原因（ADR 2026-11-07 决策 3）
+    assert "# Process terminated by watchdog (orphan)" in info.log_file.read_text(encoding="utf-8")
 
 
 # ─────────────────────── 看门狗主循环与早退 ───────────────────────

@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-logging
+type: standard
+status: active
+---
+
 # 日志体系（0.2 新架构）
 
 0.2 采用 **Rust 内核 + Python sidecar 插件** 的多进程架构。日志体系的设计目标是：

@@ -31,9 +31,11 @@ import contextlib
 import hashlib
 import importlib.util
 import logging
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -454,17 +456,36 @@ class TestOnSessionStart:
 
 
 class TestPrepareRootRepoLock:
-    def test_lock_contention_ready_repo_skips_init(self, tmp_path: Path) -> None:
-        """外部持锁 + 仓库已就绪 → 复检通过直接跳过，从不取得锁（锁文件原样保留）。"""
+    def test_lock_contention_ready_repo_waits_for_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """外部持锁（即使仓库已就绪）也必须等锁——临界区覆盖建树，不得无锁跳过。"""
         root_path = tmp_path / "ready_repo"
         _git_init(root_path)
         lock_path = _init_lock_path(root_path)
         lock_path.write_text("other-task", encoding="utf-8")
+
+        class _FakeClock:
+            def __init__(self) -> None:
+                self.values = [0.0, 999.0]
+                self.sleeps: list[float] = []
+
+            def monotonic(self) -> float:
+                return self.values.pop(0) if self.values else 999.0
+
+            def sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+
+            def time(self) -> float:
+                return 0.0
+
+        clock = _FakeClock()
+        monkeypatch.setattr(_LIFE, "time", clock)
         try:
             m = _make_manager(tmp_path, tmp_path / "wsroot")
-            m._prepare_root_repo(root_path, "t-ready")
-            assert lock_path.exists()  # 若本调用取得过锁，收尾会 unlink——文件仍在即证明跳过
-            assert "t-ready" not in m._ws_meta_store
+            with pytest.raises(RuntimeError, match="锁等待超时"):
+                m._prepare_root_repo(root_path, "t-ready")
+            assert lock_path.exists()  # 外部锁未被误删
         finally:
             with contextlib.suppress(OSError):
                 lock_path.unlink()
@@ -477,14 +498,17 @@ class TestPrepareRootRepoLock:
 
         class _FakeClock:
             def __init__(self) -> None:
-                self.values = [0.0, 100.0]
+                self.values = [0.0, 999.0]
                 self.sleeps: list[float] = []
 
             def monotonic(self) -> float:
-                return self.values.pop(0) if self.values else 100.0
+                return self.values.pop(0) if self.values else 999.0
 
             def sleep(self, seconds: float) -> None:
                 self.sleeps.append(seconds)
+
+            def time(self) -> float:
+                return 0.0
 
         clock = _FakeClock()
         monkeypatch.setattr(_LIFE, "time", clock)
@@ -516,6 +540,9 @@ class TestPrepareRootRepoLock:
                 self.sleeps.append(seconds)
                 lock_path.unlink()  # 持锁方在等待期内释放
 
+            def time(self) -> float:
+                return 0.0
+
         clock = _ReleasingClock()
         monkeypatch.setattr(_LIFE, "time", clock)
         try:
@@ -528,6 +555,23 @@ class TestPrepareRootRepoLock:
         finally:
             with contextlib.suppress(OSError):
                 lock_path.unlink(missing_ok=True)
+
+    def test_prepare_workspace_holds_lock_during_worktree(self, tmp_path: Path) -> None:
+        """临界区覆盖建树：_create_worktree_root 执行时锁文件仍在位。"""
+        root_path = tmp_path / "scope_repo"
+        _git_init(root_path)
+        m = _make_manager(tmp_path, tmp_path / "wsroot")
+        observed: dict[str, bool] = {}
+        real_create = m._create_worktree_root
+
+        def _spy_create(ws_base: Path, root: Path, task_id: str) -> dict:
+            observed["lock_exists"] = m._prepare_lock_path(root).exists()
+            return real_create(ws_base, root, task_id)
+
+        m._create_worktree_root = _spy_create  # type: ignore[method-assign]
+        meta = m._prepare_workspace_for_worktree(root_path, tmp_path / "wsroot", "t-scope")
+        assert observed["lock_exists"] is True
+        assert Path(meta["path"]).is_dir()
 
     def test_lock_release_failure_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """收尾释放锁失败（OSError）→ 吞掉不外抛，初始化结果不受影响。"""
@@ -551,6 +595,34 @@ class TestPrepareRootRepoLock:
             monkeypatch.undo()
             with contextlib.suppress(OSError):
                 real_unlink(lock_path)
+
+    def test_invalid_timeout_config_falls_back_to_default(self, tmp_path: Path) -> None:
+        """prepare_lock_timeout_seconds 非法值按缺省 180s（钳制面不崩）。"""
+        m = _make_manager(tmp_path, tmp_path / "wsroot")
+        m._config = {"workspace": {"prepare_lock_timeout_seconds": "bad"}}
+        assert m._prepare_lock_timeout_seconds() == 180.0
+
+    def test_lock_is_stale_false_when_stat_fails(self, tmp_path: Path) -> None:
+        """锁文件 stat 失败（不存在/权限）→ 不判陈旧，避免误删活锁。"""
+        m = _make_manager(tmp_path, tmp_path / "wsroot")
+        assert m._lock_is_stale(tmp_path / "missing.lock") is False
+
+    def test_crashed_holder_stale_lock_is_reclaimed(self, tmp_path: Path) -> None:
+        """持锁方崩溃残留的陈旧锁 → 清理后正常取得锁并完成初始化。"""
+        root_path = tmp_path / "stale_repo"
+        root_path.mkdir()
+        lock_path = _init_lock_path(root_path)
+        lock_path.write_text("crashed-task", encoding="utf-8")
+        old = time.time() - 3600
+        os.utime(lock_path, (old, old))
+        m = _make_manager(tmp_path, tmp_path / "wsroot")
+        try:
+            m._prepare_root_repo(root_path, "t-stale")
+            assert (root_path / ".git").exists()
+            assert not lock_path.exists()
+        finally:
+            with contextlib.suppress(OSError):
+                lock_path.unlink(missing_ok=True)
 
 
 class TestRootRepoReady:

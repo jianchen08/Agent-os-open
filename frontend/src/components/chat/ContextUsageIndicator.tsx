@@ -7,12 +7,16 @@
  * 窗口未知（maxTokens <= 0）：圆环仍在（无进度语义的图标槽位，进度弧为空、
  * muted 色），数字不显示——不展示假进度。
  *
- * 浮窗：鼠标悬停或点击弹出（输入框在页面底部，向上弹），展示上下文使用量、
- * 本轮 token 明细（输出/总计/缓存命中）与该管道的累计 token 明细；
- * 悬停移入浮窗不关闭，点击浮窗外/再次点击关闭。
+ * 浮窗：鼠标悬停或点击弹出，展示上下文使用量、本轮 token 明细（输出/总计/
+ * 缓存命中）与该管道的累计 token 明细；悬停移入浮窗不关闭，再次点击关闭。
+ * 定位：浮窗只落在消息流区（MessageList 的 data-chat-flow-region 区域）内——
+ * 以圆环为锚点向上弹出，再按流区四边夹紧（水平跟随圆环，垂直贴流区底部；
+ * 空间不足时收缩并在内部滚动），流区尺寸变化时重算；找不到消息流区（侧栏等
+ * 非聊天场景）回退为锚点上方左对齐的旧定位。
  */
 
-import { useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import { AlertCircle } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/utils/format'
@@ -51,6 +55,33 @@ export interface ContextUsageIndicatorProps {
 /** 圆环尺寸（compact 12 / 常规 16） */
 const RING_SIZE = 16
 const RING_SIZE_COMPACT = 12
+
+/** 浮窗与消息流区边缘的最小间距 */
+const POPOVER_MARGIN = 8
+/** 浮窗与触发圆环之间的默认间距（未受限时由 pb-2 hover 桥承载） */
+const POPOVER_GAP = 8
+/** 浮窗首选宽度（w-64 = 16rem；根字号被主题放大时以实测宽度为准） */
+const POPOVER_WIDTH = 256
+/** 受限定位下指针穿越输入区空隙的移入宽限（毫秒） */
+const POPOVER_CLOSE_DELAY_MS = 220
+
+/** 受限定位结果（视口坐标：消息流区内夹紧后的浮窗落点） */
+interface PopoverLayout {
+  left: number
+  top: number
+  width: number
+  maxHeight: number
+}
+
+/**
+ * 消息流区：聊天容器内带 data-chat-flow-region 的区域（MessageList 各渲染态
+ * 的根节点）。浮窗只允许落在该区域内；找不到（侧栏等非聊天场景）返回 null，
+ * 调用方回退旧定位。
+ */
+function findChatFlowRegion(anchor: HTMLElement): HTMLElement | null {
+  const container = anchor.closest('[data-testid="chat-container"]')
+  return container?.querySelector<HTMLElement>('[data-chat-flow-region]') ?? null
+}
 
 /** token 紧凑格式（主条用）：1000→1.0k，128000→128k，2500000→2.5M */
 export function formatCompactTokens(n: number): string {
@@ -145,7 +176,8 @@ function UsageRing({
 
 /**
  * 用量明细浮窗：上下文使用量 + 本轮明细 + 管道累计明细（段内无数据的行不渲染）。
- * 定位：锚点上方左对齐（输入框位于页面底部，向上弹出）。
+ * 定位：layout 非空 = 消息流区内受限定位（fixed 视口坐标，调用方已夹紧）；
+ * 为空 = 锚点上方左对齐的旧定位（非聊天场景/布局不可测量）。
  */
 function UsagePopover({
   modelName,
@@ -157,6 +189,8 @@ function UsagePopover({
   hitRatio,
   cumulative,
   compressionStatus,
+  layout,
+  panelRef,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -169,21 +203,32 @@ function UsagePopover({
   hitRatio: number
   cumulative?: CumulativeUsage
   compressionStatus?: { status: string; reason?: string }
+  layout: PopoverLayout | null
+  panelRef: RefObject<HTMLDivElement | null>
   onMouseEnter: () => void
   onMouseLeave: () => void
 }) {
   const ratio = maxTokens > 0 ? Math.min(1, currentTokenUsage / maxTokens) : 0
   return (
-    // 外层承载定位与 hover 桥（pb-2 把视觉间隙纳入浮窗 hover 区，鼠标从主条
-    // 移入浮窗不穿缝隙、不闪关）；内层是面板本体
+    // 外层承载定位与 hover 桥：未受限时 pb-2 把视觉间隙纳入浮窗 hover 区
+    // （鼠标从主条移入浮窗不穿缝隙、不闪关）；受限时由调用方按消息流区夹紧
     <div
-      className="absolute bottom-full left-0 z-[100] pb-2"
+      className={cn('z-[100]', layout ? 'fixed' : 'absolute bottom-full left-0 pb-2')}
+      /* eslint-disable-next-line no-restricted-syntax -- 受限定位落点逐次测量，Tailwind 静态类无法承载 */
+      style={layout ? { left: layout.left, top: layout.top } : undefined}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       data-testid="context-usage-popover"
     >
       <div
-        className="border-border bg-[var(--ds-bg-panel,hsl(var(--card)))] w-64 rounded-lg border p-3 shadow-xl"
+        ref={panelRef}
+        className={cn(
+          'border-border bg-[var(--ds-bg-panel,hsl(var(--card)))] rounded-lg border p-3 shadow-xl',
+          layout ? 'overscroll-contain overflow-y-auto' : 'w-64',
+        )}
+        /* eslint-disable-next-line no-restricted-syntax -- 受限定位宽高由消息流区实测决定，Tailwind 静态类无法承载 */
+        style={layout ? { width: layout.width, maxHeight: layout.maxHeight } : undefined}
+        data-testid="context-usage-popover-panel"
       >
       {/* 上下文使用量 */}
       <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide">
@@ -282,6 +327,126 @@ export function ContextUsageIndicator({
   className,
 }: ContextUsageIndicatorProps) {
   const [popoverOpen, setPopoverOpen] = useState(false)
+  const [popoverLayout, setPopoverLayout] = useState<PopoverLayout | null>(null)
+  /** 触发圆环（消息流区定位的锚点与流区查找起点） */
+  const anchorRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  /** 未受限形态下实测的自然宽度（受限后 rect 是夹紧值，不能反推自然宽） */
+  const naturalWidthRef = useRef(0)
+  const closeTimerRef = useRef<number | null>(null)
+
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  /**
+   * 测量触发圆环与消息流区，计算浮窗在流区内的落点：水平跟随圆环并夹在
+   * 左右边界内，垂直贴流区底部；流区放不下时收缩尺寸（面板内部滚动）。
+   * 布局不可测量（未上屏/jsdom）或无消息流区时置空，回退旧定位。
+   */
+  const measurePopoverLayout = useCallback(() => {
+    const anchor = anchorRef.current
+    const panel = panelRef.current
+    if (!anchor || !panel) return
+    const region = findChatFlowRegion(anchor)
+    if (!region) {
+      setPopoverLayout(null)
+      return
+    }
+    const bounds = region.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) {
+      setPopoverLayout(null)
+      return
+    }
+    const anchorRect = anchor.getBoundingClientRect()
+    const panelRect = panel.getBoundingClientRect()
+    if (!popoverLayout && panelRect.width > 0) naturalWidthRef.current = panelRect.width
+    const naturalWidth = naturalWidthRef.current || POPOVER_WIDTH
+    // scrollHeight = 内容自然高（不受当前 maxHeight 夹紧影响），流区变大后能恢复
+    const naturalHeight = panel.scrollHeight || panelRect.height
+
+    const marginLeft = bounds.left + POPOVER_MARGIN
+    const marginRight = bounds.right - POPOVER_MARGIN
+    const marginTop = bounds.top + POPOVER_MARGIN
+    const marginBottom = bounds.bottom - POPOVER_MARGIN
+
+    const width = Math.min(naturalWidth, Math.max(0, marginRight - marginLeft))
+    const maxHeight = Math.min(naturalHeight, Math.max(0, marginBottom - marginTop))
+
+    let left = anchorRect.left
+    if (left + width > marginRight) left = marginRight - width
+    if (left < marginLeft) left = marginLeft
+
+    const bottom = Math.min(anchorRect.top - POPOVER_GAP, marginBottom)
+    let top = bottom - maxHeight
+    if (top < marginTop) top = marginTop
+
+    const next: PopoverLayout = {
+      left: Math.round(left),
+      top: Math.round(top),
+      width: Math.round(width),
+      maxHeight: Math.round(maxHeight),
+    }
+    setPopoverLayout((prev) =>
+      prev &&
+      prev.left === next.left &&
+      prev.top === next.top &&
+      prev.width === next.width &&
+      prev.maxHeight === next.maxHeight
+        ? prev
+        : next,
+    )
+  }, [popoverLayout])
+
+  /** 打开期间每次渲染后重新测量：内容增减/主题字号变化都重新夹紧 */
+  useLayoutEffect(() => {
+    if (!popoverOpen) return
+    measurePopoverLayout()
+  })
+
+  /** 视口/消息流区/锚点尺寸变化时重算（窗口缩放、输入区展开、侧栏折叠等） */
+  useEffect(() => {
+    if (!popoverOpen) return
+    const anchor = anchorRef.current
+    const region = anchor ? findChatFlowRegion(anchor) : null
+    const handleViewportChange = () => measurePopoverLayout()
+    window.addEventListener('resize', handleViewportChange)
+    let observer: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(handleViewportChange)
+      if (region) observer.observe(region)
+      if (anchor) observer.observe(anchor)
+    }
+    return () => {
+      window.removeEventListener('resize', handleViewportChange)
+      observer?.disconnect()
+    }
+  }, [popoverOpen, measurePopoverLayout])
+
+  /** 卸载清理关闭定时器 */
+  useEffect(() => cancelScheduledClose, [cancelScheduledClose])
+
+  const openPopover = useCallback(() => {
+    cancelScheduledClose()
+    setPopoverOpen(true)
+  }, [cancelScheduledClose])
+
+  const schedulePopoverClose = useCallback(() => {
+    cancelScheduledClose()
+    if (!popoverLayout) {
+      setPopoverOpen(false)
+      return
+    }
+    // 受限定位时浮窗底边被夹在消息流区内，与触发圆环之间隔着输入区：
+    // 指针需穿越该空隙，延迟关闭留出移入浮窗的时间
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setPopoverOpen(false)
+    }, POPOVER_CLOSE_DELAY_MS)
+  }, [cancelScheduledClose, popoverLayout])
 
   if (!modelName || modelName === 'unknown') {
     return (
@@ -315,6 +480,7 @@ export function ContextUsageIndicator({
   return (
     <div className={cn('relative', className)}>
       <div
+        ref={anchorRef}
         className={cn(
           'bg-primary/10 border-primary/20 min-w-0 cursor-pointer items-center gap-2 rounded-lg border',
           compact
@@ -323,9 +489,12 @@ export function ContextUsageIndicator({
         )}
         data-testid="context-usage-indicator"
         aria-expanded={popoverOpen}
-        onClick={() => setPopoverOpen((v) => !v)}
-        onMouseEnter={() => setPopoverOpen(true)}
-        onMouseLeave={() => setPopoverOpen(false)}
+        onClick={() => {
+          cancelScheduledClose()
+          setPopoverOpen((v) => !v)
+        }}
+        onMouseEnter={openPopover}
+        onMouseLeave={schedulePopoverClose}
       >
         <UsageRing
           ratio={ratio}
@@ -358,21 +527,29 @@ export function ContextUsageIndicator({
             </span>
           ))}
       </div>
-      {popoverOpen && (
-        <UsagePopover
-          modelName={modelName}
-          currentTokenUsage={currentTokenUsage}
-          maxTokens={maxTokens}
-          totalTokens={totalTokens}
-          completionTokens={completionTokens}
-          cachedTokens={cachedTokens}
-          hitRatio={hitRatio}
-          cumulative={cumulative}
-          compressionStatus={compressionStatus}
-          onMouseEnter={() => setPopoverOpen(true)}
-          onMouseLeave={() => setPopoverOpen(false)}
-        />
-      )}
+      {popoverOpen &&
+        (() => {
+          const popover = (
+            <UsagePopover
+              modelName={modelName}
+              currentTokenUsage={currentTokenUsage}
+              maxTokens={maxTokens}
+              totalTokens={totalTokens}
+              completionTokens={completionTokens}
+              cachedTokens={cachedTokens}
+              hitRatio={hitRatio}
+              cumulative={cumulative}
+              compressionStatus={compressionStatus}
+              layout={popoverLayout}
+              panelRef={panelRef}
+              onMouseEnter={openPopover}
+              onMouseLeave={schedulePopoverClose}
+            />
+          )
+          // 受限定位 portal 到 body：不被聊天容器/输入区的 overflow 裁剪；
+          // 未受限（非聊天场景）保持原地的绝对定位
+          return popoverLayout ? createPortal(popover, document.body) : popover
+        })()}
     </div>
   )
 }

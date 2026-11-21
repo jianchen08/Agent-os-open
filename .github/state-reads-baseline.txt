@@ -1,0 +1,6 @@
+# 插件 state.reads 漏声明存量基线（双向棘轮：基线外新增=红，条目失效=红须同刀摘除）
+# 执法器 scripts/check_state_reads_declaration.py；格式 <plugin目录名>:<key>
+# 语义：内核按 manifest state.reads 切片投喂，未声明键插件恒读不到（静默缺省无日志）
+# 存量为历史欠账：新增漏声明即红，存量随触碰逐插件清偿
+# 2026-11-18 清偿：state_marker_parse / todo_track 全部读点已随 plugin.json
+#     reads 声明补齐（内存与序列化优化批次），13 条存量欠账同刀摘除，基线归零。

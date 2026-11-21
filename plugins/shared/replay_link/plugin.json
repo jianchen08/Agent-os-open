@@ -1,0 +1,36 @@
+{
+  "id": "replay_link",
+  "name": "ReplayLink",
+  "description": "回放链接：会话回放密文的服务端存取端点（密文上传/取回；密钥不进服务端，随 URL fragment 由前端 WebCrypto AES-256-GCM 加密）",
+  "version": "0.1.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "http_endpoints": [
+    {
+      "route_id": "replay_link_create",
+      "method": "POST",
+      "path": "/ext/replay_link/create",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "创建回放链接记录：{ciphertext_b64, iv_b64} → {id}（密文入服务端、密钥不进）"
+    },
+    {
+      "route_id": "replay_link_get",
+      "method": "GET",
+      "path": "/ext/replay_link/get",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "取回回放记录：?id=<id> → {ciphertext_b64, iv_b64}（auth:none——分享链接接收方未登录，密钥在 URL fragment 不经服务端）"
+    }
+  ],
+  "capabilities": {},
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light"
+}

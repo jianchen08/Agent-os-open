@@ -1,11 +1,16 @@
 # @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
-"""read_log 双路径测试。
+"""log 工具（block=false）双路径测试。
 
-read_log 应在两种场景都能工作：
+log(block=false) 应在两种场景都能工作：
 1. 进程活跃（在 active_processes）→ 从内存读，含实时 status
-2. 进程已清（completed 后被 _on_output_task_done 清理）→ 按 pid 算路径读磁盘
+2. 进程已清（completed 后被 _on_output_task_done 清理）→ 凭 handle 解码 pid
+   定位磁盘日志读
 
-同时验证 LOG_FILE_NOT_FOUND 失败路径和 command 解析（用于 LogCompressor 类型推断）。
+同时验证 LOG_FILE_NOT_FOUND 失败路径和 command 解析（用于 LogCompressor 类型推断
++ terminal 卡 render binding 的 result.command 字段）。
+
+2026-11-07 四工具重构（ADR T2）：read_log action 退役 → log(block=false)；
+pid 参数退役 → handle。
 """
 
 from __future__ import annotations
@@ -13,9 +18,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from agentos_plugin_sdk.process_runtime import ProcessInfo
-from agentos_plugin_sdk.process_runtime import ProcessManager
-from tool import BashTool
+from tool import BashTool, encode_handle
+
+from agentos_plugin_sdk.process_runtime import ProcessInfo, ProcessManager
 
 pytestmark = pytest.mark.unit
 
@@ -62,7 +67,7 @@ def test_read_log_by_pid_io_error_raises_process_log_read_error(pm, tmp_path, mo
 
     _write_log_file(tmp_path / "logs", pid=55501, command="echo hi", content="out\n")
     monkeypatch.setattr(
-        builtins, "open", lambda *a, **k: (_ for _ in ()).throw(OSError("disk on fire"))
+        builtins, "open", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk on fire"))
     )
     # except 块会 logger.warning：全量车道下 root logger 可能挂着 FileHandler，
     # 警告自身再触发 open 会顶掉被测异常——静音被测模块 logger，断言只看传播。
@@ -123,13 +128,13 @@ def test_read_log_by_pid_strips_header_lines(pm, tmp_path):
 
 
 # ============================================================
-# _handle_read_log 双路径
+# log 工具（block=false）双路径
 # ============================================================
 
 
 @pytest.mark.asyncio
 async def test_read_log_active_process_from_memory(tool, tmp_path):
-    """进程活跃（在 active_processes）→ 走内存路径，返回实时 status。"""
+    """进程活跃（在 active_processes）→ 走内存路径，返回实时 status + command。"""
     log_file = tmp_path / "logs" / "bash_42.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     log_file.write_text("running output line\n", encoding="utf-8")
@@ -144,11 +149,11 @@ async def test_read_log_active_process_from_memory(tool, tmp_path):
     )
     tool.process_manager.active_processes[42] = info
 
-    result = await tool.execute({"action": "read_log", "pid": 42})
+    result = await tool.read_log({"handle": encode_handle(42, None)})
 
     assert result.success
     assert result.output["status"] == "running"
-    assert result.output["pid"] == 42
+    assert result.output["command"] == "some running cmd"
     assert "running output line" in result.output["output"]
     assert result.metadata["source"] == "memory"
 
@@ -165,31 +170,31 @@ async def test_read_log_cleared_process_from_disk(tool, tmp_path):
     # 确保 active_processes 里没有这个 pid（模拟已被即时清理）
     assert 7777 not in tool.process_manager.active_processes
 
-    result = await tool.execute({"action": "read_log", "pid": 7777})
+    result = await tool.read_log({"handle": encode_handle(7777, None)})
 
     assert result.success
     assert result.output["status"] == "completed"  # 磁盘读到的都是已结束的
-    assert result.output["pid"] == 7777
+    assert result.output["command"] == "grep -r foo .", "磁盘路径 command 供 terminal 卡 binding"
     assert "foo = 1" in result.output["output"]
     assert result.metadata["source"] == "file"
 
 
 @pytest.mark.asyncio
-async def test_read_log_missing_pid_and_no_file_returns_failure(tool):
-    """pid 不存在且无日志文件 → LOG_FILE_NOT_FOUND 失败。"""
-    result = await tool.execute({"action": "read_log", "pid": 88888})
+async def test_read_log_missing_handle_and_no_file_returns_failure(tool):
+    """handle 无对应进程且无日志文件 → LOG_FILE_NOT_FOUND 失败。"""
+    result = await tool.read_log({"handle": encode_handle(88888, None)})
 
     assert not result.success
     assert result.error_code == "LOG_FILE_NOT_FOUND"
 
 
 @pytest.mark.asyncio
-async def test_read_log_no_pid_returns_failure(tool):
-    """没传 pid → MISSING_PID 失败。"""
-    result = await tool.execute({"action": "read_log"})
+async def test_read_log_no_handle_returns_failure(tool):
+    """没传 handle → MISSING_HANDLE 失败。"""
+    result = await tool.read_log({})
 
     assert not result.success
-    assert result.error_code == "MISSING_PID"
+    assert result.error_code == "MISSING_HANDLE"
 
 
 # ============================================================

@@ -243,9 +243,9 @@ class TestSwitchThenExecuteE2E:
                 # 显式档必须仍然命中。
                 "pipeline_id": "volatile-pipe-x",
                 "session_id": "thread-s1",
-                "raw_tool_calls": [{"name": "bash_execute", "args": {"command": command}}],
+                "raw_tool_calls": [{"name": "bash", "args": {"command": command}}],
                 "execution_contexts": [
-                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": task_isolated}
+                    {"provider": "host", "tool_name": "bash", "task_isolated": task_isolated}
                 ],
             },
             _services={},
@@ -632,10 +632,10 @@ class TestSessionKeyContract:
                 "session_id": "thread-s1",
                 "pipeline_id": "volatile-pipe-z",
                 "raw_tool_calls": [
-                    {"name": "bash_execute", "args": {"command": "rm -rf /x"}}
+                    {"name": "bash", "args": {"command": "rm -rf /x"}}
                 ],
                 "execution_contexts": [
-                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": True}
+                    {"provider": "host", "tool_name": "bash", "task_isolated": True}
                 ],
             },
             _services={},

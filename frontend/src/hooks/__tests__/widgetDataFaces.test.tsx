@@ -8,12 +8,12 @@
  */
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { useWidgetEventValue } from '@/hooks/useWidgetEventValue'
-import { useWidgetEventStore } from '@/stores/widgetEventStore'
-import { useWorkspaceTabs } from '@/hooks/useWorkspaceTabs'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { usePipelineLiveUsage } from '@/hooks/usePipelineLiveUsage'
+import { useWidgetEventValue } from '@/hooks/useWidgetEventValue'
+import { useWorkspaceTabs } from '@/hooks/useWorkspaceTabs'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useWidgetEventStore } from '@/stores/widgetEventStore'
 
 describe('useWidgetEventValue — widget_event 推送读面', () => {
   beforeEach(() => {

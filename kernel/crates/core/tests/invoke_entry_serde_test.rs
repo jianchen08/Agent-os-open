@@ -86,6 +86,7 @@ fn test_none_invoke_entry_omitted_in_serialization() {
         enabled: None,
         activation: None,
         provides: None,
+        visibility: Default::default(),
         invoke_entry: None,
         persistent_fields: vec![],
         export_fields: vec![],

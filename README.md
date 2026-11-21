@@ -15,7 +15,7 @@
 
 ## 📑 目录
 
-- [项目简介](#-项目简介) · [演示视频](#-演示视频) · [产品界面](#-产品界面) · [核心亮点](#-核心亮点) · [项目规模](#-项目规模)
+- [项目简介](#-项目简介) · [演示视频](#-演示视频) · [核心亮点](#-核心亮点)
 - [快速开始](#-快速开始)（[Windows](#方式一windows-一键启动推荐) / [Linux·macOS](#方式二linux--macos-一键启动) / [手动开发](#方式三手动开发模式)）
 - [多实例配置](#跨设备--多实例配置说明)
 - [文档导航](#-文档导航) · [镜像仓库](#-镜像仓库)
@@ -47,15 +47,6 @@
 
 > **构建说明**：内核 `cd kernel && cargo build --release --bin agentos-kernel`；每个 Python 插件目录自带 `pyproject.toml`，用 `uv sync --project <插件目录>` 建独立 venv；native cdylib 插件（tool_core / sensitive_checker / spill_guard）需逐插件 `cargo build --release` 并复制产物到插件目录根（启动脚本首次运行会自动完成，手动执行为 `python scripts/check_native_artifacts_sync.py --build`）；前端在仓库根 `pnpm install`（pnpm workspace，锁文件 `pnpm-lock.yaml`）。启动脚本 `start_web_02.*` 一键完成上述步骤。
 
-### 📊 项目规模
-
-- **Rust 内核**：约 9.5 万行（`kernel/`，其中约 4.0 万行为 Rust 测试——`tests/` 目录 + 内联 `#[cfg(test)]` 模块）
-- **Python 插件**：约 16.8 万行（`plugins/`；在用插件数与 `plugin.json` 清单份数以实际盘面为准）
-- **前端代码**：约 14.3 万行（`frontend/src/`）
-- **Python 测试**：约 12.4 万行（`tests/` + 插件目录就地测试）
-- **工具插件**：自研工具插件 + 预置外部 MCP 接入清单（manifest 份数与工具声明数以实际盘面为准；预置外部 MCP 现仅 1 台，另可零代码接入任意 MCP 外部工具）
-- **接入端**：Web 前端（直连内核）
-
 ---
 
 ## 🎬 演示视频
@@ -63,6 +54,10 @@
 <a href="https://www.bilibili.com/video/BV1wrbF6jEJv">
   <img src="https://img.shields.io/badge/▶_观看演示视频-B站-FF69B4?style=for-the-badge&logo=bilibili&logoColor=white" alt="灵汐 AgentOS 演示视频" />
 </a>
+
+> 点击上方图片在 B站 观看简单演示视频。
+
+---
 
 ## ✨ 核心亮点
 

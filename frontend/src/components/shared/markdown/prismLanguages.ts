@@ -17,7 +17,6 @@
  *   抛错开销与控制台噪声）。未注册语言的语义 = 无高亮纯文本，代码本体完整可复制。
  */
 
-import PrismLight from 'react-syntax-highlighter/dist/esm/prism-light'
 import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
 import batch from 'react-syntax-highlighter/dist/esm/languages/prism/batch'
 import c from 'react-syntax-highlighter/dist/esm/languages/prism/c'
@@ -54,10 +53,11 @@ import scss from 'react-syntax-highlighter/dist/esm/languages/prism/scss'
 import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql'
 import swift from 'react-syntax-highlighter/dist/esm/languages/prism/swift'
 import toml from 'react-syntax-highlighter/dist/esm/languages/prism/toml'
-import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
 import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
 import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
 import zig from 'react-syntax-highlighter/dist/esm/languages/prism/zig'
+import PrismLight from 'react-syntax-highlighter/dist/esm/prism-light'
 
 /**
  * 注册的 Prism 语言模块

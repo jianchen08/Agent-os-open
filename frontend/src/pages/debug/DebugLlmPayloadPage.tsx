@@ -7,15 +7,15 @@
  * 点击条目展开逐条消息渲染；原始 JSON 可折叠查看。
  */
 
-import { useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useState, useEffect, useCallback } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { useDiagnosticsSettingsQuery, useLlmPayloadDiagQuery } from '@/hooks/queries/useDebugQueries'
 import { getPayloadDiagFile, updateDiagnosticsSettings } from '@/services/api/llmPayload'
-import type { PayloadDiagItem } from '@/services/api/llmPayload'
 import { queryKeys } from '@/services/query/queryKeys'
+import type { PayloadDiagItem } from '@/services/api/llmPayload'
 
 /** LLM content 分段（OpenAI 视觉块形态 {type:'text', text}） */
 interface ContentBlock {

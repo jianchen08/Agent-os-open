@@ -366,3 +366,52 @@ def test_scan_importform_top_level(tmp_path):
     mods = _plugin_top_third_party(d)
     assert "PIL" in mods
     assert "helper" not in mods, "相对导入非第三方依赖"
+
+
+# ── 共享 venv 身份（pyvenv.cfg）供给防线 ─────────────────
+
+
+def _fake_shared_env(tmp_path: Path, *, with_cfg: bool) -> Path:
+    """最小共享 venv：site-packages 目录 + 可选 pyvenv.cfg。"""
+    venv = tmp_path / "_host" / ".venv"
+    (venv / "Lib" / "site-packages").mkdir(parents=True)
+    if with_cfg:
+        (venv / "pyvenv.cfg").write_text("version_info = 3.12.12\n", encoding="utf-8")
+    return venv
+
+
+def test_main_warns_when_shared_venv_cfg_missing(tmp_path, monkeypatch, capsys):
+    """缺 pyvenv.cfg：审计模式放行但必须告警（venv 内包全部失效的根因）。"""
+    venv = _fake_shared_env(tmp_path, with_cfg=False)
+    monkeypatch.setattr(B, "SHARED_ENV", venv)
+    monkeypatch.setattr(B, "REPO", tmp_path)  # 无插件扫描面，只验共享环境判据
+
+    monkeypatch.setattr(sys, "argv", ["bootstrap_plugin_envs"])
+    assert B.main() == 0
+    captured = capsys.readouterr()
+    assert "pyvenv.cfg" in (captured.out + captured.err)
+
+
+def test_main_apply_fails_closed_when_shared_venv_cfg_missing(tmp_path, monkeypatch, capsys):
+    """--apply 遇坏共享环境 fail-closed（不得顺手删/建 junction 污染）。"""
+    venv = _fake_shared_env(tmp_path, with_cfg=False)
+    monkeypatch.setattr(B, "SHARED_ENV", venv)
+    monkeypatch.setattr(B, "REPO", tmp_path)
+
+    monkeypatch.setattr(sys, "argv", ["bootstrap_plugin_envs", "--apply"])
+    assert B.main() == 1
+    assert "pyvenv.cfg" in capsys.readouterr().err
+
+
+def test_main_json_reports_shared_env_warning(tmp_path, monkeypatch, capsys):
+    """--json 消费面同样带出告警（打包管线可判）。"""
+    import json as _json
+
+    venv = _fake_shared_env(tmp_path, with_cfg=False)
+    monkeypatch.setattr(B, "SHARED_ENV", venv)
+    monkeypatch.setattr(B, "REPO", tmp_path)
+
+    monkeypatch.setattr(sys, "argv", ["bootstrap_plugin_envs", "--json"])
+    assert B.main() == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert any("pyvenv.cfg" in w for w in payload["warnings"])

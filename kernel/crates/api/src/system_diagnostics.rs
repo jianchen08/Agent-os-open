@@ -394,6 +394,93 @@ pub async fn system_task_dump_handler() -> axum::Json<serde_json::Value> {
     }))
 }
 
+// ── 重启前内存现场快照 ────────────────────────────────────────
+
+/// 快照文件名前缀（与 `kernel.log.*` 同目录；完整名 = 前缀 + UTC 时间戳）。
+pub const MEMORY_SNAPSHOT_PREFIX: &str = "memory_snapshot";
+
+/// 落盘一份内存现场快照（水位自愈/重启前调用）。
+///
+/// 内容三项：分配器全字段（`mi_collect(true)` 前后各一份，差额即分配器滞留量）、
+/// 活内存结构分解（[`build_memory_breakdown`] 同款）、任务级活动转储。
+///
+/// 动因：分钟级总量日志只能证明 committed 涨了，涨在谁身上必须靠分解面；
+/// 而分解面此前只有人工调端点时才存在，阈值触发的重启现场全丢。
+///
+/// 写失败仅告警（观测面不反噬重启主流程）；返回落盘路径。
+pub async fn dump_memory_snapshot(
+    state: &AppState,
+    log_dir: &std::path::Path,
+    reason: &str,
+) -> Option<std::path::PathBuf> {
+    let before = crate::allocator::snapshot_stats();
+    let breakdown = build_memory_breakdown(state).await;
+    let tasks = agentos_core::task_activity::global_registry().snapshot();
+    // force collect：把"页空了但没人结算"的部分先还掉，前后差额即分配器滞留
+    // ——与分解面之和对照，可分"结构囤积 vs 分配器滞留"。
+    crate::allocator::collect_now();
+    let after = crate::allocator::snapshot_stats();
+    let payload = serde_json::json!({
+        "schema": 1,
+        "captured_at": chrono::Utc::now().to_rfc3339(),
+        "reason": reason,
+        "pid": std::process::id(),
+        "memstats_before_collect": before,
+        "memstats_after_collect": after,
+        "memory_breakdown": breakdown,
+        "task_dump": serde_json::json!({"count": tasks.len(), "tasks": tasks}),
+    });
+    match write_memory_snapshot(log_dir, &payload) {
+        Ok(path) => {
+            tracing::info!(
+                target: "system-diagnostics",
+                path = %path.display(),
+                reason,
+                "内存现场快照已落盘"
+            );
+            Some(path)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "system-diagnostics",
+                error = %e,
+                reason,
+                "内存现场快照落盘失败（不阻断重启流程）"
+            );
+            None
+        }
+    }
+}
+
+/// 快照落盘（IO 层）：`<dir>/memory_snapshot_<UTC yyyymmdd_HHMMSS_mmm>.json`。
+pub fn write_memory_snapshot(
+    log_dir: &std::path::Path,
+    payload: &serde_json::Value,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(log_dir)?;
+    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f");
+    let path = log_dir.join(format!("{MEMORY_SNAPSHOT_PREFIX}_{stamp}.json"));
+    let body = serde_json::to_vec_pretty(payload)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+// ── 启动装载清单（分级单副本可观察面）─────────────────────────
+
+/// GET /api/v1/system/plugin-load-manifest — 启动装载清单（「我在跑哪份」）。
+///
+/// boot 从实例启动配置三根 + 分级清单构建、发布到全局快照（ADR
+/// 2026-11-07-plugin-tiered-single-copy-model §2.3）：每插件 {路径, 版本,
+/// 级别 tier1/tier2, 来源根} + 三根与配置文件自身路径。boot 未发布过（理论上
+/// 不可达——装载清单发布先于 HTTP serve）→ `manifest: null`（诚实缺数，不猜）。
+pub async fn system_plugin_load_manifest_handler() -> axum::Json<serde_json::Value> {
+    let manifest = agentos_plugin_loader::boot_load_manifest_snapshot();
+    axum::Json(serde_json::json!({
+        "manifest": manifest,
+    }))
+}
+
 // ── mimalloc 快照差分 ────────────────────────────────────────
 
 /// 已记录的差分基线（POST 记录，GET 消费；进程内单基线——后记覆盖前记）。
@@ -689,6 +776,7 @@ mod tests {
         for (method, uri) in [
             ("GET", "/api/v1/system/memory-breakdown"),
             ("GET", "/api/v1/system/task-dump"),
+            ("GET", "/api/v1/system/plugin-load-manifest"),
             ("GET", "/api/v1/system/memstats/snapshot"),
             ("POST", "/api/v1/system/memstats/snapshot"),
         ] {
@@ -718,6 +806,7 @@ mod tests {
         for (method, uri) in [
             ("GET", "/api/v1/system/memory-breakdown"),
             ("GET", "/api/v1/system/task-dump"),
+            ("GET", "/api/v1/system/plugin-load-manifest"),
             ("GET", "/api/v1/system/memstats/snapshot"),
             ("POST", "/api/v1/system/memstats/snapshot"),
         ] {
@@ -761,6 +850,87 @@ mod tests {
             v["process"]["process_rss_bytes"].is_number()
                 || v["process"]["process_rss_bytes"].is_null()
         );
+    }
+
+    // ── 启动装载清单（分级单副本可观察面）──
+
+    #[tokio::test]
+    async fn plugin_load_manifest_endpoint_serves_published_snapshot() {
+        let app = app_with_seeded_admin().await;
+        let token = login_token(&app).await;
+
+        // boot 未发布过 → manifest: null（诚实缺数，不猜）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/system/plugin-load-manifest")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 262_144)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        if v["manifest"].is_null() {
+            // 未发布形态合法（本进程尚未 boot）；发布后必须给出完整清单
+        } else {
+            assert!(v["manifest"]["plugins"].is_array());
+        }
+
+        // 发布快照 → 端点原样透出（路径/版本/级别/来源根字段齐）
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("plugins/shared");
+        std::fs::create_dir_all(&root).unwrap();
+        agentos_plugin_loader::publish_boot_load_manifest(
+            agentos_plugin_loader::BootLoadManifest {
+                schema: 1,
+                config_path: tmp.path().join("config/kernel/instance.yaml"),
+                tier1_root: root.clone(),
+                tier2_root: root.clone(),
+                shared_root: root.clone(),
+                plugins: vec![agentos_plugin_loader::PluginLoadEntry {
+                    plugin_id: "diag_plug".into(),
+                    version: "1.0.0".into(),
+                    tier: agentos_plugin_loader::PluginTier::Tier2,
+                    path: root.join("diag_plug"),
+                    source_root: "tier1",
+                }],
+            },
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/system/plugin-load-manifest")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 262_144)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let m = &v["manifest"];
+        assert_eq!(m["schema"], 1);
+        assert!(
+            m["tier1_root"].is_string()
+                && m["tier2_root"].is_string()
+                && m["shared_root"].is_string()
+        );
+        let entry = &m["plugins"][0];
+        assert_eq!(entry["plugin_id"], "diag_plug");
+        assert_eq!(entry["version"], "1.0.0");
+        assert_eq!(entry["tier"], "tier2");
+        assert_eq!(entry["source_root"], "tier1");
+        assert!(entry["path"].is_string());
     }
 
     // ── 快照差分 ──
@@ -867,5 +1037,71 @@ mod tests {
                 .any(|t| t["name"] == name.as_str()),
             "注销后任务不得残留"
         );
+    }
+
+    // ── 重启前内存现场快照 ──
+
+    #[tokio::test]
+    async fn dump_memory_snapshot_writes_memstats_breakdown_and_tasks() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentos-mem-snapshot-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let state = AppState::new();
+        let path = dump_memory_snapshot(&state, &dir, "unit-test-reason")
+            .await
+            .expect("快照必须落盘");
+
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with(&format!("{MEMORY_SNAPSHOT_PREFIX}_")),
+            "文件名必须带前缀: {name}"
+        );
+        assert!(name.ends_with(".json"), "文件名必须 .json: {name}");
+
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("读回快照失败")).unwrap();
+        assert_eq!(v["reason"], "unit-test-reason");
+        assert_eq!(v["pid"].as_u64().unwrap(), std::process::id() as u64);
+        assert!(v["captured_at"].as_str().is_some_and(|s| !s.is_empty()));
+        // 分配器快照两段都在（字段缺失为 null，键必须在——诚实缺数不猜测）
+        assert!(v["memstats_before_collect"].is_object());
+        assert!(v["memstats_after_collect"].is_object());
+        // 分解面必定含 pipeline_state 等持有点（AppState::new 空态也有固定条目）
+        let items = v["memory_breakdown"]["items"]
+            .as_array()
+            .expect("items 数组");
+        assert!(
+            items.iter().any(|i| i["name"] == "pipeline_state"),
+            "分解面必须含 pipeline_state 持有点"
+        );
+        assert!(v["memory_breakdown"]["total_estimated_bytes"].is_number());
+        // 任务转储计数与数组长度一致
+        assert_eq!(
+            v["task_dump"]["count"].as_u64().unwrap() as usize,
+            v["task_dump"]["tasks"].as_array().unwrap().len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_memory_snapshot_surfaces_io_error() {
+        // 目标路径被普通文件占住：create_dir_all 必失败，错误上抛给调用方降级。
+        let base = std::env::temp_dir().join(format!(
+            "agentos-mem-snapshot-bad-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&base);
+        std::fs::write(&base, b"occupied").unwrap();
+        assert!(
+            write_memory_snapshot(&base, &json!({"schema": 1})).is_err(),
+            "不可写路径必须返回 Err（调用方据此只告警不阻断重启）"
+        );
+        let _ = std::fs::remove_file(&base);
     }
 }

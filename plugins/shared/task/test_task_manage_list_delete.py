@@ -520,6 +520,34 @@ async def test_elapsed_seconds_calculation(tool: TaskTool, monkeypatch: Any) -> 
     assert TaskTool._calc_elapsed_seconds(running) == 60.0
 
 
+async def test_elapsed_seconds_never_negative(tool: TaskTool, monkeypatch: Any) -> None:
+    """耗时下界恒 0：起点晚于终点 / 起点在未来（时钟串不同源）都不得出现负值。
+
+    实测缺陷：state 聚合行起点与任务域 completed_at 由不同写面落，返工重开/
+    恢复会把起点推到终点之后；naive 串按 UTC 归一也可能让起点落在当前时刻
+    之后——两条路径都曾算出负数（外部表现 -26.4s）。负耗时对任何消费方都
+    无意义，按 0 收敛并留痕。
+    """
+    import datetime as dt
+
+    from task_types import TaskModel
+
+    inverted = TaskModel(
+        started_at="2026-08-25T10:00:30", completed_at="2026-08-25T10:00:00"
+    )
+    assert TaskTool._calc_elapsed_seconds(inverted) == 0.0, "起点晚于终点 → 0 而非负数"
+
+    future = TaskModel(started_at="2026-08-25T10:00:00")
+    _set_utc_fake_now(monkeypatch, dt.datetime(2026, 8, 25, 9, 0, 0, tzinfo=dt.UTC))
+    assert TaskTool._calc_elapsed_seconds(future) == 0.0, "起点晚于当前时刻 → 0 而非负数"
+
+    # 正常值不受收敛影响（防"一刀切成 0"式拟合）
+    normal = TaskModel(
+        started_at="2026-08-25T10:00:00", completed_at="2026-08-25T10:00:30"
+    )
+    assert TaskTool._calc_elapsed_seconds(normal) == 30.0
+
+
 def _run(run_id: str, created_at: str, *, status: str = "completed", ended_at: str | None = None) -> dict[str, Any]:
     """内核 pipeline-runs.list_by_pipeline 返回形状（RunRecord serde JSON）。"""
     d: dict[str, Any] = {
@@ -654,6 +682,59 @@ async def test_elapsed_from_runs_reader_missing_or_fails(tool: TaskTool) -> None
     assert await tool._calc_elapsed_from_runs("") is None
     _task_mod.set_runs_reader(AsyncMock(side_effect=RuntimeError("kernel down")))
     assert await tool._calc_elapsed_from_runs("pipe-run") is None
+
+
+async def test_elapsed_from_runs_never_negative_on_stale_ended_at(
+    tool: TaskTool, monkeypatch: Any
+) -> None:
+    """非终态 run 带残留 ended_at → 不得算出负耗时（2026-11-16 实证 -26.4s）。
+
+    根因：内核 record_run_start 覆盖写 run_started_at/run_status，
+    不清上一轮 run_ended_at（store.rs record_run_start）。于是新一轮 run 的
+    「起点=新」「终点=旧」，max(ended)-min(created) 为负。契约：非终态 run
+    的 ended_at 不作终点，改用当前时间。
+    """
+    import datetime as dt
+
+    _set_runs(
+        tool,
+        [
+            # 新一轮（running）：起点比残留终点晚 26.4 秒——旧实现产出 -26.4
+            _run(
+                "r2",
+                "2026-08-25T10:00:26.400000+00:00",
+                status="running",
+                ended_at="2026-08-25T10:00:00+00:00",
+            ),
+        ],
+    )
+    _set_utc_fake_now(monkeypatch, dt.datetime(2026, 8, 25, 10, 2, 26, 400000, tzinfo=dt.UTC))
+    elapsed = await tool._calc_elapsed_from_runs("pipe-run")
+    assert elapsed is not None
+    assert elapsed >= 0.0, "耗时不得为负（残留 ended_at 不得当终点）"
+    # 运行中按 now - started：10:02:26.4 - 10:00:26.4 = 120s
+    assert elapsed == 120.0
+
+
+async def test_elapsed_from_runs_terminal_diff_clamped_non_negative(
+    tool: TaskTool,
+) -> None:
+    """全终态但终点早于起点（脏数据）→ 归零而非负数。
+
+    防拟合：另给一组正常终态（终点晚于起点）断言正常差值仍算出，
+    说明归零不是无条件发生。
+    """
+    _set_runs(
+        tool,
+        [_run("r1", "2026-08-25T10:01:00", status="completed", ended_at="2026-08-25T10:00:00")],
+    )
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 0.0
+
+    _set_runs(
+        tool,
+        [_run("r2", "2026-08-25T10:00:00", status="completed", ended_at="2026-08-25T10:01:30")],
+    )
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 90.0
 
 
 async def test_elapsed_from_runs_all_created_at_missing(tool: TaskTool) -> None:
@@ -967,15 +1048,28 @@ async def test_retry_permission_denied_direct(tool: TaskTool, svc: Any) -> None:
 
 
 async def test_resume_with_none_metadata_and_message(tool: TaskTool) -> None:
-    """metadata=None 的 stopped 任务带 message 恢复 → 不崩且 message_injected。"""
+    """metadata=None 的 stopped 任务带 message → 不崩 + 强制发送 + message_injected。
+
+    2026-11-14：带 message 的 continue 走强制发送通道（停当前 → 投递 → 触发新
+    一轮），metadata 记账保留但不再是唯一动作。
+    """
     from task_types import TaskModel, TaskStatus
 
     task = TaskModel(id="t-meta", title="无元数据", status=TaskStatus.STOPPED, metadata=None)
     _task_mod.set_pipeline_executor(AsyncMock())
+    captured: dict[str, Any] = {}
+
+    async def sender_fn(params: dict[str, Any]) -> dict[str, Any]:
+        captured.update(params)
+        return {"ok": True}
+
+    _task_mod.set_chat_sender(sender_fn)
     result = await tool._resume_from_stopped(task, "恢复提示", MagicMock(), 1, {})
     assert result.success, result.error
     assert task.metadata == {"retry_message": "恢复提示"}
     assert result.output["message_injected"] is True
+    assert captured["pipeline_id"] == "t-meta"
+    assert captured["force"] is True, "stopped 任务带 message 必须走强制发送通道"
 
 
 async def test_retry_chat_sender_raises_warns(tool: TaskTool, caplog: Any) -> None:

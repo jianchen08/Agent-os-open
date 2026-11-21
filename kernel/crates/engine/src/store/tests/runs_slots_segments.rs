@@ -355,6 +355,85 @@ async fn reap_orphan_runs_fixes_run_status_projection_three_states() {
     assert!(store.reap_orphan_runs().unwrap().is_empty(), "重入幂等");
 }
 
+/// 崩溃清扫署名（ADR 2026-11-12-crash-swept-running-tasks-auto-relaunch）：
+/// 被清扫的受害行补 `run_stop_reason=crash_swept`——任务插件 boot 自动恢复
+/// 凭此标记区分「内核重启打断的 running」与「重启前就真失败」，只自动拉起
+/// 前者。非受害行（真终态 failed 自带归因 / suspended / completed）不署名、
+/// 既有归因不被覆盖；重入不重复署名。
+#[tokio::test]
+async fn reap_orphan_runs_signs_victims_with_crash_swept_reason() {
+    let store = SqliteStore::open_memory().unwrap();
+
+    // 受害行：残留 running（内核死亡时在飞）
+    store
+        .record_run_start(
+            "pipe_stale",
+            "default",
+            "run_stale",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
+        .unwrap();
+    // 对照行①：重启前就真失败（带真实归因，不得被署名覆盖）
+    store
+        .record_run_start(
+            "pipe_realfail",
+            "default",
+            "run_rf",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
+        .unwrap();
+    store
+        .set_run_status_projection("pipe_realfail", "default", RunStatus::Failed)
+        .unwrap();
+    store
+        .conn
+        .lock()
+        .execute(
+            "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at) \
+             VALUES ('pipe_realfail', 'run_stop_reason', 'llm_fail_loop', 'str', 'default', '2026-10-15T00:00:01+00:00')",
+            [],
+        )
+        .unwrap();
+
+    let reaped = store.reap_orphan_runs().unwrap();
+    assert_eq!(
+        reaped,
+        vec!["pipe_stale".to_string()],
+        "仅 running 残留被清扫"
+    );
+
+    let reason = |pid: &str| -> Option<String> {
+        store
+            .conn
+            .lock()
+            .query_row(
+                "SELECT value FROM pipeline_state \
+                 WHERE pipeline_id = ?1 AND field_key = 'run_stop_reason' AND tenant_id = 'default'",
+                rusqlite::params![pid],
+                |r| r.get(0),
+            )
+            .ok()
+    };
+    assert_eq!(
+        reason("pipe_stale").as_deref(),
+        Some("crash_swept"),
+        "受害行署名 crash_swept（自动恢复的唯一判别键）"
+    );
+    assert_eq!(
+        reason("pipe_realfail").as_deref(),
+        Some("llm_fail_loop"),
+        "真终态行的既有归因不被清扫覆盖"
+    );
+    assert!(store.reap_orphan_runs().unwrap().is_empty(), "重入幂等");
+    assert_eq!(
+        reason("pipe_stale").as_deref(),
+        Some("crash_swept"),
+        "重入不改署名（不重复写）"
+    );
+}
+
 // ── message_slots op 写入：insert 顺延 / delete 留 gap / 未知 op 忽略 ──
 
 /// op 语义：insert 在位置 N 插入并让后段 seq 顺延（message_id 不变）；

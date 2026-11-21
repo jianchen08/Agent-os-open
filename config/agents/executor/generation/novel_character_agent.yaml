@@ -78,13 +78,22 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：文件管理/检索经两步法动态可达 ──
 - file_read
 - file_write
 - task_evaluate
-- create_directory
-- copy_file
-- delete_file
-- enhanced_search
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 主角必须同时具备能力、困境、独特性三项，缺一不可
 - 每个角色必须有3-5个具体的性格标签，禁止使用'善良''勇敢'等泛泛标签
@@ -137,21 +146,8 @@ deliverables:
 recommended_metrics:
 - metric_id: file_check
   default_params:
-    action: read
+    check: not_empty
     path: '{{workspace}}/docs/character_design.md'
-- metric_id: semantic_check
-  default_params:
-    criteria:
-      required_sections:
-      - 角色概览
-      - 主角设定
-      - 角色卡片
-      - 关系矩阵
-      - 能力体系对照
-      must_contain:
-      - 性格标签
-      - 对话风格
-      - 成长弧线
 version: 1.0.0
 is_active: true
 status: active

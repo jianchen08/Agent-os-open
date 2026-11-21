@@ -39,6 +39,15 @@ export interface UseVoiceInputOptions {
   language?: string
   /** 是否连续识别 */
   continuous?: boolean
+  /**
+   * 优先浏览器原生 SpeechRecognition 实时识别（默认 false）
+   *
+   * 默认录音链路 = getUserMedia + MediaRecorder → 服务端 ASR 转写；仅显式开启时
+   * 才用浏览器识别（Electron/国内 Chrome 无云端识别服务，默认路径会空转丢话）。
+   */
+  preferBrowser?: boolean
+  /** 录音时长上限（秒），到点自动停止并走当前通道后续流程；默认 60 */
+  maxDurationSeconds?: number
   /** 录音完成回调 */
   onRecordingComplete?: (blob: Blob) => void
   /** 转写完成回调（已确认的最终文字） */
@@ -63,14 +72,18 @@ export interface UseVoiceInputReturn {
   transcript: string
   /** 当前录音时长（秒），仅在录音中递增 */
   recordingDuration: number
-  /** 当前识别模式：browser 浏览器原生识别；server-asr 服务端 ASR 降级 */
-  mode: 'browser' | 'server-asr'
+  /** 当前识别模式：native 壳原生识别；browser 浏览器原生识别；server-asr 服务端 ASR 降级 */
+  mode: 'native' | 'browser' | 'server-asr'
   /** 错误信息 */
   error: VoiceInputError | null
-  /** 开始录音 */
+  /** 开始录音（按能力选择通道：音频模型 → 录音落附件；默认 → 服务端 ASR） */
   startRecording: () => Promise<void>
   /** 停止录音 */
   stopRecording: () => void
+  /** 显式启动服务端 ASR 录音（MediaRecorder → 停止后整段转写） */
+  startServerASR: () => Promise<void>
+  /** 取消录音/转写：停止并丢弃，不触发转写与附件回调 */
+  cancelRecording: () => void
   /** 是否支持语音输入 */
   isSupported: boolean
   /** 是否支持语音识别 */
@@ -89,8 +102,12 @@ export interface VoiceInputButtonProps {
   state?: VoiceInputState
   /** 错误信息 */
   error?: VoiceInputError | null
-  /** 点击回调 */
+  /** 点击回调（鼠标路径：点按开始/停止切换） */
   onClick?: () => void
+  /** 按住开始（触屏路径：pointerdown 且非鼠标——微信式按住说话） */
+  onPressStart?: () => void
+  /** 松开停止（触屏路径：pointerup/pointercancel——松手即转写落输入框） */
+  onPressEnd?: () => void
   /** 自定义类名 */
   className?: string
   /** 录音时长（秒），用于按钮动画节律，不影响布局 */

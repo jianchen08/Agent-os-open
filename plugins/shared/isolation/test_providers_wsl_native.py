@@ -128,6 +128,7 @@ def _make_provider(
     workspace 为 None 时创建默认临时目录；显式传入的 workspace 保持调用方
     给定的存在状态（如「宿主路径不存在」用例）。默认安装 _popen_run 记录
     替身；需要测真实 _popen_run（超时杀树）时对实例属性 del 即还原类方法。
+    配置即生产形态（环境层零工具链管理，无探测/种子面）。
     """
     ws = workspace if workspace is not None else tmp_path / "ws"
     if workspace is None:
@@ -389,11 +390,63 @@ class TestCreateEnvironment:
 
     def test_create_mkdir_deterministic_failure(self, tmp_path: Path) -> None:
         provider = _make_provider(tmp_path)
-        provider._popen_run = _Recorder(script=lambda args: (1, b"", b"permission denied"))
+
+        def script(args: list[str]) -> tuple[int, bytes, bytes]:
+            return (1, b"", b"permission denied")
+
+        provider._popen_run = _Recorder(script=script)
         env = _run(provider.create_environment(_ctx(workspace=provider._workspace), "cua-x"))
         # 确定性失败（非存在性未知）：error env，不带 query_unavailable
         assert env.status == EnvironmentStatus.ERROR.value
         assert env.provider_info.get("query_unavailable") is None
+
+    def test_create_mkdir_spurious_failure_tolerated(self, tmp_path: Path) -> None:
+        """mkdir rc!=0 但 test -d 复核目录已在（假失败形态：rc!=0 且 stderr
+        空，2026-11-13 装机实测）→ 放行建 READY 环境，不落 error。"""
+        provider = _make_provider(tmp_path)
+
+        def script(args: list[str]) -> tuple[int, bytes, bytes]:
+            return (0, b"", b"") if "test" in args else (1, b"", b"")
+
+        provider._popen_run = _Recorder(script=script)
+        env = _run(provider.create_environment(_ctx(workspace=provider._workspace), "cua-x"))
+        assert env.status == EnvironmentStatus.READY.value
+        assert env.provider_info.get("query_unavailable") is None
+        assert _metadata_path(provider, "cua-x").exists()
+
+    def test_create_mkdir_repaired_from_windows_side(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """mkdir 假失败且 wsl 侧目录缺失 → Windows 侧补建后复核通过 → READY。
+
+        Windows 补建 = Path.mkdir(parents=True, exist_ok=True)（/mnt 映射下
+        与 wsl 视图同目录）；打桩标记补建发生时刻，其后的 test -d 放行。
+        工作空间须先在宿主侧存在（create_environment 前置校验拒绝不存在
+        路径），补建语义 = exist_ok 重入。"""
+        ws = tmp_path / "ws-repair"
+        ws.mkdir(parents=True, exist_ok=True)
+        provider = _make_provider(tmp_path, workspace=ws)
+        state = {"host_mkdir_done": False}
+        orig_mkdir = Path.mkdir
+
+        def tracking_mkdir(self: Path, *a: Any, **k: Any) -> None:
+            orig_mkdir(self, *a, **k)
+            if self == ws:
+                state["host_mkdir_done"] = True
+
+        def script(args: list[str]) -> tuple[int, bytes, bytes]:
+            if "mkdir" in args:
+                return (1, b"", b"")
+            if "test" in args:
+                return (0, b"", b"") if state["host_mkdir_done"] else (1, b"", b"")
+            return (0, b"", b"")
+
+        monkeypatch.setattr(Path, "mkdir", tracking_mkdir)
+        provider._popen_run = _Recorder(script=script)
+        env = _run(provider.create_environment(_ctx(workspace=str(ws)), "cua-x"))
+        assert env.status == EnvironmentStatus.READY.value
+        assert ws.is_dir()  # Windows 侧补建真实落地
+        assert _metadata_path(provider, "cua-x").exists()
 
 
 class TestFindByName:
@@ -650,7 +703,10 @@ class TestArgvBuilders:
             "npm_config_cache=/mnt/d/ws/.task_runtime/npm-cache",
         ]
         assert argv[argv.index("--exec") + 1 :][4] == "PYTHONUSERBASE=/mnt/d/ws/.task_runtime/pyuser"
-        assert argv[argv.index("--exec") + 1 :][5:7] == ["bwrap", "--dev"]
+        # 工具链持久层（ADR 2026-11-07 决策 5）：BASH_ENV 引导对在任务运行时 env
+        # 之后（本例 _distro_home 未探测 → 无 RUSTUP/CARGO 直接对）
+        assert argv[argv.index("--exec") + 1 :][5] == "BASH_ENV=/mnt/d/ws/.task_runtime/toolchain_env.sh"
+        assert argv[argv.index("--exec") + 1 :][6:8] == ["bwrap", "--dev"]
         assert argv[-4:-1] == ["/dev", "bash", "-c"]
 
     def test_build_exec_argv_minimal(self, tmp_path: Path) -> None:

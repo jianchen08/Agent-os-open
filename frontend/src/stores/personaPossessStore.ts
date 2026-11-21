@@ -17,9 +17,9 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { isModeIdShape, type PersonaPossession } from '@/services/schema/modeOptions'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
 import { userScopedKey } from '@/utils/userScopedStorage'
-import { isModeIdShape, type PersonaPossession } from '@/services/schema/modeOptions'
 
 /** avatar 合法形态：非空字符串（emoji）或 {fg,bg} 色对（卡画廊同款两形态） */
 function parseAvatar(value: unknown): PersonaPossession['avatar'] | null {

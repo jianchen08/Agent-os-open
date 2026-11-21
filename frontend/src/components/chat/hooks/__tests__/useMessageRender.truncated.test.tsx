@@ -69,16 +69,17 @@ describe('useMessageRender — 截断结果分支', () => {
     expect(JSON.stringify(details)).not.toContain('__truncated')
   })
 
-  it('截断块的展开回填在无活跃管道时返回 false（不假装取到全量）', async () => {
+  it('通用截断块不接线 onExpand（2026-11-18 裁定：展开纯渲染显示 LLM 所见，不改状态无网络）', () => {
     const { result } = renderHook(() =>
       useMessageRender({ message: makeAssistantMessage([toolPart()]), isLast: true }),
     )
 
     const fragment = result.current.fragments.find((f) => f.type === 'tool_call') as {
-      activity: { details?: Array<{ id?: string; onExpand?: () => Promise<boolean> }> }
+      activity: { details?: Array<{ id?: string; onExpand?: () => Promise<boolean>; label?: string }> }
     }
     const block = fragment.activity.details?.find((d) => d.id === 'result-truncated')
 
-    await expect(block?.onExpand?.()).resolves.toBe(false)
+    expect(block?.onExpand).toBeUndefined()
+    expect(block?.label).toContain('与 LLM 所见一致')
   })
 })

@@ -6,8 +6,13 @@ requires-python = ">=3.11"
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
     "aiohttp",
+    # ASR 本地模型下载 CA bundle（系统代理 MITM/证书链不全场景，1.1.1 修）
+    "certifi",
     "pyyaml",
     "pydantic",
+    # 本地 ASR 引擎（SenseVoiceSmall int8 ONNX，纯 CPU）：合宿模式下实装于
+    # _host venv；此处声明同轨，保证独立部署形态依赖闭环。
+    "sherpa-onnx>=2.0.1",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：

@@ -36,6 +36,13 @@ from agentos_plugin_sdk.tool_result_protocol import (
     tool_result_entry,
 )
 
+# bash 工具缺省排除（ADR 2026-11-07 T2 改名补偿）：bash 有副作用（结果不可
+# 复用）必须默认排除。SDK DEFAULT_EXCLUDE_TOOLS 仍含退役名 bash_execute
+# （plugins/sdk 本刀禁改），改名后的工具名在插件层并集兜底；SDK 侧清单随下次
+# 触碰 SDK 的刀同步迁移。
+_DEFAULT_EXCLUDE_TOOL_FACE: tuple[str, ...] = ("bash",)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,7 +58,7 @@ class ToolCache(IInputPlugin):
     - enabled: 是否启用缓存（默认 True）
     - default_ttl: 默认缓存过期时间，单位秒（默认 300）
     - max_size: 最大缓存条目数（默认 100）
-    - exclude_tools: 不缓存的工具名列表（默认含 bash_execute 等有副作用的工具）
+    - exclude_tools: 不缓存的工具名列表（默认含 bash 等有副作用的工具）
 
     优先级：35（校验级，在 schema 验证之后）
     缓存异常不阻塞管道。
@@ -69,9 +76,12 @@ class ToolCache(IInputPlugin):
                 - default_ttl: 默认缓存过期时间，单位秒（默认 300）
                 - max_size: 最大缓存条目数（默认 100）
                 - exclude_tools: 不缓存的工具名列表
-                  （默认含 bash_execute/file_write 等有副作用的工具）
+                  （默认含 bash/file_write 等有副作用的工具）
         """
-        self._config = config or {}
+        cfg = dict(config or {})
+        # bash 有副作用不入缓存（缺省排除；SDK 缺省表仍含退役名，见常量注释）
+        cfg["exclude_tools"] = [*cfg.get("exclude_tools", []), *_DEFAULT_EXCLUDE_TOOL_FACE]
+        self._config = cfg
         self._cache = ToolResultCache(self._config)
 
     @property

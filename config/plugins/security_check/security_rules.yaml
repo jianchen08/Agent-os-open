@@ -1,3 +1,6 @@
+# 出厂播种版本（seedConfigTree 裁决：用户副本严格大于才保留；本文件是
+# 出厂安全策略默认值，不声明版本会让用户空间陈旧副本永久遮蔽包内修复）。
+version: 3
 mode: blacklist
 
 rules:
@@ -203,7 +206,7 @@ rules:
         value: "^(?!git\\s).+"
 
   # ── 宿主路径访问：命令含 Windows 盘符路径时强制审批 ──
-  # bash_execute 被 isolation_guard 路由到 host 执行（容器内无宿主路径），
+  # bash 工具被 isolation_guard 路由到 host 执行（容器内无宿主路径），
   # 此时必须弹审批，不能走下面的 safe_commands 白名单（否则 ls D:/... 会被直接放行）。
   # 正则匹配 D:/、D:\、C:\Users 等盘符绝对路径；负向后视 (?<![A-Za-z0-9])
   # 限定盘符单字母前非字母数字——http:// 的 p:/ 这类 URL scheme 片段不误命中
@@ -216,7 +219,7 @@ rules:
   # priority: 1 —— 位置闸优先级高于白名单（默认 0）：引擎按优先级裁决 allow 与
   # 拦截并存，平级 allow 生效（白名单豁免关键词子串噪音），高优先级审批不被掩蔽。
   - name: "host_path_access"
-    tools: ["bash_execute"]
+    tools: ["bash"]
     params: ["command", "working_dir"]
     action: needs_approval
     priority: 1
@@ -226,14 +229,14 @@ rules:
         value: "(?<![A-Za-z0-9])[A-Za-z]:[\\\\/]"
 
   # ── 参数白名单：安全命令直接放行，不弹审批 ──
-  # 危险工具（如 bash_execute）的参数如果命中白名单，视为安全操作直接放行。
+  # 危险工具（如 bash）的参数如果命中白名单，视为安全操作直接放行。
   # 正则整条锚定 + 禁连接/替换/重定向符（&& / ; / | / 换行 / $() / 反引号 /
   # 子 shell 括号 / < > 重定向）：白名单只放行"整条命令就是安全命令"——
   # `echo "..." && curl ...`、`echo $(curl ...)`、`echo a⏎curl ...`、`echo x > file`
   # 这类以安全命令为载体注入第二条命令或重定向写文件的组合不再享受 allow，
   # 危险关键词（curl / pip install / rm -rf 等）正常命中 needs_approval。
   - name: "safe_commands"
-    tools: ["bash_execute"]
+    tools: ["bash"]
     params: ["command", "cmd"]
     action: allow
     patterns:
@@ -271,3 +274,49 @@ rules:
     patterns:
       - type: keyword
         value: "transition"
+
+  # ── 终审保留：管道级免审批（审批卡授予的旁路覆盖档）下仍逐次人审 ──
+  # final_approval: true 的规则组只在「管道覆盖档 = bypass」的生效路径上匹配：
+  # 命中本组的操作仍弹审批（卡面标注终审），同一批其余调用整体放行。
+  # 手动会话级旁路档的既有语义不变（不进本组匹配）；规则降级态整体压制
+  # 管道覆盖档（回落既有解析链保守弹卡）。
+  - name: "final_approval_publish"
+    final_approval: true
+    tools: ["*"]
+    params: ["command", "cmd"]
+    action: needs_approval
+    patterns:
+      - {type: keyword, value: "git push --force"}
+      - {type: keyword, value: "git push -f"}
+      - {type: keyword, value: "npm publish"}
+      - {type: keyword, value: "pnpm publish"}
+      - {type: keyword, value: "yarn publish"}
+      - {type: keyword, value: "twine upload"}
+      - {type: keyword, value: "docker push"}
+      - {type: keyword, value: "gh release"}
+      - {type: keyword, value: "cargo publish"}
+
+  - name: "final_approval_mass_delete"
+    final_approval: true
+    tools: ["*"]
+    params: ["command", "cmd"]
+    action: needs_approval
+    patterns:
+      - {type: regex, value: "\\brm\\s+-[A-Za-z]*[rR][A-Za-z]*f"}
+      - {type: regex, value: "\\brm\\s+-[A-Za-z]*f[A-Za-z]*[rR]"}
+      - {type: keyword, value: "del /s"}
+      - {type: keyword, value: "rmdir /s"}
+      - {type: keyword, value: "Remove-Item -Recurse"}
+
+  - name: "final_approval_credentials"
+    final_approval: true
+    tools: ["*"]
+    params: ["command", "cmd"]
+    action: needs_approval
+    patterns:
+      - {type: keyword, value: "id_rsa"}
+      - {type: keyword, value: "id_ed25519"}
+      - {type: keyword, value: "credentials.json"}
+      - {type: keyword, value: "credentials.yaml"}
+      - {type: keyword, value: ".ssh/"}
+      - {type: keyword, value: ".aws/credentials"}

@@ -24,6 +24,7 @@ import asyncio
 import base64
 import importlib.util
 import json
+import logging
 import sys
 import types
 from pathlib import Path
@@ -45,7 +46,8 @@ def _load_server() -> Any:
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -80,7 +82,6 @@ class FakeAdapter:
         self.calls: list[dict[str, Any]] = []
 
     async def completion(self, **kwargs: Any) -> Any:
-        from types import SimpleNamespace as _NS
 
         self.calls.append(kwargs)
         if self._connect_exc is not None:
@@ -89,7 +90,7 @@ class FakeAdapter:
         for c in self._chunks:
             if on_chunk is not None:
                 on_chunk(c)
-        return _NS(text="ok", tool_calls=[], thinking_text=None, usage=None, finish_reason="stop")
+        return SimpleNamespace(text="ok", tool_calls=[], thinking_text=None, usage=None, finish_reason="stop")
 
     async def health_check(self, model: str) -> bool:
         if self._health_exc is not None:
@@ -124,7 +125,11 @@ def _decode(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_on_load_injects_config_resets_router_and_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """on_load：配置注入 shim 可读回、router_factory 旧单例清空、adapter 单例清空。"""
+    """on_load：配置注入 shim 可读回、router 单例槽位重置、adapter 惰性单例清空。
+
+    重置不清表（读侧无空窗，审计 2026-11-12 P2-12）：旧映射由下一次构建整体
+    替换——此处显式触发一次懒重建，断言旧配置不残留。
+    """
     mod = _load_server()
     import router_factory as rf
 
@@ -134,9 +139,11 @@ def test_on_load_injects_config_resets_router_and_adapter(monkeypatch: pytest.Mo
 
     _run(mod._on_load({}))
 
-    assert "stale-model" not in rf._model_to_provider  # 单例重置：旧配置不残留
     assert mod.get_config()["llm"]["providers"]["deepseek"]["keys"] == []  # shim 可读回
     assert mod._adapter is None  # 惰性 adapter 清空，下次调用重建
+
+    mod._ensure_adapter()  # 下次调用懒重建：下一代表整体替换
+    assert "stale-model" not in rf._model_to_provider  # 旧配置不残留
 
 
 def test_on_unload_clears_adapter() -> None:
@@ -393,3 +400,114 @@ def test_http_handle_unexpected_error_returns_500(monkeypatch: pytest.MonkeyPatc
     assert result["data"]["status"] == 500
     assert body["error"] == "internal server error"
     assert "disk gone" in body["detail"]
+
+
+# ─────────────────── _StreamOutbound：退化循环停止与用户可见信号 ───────────────────
+
+
+class _PublisherStub:
+    """event-bus 发布桩：记录流事件与 plugin_error（不连真通道）。"""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.errors: list[tuple[dict[str, Any], str]] = []
+
+    def put(self, event: str, payload: dict[str, Any]) -> None:
+        self.events.append((event, payload))
+
+    def emit_plugin_error(self, error: dict[str, Any], source: str) -> None:
+        self.errors.append((error, source))
+
+
+def test_outbound_returns_stop_on_repetition_with_content_and_notifies_once() -> None:
+    """正文通道原地重复 → on_chunk 返回 "stop"（adapter 据此截断）+ 用户可见信号一条。
+
+    断的是行为契约：有半截内容的截断轮（正文已累积），guard 判定后必须给
+    adapter 停止信号，且 plugin_error 只发一次（截断对用户可见，禁静默降级）。
+    """
+    mod = _load_server()
+    publisher = _PublisherStub()
+    outbound = mod._StreamOutbound(publisher=publisher, cancel_event=asyncio.Event())
+
+    results = [outbound.on_chunk({"type": "text", "content": "🍦" * 10}) for _ in range(60)]
+
+    assert results[-1] == "stop"
+    assert len(publisher.errors) == 1
+    error, source = publisher.errors[0]
+    assert error["code"] == "LLM_STREAM_REPETITION"
+    assert source == "llm_service"
+    # 判定轮发了 block_end（客户端不留半开块）
+    assert publisher.events[-1][0] == "block_end"
+    # 后续 chunk 不再重复通知
+    outbound.on_chunk({"type": "thinking", "content": "x"})
+    assert len(publisher.errors) == 1
+
+
+def test_outbound_zero_output_repetition_skips_notice() -> None:
+    """零产出退化轮不发截断提醒：llm_core 会抛错终止，引擎侧已发失败通知。
+
+    同一事故只留一条通知（2026-11-10 用户裁定）——思考通道命中且正文/工具调用
+    双空时，adapter 仍要拿到 "stop"，但不再叠加「已自动截断」。
+    """
+    mod = _load_server()
+    publisher = _PublisherStub()
+    outbound = mod._StreamOutbound(publisher=publisher, cancel_event=asyncio.Event())
+
+    results = [
+        outbound.on_chunk({"type": "thinking", "content": "🍦" * 10}) for _ in range(60)
+    ]
+
+    assert results[-1] == "stop"
+    assert publisher.errors == []
+
+
+def test_outbound_normal_stream_never_returns_stop() -> None:
+    """正常文本流恒返回 None（不得因守卫误伤正常输出）。"""
+    mod = _load_server()
+    outbound = mod._StreamOutbound(publisher=None, cancel_event=asyncio.Event())
+
+    text = "".join(
+        f"第{i}步：检查配置项 config_{i} 的取值并记录到清单，随后继续下一项。\n"
+        for i in range(60)
+    )
+    for i in range(0, len(text), 20):
+        assert outbound.on_chunk({"type": "text", "content": text[i : i + 20]}) is None
+
+
+def test_outbound_logs_repetition_evidence(caplog: pytest.LogCaptureFixture) -> None:
+    """退化截断必须留证：命中通道 + 判定信息（reasons/onset）+ 原文尾部落日志。
+
+    截断内容不进 assistant 消息（零产出轮 llm_core 直接抛错），不留证则事后
+    无法判定真退化还是误判（2026-11-10 实测 8 次命中零现场）。无 event-bus
+    的降级面同样要留证。simurg 引擎换代后判停点 = 首个检查点（hold=350），
+    旧自研守卫的 500 字符窗口节奏退役（调研文档 §3 vetting 实测 corrupt@340）。
+    """
+    mod = _load_server()
+    outbound = mod._StreamOutbound(publisher=None, cancel_event=asyncio.Event())
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(60):
+            outbound.on_chunk({"type": "thinking", "content": "🍦" * 10})
+
+    evidence = [r.getMessage() for r in caplog.records if "退化循环截断留证" in r.getMessage()]
+    assert len(evidence) == 1
+    assert "channel=thinking" in evidence[0]
+    assert "chars=350" in evidence[0]
+    # 引擎可读判定原因 + 环起点随留证落日志（自证缺口修复面）
+    assert "reasons=" in evidence[0]
+    assert "reasons=-" not in evidence[0]
+    assert "onset_char=" in evidence[0]
+    assert "exempted=False" in evidence[0]
+    assert "🍦" * 10 in evidence[0]
+
+
+def test_outbound_repetition_without_publisher_still_returns_stop() -> None:
+    """无 event-bus（降级面）：判定后照样返回 stop，通知步骤跳过不炸。"""
+    mod = _load_server()
+    outbound = mod._StreamOutbound(publisher=None, cancel_event=asyncio.Event())
+
+    results = [
+        outbound.on_chunk({"type": "thinking", "content": "🍦" * 10}) for _ in range(60)
+    ]
+
+    assert results[-1] == "stop"

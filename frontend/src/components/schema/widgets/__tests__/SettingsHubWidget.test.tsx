@@ -241,3 +241,90 @@ describe('SettingsHubWidget — 移动端导航抽屉（md 以下开合）', () 
     expect(screen.queryByTestId('settings-nav-backdrop')).toBeNull()
   })
 })
+
+describe('SettingsHubWidget — 动态注册页轮询与插件配置直达', () => {
+  beforeEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    mockGetSchema.mockResolvedValue({})
+  })
+
+  afterEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    mockGetSchema.mockReset()
+    mockGetSchema.mockResolvedValue({})
+  })
+
+  it('schema 之后到达的动态注册页经 1.5s 签名轮询进入「插件页面」导航', async () => {
+    // 基线 schema 先载入并完成 loadFromSchema（等待其产物出现，避免注册被幂等清空抹掉）
+    mockGetSchema.mockResolvedValue({
+      plugin_contributes: [
+        {
+          plugin_id: 'ext-plugin',
+          plugin_name: '扩展插件',
+          contributes: {
+            pages: [
+              { id: 'ext-settings-page', title: '扩展设置页', space: 'settings', slot: 'nav', widget: 'ext_widget' },
+            ],
+          },
+        },
+      ],
+    })
+    renderWithProviders(<SettingsHubWidget />)
+    await waitFor(() => {
+      expect(screen.getByText('插件页面')).toBeInTheDocument()
+    })
+    // 首载后才注册（DSH 槽位页形态：schema 先到、声明后到）
+    contributionRegistry.register({
+      type: 'pages',
+      id: 'late-settings-page',
+      title: '迟到注册页',
+      space: 'settings',
+      slot: 'nav',
+      widget: 'late_widget',
+    })
+    widgetRegistry.register(
+      'late_widget',
+      ((props: { label?: string }) => (
+        <div data-testid="late-widget">{props.label}</div>
+      )) as never,
+      { name: 'late_widget', supportedSpaces: ['settings'] },
+    )
+    // 轮询间隔 1.5s：签名变化触发导航重算
+    await waitFor(
+      () => expect(screen.getByText('迟到注册页')).toBeInTheDocument(),
+      { timeout: 4000 },
+    )
+    fireEvent.click(screen.getByText('迟到注册页', { exact: true }))
+    await waitFor(() => {
+      expect(screen.getByTestId('late-widget')).toBeInTheDocument()
+    })
+  }, 10_000)
+
+  it('点击「插件配置」导航项直达内联 PluginConfigEmbed（pathKey 拆分正确）', async () => {
+    mockGetSchema.mockResolvedValue({
+      plugin_configs: [
+        {
+          plugin_id: 'cfg-plugin',
+          plugin_name: '配置插件',
+          config_files: [{ id: 'default', path: 'config/cfg.yaml', label: '配置项文件' }],
+        },
+      ],
+    })
+    renderWithProviders(<SettingsHubWidget />)
+    await waitFor(() => {
+      expect(screen.getByText('插件配置')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('配置项文件', { exact: true }))
+    await waitFor(() => {
+      expect(screen.getByTestId('plugin-config-editor')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('plugin-config-editor')).toHaveTextContent('cfg-plugin/default')
+  })
+
+  it('initialActive 非法 plugin 路径（缺 fileId 段）→ 无效配置路径提示', () => {
+    renderWithProviders(<SettingsHubWidget initialActive="plugin:nocolon" />)
+    expect(screen.getByText(/无效的配置路径/)).toBeInTheDocument()
+  })
+})

@@ -25,7 +25,7 @@ from typing import Any
 from base_combo_adapter import BaseComboAdapter
 from helpers import _extract_qq_text
 from input_adapter import QueuedChannelInputAdapter, build_channel_state
-from onebot_client import OneBotClient
+from onebot_client import DEFAULT_WS_PORT, OneBotClient
 from output_adapter import BufferedChannelOutputAdapter
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class QQAdapter(BaseComboAdapter):
 
     Example::
 
-        adapter = QQAdapter(ws_port=8080, http_api_url="http://localhost:5700")
+        adapter = QQAdapter(ws_port=DEFAULT_WS_PORT, http_api_url="http://localhost:5700")
         await adapter.start()
         # ... 使用 adapter.input_adapter / adapter.output_adapter ...
         await adapter.stop()
@@ -156,7 +156,7 @@ class QQAdapter(BaseComboAdapter):
     def __init__(
         self,
         ws_host: str = "127.0.0.1",
-        ws_port: int = 8080,
+        ws_port: int = DEFAULT_WS_PORT,
         http_api_url: str = "http://127.0.0.1:5700",
         **kwargs: Any,
     ) -> None:

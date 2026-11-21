@@ -188,17 +188,26 @@ def _get_service_provider() -> Any:
     return _ServiceProviderShim()
 
 
-# ── 完赛前置证据校验（文件面 + commit 面，完赛单漏斗）────────────────────────
-# 任务 metadata 声明 required_files（交付文件相对路径清单）时，完赛（评估通过
-# 落 completed）前逐个核对：①文件面——文件存在于任务工作空间且 mtime 晚于任
-# 务创建基线（task.created_at）；②commit 面——工作空间存在基线之后的新
-# commit。两证据同时成立才放行（AND）。未声明 required_files → 只查 commit
-# 面（用户裁定 2026-11-04：无 git 记录的任务不落 completed，回执要求 agent
-# 先提交）。取证环境不完整如实降级（warning 留痕，不因环境差异误杀合法完
-# 赛）：工作空间坐标不可得 / 基线缺失或不可解析 / 工作空间非 git 仓 / git
-# 不可用或超时。
+# ── 完赛前置证据校验（双轨：文件面 / commit 面，完赛单漏斗）──────────────────
+# 双轨判据（ADR 2026-11-11-evidence-gate-dual-track）：
+# - 豁免轨：任务声明 acceptance_criteria.files（task_submit 白话字段，存储为
+#   ``file_check::<路径>`` 实例键或字面 files 键）且工作空间非 worktree 模式
+#   → 文件面替代 commit 面：清单取 required_files 与 acceptance files 并集
+#   （都声明都查），逐一核对存在 + mtime 晚于任务创建基线，commit 面整体
+#   跳过（零 git 探测）。动因：无 bash 命令工具的 agent（novel/research/
+#   orchestrator 家族）执行不了 git commit，commit 面恒查 = 结构性死锁。
+# - 既有轨：未声明 acceptance files，或 worktree 挂靠项目任务（交付语义 =
+#   commit 后合并回项目仓库）→ 原闸不变：声明 required_files → 文件面 +
+#   commit 面 AND 双闸；未声明 → 只查 commit 面（用户裁定 2026-11-04：无
+#   git 记录的任务不落 completed，回执要求 agent 先提交）。
+# 取证环境不完整如实降级（warning 留痕，不因环境差异误杀合法完赛）：工作
+# 空间坐标不可得 / 基线缺失或不可解析 / 工作空间非 git 仓 / git 不可用或
+# 超时（豁免轨只用文件面，无 git 降级形态）。
 _REQUIRED_FILES_META_KEY = "required_files"
 _EVIDENCE_GIT_TIMEOUT = 30  # git 取证命令超时（秒），对齐 worktree_merge._GIT_TIMEOUT
+_ACCEPTANCE_FILES_FLAT_KEY = "files"
+_FILE_CHECK_DEFINITION_ID = "file_check"
+_FILE_CHECK_INSTANCE_SEP = "::"
 
 
 def _required_files_declared(metadata: dict[str, Any] | None) -> list[str]:
@@ -213,6 +222,58 @@ def _required_files_declared(metadata: dict[str, Any] | None) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(item) for item in raw]
+
+
+def _resolve_task_placeholder(path: str, task_id: str) -> str:
+    """验收路径 ``{{task_id}}`` → 真实任务 ID（评估实查前唯一替换通道）。
+
+    派发时 task_id 未出生，任务书验收路径按契约写模板 ``{{task_id}}_<后缀>``
+    （提交期双花括号白名单放行）；评估实查前统一替换，杜绝按字面路径验收
+    （实测 1a42e85aaa47：agent 被迫落字面名文件才能过闸）。只做精确子串
+    替换——``{{workspace}}``/``{{state:...}}``/单花 ``{title}`` 等其他占位符
+    原样保留，不与值面替换（_inject_workspace_and_placeholders）混流。
+    """
+    return path.replace("{{task_id}}", str(task_id))
+
+
+def _acceptance_files_declared(acceptance_criteria: Any) -> list[str]:
+    """读任务 acceptance_criteria 的 files 声明（相对路径清单，豁免轨触发器）。
+
+    双形态同源（同一 files 字段信号的存储两面，task_submit 白话展开契约）：
+    - 展开形态（主管道实际存储）：files 展开为 ``file_check::<路径>`` 实例键，
+      实例后缀即声明路径；
+    - 原始形态（直构 metadata 的任务/测试）：字面 ``files`` 键字符串数组。
+    非 dict/未声明/空清单 → []（不豁免）。裸 ``file_check`` 指标键（指标名
+    dict 形态提交，无实例后缀）不属 files 字段信号，不计入——豁免触发只认
+    显式 files 声明，不做启发式扩面（ADR 2026-11-11 被否方案 3）。
+    """
+    if not isinstance(acceptance_criteria, dict):
+        return []
+    declared: list[str] = []
+    raw = acceptance_criteria.get(_ACCEPTANCE_FILES_FLAT_KEY)
+    if isinstance(raw, list):
+        declared.extend(str(item) for item in raw)
+    for key in acceptance_criteria:
+        if not isinstance(key, str) or _FILE_CHECK_INSTANCE_SEP not in key:
+            continue
+        definition_id, _, instance_path = key.partition(_FILE_CHECK_INSTANCE_SEP)
+        if definition_id == _FILE_CHECK_DEFINITION_ID and instance_path.strip():
+            declared.append(instance_path)
+    return declared
+
+
+def _is_worktree_workspace(ws_meta: dict[str, Any]) -> bool:
+    """worktree 边界判定（豁免轨硬边界）：mode == "worktree" 不豁免 commit 面。
+
+    假设：state 无独立 workspace_mode 键——工作空间模式单源在
+    ``task.ws_meta.mode``（出生写面 workspace_lifecycle，取值
+    plain/shared/worktree），本判定与合并门控对同一字段的读法一致
+    （mode != "worktree" 即不合并）。mode 键缺失按非 worktree（独立任务）
+    保守代理——与设计裁定的「project_id 缺省=独立任务」同口径。
+    升级触发：worktree 判定键位/取值改名，或新增第四种挂靠项目工作空间模式
+    时，本判定与合并门控须同刀更新。
+    """
+    return str(ws_meta.get("mode") or "") == "worktree"
 
 
 def _parse_created_at_epoch(created_at: Any) -> float | None:
@@ -373,6 +434,22 @@ def _build_required_files_receipt(task_id: str, violations: list[str], baseline_
         *violations,
         f"判定基线：文件须存在于工作空间且修改时间晚于任务创建时间（{baseline_text}），"
         "且工作空间存在该基线之后的新 commit。",
+    ]
+    return "\n".join(lines)
+
+
+def _build_acceptance_files_receipt(task_id: str, violations: list[str], baseline_text: str) -> str:
+    """评估拒绝回执（豁免轨文件面证据不足）——文案单点产出。
+
+    回执只给文件面补救路径，不得出现「先 git 提交/commit」类指令：豁免轨的
+    执行者多为无 bash 命令工具的 agent，提交指令对其不可执行（结构性死锁的
+    回执面教训，ADR 2026-11-11-evidence-gate-dual-track）。
+    """
+    lines = [
+        f"评估不通过：任务 {task_id} 交付证据不足，先补齐以下证据再完赛：",
+        *violations,
+        f"判定基线：本任务按验收文件证据完赛（文件面即交付证据，无需版本库提交），"
+        f"交付文件须存在于工作空间且修改时间晚于任务创建时间（{baseline_text}）。",
     ]
     return "\n".join(lines)
 
@@ -1404,25 +1481,42 @@ class TaskEvaluateTool(BuiltinTool):
         return {}
 
     async def _check_completion_evidence(self, task: Any) -> ToolExecutionResult | None:
-        """完赛前置证据校验（单漏斗：文件面 + commit 面，完赛单入口）。
+        """完赛前置证据校验（双轨单漏斗：文件面 / commit 面，完赛单入口）。
 
-        声明 required_files → 文件面（存在且 mtime 晚于任务创建基线）与
-        commit 面（工作空间基线后有新 commit）AND 双闸；未声明 → 只查
-        commit 面（无 git 记录不落 completed，回执要求 agent 先提交）。
-        commit 面单次探测、两分支共享同一结果（同一任务不做第二次 git 探测）。
+        豁免轨：声明 acceptance_criteria.files 的非 worktree 任务 → 文件面
+        替代 commit 面（清单 = required_files 与 acceptance files 并集，逐一
+        核对存在 + mtime 晚于基线；commit 面整体跳过，零 git 探测）。
+        既有轨：未声明 acceptance files 或 worktree 任务 → 原闸不变：声明
+        required_files → 文件面（存在且 mtime 晚于任务创建基线）与 commit 面
+        （工作空间基线后有新 commit）AND 双闸；未声明 → 只查 commit 面
+        （无 git 记录不落 completed，回执要求 agent 先提交）。commit 面单次
+        探测、两分支共享同一结果（同一任务不做第二次 git 探测）。
         任一证据不足 → 返回拒绝结果（result=retry，回执写明细），任务不落
         completed。
         降级（warning 留痕，放行）：工作空间坐标不可得 / 基线缺失或不可解析
-        → 全放行；工作空间非 git 仓 / git 不可用或超时 → commit 面跳过
-        （声明 required_files 时文件面照查，未被降级豁免）。
+        → 全放行；既有轨下工作空间非 git 仓 / git 不可用或超时 → commit 面
+        跳过（声明 required_files 时文件面照查，未被降级豁免；豁免轨纯文件
+        面，无 git 降级形态）。
 
         Returns:
             None = 证据校验通过或降级放行；ToolExecutionResult = 证据不足拒绝。
         """
-        required_files = _required_files_declared(task.metadata)
-        face = "文件面+commit 面" if required_files else "commit 面"
+        required_files = [
+            _resolve_task_placeholder(p, str(task.id))
+            for p in _required_files_declared(task.metadata)
+        ]
         ws_meta = await self._read_task_ws_meta(task)
         workspace = str(ws_meta.get("path") or "")
+        acceptance_files = [
+            _resolve_task_placeholder(p, str(task.id))
+            for p in _acceptance_files_declared((task.metadata or {}).get("acceptance_criteria"))
+        ]
+        exempt = bool(acceptance_files) and not _is_worktree_workspace(ws_meta)
+        face = (
+            "文件面（acceptance files 豁免轨）"
+            if exempt
+            else ("文件面+commit 面" if required_files else "commit 面")
+        )
         if not workspace or not os.path.isdir(workspace):
             logger.warning(
                 "[TaskEvaluate] 完赛证据校验降级放行（工作空间坐标不可得）| task=%s | 面=%s | ws_path=%r",
@@ -1442,6 +1536,19 @@ class TaskEvaluateTool(BuiltinTool):
             )
             return None
         baseline_text = datetime.fromtimestamp(baseline).isoformat(timespec="seconds")
+        if exempt:
+            # 豁免轨（ADR 2026-11-11-evidence-gate-dual-track）：文件面替代
+            # commit 面——并集清单照查，commit 面整体跳过（不做 git 探测）。
+            union_files = list(dict.fromkeys([*required_files, *acceptance_files]))
+            violations = _collect_required_files_violations(workspace, union_files, baseline)
+            if not violations:
+                return None
+            return _reject_incomplete_delivery(
+                str(task.id),
+                _build_acceptance_files_receipt(str(task.id), violations, baseline_text),
+                metric_id="acceptance_files",
+                detail=f"违规={len(violations)}（豁免轨文件面）",
+            )
         since_text = datetime.fromtimestamp(baseline).strftime("%Y-%m-%d %H:%M:%S")
         commit = await asyncio.to_thread(_probe_commit_evidence, workspace, since_text)
         if commit.degrade_reason:

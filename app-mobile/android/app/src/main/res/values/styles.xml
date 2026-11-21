@@ -13,6 +13,11 @@
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
+        <!-- 移动端视觉 P0-5：文件选择器等外部 Activity 转场期间 windowBackground
+             露出，DayNight 默认深色近黑（实测整屏黑 #202124）——显式指定与前端
+             页面底色同源的背景色（浅/深由 values(-night)/colors.xml 提供），
+             转场帧与 WebView 页面底色一致，黑屏观感消除。 -->
+        <item name="android:windowBackground">@color/agentos_window_bg</item>
     </style>
 
 

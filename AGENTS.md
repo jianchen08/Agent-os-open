@@ -79,7 +79,7 @@ AgentOS 侧任务勿假设其存在；需要时按工具插件立项补位。
 - **用户空间两面**：dev=`<repo>/user_root`（gitignored），装机=`%APPDATA%\agentos`；venv 生效面=用户空间副本（BuiltinFirst 用户赢）。
 - **播种型插件禁共享根跨包 import**：播种副本对共享根裸模块不可达（import 装机炸）；通道收敛≠代码物理收敛。
 - **工作区还原清 venv/node_modules**：症状=electron tsc 报 Cannot find type definition 'node'→仓根 `npm install` 重建；重装装机后固定两步=仓根 npm install+用户空间 venv 镜像进 resources。
-- **WSL 铁律**：cargo 必挂 rust:1.88 容器；SQLite 禁落 /mnt/d/；内核跑先复制 ext4。
+- **执行契约铁律**：bash 面=bash/log/input/kill 四单词工具（handle 取代 pid；前台超时返回 running+handle+已捕获输出、进程不死；log 拉模式想查就查；单次上限 600s）；工具链跨任务持久（容器卷/发行版 home，装一次处处可用；环境层零探测零预装——CC/Codex 同构，agent 运行中撞到依赖缺失自己装，持久层保证装一次永久，任务类型/工作区文件内容不参与环境选择）；跨后端一致性=环境差异只许影响速度不许影响正确性契约；SQLite 禁落 /mnt/d/（ADR 2026-11-07，2026-11-10 修订二）。
 - **bash 直拉内核=毒化**：动内核只能经 electron；孤儿内核缺密钥注入致 LLM 全断+占 9101 端口，装机启动器拒启；清场=杀全树+正规重启。
 - **Windows/打包坑**：NSIS `/S` 静默安装恒带 `/D=<dir>` 否则零文件 exit 0；Git Bash 调 NSIS 前加 `MSYS_NO_PATHCONV=1` 防路径改写；commit 必带 pathspec（裸 commit 扫全仓 874 文件教训）；stash 禁裸 pop、pop 后必 list 验证；`cargo test | tail` / `vitest | tail` 吃退出码=假绿，验门禁勿管道 tail。
 - **挂载盘提权盲区**：network-mode 挂载盘（WinFsp/rclone 的 V:）对 RL HIGHEST/提权上下文不可见（`Get-ChildItem V:\` 与 `Win32_LogicalDisk` 双空，UAC 会话隔离覆盖网络重定向器）——挂载健康检查只能用 rclone 进程活性；VBS/wscript 启动失败恒静默（Run 返回 False 无日志），排障先验 exe 路径存在；挂载自愈=幂等脚本（活实例早退永不杀）+计划任务重复触发（登录触发兜底重启）。
@@ -117,7 +117,11 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   完全免审批（隔离容器即安全边界；由旁路档承载，与显式选旁路同档同路径）；
   显式选 default/accept_edits/auto 后以所选档为准（隔离不再豁免黑名单），
   显式选旁路即免审批本身；选择器如实显示当前生效档（未选时隔离/worktree 显示
-  「免审批」，与显式旁路可辨别）。非隔离会话无免审批默认，按档走。会话隔离由
+  「免审批」，与显式旁路可辨别）。非隔离会话无免审批默认，按档走。审批卡另有
+  「本管道后续免审批」（管道级权限档覆盖，键 pipeline_id，含派发子树血缘链上溯；
+  终审规则仍逐次人审）与「本次命令全部加入永久免审批白名单」（命令按解析出的
+  子命令逐条精确指纹、跨会话；同命令免批同口径）；覆盖表
+  落 `permission_modes_pipeline.json`，撤销/审计端点齐备（ADR 2026-11-12）。会话隔离由
   isolation_guard 容器落地。
 - **插件热发现/热重载全链路**：新建插件目录、修改 plugin.json、改插件 Python
   代码均由 watcher 自动处理（发现→G2 校验→注册/重注册/respawn），无需
@@ -186,8 +190,18 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
 
 **角色分流**：
 
-**调度方**（AgentOS 主会话等）：只做沟通与任务提交，不代执行。活源两种：
-**用户提出的开发需求**、台账里的续作候选。
+**分工按产出性质切，不按阶段切**（含项目任务链方案规划段；真值 =
+`skills/skill-container-task-flow/SKILL.md`「七、方案规划段」）：
+- **调度方只做需求侧**：需求约束（要什么 / 边界 / 红线 / 明确不做什么）、讨论
+  收敛（整理成「约束条目 + 待决项」）、方案交回后的需求一致性核对（只判是否满足
+  约束，**不改技术方案**）、档案区 `docs/project/` 落盘、任务链 HTML 生成。
+- **专业 agent 做技术侧**（对应领域编排链 携 `skill-solution-*` 技能）：怎么做、
+  为什么不用另一个、被否方案、风险、分批实施切分与验收判据。
+- **自检线**：调度方一旦开始回答「该选 A 还是 B 更好」即越界，该问题转成约束
+  增量/待决项交给专业 agent，不在自己这里选型权衡。
+
+**调度方**（AgentOS 主会话等）：只做沟通与任务提交，不代技术执行（需求侧产出见
+上「分工按产出性质切」）。活源两种：**用户提出的开发需求**、台账里的续作候选。
 1. **接需求**：澄清到可执行——验收判据明确、改动面清楚；需求第一一字不增。
 2. **立卡派发**：task_submit 建任务（后台、隔离工作空间），任务书自含改动面/
    验收判据/相关纪律指针；任务书必须自含「设计真值=<文档路径>」指针（域有
@@ -213,6 +227,14 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
    关键路径/新域需求先走需求对抗技能
    （`skills/skill-requirement-battle/SKILL.md`，既有任务书自含技能索引
    指针机制承载，零新件），冻结产物四件套随任务书走。
+   **产物路径任务唯一**：验证/审查/评估报告类交付物路径必须带
+   `{{task_id}}_` 前缀，禁共享固定名——共享仓工作区并行派发同名必互相
+   覆盖（2026-11-11 function_verify_report.md 三轮覆盖事故根因）。派发时
+   task_id 未出生，任务书写 **模板** `{{task_id}}_<固定后缀>`（提交期双花
+   括号白名单放行；评估期 task_evaluate 自动替换后 file_check 实查并在
+   结果里回显实查路径；执行面 agent 经 dynamic_vars 注入的
+   `{{state:context.task_id}}` 自解析落盘——verification 家族
+   4 配置 + general_agent + environment_setup_agent 已同刀配齐）。
    新代码任务的 TDD 表述用三步式（用户裁定 2026-10-25）：①Red=设计动作，
    被测是新代码、其 API 契约由测试定义（不确定的外部依赖用最小桩）；
    ②Green 紧跟：实现落盘使测试通过；③外部对接面（注册/声明类）Green 后
@@ -248,13 +270,27 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
 - 加 provider 插件（llm_provider.<type>）：`plugins/shared/llm_provider_<type>/`（provides namespace + 同名 service 背书 + via=plugin 接 llm.yaml；见 ADR 2026-11-04-llm-default-gateway-and-provider-plugins）；网关自路由兜底链=llm.yaml defaults.tiers.fallback_chain
 - 加工具插件：`plugins/shared/<name>/`（plugin.json 声明 + 实现 + 测试），
   加入 agentos.yaml 的 tool_ids，补 output_schema/render。
+- **无宿主 bash 的 agent 验插件**：用 `plugin_verify` 工具
+  （`plugins/shared/plugin_verifier`，参数面闭集 + 固定脚本 SHA-256 pin +
+  路径闸 + 环境洗白 + 超时树杀）；工具**按任务模式标签注入**（模式包
+  `mode.yaml` 的 `inject_tool_ids`，`mode_evolution` 已声明），不写 agent
+  白名单。有 bash 的编码 agent 继续用
+  `skills/plugin-dev/scripts/verify_host.py`。设计真值 = ADR
+  2026-11-11-mode-scoped-assets-and-plugin-verify-tool。
 - 加系统插件：`plugins/shared/<name>/`（不再选桶，id 承载语义）。
 - 改 agent 配置：`config/agents/main/`（agentos.yaml + persona/ + 提示词骨架）。
-- **装机版插件更新（不动装机包）**：`python scripts/sync_installed_user_space.py
-  --user-root "$env:APPDATA\agentos" --plugin <plugins/ 下相对路径>`。同 id
-  双源裁决=BuiltinFirst（ADR 2026-09-20-packaged-dual-source-adjudication）：
-  **插件版本号必须严格大于内置副本**（持平=同步无效）；**绝不重打包、绝不写
-  安装目录（脚本硬拒绝）**；生效验证两面查：业务端点新字段 + `/api/v1/schema`
+- **装机版插件更新**：按"谁改的"分两条路——①**开发版改内置插件 = 直接改装机
+  内置副本**（装机位 `<安装位>/resources/plugins/shared/<插件>`，以内核日志
+  "Plugin directory (builtin root)" 为准；复制仓内插件文件，勿带 .venv；
+  内置副本的依赖由装机 `resources/prereqs/python` 提供，无需自建 venv），
+  **不造用户影子**（用户副本只服务"用户自己改过"的插件）；改完 watcher 自动
+  热接管，无需重启内核。②**用户自己改了插件**才走用户空间：
+  `python scripts/sync_installed_user_space.py --user-root "$env:APPDATA\agentos"
+  --plugin <plugins/ 下相对路径>`；同 id 双源裁决=BuiltinFirst（ADR
+  2026-09-20-packaged-dual-source-adjudication）：**插件版本号必须严格大于内置
+  副本**（持平=同步无效），**绝不重打包、绝不写安装目录（脚本硬拒绝）**。
+  代价：内置副本在装机包目录内，应用升级/重装即覆盖回旧版，长期生效仍须走
+  CI 门禁的正式打包发版。生效验证两面查：业务端点新字段 + `/api/v1/schema`
   的 ui_schema 新声明。完整细节（--config/--addon、watcher 热接管、
   disable→enable、venv 供给、asar 前端契约同批）=
   `docs/working/装机版维护轮配方_20261013.md` §10。
@@ -269,6 +305,11 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   未跑过均拦）；部署环境检测与打包链实测 =
   `.github/workflows/env-gate.yml`（deploy-env / pack-windows 两车道）。
   ADR 2026-10-28-ci-gated-packaging-deploy。
+- **内核 env 旋钮登记**：kernel/crates 读 `AGENTOS_*` 新键必须登记
+  `config/kernel/env_keys.yaml`（description 必填；双向棘轮门禁
+  kernel-env-registry，检查器 `scripts/check_env_key_registry.py`）。默认值
+  口径维持「常量默认 + env 覆盖」惯例不 yaml 化；全量索引与可见性双 lint
+  执法见 ADR 2026-11-17-kernel-env-key-registry-gate。
 - **查内核库（任务/管道/追踪数据排查）**：`python scripts/kernel_db_query.py
   "<只读SQL>"`——临时快照只读、对运行中内核安全（装机库 `--db
   "$env:APPDATA\agentos\agentos_kernel.db"`）；键位速查见

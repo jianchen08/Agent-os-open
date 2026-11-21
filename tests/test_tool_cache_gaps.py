@@ -128,7 +128,7 @@ class TestEarlyReturns:
         assert result.state_updates == {}
         assert result.skip_remaining is False
 
-    @pytest.mark.parametrize("tool", ["bash_execute", "file_write", "task_submit"])
+    @pytest.mark.parametrize("tool", ["bash", "bash_execute", "file_write", "task_submit"])
     def test_excluded_tools_never_bypass_execution(self, tool: str) -> None:
         """默认排除表内的有副作用工具：即便缓存有同键条目也不短路（结果不可复用）。"""
         p = tc_plugin.ToolCache()
@@ -228,15 +228,16 @@ class TestHitShortCircuit:
 
         assert ops[0]["msg"]["content"] == "nested:\n- 1\n- 2\n"
 
-    def test_string_result_scalar_document(self) -> None:
-        """字符串结果 = YAML 标量文档进 content，data 原样不包键（旧
-        {"content": ...} 包装为漂移已清偿，与执行路径同形）。"""
+    def test_string_result_verbatim_passthrough(self) -> None:
+        """字符串结果 = 原文逐字直通 content（ADR 2026-11-09-tool-result-
+        content-verbatim：不缩进/不转义/不补 YAML 标量尾换行），data 原样
+        不包键（旧 {"content": ...} 包装为漂移已清偿，与执行路径同形）。"""
         p = tc_plugin.ToolCache()
         p.put({"name": "web_search", "args": {"q": "x"}}, "plain text")
 
         msg = _run(p, _state()).state_updates["messages"]["_ops"][0]["msg"]
 
-        assert msg["content"] == "plain text\n"
+        assert msg["content"] == "plain text"
         assert msg["tool_result"]["data"] == "plain text"
 
     def test_unserializable_result_falls_back_to_str(self) -> None:

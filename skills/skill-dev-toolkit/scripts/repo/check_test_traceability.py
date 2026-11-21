@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -169,12 +170,8 @@ def find_test_files() -> list[Path]:
 # ── 标记解析 ────────────────────────────────────────────────────────────
 
 
-def parse_markers(path: Path) -> dict[str, str | None]:
-    """读文件头部（前 40 行）解析 @feature/@vision/@audit。"""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {"feature": None, "vision": None, "audit": None}
+def parse_markers(text: str) -> dict[str, str | None]:
+    """解析文本头部（前 40 行）的 @feature/@vision/@audit（内容由提交面读取方供给）。"""
     head = "\n".join(text.splitlines()[:40])
     feat = FEATURE_RE.search(head)
     vis = VISION_RE.search(head)
@@ -184,6 +181,89 @@ def parse_markers(path: Path) -> dict[str, str | None]:
         "vision": vis.group(1) if vis else None,
         "audit": aud.group(1) if aud else None,
     }
+
+
+# ── 提交面过滤（HEAD + git 索引）────────────────────────────────────────
+
+
+def git_index_files() -> set[str] | None:
+    """git 索引面（tracked + staged）相对路径集合；非 git 环境返回 None（全量扫描）。
+
+    门禁评估面 = HEAD + 暂存：未跟踪且未暂存的文件不属任何提交，CI 干净检出
+    也无此物——扫进会把未标记数虚高到基线之外（2026-11-07 实证：平行会话在飞
+    内核拆分留下 5 个未标记 #[cfg(test)] 新文件，工作区 344 > 基线 339 误红）。
+    文件一旦被暂存/提交即进入索引面，届时照样受非法标记与基线锁约束，无逃逸口。
+    """
+    try:
+        r = subprocess.run(["git", "ls-files", "-z"], capture_output=True, cwd=ROOT, check=False)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    return {s.decode("utf-8", "replace") for s in r.stdout.split(b"\0") if s}
+
+
+def in_commit_face(p: Path, index: set[str] | None) -> bool:
+    """文件是否属提交面：index 为 None（非 git 环境）或命中 tracked/staged 集合。"""
+    if index is None:
+        return True
+    try:
+        rel = p.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return True
+    return rel in index
+
+
+def rel_of(p: Path) -> str | None:
+    """POSIX 相对路径；ROOT 之外（防御面）返回 None。"""
+    try:
+        return p.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return None
+
+
+def git_face_changes() -> tuple[set[str], set[str]] | None:
+    """暂存面与工作区脏面（POSIX 相对路径集合）；git 不可用返回 None。
+
+    暂存 = `git diff --cached`（含新增与删除）；脏面 = `git diff`（tracked 文件
+    未暂存改动）。内容评估面 = HEAD + 暂存：暂存文件读索引内容，脏面 tracked
+    文件读 HEAD 内容，其余读盘（盘面 ≡ HEAD）。tracked 文件的未暂存改动因此
+    不污染评估——2026-11-07 二次实证：平行会话对 7 个 tracked 测试文件的未暂存
+    改动带入非法标记，盘面内容污染所有提交（b5dda064b 只收敛了文件集合面，
+    本刀补齐内容面）。暂存/提交即入评估面，无逃逸口。
+    """
+    try:
+        r_cached = subprocess.run(
+            ["git", "diff", "--name-only", "--cached", "-z"], capture_output=True, cwd=ROOT, check=False
+        )
+        r_dirty = subprocess.run(["git", "diff", "--name-only", "-z"], capture_output=True, cwd=ROOT, check=False)
+    except OSError:
+        return None
+    if r_cached.returncode != 0 or r_dirty.returncode != 0:
+        return None
+    staged = {s.decode("utf-8", "replace") for s in r_cached.stdout.split(b"\0") if s}
+    dirty = {s.decode("utf-8", "replace") for s in r_dirty.stdout.split(b"\0") if s}
+    return staged, dirty
+
+
+def read_commit_face_text(p: Path, rel: str | None, changes: tuple[set[str], set[str]] | None) -> str:
+    """按内容评估面读文件：暂存→索引内容；脏面 tracked→HEAD 内容；其余→盘面。
+
+    git 故障兜底读盘——盘面是提交面的超集，宁可多扫不引入逃逸口。
+    """
+    if changes is not None and rel is not None:
+        staged, dirty = changes
+        if rel in staged or rel in dirty:
+            rev = f":{rel}" if rel in staged else f"HEAD:{rel}"
+            r = subprocess.run(["git", "show", rev], capture_output=True, cwd=ROOT, check=False)
+            if r.returncode == 0:
+                return r.stdout.decode("utf-8", "replace")
+            if rel in staged and not p.exists():
+                return ""  # 暂存删除：文件不贡献标记
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 # ── 主逻辑 ──────────────────────────────────────────────────────────────
@@ -199,12 +279,15 @@ def main() -> int:
     valid_audits = load_valid_audits()
     baseline = read_baseline()
 
-    files = find_test_files()
+    index = git_index_files()
+    changes = git_face_changes() if index is not None else None
+    files = [p for p in find_test_files() if in_commit_face(p, index)]
     unmarked: list[Path] = []
     invalid: list[tuple[Path, str]] = []
 
     for p in files:
-        m = parse_markers(p)
+        text = read_commit_face_text(p, rel_of(p), changes)
+        m = parse_markers(text)
         feat = m["feature"]
         if not feat:
             unmarked.append(p)

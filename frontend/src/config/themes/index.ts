@@ -129,7 +129,7 @@ export const themeList: ThemeInfo[] = [
     description: 'PICO-8 复古色板：暖白画布+实线描边+积木硬阴影，明快不刺眼',
     category: 'light',
     preview: {
-      primary: '#29adff',
+      primary: '#0087db',
       background: '#fff1e8',
       surface: '#ffe3cc',
       text: '#1d2b53',
@@ -142,7 +142,7 @@ export const themeList: ThemeInfo[] = [
     description: '奶油软萌系：奶白底+玫瑰粉，柔光圆角，甜而不腻',
     category: 'light',
     preview: {
-      primary: '#d9738f',
+      primary: '#cc5d7e',
       background: '#fff9f5',
       surface: '#f7ede6',
       text: '#5d4a41',

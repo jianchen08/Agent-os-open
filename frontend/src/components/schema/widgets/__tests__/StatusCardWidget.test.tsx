@@ -42,10 +42,11 @@ describe('StatusCardWidget — metric 形态（声明 props 渲染）', () => {
 })
 
 describe('StatusCardWidget — 不确定进度（indeterminate 提前返回面）', () => {
-  it('indeterminate 渲染 label 与「处理中...」占位（不画确定值百分比）', () => {
+  it('indeterminate 渲染 label 与「执行中」占位（不画确定值百分比）', () => {
     render(<StatusCardWidget label="同步中" value={45} indeterminate />)
     expect(screen.getByText('同步中')).toBeInTheDocument()
-    expect(screen.getByText('处理中...')).toBeInTheDocument()
+    // 活动态文案全站统一「执行中」（daecb5b4ed），indeterminate 占位随迁
+    expect(screen.getByText('执行中')).toBeInTheDocument()
     expect(screen.queryByText('45%')).not.toBeInTheDocument()
   })
 })

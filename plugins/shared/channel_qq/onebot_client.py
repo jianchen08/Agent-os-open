@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 # 类型别名
 MessageCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
+# 反向 WS 监听端口的单一真值：plugin.json 声明默认、server.py 兜底默认、
+# 本模块与 adapter 的构造签名默认均引用此常量。8080 归 zcode-proxy 基础
+# 设施保留（网关车道后端），插件默认端口禁占（端口保留约定由
+# tests/channels/test_qq_config_defaults.py 守卫）。
+DEFAULT_WS_PORT = 8081
+
 
 class OneBotClient:
     """OneBot v11 协议客户端。
@@ -45,7 +51,7 @@ class OneBotClient:
 
     Example::
 
-        client = OneBotClient(ws_port=8080, http_api_url="http://127.0.0.1:5700")
+        client = OneBotClient(ws_port=DEFAULT_WS_PORT, http_api_url="http://127.0.0.1:5700")
         client.on_message = handle_message
         await client.connect()
     """
@@ -53,7 +59,7 @@ class OneBotClient:
     def __init__(
         self,
         ws_host: str = "127.0.0.1",
-        ws_port: int = 8080,
+        ws_port: int = DEFAULT_WS_PORT,
         http_api_url: str = "http://127.0.0.1:5700",
         *,
         access_token: str = "",

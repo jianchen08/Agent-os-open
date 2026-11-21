@@ -89,6 +89,30 @@ def _partial_response(
     return result
 
 
+@pytest.fixture(autouse=True)
+def _llm_model_config(monkeypatch: Any) -> None:
+    """注入最小 llm.yaml 视图：模型空解析现在显式报错（本模块不测模型解析）。"""
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "deepseek-v3": {
+                        "provider": "openai",
+                        "model_name": "deepseek-v3",
+                        "api_base": "https://stub.example.com",
+                        "api_key": "stub-key",
+                    }
+                },
+                "defaults": {"chat": "deepseek-v3"},
+            }
+        },
+    )
+
+
 def _make_plugin(caller: _FakeCaller) -> LLMCore:
     set_capability_caller(caller)
     return LLMCore(

@@ -70,6 +70,7 @@ fn tool_round_tokio_blocking_no_segfault() {
         task_id: String::new(),
         pipeline_id: "a33573e5ee2f".into(),
         tool_call_json: Some(r#"{"name":"file_read"}"#.into()),
+        hook_json: None,
     };
 
     for i in 0..3 {

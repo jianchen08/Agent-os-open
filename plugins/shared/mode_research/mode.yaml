@@ -4,7 +4,7 @@
 mode: research
 name: 研究模式
 # description = 主 agent 唯一域路由知识（批 F3 接管口径：什么任务归我/直派谁/编排链要点；措辞定版 = 渲染缓存前缀稳定）
-description: 调研/研究任务（问题→带引用报告）。简单调研直派 executor/generation/research_agent；复杂研究派编排链 orchestrator/research_orchestrator_agent（执行型：建模/分析/整合/报告自执行，信息收集与终稿独立核查外包 research_agent）
+description: 调研/研究任务（问题→带引用报告）。简单调研直派 executor/generation/research_agent；复杂研究派编排链 orchestrator/research_orchestrator_agent（执行型：建模/分析/整合/报告自执行，信息收集外包 research_agent，终稿独立核查外包 mode_research/research_reviewer_agent）
 icon: 🔍                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
 # 方案规划段领域规格（批 B2 注册化）：值 = 技能名（包内 skills/ 随包，经工作空间
 # 并集快照按名可读）；方案段骨架第零步按本键查注册表（ADR 2026-10-09 决策 4）
@@ -14,7 +14,8 @@ chain:
   entry: main
   # 实际编排（照实声明）：main 派单表调研域 research_agent /
   # research_orchestrator_agent 两键皆可直派；复杂研究走编排者（五阶段状态机），
-  # 其信息收集/终稿独立核查外包 research_agent，链终点即编排者；执行者池声明已全模式退役
+  # 其信息收集外包 research_agent、终稿独立核查外包 research_reviewer_agent，
+  # 链终点即编排者；执行者池声明已全模式退役
   # （P1，ADR 2026-10-09 决策 2）
   expected_path: [main, orchestrator/research_orchestrator_agent]
   entry_override: null

@@ -144,4 +144,4 @@ class TestLifecycleHooks:
         srv = _load_server()
         monkeypatch.setattr(srv.plugin, "get_config", lambda: {"max_reminders": 7})
         inst = srv.get_instance()
-        assert inst._max_reminders == 7
+        assert inst._default_max_reminders == 7

@@ -55,11 +55,47 @@ def test_new_doc_with_invalid_enum_is_red(tmp_path: Path) -> None:
 
 
 def test_scope_boundaries() -> None:
-    """docs/**.md 在执法面；ADR 目录豁免；仓内其余 .md 与非 md 不涉。"""
+    """docs/**.md 全在执法面（含 ADR 目录，D3 部分解除）；仓内其余 .md 与非 md 不涉。"""
     assert mod.in_scope("docs/working/some-ledger.md")
-    assert not mod.in_scope("docs/decisions/2026-10-30-some-adr.md")
+    assert mod.in_scope("docs/decisions/2026-10-30-some-adr.md")
+    assert mod.in_scope("docs/schemas/文档治理标准.md")
     assert not mod.in_scope("skills/code-implement/SKILL.md")
     assert not mod.in_scope("docs/notes/rst.rst")
+
+
+ADR_FM = "---\ndoc_id: 20261114-demo-adr\ntype: adr\nstatus: active\n---\n\n## 背景\n"
+
+
+def test_new_adr_without_frontmatter_is_red(tmp_path: Path) -> None:
+    """负样本：ADR 目录已解除豁免——裸五段 ADR 新增即红（D3 增量口径）。"""
+    rel = _doc(tmp_path, "docs/decisions/2026-11-14-bare-adr.md", "## 背景\n裸 ADR\n")
+    err = mod.check(rel)
+    assert err and "缺 frontmatter" in err
+
+
+def test_new_adr_with_frontmatter_is_green(tmp_path: Path) -> None:
+    rel = _doc(tmp_path, "docs/decisions/2026-11-14-demo-adr.md", ADR_FM)
+    assert mod.check(rel) is None
+
+
+def test_new_adr_must_declare_type_adr(tmp_path: Path) -> None:
+    """ADR 目录下 type 非 adr → 红（否则 supersede 链与 status 无从机械审计）。"""
+    rel = _doc(
+        tmp_path, "docs/decisions/2026-11-14-wrong-type.md",
+        "---\ndoc_id: 20261114-wrong-type\ntype: design\nstatus: active\n---\n正文\n",
+    )
+    err = mod.check(rel)
+    assert err and "type 必为 adr" in err
+
+
+def test_template_file_exempt_from_adr_type_rule(tmp_path: Path) -> None:
+    """模板件不是实例：即便 type 非 adr 也不触发 type 归属执法。"""
+    rel = _doc(
+        tmp_path, "docs/decisions/_TEMPLATE.md",
+        "---\ndoc_id: 20261114-adr-template\ntype: design\nstatus: active\n---\n正文\n",
+    )
+    err = mod.check(rel)
+    assert not (err and "type 必为 adr" in err), err
 
 
 def test_main_decision_paths(

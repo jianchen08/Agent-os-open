@@ -331,8 +331,9 @@ class TestAgentMetricPipeline:
         # 登记键（ADR 2026-08-24-eval-pipeline-state-keys）
         assert st["evaluation.of_task"] == "taskP1"
         assert st["evaluation.metric_id"] == "semantic_check"
-        # 防递归：评估者模式
-        assert st["plugin_configs"]["task_reminder"]["evaluation_mode"] is True
+        # 防递归：评估者模式（99403b823 起路由键 = state evaluation.mode，
+        # task_reminder 不再读 plugin_configs 实例配置）
+        assert st["evaluation.mode"] == "evaluator"
         # 回收超时不阻塞断言（detected_result 缺席 → 指标失败但派发契约已验证）
         assert r.results[0].pipeline_run_id == "evalPipe1"
 

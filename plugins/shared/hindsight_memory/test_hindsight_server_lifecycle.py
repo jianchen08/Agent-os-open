@@ -7,7 +7,7 @@
    summarize（dict recall 计数/空摘要/异常）、delete（无 documents API/无 deleter/
    dict 与非 dict 响应）、import_document（文件读取失败/无文本/异常）、
    get_documents（model_dump 条目/无 id 条目/单条取失败降级）；
-2. _chunk_text 空文本；模块 sys.path 自插；
+2. 模块 sys.path 自插；
 3. _load_env_file_keys / _apply_llm_env（环境变量装配）；
 4. _ensure_memory_backend 懒注入（成功缓存/失败降级）；
 5. on_load：既有服务复用、子进程 spawn（health 轮询）、venv 缺失降级；
@@ -97,10 +97,6 @@ def mock_client(srv: Any) -> MagicMock:
 
 
 class TestBasics:
-    def test_chunk_text_empty(self, srv: Any) -> None:
-        """空文本 → []（不产出空块）。"""
-        assert srv._chunk_text("") == []
-
     def test_module_self_registers_on_sys_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """插件目录不在 sys.path 时 server.py 导入自插（本地模块可达性）。"""
         plugin_dir = str(_PLUGIN_DIR)
@@ -399,7 +395,7 @@ class TestImportDocumentBranches:
         assert "ingest down" in result["error"]
 
     def test_import_reads_file(self, srv: Any, mock_client: MagicMock, tmp_path: Path) -> None:
-        """file_path 真实文件 → 读取切块入库（真实文件系统）。"""
+        """file_path 真实文件 → 读取整文档单次入库（标题双通道，真实文件系统）。"""
         doc = tmp_path / "doc.md"
         doc.write_text("abc", encoding="utf-8")
         result = _call_tool(
@@ -408,7 +404,9 @@ class TestImportDocumentBranches:
         )
         assert result["chunks_imported"] == 1
         assert result["knowledge_name"] == "kb-f"
-        assert mock_client.aretain.call_args.kwargs["content"] == "abc"
+        call_kwargs = mock_client.aretain.call_args.kwargs
+        assert call_kwargs["content"] == "# kb-f\n\nabc"
+        assert call_kwargs["context"] == "kb-f"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -883,6 +881,20 @@ class TestOnLoad:
         client_mod.Hindsight = MagicMock(return_value=client)
         monkeypatch.setitem(sys.modules, "hindsight_client", client_mod)
 
+    def _run_on_load(self, srv: Any) -> None:
+        """驱动 on_load 全生命周期：on_load 秒级返回后接跑后台初始化任务。
+
+        就绪等待后台化后，on_load 本体只做配置装配 + 后台任务派发；本助手在
+        同一事件循环内 await 后台任务，使其出结果（成功/失败）后再断言。
+        """
+
+        async def drive() -> None:
+            await srv._on_load({})
+            if srv._init_task is not None:
+                await srv._init_task
+
+        _run(drive())
+
     def test_reuses_existing_server(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """health 已 200 → 复用既有服务，不 spawn 子进程。"""
         client = MagicMock()
@@ -897,7 +909,7 @@ class TestOnLoad:
         monkeypatch.setattr(srv, "_needs_aux_provision", lambda _root: False)
         srv.plugin._injected_config = {"default_bank_id": "tenant-1"}
 
-        _run(srv._on_load({}))
+        self._run_on_load(srv)
 
         assert srv._client is client
         assert srv._api_process is None
@@ -963,7 +975,7 @@ class TestOnLoad:
         # 轮询 sleep 1s/次 → 测试中置零（外部时序依赖）
         monkeypatch.setattr("asyncio.sleep", AsyncMock())
 
-        _run(srv._on_load({}))
+        self._run_on_load(srv)
 
         popen_args = subprocess.Popen.call_args.args[0]
         venv_python = str(_PLUGIN_DIR / ".venv-hindsight" / "Scripts" / "python.exe")
@@ -1041,7 +1053,7 @@ class TestOnLoad:
         assert "panic-trace" in str(ei.value)
 
     def test_missing_venv_degrades(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        """venv python 缺失 → 初始化失败降级（_client=None + 告警），不崩。"""
+        """venv python 缺失 → 后台初始化失败降级（_client=None + 告警），不崩。"""
         monkeypatch.setenv("HINDSIGHT_DATA_DIR", str(tmp_path / "data"))
         monkeypatch.setattr(
             urllib.request, "urlopen", MagicMock(side_effect=ConnectionError("down"))
@@ -1049,9 +1061,10 @@ class TestOnLoad:
         monkeypatch.setattr(os.path, "isfile", MagicMock(return_value=False))
 
         with caplog.at_level(logging.WARNING):
-            _run(srv._on_load({}))
+            self._run_on_load(srv)
 
         assert srv._client is None
+        assert srv._init_inflight is None  # 后台失败出口清引用
         assert any("初始化失败" in r.getMessage() for r in caplog.records)
 
 class TestOnUnload:

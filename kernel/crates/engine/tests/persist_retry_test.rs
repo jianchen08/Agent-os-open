@@ -77,6 +77,9 @@ struct FlakyStorage {
     checkpoint_failures_remaining: AtomicUsize,
     status_attempts: AtomicUsize,
     status_failures_remaining: AtomicUsize,
+    // ── 镜像面：run.plugin_errors 起点清零（run 起点 run.plugin_errors 独立配额，不耗通用 upsert 预算）──
+    mirror_attempts: AtomicUsize,
+    mirror_failures_remaining: AtomicUsize,
     /// 全部 upsert_state_field 调用 (key, value)（补偿标记断言用）。
     upsert_calls: Mutex<Vec<(String, serde_json::Value)>>,
 }
@@ -93,6 +96,8 @@ impl FlakyStorage {
             checkpoint_failures_remaining: AtomicUsize::new(0),
             status_attempts: AtomicUsize::new(0),
             status_failures_remaining: AtomicUsize::new(0),
+            mirror_attempts: AtomicUsize::new(0),
+            mirror_failures_remaining: AtomicUsize::new(0),
             upsert_calls: Mutex::new(Vec::new()),
         }
     }
@@ -177,6 +182,12 @@ impl StorageBackend for FlakyStorage {
         if key == "run_status" {
             self.status_attempts.fetch_add(1, Ordering::SeqCst);
             return take_one_fail(&self.status_failures_remaining);
+        }
+        if key == agentos_engine::RUN_PLUGIN_ERRORS_KEY {
+            // 镜像面独立配额（默认 0 失败）：引擎 run 起点清零的簿记写，不耗
+            // 通用 upsert 预算——投影键重试契约测试的故障注入只针对投影键。
+            self.mirror_attempts.fetch_add(1, Ordering::SeqCst);
+            return take_one_fail(&self.mirror_failures_remaining);
         }
         self.upsert_attempts.fetch_add(1, Ordering::SeqCst);
         take_one_fail(&self.upsert_failures_remaining)
@@ -629,5 +640,40 @@ async fn run_end_status_exhausts_retries_writes_terminal_persist_marker() {
     assert!(
         value["failed_at"].as_str().is_some_and(|s| !s.is_empty()),
         "标记必须带时间戳: {value}"
+    );
+}
+
+/// run.plugin_errors 起点清零失败 → warn 不阻断 run（与 record_run_start
+/// 同软语义：起点清零是读面卫生写，失败只残留旧镜像，不致命）。
+#[tokio::test]
+async fn run_plugin_errors_mirror_clear_failure_is_soft() {
+    let store = Arc::new(FlakyStorage::new(0, 0));
+    store
+        .mirror_failures_remaining
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let backend: Arc<dyn StorageBackend> = Arc::clone(&store) as Arc<dyn StorageBackend>;
+    let executor = PipelineExecutor::new(
+        Arc::new(EmptyInvoker) as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        TenantContext::new("t", "s"),
+        vec!["writer".to_string()],
+        backend,
+        "r",
+    );
+    let config = make_config();
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
+        .expect("compile ok");
+
+    executor
+        .run_compiled(&compiled, json!({"pipeline_id": "pipe_retry"}))
+        .await
+        .expect("镜像清零失败不阻断 run（软语义）");
+
+    assert_eq!(
+        store
+            .mirror_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "清零写不重试（软语义）：失败 warn 留痕，残留由下一 run 起点再清"
     );
 }

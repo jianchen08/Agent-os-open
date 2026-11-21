@@ -62,7 +62,7 @@ use agentos_core::traits::{
     MessageQueryOpts, SessionListFilter, StorageBackend, StreamingSlotSweep,
 };
 use agentos_core::types::{
-    MessageRecord, PatchType, PendingInputRecord, PendingInputSource, PipelineRunInfo, RunRecord,
+    DispatchRequest, MessageRecord, PatchType, PendingInputRecord, PipelineRunInfo, RunRecord,
     RunStatus, SegmentRecord, SessionRecord, StorageError, TraceEntry, UserRecord,
 };
 use async_trait::async_trait;
@@ -811,6 +811,17 @@ impl SqliteStore {
                  ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET value = ?2, updated_at = ?2",
                 rusqlite::params![pipeline_id, now, tenant_id],
             )?;
+            // 崩溃署名（ADR 2026-11-12-crash-swept-running-tasks-auto-relaunch）：
+            // 受害行补 run_stop_reason=crash_swept——任务插件 boot 自动恢复凭此
+            // 区分「内核重启打断的 running」与「重启前就真失败」（后者自带真实
+            // 归因且不在受害清单，永不被本署名覆盖）。run 收尾 terminal_run_fields
+            // 每轮终态覆写该键，续跑轮收尾时署名自然消解，无跨 run 残留。
+            conn.execute(
+                "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at) \
+                 VALUES (?1, 'run_stop_reason', 'crash_swept', 'str', ?2, ?3) \
+                 ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET value = 'crash_swept', updated_at = ?3",
+                rusqlite::params![pipeline_id, tenant_id, now],
+            )?;
         }
         // 崩溃残留待取消标记清扫（全租户，同崩溃家政语义）
         conn.execute(
@@ -991,6 +1002,10 @@ impl SqliteStore {
         ops: &[serde_json::Value],
         now: &str,
     ) -> Result<(), StorageError> {
+        // 已删除管道写屏障：删除后到达的消息 op 不再落库。
+        if crate::deleted_pipelines::is_deleted(pid) {
+            return Ok(());
+        }
         for op in ops {
             let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
             match kind {
@@ -1548,6 +1563,10 @@ impl SqliteStore {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        // 已删除管道写屏障（与批量版同口径）。
+        if crate::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(());
+        }
         let conn = self.conn.lock();
         let (value_text, value_kind) = encode_state_value(value);
         let now = chrono::Utc::now().to_rfc3339();
@@ -1591,6 +1610,11 @@ impl SqliteStore {
         tenant_id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
+        // 已删除管道写屏障：删除事务提交后，在途 run 的迟到 state 回写一律
+        // 丢弃（否则整份快照会把删掉的管道重新写回库，管理页现孤儿）。
+        if crate::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(());
+        }
         let now = chrono::Utc::now().to_rfc3339();
         for (key, value) in fields {
             let (value_text, value_kind) = encode_state_value(value);
@@ -1602,6 +1626,32 @@ impl SqliteStore {
             )?;
         }
         Ok(())
+    }
+
+    /// 批量真删 pipeline_state 行（update 的 delete_keys 落点；update 纯
+    /// upsert 写 null 只留墓碑键行，键真删必须走 DELETE）。
+    ///
+    /// 主键 `(pipeline_id, field_key, tenant_id)` 精确删；租户隔离由 WHERE
+    /// 的 tenant_id 条件保证（不触他租户同名键）。幂等：不存在的键跳过、
+    /// 不报错。返回实际删除的键列表（not_found 由调用方按返回值差集推断）。
+    pub fn delete_state_fields(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        keys: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock();
+        let mut deleted = Vec::with_capacity(keys.len());
+        for key in keys {
+            let n = conn.execute(
+                "DELETE FROM pipeline_state WHERE pipeline_id=?1 AND tenant_id=?2 AND field_key=?3",
+                rusqlite::params![pipeline_id, tenant_id, key],
+            )?;
+            if n > 0 {
+                deleted.push(key.clone());
+            }
+        }
+        Ok(deleted)
     }
 
     /// 读出某 pipeline 的全部持久化字段（冷启动重建用）。标量按 value_kind 解码，
@@ -1632,28 +1682,37 @@ impl SqliteStore {
         Ok(map)
     }
 
-    // ── 域11：pending 输入队列（ADR-2026-08-26）──────────────────────
+    // ── 域11：pending 输入队列（ADR-2026-08-26 / ADR-2026-11-17）─────────
 
     /// 入队一条 pending 输入（created_at 即 FIFO 序）。幂等：
     /// - 同 id 重复入队忽略（INSERT OR IGNORE）；
     /// - 同一 client_message_id 重复入队忽略（网络重试/前端重发；主键 id 每次
     ///   新生成，只靠主键去重会插两条并执行两次）。空 cmid 不参与查重
     ///   （触发器/任务等无幂等键来源）。
+    ///
+    /// 管道键取自 `input.request.pipeline_id`（单一真值，无冗余形参）；
+    /// 行形状 = 队列信封列 + request JSON 单列。
     pub fn enqueue_pending_input(
         &self,
         tenant_id: &str,
-        pipeline_id: &str,
         input: &PendingInputRecord,
     ) -> Result<(), StorageError> {
+        let pipeline_id = input.request.pipeline_id.as_str();
+        let client_message_id = input.request.client_message_id.as_str();
+        // 已删除管道写屏障：删除后退回的排队消息不再入队（重启/链尾 drain
+        // 消费会让已删管道复活成幽灵 run）。
+        if crate::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(());
+        }
         let conn = self.conn.lock();
         // cmid 查重与 INSERT 同处一个连接锁临界区（单连接串行），并发入队也
         // 不会双插。索引 idx_pending_cmid 由 schema 初始化创建。
-        if !input.client_message_id.is_empty() {
+        if !client_message_id.is_empty() {
             let existing: Option<String> = conn
                 .query_row(
                     "SELECT id FROM pipeline_pending_inputs \
                      WHERE tenant_id=?1 AND pipeline_id=?2 AND client_message_id=?3 LIMIT 1",
-                    rusqlite::params![tenant_id, pipeline_id, input.client_message_id],
+                    rusqlite::params![tenant_id, pipeline_id, client_message_id],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -1661,41 +1720,20 @@ impl SqliteStore {
                 return Ok(());
             }
         }
-        let ec = input
-            .execution_context
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| StorageError::Database(e.to_string()))?;
-        let ov = input
-            .state_overlay
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| StorageError::Database(e.to_string()))?;
+        let request = serde_json::to_string(&input.request).map_err(|e| {
+            StorageError::Serialization(format!("pending request 序列化失败（{}）: {e}", input.id))
+        })?;
         conn.execute(
             "INSERT OR IGNORE INTO pipeline_pending_inputs \
-             (id, pipeline_id, tenant_id, user_id, content, thread, source, agent_id, \
-              route_id, thinking_strength, client_message_id, execution_context, \
-              state_overlay, pipeline_config_id, created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+             (id, pipeline_id, tenant_id, client_message_id, created_at, request) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
             rusqlite::params![
                 input.id,
                 pipeline_id,
                 tenant_id,
-                input.user_id,
-                input.content,
-                input.thread,
-                serde_json::to_string(&input.source)
-                    .expect("serde_json Value serialization is infallible"),
-                input.agent_id,
-                input.route_id,
-                input.thinking_strength,
-                input.client_message_id,
-                ec,
-                ov,
-                input.pipeline_config_id,
+                client_message_id,
                 input.created_at,
+                request,
             ],
         )?;
         Ok(())
@@ -1724,32 +1762,14 @@ impl SqliteStore {
         Ok(updated > 0)
     }
 
-    /// pending 行 source 列解析。腐败值显式留痕后保守回退 user 标注——
-    /// 不留痕会把"读不懂"伪装成真实来源，操作面无从发现。
-    fn parse_pending_source(raw: &str, row_id: &str) -> PendingInputSource {
-        serde_json::from_str(raw).unwrap_or_else(|e| {
-            warn!(
-                id = %row_id,
-                raw = %raw,
-                error = %e,
-                "pending 输入 source 腐败，回退 user 标注"
-            );
-            PendingInputSource::User
-        })
-    }
-
-    /// pending 行可选 JSON 列（execution_context / state_overlay）解析。
-    /// 腐败值显式留痕后丢弃该字段（None）——载荷注入失败必须可观测。
-    fn parse_pending_optional_json(
-        raw: Option<&str>,
-        row_id: &str,
-        field: &str,
-    ) -> Option<serde_json::Value> {
-        let s = raw?;
-        match serde_json::from_str(s) {
-            Ok(v) => Some(v),
+    /// pending 行 `request` 列解析（DispatchRequest JSON）。腐败值告警后返回
+    /// None = 该条目不可重放——调用方按读取面（list 跳过）或消费面（pop 跳过
+    /// 并删除，防毒丸条目永久阻塞队列）处置。
+    fn parse_pending_request(raw: &str, row_id: &str) -> Option<DispatchRequest> {
+        match serde_json::from_str::<DispatchRequest>(raw) {
+            Ok(request) => Some(request),
             Err(e) => {
-                warn!(id = %row_id, field = field, error = %e, "pending 输入 JSON 字段腐败，丢弃");
+                warn!(id = %row_id, error = %e, "pending 输入 request 腐败，条目不可重放");
                 None
             }
         }
@@ -1757,90 +1777,54 @@ impl SqliteStore {
 
     /// 取队首（FIFO：created_at, id 升序）第一条 pending 输入并删除（消费瞬态）。
     /// None = 队列空。删除即激活——激活后不可回退（物理边界）。
+    /// request 腐败条目：告警后删除并取下一条（毒丸不得阻塞整条队列）。
     pub fn pop_pending_input(
         &self,
         tenant_id: &str,
         pipeline_id: &str,
     ) -> Result<Option<PendingInputRecord>, StorageError> {
         let conn = self.conn.lock();
-        let row = conn
-            .query_row(
-                "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
-                        agent_id, route_id, thinking_strength, client_message_id, \
-                        execution_context, state_overlay, pipeline_config_id, created_at \
-                 FROM pipeline_pending_inputs \
-                 WHERE tenant_id=?1 AND pipeline_id=?2 \
-                 ORDER BY created_at, id LIMIT 1",
-                rusqlite::params![tenant_id, pipeline_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, String>(9)?,
-                        row.get::<_, String>(10)?,
-                        row.get::<_, Option<String>>(11)?,
-                        row.get::<_, Option<String>>(12)?,
-                        row.get::<_, Option<String>>(13)?,
-                        row.get::<_, String>(14)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((
-            id,
-            pid,
-            tnt,
-            uid,
-            content,
-            thread,
-            source,
-            agent,
-            route_id,
-            thinking,
-            cmid,
-            ec,
-            ov,
-            pcid,
-            created,
-        )) = row
-        else {
-            return Ok(None);
-        };
-        conn.execute(
-            "DELETE FROM pipeline_pending_inputs WHERE id=?1 AND tenant_id=?2",
-            rusqlite::params![id, tenant_id],
-        )?;
-        let source = Self::parse_pending_source(&source, &id);
-        let execution_context =
-            Self::parse_pending_optional_json(ec.as_deref(), &id, "execution_context");
-        let state_overlay = Self::parse_pending_optional_json(ov.as_deref(), &id, "state_overlay");
-        Ok(Some(PendingInputRecord {
-            id,
-            pipeline_id: pid,
-            tenant_id: tnt,
-            user_id: uid,
-            content,
-            thread,
-            source,
-            agent_id: agent,
-            route_id,
-            thinking_strength: thinking,
-            client_message_id: cmid,
-            execution_context,
-            state_overlay,
-            pipeline_config_id: pcid,
-            created_at: created,
-        }))
+        loop {
+            let row = conn
+                .query_row(
+                    "SELECT id, tenant_id, created_at, request \
+                     FROM pipeline_pending_inputs \
+                     WHERE tenant_id=?1 AND pipeline_id=?2 \
+                     ORDER BY created_at, id LIMIT 1",
+                    rusqlite::params![tenant_id, pipeline_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((id, tnt, created, request_raw)) = row else {
+                return Ok(None);
+            };
+            conn.execute(
+                "DELETE FROM pipeline_pending_inputs WHERE id=?1 AND tenant_id=?2",
+                rusqlite::params![id, tnt],
+            )?;
+            match Self::parse_pending_request(&request_raw, &id) {
+                Some(request) => {
+                    return Ok(Some(PendingInputRecord {
+                        id,
+                        tenant_id: tnt,
+                        created_at: created,
+                        request,
+                    }))
+                }
+                None => continue,
+            }
+        }
     }
 
-    /// 列出某管道全部 pending 条目（FIFO 序）。
+    /// 列出某管道全部 pending 条目（FIFO 序）。request 腐败行告警后跳过
+    /// （只读面不删除；该行会在消费面按毒丸规则清除）。
     pub fn list_pending_inputs(
         &self,
         tenant_id: &str,
@@ -1849,9 +1833,7 @@ impl SqliteStore {
         let conn = self.conn.lock();
         let rows = conn
             .prepare(
-                "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
-                        agent_id, route_id, thinking_strength, client_message_id, \
-                        execution_context, state_overlay, pipeline_config_id, created_at \
+                "SELECT id, tenant_id, created_at, request \
                  FROM pipeline_pending_inputs \
                  WHERE tenant_id=?1 AND pipeline_id=?2 \
                  ORDER BY created_at, id",
@@ -1862,68 +1844,27 @@ impl SqliteStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                    row.get::<_, Option<String>>(13)?,
-                    row.get::<_, String>(14)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
-            .map(
-                |(
+            .filter_map(|(id, tnt, created, request_raw)| {
+                let request = Self::parse_pending_request(&request_raw, &id)?;
+                Some(PendingInputRecord {
                     id,
-                    rid,
-                    t,
-                    uid,
-                    content,
-                    thread,
-                    source,
-                    agent,
-                    route_id,
-                    thinking,
-                    cmid,
-                    ec,
-                    ov,
-                    pcid,
-                    created,
-                )| {
-                    let source = Self::parse_pending_source(&source, &id);
-                    let execution_context =
-                        Self::parse_pending_optional_json(ec.as_deref(), &id, "execution_context");
-                    let state_overlay =
-                        Self::parse_pending_optional_json(ov.as_deref(), &id, "state_overlay");
-                    PendingInputRecord {
-                        id,
-                        pipeline_id: rid,
-                        tenant_id: t,
-                        user_id: uid,
-                        content,
-                        thread,
-                        source,
-                        agent_id: agent,
-                        route_id,
-                        thinking_strength: thinking,
-                        client_message_id: cmid,
-                        execution_context,
-                        state_overlay,
-                        pipeline_config_id: pcid,
-                        created_at: created,
-                    }
-                },
-            )
+                    tenant_id: tnt,
+                    created_at: created,
+                    request,
+                })
+            })
             .collect())
     }
 
     /// 修改 pending 条目 content（不存在 → Ok(false)）。
+    ///
+    /// content 在 request JSON 内（单一真值），读-改-写同处一个连接锁临界区；
+    /// request 腐败 → 显式 Serialization 错误（PUT 端 500，不静默丢弃修改）。
     pub fn update_pending_input_content(
         &self,
         tenant_id: &str,
@@ -1932,10 +1873,27 @@ impl SqliteStore {
         new_content: &str,
     ) -> Result<bool, StorageError> {
         let conn = self.conn.lock();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT request FROM pipeline_pending_inputs \
+                 WHERE id=?1 AND tenant_id=?2 AND pipeline_id=?3",
+                rusqlite::params![input_id, tenant_id, pipeline_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let mut request = Self::parse_pending_request(&raw, input_id).ok_or_else(|| {
+            StorageError::Serialization(format!("pending request 腐败，无法修改（{input_id}）"))
+        })?;
+        request.content = new_content.to_string();
+        let updated = serde_json::to_string(&request)
+            .map_err(|e| StorageError::Serialization(format!("pending request 序列化失败: {e}")))?;
         let n = conn.execute(
-            "UPDATE pipeline_pending_inputs SET content=?1 \
+            "UPDATE pipeline_pending_inputs SET request=?1 \
              WHERE id=?2 AND tenant_id=?3 AND pipeline_id=?4",
-            rusqlite::params![new_content, input_id, tenant_id, pipeline_id],
+            rusqlite::params![updated, input_id, tenant_id, pipeline_id],
         )?;
         Ok(n > 0)
     }
@@ -1988,6 +1946,10 @@ impl SqliteStore {
         step_no: i64,
         state: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        // 已删除管道写屏障：run 收尾/步骤快照不再落库。
+        if crate::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(());
+        }
         let conn = self.conn.lock();
         let checkpoint_id = format!("cp_{pipeline_id}_{step_no}");
         // 瘦身副本：剥离 messages + 易变 per-run 键（内核自有 ∪ 插件声明），
@@ -2071,6 +2033,75 @@ impl SqliteStore {
                 Ok(Some((step_no, state)))
             }
             None => Ok(None),
+        }
+    }
+
+    /// 取目标消息序号之前最近的一份 checkpoint（step_no 最大且
+    /// `ckpt_max_seq < seq_exclusive`）。
+    ///
+    /// ckpt_max_seq 是 checkpoint 拍点时的消息最大序号（save_checkpoint 写入的
+    /// 水位），按它筛「目标轮次开始前」的基线；旧格式 checkpoint 无水位
+    /// （json_extract 返回 NULL）自然被排除。重发状态回退读面，见
+    /// `StorageBackend::load_checkpoint_before_seq`。
+    pub fn load_checkpoint_before_seq(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        seq_exclusive: i64,
+    ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT step_no, state_json FROM pipeline_checkpoints \
+                 WHERE pipeline_id=?1 AND tenant_id=?2 \
+                   AND CAST(json_extract(state_json, '$.ckpt_max_seq') AS INTEGER) < ?3 \
+                 ORDER BY step_no DESC LIMIT 1",
+                rusqlite::params![pipeline_id, tenant_id, seq_exclusive],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((step_no, state_json)) => {
+                let mut state: serde_json::Value =
+                    serde_json::from_str(&state_json).map_err(|e| {
+                        StorageError::Serialization(format!(
+                            "checkpoint state for pipeline {pipeline_id}: {e}"
+                        ))
+                    })?;
+                if let Some(obj) = state.as_object_mut() {
+                    obj.remove("messages");
+                }
+                Ok(Some((step_no, state)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 用给定字段集替换某 pipeline 的全部持久化标量（单事务先清后写）。
+    pub fn replace_pipeline_state(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        // 已删除管道写屏障：regenerate 回退不得重建已删管道的 state 行。
+        if crate::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
+        tx.execute(
+            "DELETE FROM pipeline_state WHERE pipeline_id=?1 AND tenant_id=?2",
+            rusqlite::params![pipeline_id, tenant_id],
+        )?;
+        match Self::upsert_state_fields_tx(&tx, pipeline_id, tenant_id, fields) {
+            Ok(()) => tx
+                .commit()
+                .map(|_| ())
+                .map_err(|e| StorageError::Database(format!("commit: {e}"))),
+            Err(e) => Err(e),
         }
     }
 
@@ -2187,6 +2218,10 @@ impl SqliteStore {
     /// 清理，最后删 sessions 行。返回实际删除的 pipeline_id 清单（调用方逐出
     /// 内存 state 注册表用）。无记录时同样返回 Ok(vec![])（幂等）。
     /// tenant_id 由调用方在派发到 DB 线程池前解析。单次事务包裹，失败回滚。
+    ///
+    /// 提交成功后登记进程级墓碑（[`crate::deleted_pipelines`]）：删除不会让
+    /// 在途 run 立刻停手——其后的 state 回写/消息/trace/派生映射一律被写屏障
+    /// 丢弃，否则整份快照会把删掉的管道重新写回库（2026-11-10 装机实证）。
     fn delete_session_inner(
         &self,
         thread_id: &str,
@@ -2197,14 +2232,9 @@ impl SqliteStore {
             .transaction()
             .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
 
-        // 1. 收集该会话全部 pipeline_id：映射表 + sessions.pipeline_ids 兜底（防主管道未写映射）。
-        let mut pipeline_ids = pipeline_ids_for_thread(&tx, thread_id, tenant_id)?;
-
-        // 2. 血缘后代：子任务管道出生落自环绑定（thread=自身 id），不属于任何
-        // 会话——按 thread 清单级联会漏掉整条子任务链（runs/state/绑定全残留，
-        // 管理页幽灵条目的根源），删除面清单必须沿血缘补全。
-        let descendants = descendant_pipeline_ids(&tx, &pipeline_ids, tenant_id)?;
-        pipeline_ids.extend(descendants);
+        // 1. 收集该会话全部 pipeline_id：映射表 + sessions.pipeline_ids 兜底
+        //    （防主管道未写映射）+ 血缘后代（子任务链）。
+        let pipeline_ids = Self::collect_cascade_ids(&tx, thread_id, tenant_id)?;
 
         if pipeline_ids.is_empty() {
             // 无任何管道（纯标签会话）：直接删 sessions 行
@@ -2228,8 +2258,13 @@ impl SqliteStore {
         )?;
 
         tx.commit()
-            .map(|_| pipeline_ids)
-            .map_err(|e| StorageError::Database(format!("commit: {e}")))
+            .map_err(|e| StorageError::Database(format!("commit: {e}")))?;
+        // 5. 提交后登记墓碑（连接锁仍持有：与删除临界区同段，迟到的写者必在
+        //    本函数返回后才会拿到连接锁）。
+        for pid in &pipeline_ids {
+            crate::deleted_pipelines::mark_deleted(pid);
+        }
+        Ok(pipeline_ids)
     }
 
     /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义）。
@@ -2239,6 +2274,7 @@ impl SqliteStore {
     /// 两份清单不得各自增删表。清单先沿血缘补全后代任务管道（删父任务
     /// 连带其派生链，否则子任务自环绑定让整链残留成幽灵）。
     /// 单次事务包裹，失败回滚；无记录时返回 Ok(vec![])（幂等）。
+    /// 提交成功后登记进程级墓碑（同 `delete_session_inner`）。
     fn delete_pipeline_inner(
         &self,
         pipeline_id: &str,
@@ -2256,8 +2292,85 @@ impl SqliteStore {
         Self::delete_pipelines_cascade(&tx, &pipeline_ids, tenant_id)?;
 
         tx.commit()
-            .map(|_| pipeline_ids)
-            .map_err(|e| StorageError::Database(format!("commit: {e}")))
+            .map_err(|e| StorageError::Database(format!("commit: {e}")))?;
+        for pid in &pipeline_ids {
+            crate::deleted_pipelines::mark_deleted(pid);
+        }
+        Ok(pipeline_ids)
+    }
+
+    /// 会话存在性（跨租户；thread_id 是 sessions 主键，全局唯一）。
+    fn session_exists_inner(&self, thread_id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE thread_id = ?1)",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    /// 挂起一组管道当前 `run_status=running` 的运行，返回其 run_id 清单。
+    ///
+    /// 删除前收口用：run 的 state 行可能与调用方租户不同（出生/跑轮租户错配
+    /// 的存量形态），但 pipeline_id 是全局唯一 uuid——停止信号按 id 收口，
+    /// 不按租户过滤（这不是删除数据，只是发停止信号）。
+    fn suspend_runs_inner(&self, pipeline_ids: &[String]) -> Result<Vec<String>, StorageError> {
+        if pipeline_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
+        let placeholders = (0..pipeline_ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let select_sql = format!(
+            "SELECT s.value FROM pipeline_state s \
+             WHERE s.field_key = 'run_id' AND s.pipeline_id IN ({placeholders}) \
+               AND EXISTS (SELECT 1 FROM pipeline_state r \
+                           WHERE r.pipeline_id = s.pipeline_id \
+                             AND r.field_key = 'run_status' AND r.value = 'running')"
+        );
+        let run_ids: Vec<String> = {
+            let mut stmt = tx.prepare(&select_sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(pipeline_ids.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let update_sql = format!(
+            "UPDATE pipeline_state SET value = 'suspended', value_kind = 'str', updated_at = ?1 \
+             WHERE field_key = 'run_status' AND value = 'running' AND pipeline_id IN ({})",
+            (0..pipeline_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(pipeline_ids.len() + 1);
+        params.push(&now);
+        for pid in pipeline_ids {
+            params.push(pid);
+        }
+        tx.execute(&update_sql, params.as_slice())?;
+        tx.commit()
+            .map_err(|e| StorageError::Database(format!("commit: {e}")))?;
+        Ok(run_ids)
+    }
+
+    /// 会话级联清单收集（删除/挂起共用）：映射表 + pipeline_ids 兜底 + 血缘后代。
+    fn collect_cascade_ids(
+        conn: &rusqlite::Connection,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut ids = pipeline_ids_for_thread(conn, thread_id, tenant_id)?;
+        let descendants = descendant_pipeline_ids(conn, &ids, tenant_id)?;
+        ids.extend(descendants);
+        Ok(ids)
     }
 
     /// 会话删除 / 任务删除共用的管道级联清理：删净一组管道在全部执行数据表中的行。
@@ -2326,6 +2439,11 @@ impl SqliteStore {
             return Err(StorageError::Database(format!(
                 "link_pipeline_session: empty id (pipeline_id={pipeline_id:?}, thread_id={thread_id:?})"
             )));
+        }
+        // 已删除管道写屏障：在途 run 的下一轮开跑不得把映射重新写回（删除后
+        // 重连映射 = 孤儿管道重新获得注入派发入口）。
+        if crate::deleted_pipelines::is_deleted(pipeline_id) {
+            return Ok(());
         }
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
@@ -2735,6 +2853,10 @@ impl SqliteStore {
     }
 
     fn append_trace_inner(&self, entry: TraceEntry, tenant_id: &str) -> Result<(), StorageError> {
+        // 已删除管道写屏障：迟到轨迹不再落库。
+        if crate::deleted_pipelines::is_deleted(&entry.pipeline_id) {
+            return Ok(());
+        }
         let conn = self.conn.lock();
         let patch_type_str = match entry.patch_type {
             PatchType::StateUpdate => "state_update",
@@ -2957,10 +3079,17 @@ fn pipeline_ids_for_thread(
 /// 沿血缘 `lineage.parent_pipeline_id`（子→父指针）收集根管道集的全部后代
 /// 任务管道，BFS 逐层展开（防环 visited）。返回不含 roots 自身、按发现序排列。
 ///
+/// 向下引用两类（都属于"下级执行管道"）：
+/// - `lineage.parent_pipeline_id`：子任务出生血缘（子管道行指向父管道）；
+/// - `task.owned.<child_id>.<field>`：提交者/父管道持有的子管道登记键——
+///   review 等以 `lineage.root` 根形式出生、不挂父血缘的派生管道，只靠它
+///   声明归属；不折算这类引用，删会话/任务后它们整条留成孤儿。
+///
 /// 删除面专用：子任务管道出生落自环 pipeline_sessions 绑定（thread=自身 id，
-/// sessions 表无行），不属于任何被删会话——删除清单不沿血缘补全就会整链漏删
+/// sessions 表无行），不属于任何被删会话——删除清单不沿引用补全就会整链漏删
 /// （state/绑定残留，管理页幽灵条目）。标量值 str 原文存储，解析失败按原值兜底
-/// （兼容 JSON 编码壳的过渡残留）。
+/// （兼容 JSON 编码壳的过渡残留）。非管道实体（如项目节点）的 owned 键同样
+/// 进入清单：按 id 删除对无数据者天然幂等。
 fn descendant_pipeline_ids(
     conn: &rusqlite::Connection,
     roots: &[String],
@@ -2970,24 +3099,42 @@ fn descendant_pipeline_ids(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT pipeline_id, value FROM pipeline_state \
-         WHERE tenant_id = ?1 AND field_key = 'lineage.parent_pipeline_id'",
+        "SELECT pipeline_id, field_key, value FROM pipeline_state \
+         WHERE tenant_id = ?1 \
+           AND (field_key = 'lineage.parent_pipeline_id' OR field_key LIKE 'task.owned.%')",
     )?;
     let rows = stmt.query_map(rusqlite::params![tenant_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
-    let mut children_by_parent: std::collections::HashMap<String, Vec<String>> =
+    let mut children_by_owner: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for r in rows {
-        let (child, raw) = r?;
-        let parent: String = serde_json::from_str(&raw).unwrap_or_else(|_| raw.clone());
-        children_by_parent.entry(parent).or_default().push(child);
+        let (holder, key, raw) = r?;
+        if key == "lineage.parent_pipeline_id" {
+            let parent: String = serde_json::from_str(&raw).unwrap_or_else(|_| raw.clone());
+            if !parent.is_empty() {
+                children_by_owner.entry(parent).or_default().push(holder);
+            }
+        } else if let Some(child) = key
+            .strip_prefix("task.owned.")
+            .and_then(|rest| rest.split('.').next())
+            .filter(|id| !id.is_empty())
+        {
+            children_by_owner
+                .entry(holder)
+                .or_default()
+                .push(child.to_string());
+        }
     }
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = roots.iter().cloned().collect();
     let mut frontier: Vec<String> = roots.to_vec();
     while let Some(pid) = frontier.pop() {
-        if let Some(children) = children_by_parent.get(&pid) {
+        if let Some(children) = children_by_owner.get(&pid) {
             for child in children {
                 if seen.insert(child.clone()) {
                     out.push(child.clone());
@@ -3274,6 +3421,19 @@ impl StorageBackend for SqliteStore {
             .await
     }
 
+    async fn delete_state_fields(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        keys: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let keys = keys.to_vec();
+        self.blocking(move |this| this.delete_state_fields(&pipeline_id, &tenant_id, &keys))
+            .await
+    }
+
     async fn load_pipeline_state(
         &self,
         pipeline_id: &str,
@@ -3311,6 +3471,33 @@ impl StorageBackend for SqliteStore {
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
         self.blocking(move |this| this.load_latest_checkpoint(&pipeline_id, &tenant_id))
+            .await
+    }
+
+    async fn load_checkpoint_before_seq(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        seq_exclusive: i64,
+    ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        self.blocking(move |this| {
+            this.load_checkpoint_before_seq(&pipeline_id, &tenant_id, seq_exclusive)
+        })
+        .await
+    }
+
+    async fn replace_pipeline_state(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let fields = fields.clone();
+        self.blocking(move |this| this.replace_pipeline_state(&pipeline_id, &tenant_id, &fields))
             .await
     }
 
@@ -3363,13 +3550,11 @@ impl StorageBackend for SqliteStore {
     async fn enqueue_pending_input(
         &self,
         tenant_id: &str,
-        pipeline_id: &str,
         input: &PendingInputRecord,
     ) -> Result<(), StorageError> {
         let tenant_id = tenant_id.to_string();
-        let pipeline_id = pipeline_id.to_string();
         let input = input.clone();
-        self.blocking(move |this| this.enqueue_pending_input(&tenant_id, &pipeline_id, &input))
+        self.blocking(move |this| this.enqueue_pending_input(&tenant_id, &input))
             .await
     }
 
@@ -3493,6 +3678,40 @@ impl StorageBackend for SqliteStore {
         let pipeline_id = pipeline_id.to_string();
         self.blocking(move |this| this.delete_pipeline_inner(&pipeline_id, &tenant_id))
             .await
+    }
+
+    async fn session_exists(&self, thread_id: &str) -> Result<bool, StorageError> {
+        let thread_id = thread_id.to_string();
+        self.blocking(move |this| this.session_exists_inner(&thread_id))
+            .await
+    }
+
+    async fn suspend_cascade_runs(&self, thread_id: &str) -> Result<Vec<String>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let thread_id = thread_id.to_string();
+        self.blocking(move |this| {
+            let pipeline_ids = {
+                let conn = this.conn.lock();
+                Self::collect_cascade_ids(&conn, &thread_id, &tenant_id)?
+            };
+            this.suspend_runs_inner(&pipeline_ids)
+        })
+        .await
+    }
+
+    async fn suspend_pipeline_runs(&self, pipeline_id: &str) -> Result<Vec<String>, StorageError> {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let pipeline_id = pipeline_id.to_string();
+        self.blocking(move |this| {
+            let pipeline_ids = {
+                let conn = this.conn.lock();
+                let mut ids = vec![pipeline_id.clone()];
+                ids.extend(descendant_pipeline_ids(&conn, &ids, &tenant_id)?);
+                ids
+            };
+            this.suspend_runs_inner(&pipeline_ids)
+        })
+        .await
     }
 
     async fn link_pipeline_session(
@@ -4050,9 +4269,15 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, user_id, content, thread, source, created_at) \
-                 VALUES ('pin-ghost', 'p-ghost', 'default', 'u1', 'hi', ?1, 'chat', ?2)",
-                rusqlite::params![tid, now],
+                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, client_message_id, created_at, request) \
+                 VALUES ('pin-ghost', 'p-ghost', 'default', '', ?2, ?1)",
+                rusqlite::params![
+                    format!(
+                        "{{\"thread_id\":{}, \"user_id\":\"u1\", \"pipeline_id\":\"p-ghost\", \"content\":\"hi\", \"client_message_id\":\"\", \"source\":\"user\", \"execution_context\":null, \"state_overlay\":null, \"pipeline_config_id\":null}}",
+                        serde_json::to_string(tid).unwrap()
+                    ),
+                    now
+                ],
             )
             .unwrap();
             // 对照管道：同表各留一行（不应误删）
@@ -4069,9 +4294,12 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, user_id, content, thread, source, created_at) \
-                 VALUES ('pin-keep', 'p-keep', 'default', 'u1', 'hi', 'thread-other', 'chat', ?1)",
-                rusqlite::params![now],
+                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, client_message_id, created_at, request) \
+                 VALUES ('pin-keep', 'p-keep', 'default', '', ?1, ?2)",
+                rusqlite::params![
+                    now,
+                    "{\"thread_id\":\"thread-other\", \"user_id\":\"u1\", \"pipeline_id\":\"p-keep\", \"content\":\"hi\", \"client_message_id\":\"\", \"source\":\"user\", \"execution_context\":null, \"state_overlay\":null, \"pipeline_config_id\":null}"
+                ],
             )
             .unwrap();
         }
@@ -4109,6 +4337,304 @@ mod tests {
             count("SELECT COUNT(*) FROM pipeline_pending_inputs WHERE pipeline_id = 'p-keep'"),
             1,
             "其他会话管道 pending 输入不应误删"
+        );
+    }
+
+    /// 回归测试：删除后的写屏障——删除提交后，在途 run 的迟到写入
+    /// （state/trace/checkpoint/消息/映射/pending）一律丢弃，不得把删掉的
+    /// 管道重新写回库（2026-11-10 装机实证：删会话后在途 run 把整份 state
+    /// 28 行整批复活，并继续派生新子管道）。
+    #[tokio::test]
+    async fn test_deleted_pipeline_write_barrier_blocks_resurrection() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-write-barrier";
+        let pid = "pipe-write-barrier";
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES (?1, 'wb', 'active', 'default', ?2, ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                 VALUES (?1, ?2, 'default', ?3)",
+                rusqlite::params![pid, tid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, value, value_kind, updated_at) \
+                 VALUES ('default', ?1, 'task.status', 'running', 'str', ?2)",
+                rusqlite::params![pid, now],
+            )
+            .unwrap();
+        }
+        store.delete_session(tid).await.unwrap();
+        assert!(
+            crate::deleted_pipelines::is_deleted(pid),
+            "删除提交后必须登记墓碑"
+        );
+
+        // 模拟在途 run 的迟到写：全部应被屏障丢弃
+        store
+            .upsert_state_fields(
+                pid,
+                "default",
+                &serde_json::json!({"task.status": "running", "run_status": "running"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+        store
+            .append_trace(TraceEntry {
+                trace_id: "trace-wb".into(),
+                pipeline_id: pid.into(),
+                seq: 0,
+                plugin_id: "p".into(),
+                patch_type: PatchType::StateUpdate,
+                patch_data: json!({}),
+                created_at: now.clone(),
+            })
+            .await
+            .unwrap();
+        store
+            .save_checkpoint(pid, "default", 1, &json!({"late": true}))
+            .unwrap();
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "迟到的消息"}})],
+            )
+            .unwrap();
+        store
+            .link_pipeline_session(pid, tid, "default")
+            .await
+            .unwrap();
+        store
+            .enqueue_pending_input(
+                "default",
+                &PendingInputRecord {
+                    id: "pin-wb".into(),
+                    tenant_id: "default".into(),
+                    created_at: now.clone(),
+                    request: DispatchRequest {
+                        thread_id: tid.into(),
+                        user_id: "u1".into(),
+                        pipeline_id: pid.into(),
+                        content: "迟到的排队消息".into(),
+                        client_message_id: "cmid-wb".into(),
+                        source: agentos_core::types::PendingInputSource::User,
+                        execution_context: None,
+                        state_overlay: None,
+                        pipeline_config_id: None,
+                    },
+                },
+            )
+            .unwrap();
+
+        // 区分度对照：屏障按 pipeline_id 生效，无关管道写入照常
+        store
+            .upsert_state_fields(
+                "pipe-write-barrier-other",
+                "default",
+                &serde_json::json!({"task.status": "running"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        for (table, column) in [
+            ("traces", "pipeline_id"),
+            ("message_slots", "pipeline_id"),
+            ("pipeline_state", "pipeline_id"),
+            ("pipeline_checkpoints", "pipeline_id"),
+            ("pipeline_pending_inputs", "pipeline_id"),
+            ("pipeline_sessions", "pipeline_id"),
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = '{pid}'");
+            assert_eq!(count(&sql), 0, "{table} 不得被迟到写入复活");
+        }
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE pipeline_id = 'pipe-write-barrier-other'"),
+            1,
+            "无关管道的写入不得被误丢（屏障按 id 生效）"
+        );
+    }
+
+    /// 回归测试：删除前挂起——会话级联清单（含血缘后代）内所有 running run
+    /// 置 suspended 并回传 run_id（调用方据此发停止信号），收窄"删后仍跑"
+    /// 的窗口；数据面终态由删除墓碑写屏障兜底。
+    #[tokio::test]
+    async fn test_suspend_cascade_runs_suspends_all_running() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-suspend-cascade";
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES (?1, 'suspend', 'active', 'default', ?2, ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            for (pid, run_id) in [
+                ("pipe-suspend-main", "run-suspend-main"),
+                ("pipe-suspend-child", "run-suspend-child"),
+            ] {
+                conn.execute(
+                    "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                     VALUES (?1, ?2, 'default', ?3)",
+                    rusqlite::params![pid, tid, now],
+                )
+                .unwrap();
+                for (key, value) in [("run_id", run_id), ("run_status", "running")] {
+                    conn.execute(
+                        "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, value, value_kind, updated_at) \
+                         VALUES ('default', ?1, ?2, ?3, 'str', ?4)",
+                        rusqlite::params![pid, key, value, now],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        // 子管道经血缘挂到主管道（级联清单必须沿血缘收口）
+        store
+            .upsert_state_field(
+                "pipe-suspend-child",
+                "default",
+                "lineage.parent_pipeline_id",
+                &serde_json::json!("pipe-suspend-main"),
+            )
+            .unwrap();
+
+        let run_ids = store.suspend_cascade_runs(tid).await.unwrap();
+        assert_eq!(
+            run_ids.len(),
+            2,
+            "主管道与血缘子管道的 run 都要挂起: {run_ids:?}"
+        );
+        assert!(run_ids.contains(&"run-suspend-main".to_string()));
+        assert!(run_ids.contains(&"run-suspend-child".to_string()));
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE field_key='run_status' AND value='suspended'"),
+            2,
+            "两条管道的运行状态都应置 suspended（llm 取消感知的权威信号）"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE field_key='run_status' AND value='running'"),
+            0
+        );
+    }
+
+    /// 回归测试：session_exists 跨租户判定（thread_id 主键全局唯一），删除后
+    /// 返回 false——派生创建闸门据此拒绝已删会话下的孤儿出生。
+    #[tokio::test]
+    async fn test_session_exists_is_tenant_agnostic() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-exists-u";
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES (?1, 'exists', 'active', 'u-tenant', ?2, ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+        }
+        // 无租户 scope（默认 default）也能查到 u-tenant 会话
+        assert!(
+            store.session_exists(tid).await.unwrap(),
+            "跨租户会话必须可见"
+        );
+        assert!(!store.session_exists("thread-no-such").await.unwrap());
+        // 删除按会话自身租户执行（删除过滤语义不变）
+        let tenant =
+            agentos_core::types::TenantContext::new("u-tenant".to_string(), tid.to_string());
+        agentos_tenant::scope(tenant, async { store.delete_session(tid).await })
+            .await
+            .unwrap();
+        assert!(
+            !store.session_exists(tid).await.unwrap(),
+            "删除后必须不可见"
+        );
+    }
+
+    /// 回归测试：`task.owned.<id>` 持有的下级管道随会话/任务级联删除。
+    ///
+    /// review 等派生管道以 `lineage.root` 根形式出生（不挂父血缘），归属只靠
+    /// 父管道的 `task.owned.<id>` 登记键——不展开持有引用就整条残留成孤儿。
+    /// 区分度断言：未被任何被删管道持有的无关管道不得误删。
+    #[tokio::test]
+    async fn test_delete_session_cascades_owned_child_pipeline() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-owned-child";
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES (?1, 'owned', 'active', 'default', ?2, ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                 VALUES ('pipe-owned-main', ?1, 'default', ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, value, value_kind, updated_at) \
+                 VALUES ('default', 'pipe-owned-review', 'lineage.root', 'true', 'bool', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            // 无关管道（同租户，不被持有，不得误删）
+            conn.execute(
+                "INSERT INTO pipeline_state (tenant_id, pipeline_id, field_key, value, value_kind, updated_at) \
+                 VALUES ('default', 'pipe-owned-bystander', 'lineage.root', 'true', 'bool', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+        // 主管道持有复盘子管道（review 出生形态：根血缘 + 持有登记键）
+        store
+            .upsert_state_field(
+                "pipe-owned-main",
+                "default",
+                "task.owned.pipe-owned-review.title",
+                &serde_json::json!("复盘"),
+            )
+            .unwrap();
+
+        let deleted = store.delete_session(tid).await.unwrap();
+        assert!(
+            deleted.contains(&"pipe-owned-review".to_string()),
+            "持有登记的子管道应进删除清单: {deleted:?}"
+        );
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE pipeline_id = 'pipe-owned-review'"),
+            0,
+            "复盘子管道 state 应随会话删除"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state WHERE pipeline_id = 'pipe-owned-bystander'"),
+            1,
+            "未被持有的无关管道不得误删"
         );
     }
 
@@ -4267,8 +4793,15 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, user_id, content, thread, source, created_at)                  VALUES ('pin-del-1', ?1, 'default', 'u1', 'hi', 'thread-del', 'chat', ?2)",
-                rusqlite::params![pid, now],
+                "INSERT INTO pipeline_pending_inputs (id, pipeline_id, tenant_id, client_message_id, created_at, request)                  VALUES ('pin-del-1', ?1, 'default', '', ?2, ?3)",
+                rusqlite::params![
+                    pid,
+                    now,
+                    format!(
+                        "{{\"thread_id\":\"thread-del\", \"user_id\":\"u1\", \"pipeline_id\":{}, \"content\":\"hi\", \"client_message_id\":\"\", \"source\":\"user\", \"execution_context\":null, \"state_overlay\":null, \"pipeline_config_id\":null}}",
+                        serde_json::to_string(pid).unwrap()
+                    )
+                ],
             )
             .unwrap();
         }
@@ -5181,6 +5714,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(committed, 1);
+    }
+
+    #[test]
+    fn test_delete_state_fields_db_semantics() {
+        // pipeline-state.update delete_keys 的 DB 落点契约：
+        // ① 删单/多键：主键 (pipeline_id, field_key, tenant_id) 精确删，行消失；
+        // ② 幂等：删不存在的键不报错、不误删他键；
+        // ③ 租户隔离：只删目标租户行，同 pid 其他租户行不动。
+        let store = SqliteStore::open_memory().unwrap();
+        let mut fields_a = serde_json::Map::new();
+        fields_a.insert(
+            "approval.tickets.t1".into(),
+            serde_json::json!({"id": "t1"}),
+        );
+        fields_a.insert("task.status".into(), serde_json::json!("running"));
+        store
+            .upsert_state_fields("pipe_del_state_fields_test", "tenant_a", &fields_a)
+            .unwrap();
+        let mut fields_b = serde_json::Map::new();
+        fields_b.insert(
+            "approval.tickets.t1".into(),
+            serde_json::json!({"id": "other_tenant"}),
+        );
+        store
+            .upsert_state_fields("pipe_del_state_fields_test", "tenant_b", &fields_b)
+            .unwrap();
+
+        // 删多键（含混合存在/不存在的键）：返回实际删除的键列表
+        let deleted = store
+            .delete_state_fields(
+                "pipe_del_state_fields_test",
+                "tenant_a",
+                &[
+                    "approval.tickets.t1".to_string(),
+                    "task.status".to_string(),
+                    "never_existed".to_string(),
+                ],
+            )
+            .unwrap();
+        let mut sorted = deleted.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec!["approval.tickets.t1".to_string(), "task.status".to_string()],
+            "返回值只含实际删除的键（不存在的键幂等跳过，不是错误）"
+        );
+
+        // tenant_a 行全消失
+        let a = store
+            .load_pipeline_state("pipe_del_state_fields_test", "tenant_a")
+            .unwrap();
+        assert!(a.is_empty(), "tenant_a 被删键的 DB 行必须消失: {a:?}");
+        // 租户隔离：tenant_b 同名键不受影响
+        let b = store
+            .load_pipeline_state("pipe_del_state_fields_test", "tenant_b")
+            .unwrap();
+        assert_eq!(
+            b.get("approval.tickets.t1"),
+            Some(&serde_json::json!({"id": "other_tenant"})),
+            "其他租户同 pid 同名键不得被误删"
+        );
+
+        // 纯不存在键再删：幂等 Ok 且返回空列表
+        let again = store
+            .delete_state_fields(
+                "pipe_del_state_fields_test",
+                "tenant_a",
+                &["task.status".to_string()],
+            )
+            .unwrap();
+        assert!(again.is_empty(), "重复删除已消失的键 = 幂等空结果");
     }
 
     mod pending_input;

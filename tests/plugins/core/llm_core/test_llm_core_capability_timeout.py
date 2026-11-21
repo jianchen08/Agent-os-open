@@ -64,20 +64,36 @@ def _install_llm_config(monkeypatch: pytest.MonkeyPatch, llm_section: dict[str, 
     monkeypatch.setattr(_config_models, "_config", {"llm": llm_section})
 
 
-def _make_and_execute(model_name: str) -> _TimeoutCapturingCaller:
-    """构造挂伪 caller 的 LLMCore 并执行一轮，返回 caller 供断言。"""
+def _make_and_execute(
+    model_name: str, *, binding_model_id: str | None = None
+) -> _TimeoutCapturingCaller:
+    """构造挂伪 caller 的 LLMCore 并执行一轮，返回 caller 供断言。
+
+    ``binding_model_id`` 非空 → state 预置在飞绑定快照（覆盖「模型不在
+    llm.yaml」用例：解析链不再以构造期身份兜底，绑定快照是在飞 run 的
+    合法身份来源）。
+    """
     caller = _TimeoutCapturingCaller()
     set_capability_caller(caller)
     plugin = LLMCore(
         {"provider": "openai", "model_name": model_name, "default_params": {}}
     )
-    ctx = SimpleNamespace(
-        state={
-            "messages": [{"role": "user", "content": "hi"}],
-            "streaming": True,
-            "pipeline_id": "test-cap-timeout",
+    state: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "streaming": True,
+        "pipeline_id": "test-cap-timeout",
+    }
+    if binding_model_id:
+        state["llm_model_binding"] = {
+            "run_id": "",
+            "model_id": binding_model_id,
+            "provider": "openai",
+            "model_name": binding_model_id,
+            "api_base": "https://stub.example.com",
+            "default_params": {},
+            "context_window": None,
         }
-    )
+    ctx = SimpleNamespace(state=state)
     asyncio.run(plugin.execute(ctx))  # type: ignore[arg-type]
     return caller
 
@@ -93,10 +109,11 @@ def test_timeout_uses_model_call_timeout_plus_margin(
                 "m-large": {
                     "provider": "p1",
                     "model_name": "m-large",
+                    "api_base": "https://stub.example.com",
                     "call_timeout": 600,
                 }
             },
-            "defaults": {"call_timeout": 300},
+            "defaults": {"call_timeout": 300, "chat": "m-large"},
         },
     )
     caller = _make_and_execute("m-large")
@@ -119,8 +136,14 @@ def test_timeout_falls_back_to_defaults_call_timeout(
     _install_llm_config(
         monkeypatch,
         {
-            "models": {"m-large": {"provider": "p1", "model_name": "m-large"}},
-            "defaults": {"call_timeout": 450},
+            "models": {
+                "m-large": {
+                    "provider": "p1",
+                    "model_name": "m-large",
+                    "api_base": "https://stub.example.com",
+                }
+            },
+            "defaults": {"call_timeout": 450, "chat": "m-large"},
         },
     )
     caller = _make_and_execute("m-large")
@@ -135,7 +158,9 @@ def test_timeout_falls_back_to_internal_default_when_model_missing(
 ) -> None:
     """模型不在 llm.yaml → loader 内部默认 300s 口径 → 360。"""
     _install_llm_config(monkeypatch, {"models": {}, "defaults": {}})
-    caller = _make_and_execute("m-unknown")
+    # 模型已被热重载移除的在飞 run：身份来自绑定快照（解析链不再回退构造
+    # 期身份），超时仍按 llm.yaml 查表失败走内部默认。
+    caller = _make_and_execute("m-unknown", binding_model_id="m-unknown")
 
     timeout = caller.calls[0][2]
     assert timeout == 360.0

@@ -117,9 +117,16 @@ export default defineConfig(({ mode }) => {
       // @rjsf/validator-ajv8）运行时 new Function 编译 schema 所必需，缺失则
       // 全部 RJSF 动态表单提交被 CSP 拦死（BUG-16 GUI 实证 2026-09-15）。
       // 差异仅在于 dev 无 nginx 的 always/继承语义。
+      // frame-src 放行项 = DSH 官方插件页（插件 `dsh_adapter` 的 `dsh_plugin_manager`
+      // 页以**跨源 iframe** 内嵌该 SPA）。该应用监听端口由
+      // `plugins/shared/dsh_adapter/web_app.py` 的 `WEB_PORT_DEFAULT` 固定为 9177：
+      // 随机端口无法被静态 CSP 精确放行，能放行它的写法只有 `http://127.0.0.1:*`
+      // 通配——那会把整个回环纳入可嵌面，放宽过大。两处 CSP 字面量与 Python 常量的
+      // 一致性由 `plugins/shared/dsh_adapter/tests/test_official_ui_csp_origin.py`
+      // 对账；Electron 侧同款声明见 `electron/app-protocol.ts` 的 APP_CSP。
       headers: {
         'Content-Security-Policy':
-          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; frame-src 'self' blob: data: http://127.0.0.1:9177 http://localhost:9177; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'SAMEORIGIN',
         'Referrer-Policy': 'strict-origin-when-cross-origin',

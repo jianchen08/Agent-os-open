@@ -45,6 +45,27 @@ describe('classifyLoginFailure', () => {
     expect(classifyLoginFailure(rejected('x', { code: 'ECONNABORTED' })).kind).toBe('network')
   })
 
+  it('网络失败细分：超时族（ECONNABORTED/ETIMEDOUT）timedOut=true，连不上 timedOut=false', () => {
+    // 超时=请求已发出但内核未在窗口内应答（两错误码同族）
+    expect(classifyLoginFailure(rejected('timeout of 120000ms exceeded', { code: 'ECONNABORTED' }))).toEqual({
+      kind: 'network',
+      timedOut: true,
+    })
+    expect(classifyLoginFailure(rejected('x', { code: 'ETIMEDOUT' }))).toEqual({
+      kind: 'network',
+      timedOut: true,
+    })
+    // 连不上=根本没建立连接（axios 把 ECONNREFUSED 等包装为 ERR_NETWORK）
+    expect(classifyLoginFailure(rejected('Network Error', { code: 'ERR_NETWORK' }))).toEqual({
+      kind: 'network',
+      timedOut: false,
+    })
+    expect(classifyLoginFailure(rejected('Network Error', {}))).toEqual({
+      kind: 'network',
+      timedOut: false,
+    })
+  })
+
   it('其余错误（含普通 Error/非对象）：unknown 不误判', () => {
     expect(classifyLoginFailure(new Error('connection refused')).kind).toBe('unknown')
     expect(classifyLoginFailure('boom').kind).toBe('unknown')
@@ -67,6 +88,17 @@ describe('loginFailureBanner', () => {
   it('网络失败：无法连接内核 + 附当前目标基址（本机/远程可辨别，S5-D①）', () => {
     const text = loginFailureBanner({ kind: 'network' }, 'http://10.0.2.2:9')
     expect(text).toBe('无法连接内核（目标：http://10.0.2.2:9），请确认服务已启动或检查服务器地址')
+  })
+
+  it('网络失败超时分支：内核响应超时 + 「再点一次登录」行动指引（不误导查服务）', () => {
+    const text = loginFailureBanner({ kind: 'network', timedOut: true }, 'http://10.0.2.2:9')
+    expect(text).toBe('内核响应超时（目标：http://10.0.2.2:9）（启动中或繁忙），请再点一次登录')
+  })
+
+  it('网络失败超时分支：无基址（同源）不输出空目标段', () => {
+    expect(loginFailureBanner({ kind: 'network', timedOut: true }, '')).toBe(
+      '内核响应超时（启动中或繁忙），请再点一次登录',
+    )
   })
 
   it('网络失败：无基址（同源）时不输出空目标段', () => {

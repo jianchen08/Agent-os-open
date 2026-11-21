@@ -56,6 +56,12 @@ export interface NotificationItem {
   actions?: NotificationAction[]
   /** 自动消失时间（毫秒），0 = 不自动消失 */
   autoDismissMs?: number
+  /**
+   * 合并键（2026-11-18 装机事故批次 3）：同键重复投递更新既有条目而非新增
+   * （77 次重连这类高频失败合并为单条更新，不刷屏）。用户手动关闭后键随条目
+   * 消失，下一次新失败以新 id 重新入列（不被 dismissed 记忆永久静默）。
+   */
+  mergeKey?: string
   /** 来源标识（如 pipeline_id，用于关联流式事件） */
   sourceId?: string
   /** 错误来源（统一错误模型 config/kernel/error_codes.json sources.enum，渲染来源标签） */

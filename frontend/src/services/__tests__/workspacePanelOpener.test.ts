@@ -9,10 +9,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { slotRegistry } from '@/services/slots/slotRegistry'
 import { loadSchemaIntoRegistries, registerWidgetStub } from '@/test/schemaLoader'
 
 /** 每用例前重置 store，避免跨用例残留（widget 注册面=生产 main.tsx 启动同款） */

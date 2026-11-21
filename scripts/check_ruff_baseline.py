@@ -10,9 +10,14 @@
 
     .github/ruff-<name>-baseline.txt   键: ruff_findings=N
 
-- 当前 > 基线 → exit 1（新增违规，拦截合并）
-- 当前 < 基线 → 提示可收紧（--init 打印新值，收紧须单独 commit 留归因）
-- 日志含 invalid-syntax → 直接红（语法错误文件落入 lint 盲区，基线不可信）
+判定（fail-closed：测不准一律判红，"没数到"绝不推断为"零违规"）：
+- 日志缺 `Found N error` 汇总行 → 红（空日志 / ruff 未安装 / 启动失败 /
+  输出截断 / 输出格式变更，都无法证明 ruff 真跑通）
+- 日志含 invalid-syntax → 红（语法错误文件落入 lint 盲区，基线计数不可信）
+- 基线文件缺失 / 无 `ruff_findings=` 键 / 值非非负整数 → 红（--name 拼错
+  曾被静默当成基线 0 而判绿）
+- 当前 > 基线 → 红（新增违规，拦截合并）
+- 当前 < 基线 → 通过并提示可收紧（--init 打印新值，收紧须单独 commit 留归因）
 
 用法：
     python scripts/check_ruff_baseline.py --name scripts --from-file log.txt
@@ -29,15 +34,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FOUND_RE = re.compile(r"^Found (\d+) error", re.M)
 SYNTAX_RE = re.compile(r"invalid-syntax")
+BASELINE_KEY = "ruff_findings"
+LOG_PREVIEW_CHARS = 200
 
 
 def baseline_path(name: str) -> Path:
     return ROOT / ".github" / f"ruff-{name}-baseline.txt"
 
 
-def parse_findings(log: str) -> int:
+def parse_findings(log: str) -> int | None:
+    """解析 `Found N error(s).` 汇总行；无汇总行返回 None（测量失败，不是零违规）。"""
     m = FOUND_RE.search(log)
-    return int(m.group(1)) if m else 0
+    return int(m.group(1)) if m else None
+
+
+def read_baseline(path: Path) -> int | None:
+    """读基线键值；文件缺失 / 缺键 / 值非非负整数 → None（由调用方判红）。"""
+    if not path.is_file():
+        return None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line.startswith(f"{BASELINE_KEY}="):
+            continue
+        try:
+            value = int(line.split("=", 1)[1])
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+    return None
 
 
 def main() -> int:
@@ -47,25 +71,39 @@ def main() -> int:
     parser.add_argument("--init", action="store_true", help="按当前实测打印新基线（收紧用，禁止上调）")
     ns = parser.parse_args()
 
-    log = Path(ns.from_file).read_text(encoding="utf-8", errors="replace")
+    log_path = Path(ns.from_file)
+    if not log_path.is_file():
+        print(f"ruff-{ns.name}: 日志文件不存在 {log_path}——ruff 未执行或输出未落盘，不判绿。")
+        return 1
+    log = log_path.read_text(encoding="utf-8", errors="replace")
+
     current = parse_findings(log)
-
-    bp = baseline_path(ns.name)
-    baseline = 0
-    if bp.exists():
-        for raw in bp.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if line.startswith("ruff_findings="):
-                baseline = int(line.split("=", 1)[1])
-
-    if ns.init:
-        print(f"ruff_findings={current}")
-        return 0
+    if current is None:
+        preview = log.strip()[:LOG_PREVIEW_CHARS].replace("\n", " / ")
+        print(
+            f"ruff-{ns.name}: 日志无 `Found N error` 汇总行——无法证明 ruff 实际跑通"
+            "（空日志 / ruff 未安装 / 启动失败 / 输出截断 / 格式变更皆然），"
+            f"「没数到」不推断为零违规，按失败处理 | 日志首 {LOG_PREVIEW_CHARS} 字符: {preview!r}"
+        )
+        return 1
 
     if SYNTAX_RE.search(log):
         print(
             f"ruff-{ns.name}: 日志含 invalid-syntax——语法错误使文件落入 lint 盲区，"
             "基线计数不可信；先修语法（参照 trajectory_harvest 先例）。"
+        )
+        return 1
+
+    if ns.init:
+        print(f"{BASELINE_KEY}={current}")
+        return 0
+
+    bp = baseline_path(ns.name)
+    baseline = read_baseline(bp)
+    if baseline is None:
+        print(
+            f"ruff-{ns.name}: 基线不可读（{bp} 缺失或缺少 `{BASELINE_KEY}=<非负整数>`）——"
+            "无法比对即不判绿，核对 --name 是否拼错。"
         )
         return 1
 

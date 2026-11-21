@@ -17,4 +17,5 @@ CreateObject("WScript.Shell").Run _
   """" & rclone & """ mount VM-0-16-ubuntu:/home/ubuntu V:" & _
   " --vfs-cache-mode writes --vfs-write-back 0s --network-mode --dir-cache-time 5s" & _
   " --links --volname ""VM-0-16-ubuntu""" & _
+  " --rc --rc-addr 127.0.0.1:5572 --rc-no-auth" & _
   " --log-file ""D:\myproject\container_e17cc5927dfd\.zctmp\rclone_mount_task.log"" --log-level INFO", 0, False

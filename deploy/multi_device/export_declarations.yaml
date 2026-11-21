@@ -17,7 +17,7 @@ schema: agentos.multi_device.export_declarations/v1
 rclone_pinned_version: "v1.75.2"
 
 devices:
-  # ---- 云端 Linux（162.14.69.153，7x24 内核端）----
+  # ---- 云端 Linux（203.0.113.153，7x24 内核端）----
   # 设备名 = platform.node() 回退口径（.env 未配 AGENTOS_DEVICE_ID，2026-10-18 探明）
   VM-0-16-ubuntu:
     role: cloud-kernel

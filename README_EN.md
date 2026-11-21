@@ -15,7 +15,7 @@
 
 ## 📑 Table of Contents
 
-- [Overview](#-overview) · [Demo Video](#-demo-video) · [Product Interface](#-product-interface) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
+- [Overview](#-overview) · [Demo Video](#-demo-video) · [Key Highlights](#-key-highlights)
 - [Quick Start](#-quick-start)（[Windows](#option-1-windows-one-click-recommended) / [Linux·macOS](#option-2-linux--macos-one-click) / [Manual](#option-3-manual-development)）
 - [Multi-Instance Config](#cross-device--multi-instance-configuration)
 - [Documentation](#-documentation-navigation) · [Mirrors](#-mirror-repositories)
@@ -47,15 +47,6 @@
 
 > **Build**: kernel via `cd kernel && cargo build --release --bin agentos-kernel`; every Python plugin directory carries its own `pyproject.toml` — create its isolated venv with `uv sync --project <plugin-dir>`; native cdylib plugins (tool_core / sensitive_checker / spill_guard) each need `cargo build --release` plus copying the artifact into the plugin directory root (done automatically on the launch scripts' first run, or manually via `python scripts/check_native_artifacts_sync.py --build`); frontend via `pnpm install` at the repo root (pnpm workspace, lockfile `pnpm-lock.yaml`). The `start_web_02.*` launch scripts do all of this in one step.
 
-### 📊 Project Scale
-
-- **Rust kernel**: ~95K lines (`kernel/`, ~40K of which are Rust tests — `tests/` dirs + inline `#[cfg(test)]` modules)
-- **Python plugins**: ~168K lines (`plugins/`; 80 plugins currently enabled, 97 `plugin.json` manifests on disk)
-- **Frontend code**: ~143K lines (`frontend/src/`)
-- **Python tests**: ~124K lines (`tests/` + in-plugin tests)
-- **Tool plugins**: 26 manifests (18 self-built tool plugins + 8 preset external-MCP integrations, 58 tool declarations in total; plus zero-code integration of any MCP external tool)
-- **Client**: Web frontend (talking straight to the kernel)
-
 ---
 
 ## 🎬 Demo Video
@@ -65,28 +56,6 @@
 </a>
 
 > Click the image above to watch a quick demo on Bilibili.
-
----
-
-## 📸 Product Interface
-
-> All screenshots below are captured from a real running instance (local dev run); account names and other sensitive details are masked.
-
-### Workbench
-
-![Lingxi AgentOS workbench: sidebar with New Session / Task Management / Sessions, and the welcome area with a "start a new conversation" guide](screenshots/workbench.png)
-
-### Deep-Space Command Center Theme
-
-![The workbench after switching to the "Deep-Space Command Center" theme (dark)](screenshots/command-center-theme.png)
-
-### Theme Picker
-
-![Theme picker: 10 themes (7 compile-time presets + 3 dynamic JSON themes)](screenshots/theme-picker.png)
-
-### New Session: Agent Roster
-
-![Agent selection list in the "New Session" dialog](screenshots/agent-roster.png)
 
 ---
 

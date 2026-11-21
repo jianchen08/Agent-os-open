@@ -14,6 +14,7 @@ import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { clearSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 import { useAgentStore } from '../agentStore'
 import { useNotificationStore } from '../notificationStore'
 import { usePipelineMessageStore } from '../pipelineMessageStore'
@@ -57,7 +58,6 @@ vi.mock('@/services/sessionExecutionOptions', () => ({
 }))
 
 import * as sessionApi from '@/services/api/session'
-import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const makeSession = (id: string, extra: Partial<Session> = {}): Session =>
   ({
@@ -440,18 +440,38 @@ describe('sessionListStore — 写操作失败回滚与通知', () => {
   })
 
   it('renameSession 成功后标题为 trim 后的值', async () => {
-    seedSessions([makeSession('s1', { title: '原标题' })])
+    seedSessions([makeSession('s1', { title: '原标题', pipelineIds: ['pid-s1'] })])
+    queryClient.setQueryData(queryKeys.pipelineRuns, {
+      'pid-s1': {
+        run_id: 'pid-s1',
+        pipeline_id: 'pid-s1',
+        status: 'running',
+        started_at: '2026-09-01T00:00:00.000Z',
+      },
+    })
     vi.mocked(sessionApi.updateSession).mockResolvedValue(undefined as never)
 
     await useSessionListStore.getState().renameSession('s1', '  新标题  ')
 
     expect(queryClient.getQueryData<Session[]>(queryKeys.sessions)![0].title).toBe('新标题')
     expect(sessionApi.updateSession).toHaveBeenCalledWith('s1', { title: '新标题' })
-    // 主标签名/面包屑随会话标题同步（ADR 2026-10-16-subagent-tab-naming）
+    // 主标签名随主管道标题同步（2026-11-11 用户裁定：标签名只显示管道标题）：
+    // 前端对注册表缓存乐观同写（内核同名传播 state.title），标签单字段消费
+    const runs = queryClient.getQueryData<Record<string, { title?: string }>>(queryKeys.pipelineRuns)!
+    expect(runs['pid-s1'].title).toBe('新标题')
     expect(agentTab.updateTab).toHaveBeenCalledWith('main-s1', {
       agentName: '新标题',
       path: ['新标题'],
     })
+  })
+
+  it('renameSession 注册表无主管道行：不动标签（缺数据不是改名依据）', async () => {
+    seedSessions([makeSession('s1', { title: '原标题', pipelineIds: ['pid-s1'] })])
+    vi.mocked(sessionApi.updateSession).mockResolvedValue(undefined as never)
+
+    await useSessionListStore.getState().renameSession('s1', '新标题')
+
+    expect(agentTab.updateTab).not.toHaveBeenCalled()
   })
 
   it('renameSession 对不存在的会话仍调用 API（无本地快照用于回滚）', async () => {

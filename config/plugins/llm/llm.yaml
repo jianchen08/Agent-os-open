@@ -100,6 +100,11 @@ models:
       - image/gif
       - image/webp
       supports_image: true
+      # 视觉输入不缩放总像素上限（R21 总像素口径）：GLM 官方文档只披露上传
+      # 上限（单图 ≤5MB、像素 ≤6000*6000，docs.bigmodel.cn 对话补全 API），
+      # 编码器内部缩放阈值未披露——取保守缺省 1024²=1048576（业内编码器
+      # 常见 patch 处理预算，低于阈值直喂不被 API 端缩放）。
+      max_pixels: 1048576
     provider: zhipu_coding
     reasoning_model: true
     thinking_strength_params:
@@ -218,6 +223,12 @@ models:
       - image/gif
       - image/webp
       max_image_size: 20971520
+      # 视觉输入不缩放总像素上限（R21 总像素口径）：DeepSeek 官方图像理解
+      # 文档——总像素小于约 544×544 等比放大、更大则缩到总像素约 1300×1300
+      # （api-docs.deepseek.com/zh-cn/guides/vision）；不缩放安全区 =
+      # 总像素 ≤ 544²。R20 误取目标值 1300 做单边阈值，861K 像素海报漏判
+      # （TB 真题 R21 实证），本键即缩放触发阈值下限。
+      max_pixels: 295936
   deepseek-v4.1-flash:
     provider: ollama-oline
     model_name: deepseek-v4.1-flash
@@ -237,6 +248,12 @@ models:
       - image/gif
       - image/webp
       max_image_size: 20971520
+      # 视觉输入不缩放总像素上限（R21 总像素口径）：DeepSeek 官方图像理解
+      # 文档——总像素小于约 544×544 等比放大、更大则缩到总像素约 1300×1300
+      # （api-docs.deepseek.com/zh-cn/guides/vision）；不缩放安全区 =
+      # 总像素 ≤ 544²。R20 误取目标值 1300 做单边阈值，861K 像素海报漏判
+      # （TB 真题 R21 实证），本键即缩放触发阈值下限。
+      max_pixels: 295936
     thinking_strength_params:
       low:
         reasoning_effort: low
@@ -609,9 +626,17 @@ providers:
       'off':
         reasoning_effort: none
   cpa_gateway:
-    # ACP 额度池 CPA 网关（127.0.0.1:8317）——glm-5.3-*-gift 走 ZCode start-plan
-    # 礼包额度（经 zcode-proxy 127.0.0.1:8080），密钥经环境变量 CPA_CLIENT_API_KEY
-    # 注入（真值在 cpa-gateway KEYS.txt，禁入仓）。
+    # CPA 网关（127.0.0.1:8317）——via=plugin 契约首个正式实例（ADR 2026-11-04，
+    # 用户裁定 2026-11-21）：传输在 provider 插件 llm_provider_gateway（provides
+    # namespace llm_provider.gateway），路由/池化/兜底/用量编排留网关侧。网关
+    # 进程由该插件自包含拉起（端口三态：外部探活命中→复用；端口空闲→拉起捆绑
+    # exe；被第三方占用→fail-visible 不误杀），本机个人网关与捆绑网关收敛到
+    # 同一 8317 出口。
+    # keys 保留 = 托管形态（slot 注入 api_key/api_base 逐 slot 冷却重试，复用
+    # 既有语义）；client key 经 CPA_CLIENT_API_KEY 注入（真值在网关侧 KEYS.txt，
+    # 禁入仓）。glm-5.3 车道需网关在位且用户已接入车道（OAuth 登录或自带 key）。
+    via: plugin
+    provider_type: gateway
     type: openai
     api_base: http://127.0.0.1:8317/v1
     keys:
@@ -631,3 +656,16 @@ providers:
         reasoning_effort: high
       low:
         reasoning_effort: low
+  dsh_runtime:
+    # DSH 生态模型源（dsh 方言；LLM 两类收敛批 4，主方案 §6.4-b）——新接 provider
+    # 条目，非改既有：本条目只声明 DSH llm 服务端点与 provider 路由形态。
+    # 接入两步：①设 DSH_LLM_BASE_URL / DSH_LLM_API_KEY；②models 段按
+    # provider: dsh_runtime 写条目（模型 id 取自 listProviders/listModels 咨询
+    # 发现，契约实现见 plugins/shared/llm_core/llm_dsh.py）。未配置 env 时本条目
+    # 无模型引用、不进模型选择器；直接引用则 api_base 占位符 fail-closed 不发请求。
+    type: dsh
+    api_base: ${DSH_LLM_BASE_URL}
+    provider_route: dsh
+    keys:
+    - id: dsh_runtime_main
+      api_key: ${DSH_LLM_API_KEY}

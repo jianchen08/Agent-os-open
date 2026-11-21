@@ -288,13 +288,27 @@ fn multimodal_message(state: &Value, pending: &[PendingImage]) -> Value {
     }
 }
 
-/// 序列化工具结果数据为消息 content（对齐 Python get_format_manager().serialize，默认 YAML）。
+/// 序列化工具结果数据为消息 content。
+///
+/// 文本直通（ADR 2026-11-09-tool-result-content-verbatim）：**任何工具**的
+/// 文本载荷都以原文逐字进上下文——data 本身是字符串，或对象含字符串
+/// `content` 字段（文本载荷统一键）。YAML 块标量会给每行强制加缩进，模型从
+/// 渲染文本复制片段回写 `search_replace` 必带多余空格而恒失败（任务
+/// 2393a90baea9 实证 8 次 `old_str not found`，每行恰多 2 空格）。
+/// 其余形态（结构化结果）仍走 YAML（对齐 Python
+/// `tool_result_protocol.serialize_for_content`；双车道契约夹具锚定）。
 ///
 /// 失败回退 to_string（对齐 plugin.py serialize_for_content 的兜底语义）。
 pub fn serialize_for_content(data: &Value) -> Result<String, String> {
     // None / Null → 空字符串（避免 "null" 进上下文）。
     if data.is_null() {
         return Ok(String::new());
+    }
+    if let Value::String(text) = data {
+        return Ok(text.clone());
+    }
+    if let Some(Value::String(text)) = data.get("content") {
+        return Ok(text.clone());
     }
     serde_yaml::to_string(data).map_err(|e| e.to_string())
 }
@@ -358,6 +372,44 @@ mod tests {
         let msg2 = tool_result_message(&json!({"name": "f", "id": "c1"}), &bad);
         assert_eq!(msg2["content"], "Error: boom");
         assert_eq!(msg2["tool_result"]["data"], Value::Null);
+    }
+
+    #[test]
+    fn content_field_passthrough_verbatim() {
+        // 文本直通：多行原文逐字，行首缩进/引号/反斜杠原样，不补尾换行
+        // （事故 2393a90baea9 根因：YAML 块标量给每行 +2 空格）。
+        let text = "# 标题\n\n  2. **缩进行保留** —— \"引号\" \\反斜杠\n- 列表尾行";
+        let data = json!({
+            "file": "D:\\w\\a.md",
+            "lines": 5,
+            "size": 42,
+            "content": text,
+        });
+        let out = serialize_for_content(&data).unwrap();
+        assert_eq!(out, text, "content 必须逐字直通");
+        let msg = tool_result_message(
+            &json!({"name": "file_read", "id": "call_fr"}),
+            &ToolResult::succeeded("file_read", data, 1.0),
+        );
+        assert_eq!(msg["content"], text, "role=tool 消息正文 = 文件原文");
+        // 空字符串同样直通（空文件不该渲染成 "content: ''"）。
+        assert_eq!(serialize_for_content(&json!({"content": ""})).unwrap(), "");
+        // 纯字符串结果同样直通（任何工具的文本载荷）。
+        assert_eq!(
+            serialize_for_content(&json!("plain text")).unwrap(),
+            "plain text"
+        );
+        assert_eq!(serialize_for_content(&json!("42")).unwrap(), "42");
+        // 无 content 键 → 仍 YAML（键序 BTreeMap 字典序）。
+        assert_eq!(
+            serialize_for_content(&json!({"b": 2, "a": 1})).unwrap(),
+            "a: 1\nb: 2\n"
+        );
+        // content 非字符串 → 仍 YAML（不误吞结构化载荷）。
+        assert_eq!(
+            serialize_for_content(&json!({"content": {"x": 1}})).unwrap(),
+            "content:\n  x: 1\n"
+        );
     }
 
     #[test]

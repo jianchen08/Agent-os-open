@@ -8,7 +8,6 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
-
 import { KERNEL_NAV_ITEMS } from '@/services/settingsKernelNav'
 import { renderWithProviders } from '@/test/renderWithProviders'
 

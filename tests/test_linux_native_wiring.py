@@ -87,19 +87,32 @@ class TestLinuxNativeSlotting:
     def test_linux_defaults_to_native_zero_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """enabled 缺席 + Linux → LinuxNative（零配置默认接管，ADR 2026-10-12）。"""
+        """enabled 缺席 + Linux → LinuxNative（零配置默认接管，ADR 2026-10-12）。
+
+        wsl_native 显式关（nt 上缺省启用会先占 CONTAINER 槽，2026-11-13 裁定；
+        Linux 机器本无 wsl.exe，显式关即生产语义）。"""
         mod = _load_manager_module()
         monkeypatch.setattr(mod, "_is_linux_platform", lambda: True)
-        providers = mod._create_providers_from_config({"host": {"enabled": True}})
+        providers = mod._create_providers_from_config(
+            {"host": {"enabled": True}, "wsl_native": {"enabled": False}}
+        )
         assert isinstance(providers[IsolationLevel.CONTAINER], LinuxNativeProvider)
         assert isinstance(providers[IsolationLevel.HOST], HostProvider)
 
     def test_explicit_opt_out_falls_docker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """显式 enabled=false + Linux → Docker（opt-out 语义，复用 enabled 词汇）。"""
+        """显式 enabled=false + Linux → Docker（opt-out 语义，复用 enabled 词汇）。
+
+        Docker 仅显式 opt-in（2026-11-13 裁定）：cua.enabled 必带；wsl_native
+        显式关（nt 缺省启用）。"""
         mod = _load_manager_module()
         monkeypatch.setattr(mod, "_is_linux_platform", lambda: True)
         providers = mod._create_providers_from_config(
-            {"host": {"enabled": True}, "linux_native": {"enabled": False}}
+            {
+                "host": {"enabled": True},
+                "linux_native": {"enabled": False},
+                "cua": {"enabled": True},
+                "wsl_native": {"enabled": False},
+            }
         )
         assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
 
@@ -122,11 +135,18 @@ class TestLinuxNativeSlotting:
             assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
 
     def test_macos_falls_docker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """enabled + 非 Linux posix（macOS）→ Docker（平台门排除）。"""
+        """enabled + 非 Linux posix（macOS）→ Docker（平台门排除）。
+
+        Docker 仅显式 opt-in（2026-11-13 裁定）：cua.enabled 必带；wsl_native
+        显式关（nt 缺省启用）。"""
         mod = _load_manager_module()
         monkeypatch.setattr(mod, "_is_linux_platform", lambda: False)
         providers = mod._create_providers_from_config(
-            {"linux_native": {"enabled": True}}
+            {
+                "linux_native": {"enabled": True},
+                "cua": {"enabled": True},
+                "wsl_native": {"enabled": False},
+            }
         )
         assert isinstance(providers[IsolationLevel.CONTAINER], DockerProvider)
 

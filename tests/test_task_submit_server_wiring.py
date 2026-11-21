@@ -77,7 +77,7 @@ def wiring(monkeypatch):
             sys.modules.pop(name, None)
         tool_mod._chat_sender = None
         tool_mod._agent_registry_lookup = None
-        tool_mod._state_reader = None
+        tool_mod.set_state_reader(None)
 
 
 class _FakeHandle:
@@ -119,7 +119,7 @@ def test_on_load_registers_all_three_bridges(wiring, monkeypatch):
     asyncio.run(server_mod._on_load({}))
 
     assert tool_mod._chat_sender is not None
-    assert tool_mod._state_reader is not None
+    assert tool_mod._get_state_reader() is not None
     assert tool_mod._agent_registry_lookup is not None
 
 
@@ -152,7 +152,7 @@ def test_state_reader_returns_list_response_as_is(wiring, monkeypatch):
     })
     asyncio.run(server_mod._on_load({}))
 
-    assert asyncio.run(tool_mod._state_reader()) == rows
+    assert asyncio.run(tool_mod._get_state_reader()()) == rows
 
 
 def test_state_reader_normalizes_non_list_response_to_empty(wiring, monkeypatch):
@@ -165,7 +165,7 @@ def test_state_reader_normalizes_non_list_response_to_empty(wiring, monkeypatch)
     })
     asyncio.run(server_mod._on_load({}))
 
-    assert asyncio.run(tool_mod._state_reader()) == []
+    assert asyncio.run(tool_mod._get_state_reader()()) == []
 
 
 def test_state_reader_calls_list_method(wiring, monkeypatch):
@@ -177,7 +177,7 @@ def test_state_reader_calls_list_method(wiring, monkeypatch):
         "tool-executor": lambda m, p: {"success": True, "data": {"found": False}},
     })
     asyncio.run(server_mod._on_load({}))
-    asyncio.run(tool_mod._state_reader())
+    asyncio.run(tool_mod._get_state_reader()())
 
     assert [m for m, _ in handles["pipeline-state"].calls] == ["list"]
 

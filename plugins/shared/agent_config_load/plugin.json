@@ -1,7 +1,7 @@
 {
   "id": "pipeline_agent_config_load",
   "name": "Agent Config Load",
-  "version": "1.7.2",
+  "version": "1.7.4",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -37,6 +37,7 @@
     "task.id",
     "tool_ids",
     "tool_ids.mode_source",
+    "tool_deny",
     "project_roots",
     "context.*",
     "model_tier",
@@ -75,7 +76,8 @@
       "system_prompt",
       "task.id",
       "task.parent_project_id",
-      "timeout_seconds"
+      "timeout_seconds",
+      "execution_context"
     ]
   }
 }

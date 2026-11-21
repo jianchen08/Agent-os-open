@@ -28,7 +28,7 @@ def test_long_output_returns_full_output():
     """长输出：data["output"] 必须是完整原文（spill_guard 负责兜底）。"""
     output = "\n".join(f"line {i:05d}: build output" for i in range(500))
     data = BashTool._compact_result_data(
-        pid=1,
+        handle='bs1.a.1111',
         output=output,
         summary_obj={"warnings": 0, "errors": 0, "summary": ["[500行]"]},
         exit_code=0,
@@ -40,7 +40,7 @@ def test_compact_keeps_semantic_extraction():
     """长输出的语义提取字段保留（log_compressor 专用层职责不变）。"""
     output = "x" * (BashTool.SHORT_OUTPUT_CHAR_THRESHOLD + 100)
     data = BashTool._compact_result_data(
-        pid=2,
+        handle='bs1.b.2222',
         output=output,
         summary_obj={
             "warnings": 1,

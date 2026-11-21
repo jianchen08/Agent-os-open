@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import threading
 import time as _time
@@ -1071,3 +1072,197 @@ async def test_config_native_timeout_keys_happy_path_streams_normally() -> None:
     assert resp.text == "答案"
     assert resp.thinking_text == "plan"
     assert [e["type"] for e in received] == ["thinking", "thinking_end", "text"]
+
+
+# ─────────────────── 思考通道退化停止（reasoning_content 路径） ───────────────────
+
+
+async def test_reasoning_channel_stop_truncates_and_marks_repetition() -> None:
+    """reasoning_content 通道收到 "stop" → 截断流、置 stream_repetition、finish=length。
+
+    2026-11-07 事故形态：退化循环全在思考通道。此前该返回值被丢弃，即使守卫
+    判定也断不了流（钩子形同废纸），故本用例锁死"思考通道与正文同权"。
+    """
+    received: list[dict[str, Any]] = []
+
+    def _on_chunk(evt: dict[str, Any]) -> Any:
+        received.append(evt)
+        if evt["type"] == "thinking" and evt["content"] == "loop":
+            return "stop"
+        return None
+
+    chunks = [
+        _chunk([_choice(_delta(content="0"))]),
+        _chunk([_choice(_delta(reasoning="loop"))]),
+        _chunk([_choice(_delta(reasoning="after"))]),  # 停止后不应被消费
+    ]
+    ad = _StubAdapter(_FakeStream(chunks))
+
+    resp = await _run_stream(ad, on_chunk=_on_chunk)
+
+    assert resp.thinking_text == "loop"
+    assert resp.stream_repetition is True
+    assert resp.finish_reason == "length"
+    assert {"type": "thinking", "content": "after"} not in received
+
+
+async def test_think_tag_channel_stop_drops_trailing_text() -> None:
+    """``<think/>`` 标签内的思考段触发停止 → 闭标签后的残余正文不再发事件。"""
+    received: list[dict[str, Any]] = []
+
+    def _on_chunk(evt: dict[str, Any]) -> Any:
+        received.append(evt)
+        if evt["type"] == "thinking" and evt["content"] == "a":
+            return "stop"
+        return None
+
+    chunks = [
+        _chunk([_choice(_delta(content="0"))]),
+        _chunk([_choice(_delta(content="x<think>a</think>b"))]),
+    ]
+    ad = _StubAdapter(_FakeStream(chunks))
+
+    resp = await _run_stream(ad, on_chunk=_on_chunk)
+
+    assert resp.stream_repetition is True
+    assert resp.thinking_text == "a"
+    assert {"type": "text", "content": "b"} not in received
+
+
+async def test_in_think_tag_stop_breaks_before_closing_body() -> None:
+    """已处于标签内时续片触发停止 → 立即中断（不消费闭合标签后的正文）。"""
+    received: list[dict[str, Any]] = []
+
+    def _on_chunk(evt: dict[str, Any]) -> Any:
+        received.append(evt)
+        if evt["type"] == "thinking" and evt["content"] == "more":
+            return "stop"
+        return None
+
+    chunks = [
+        _chunk([_choice(_delta(content="0"))]),
+        _chunk([_choice(_delta(content="<think>plan"))]),
+        _chunk([_choice(_delta(content="more</think>tail"))]),
+    ]
+    ad = _StubAdapter(_FakeStream(chunks))
+
+    resp = await _run_stream(ad, on_chunk=_on_chunk)
+
+    assert resp.stream_repetition is True
+    assert resp.thinking_text == "planmore"
+    assert resp.text == "0"
+
+
+# ─────────────────── wire 层 payload 快照落盘契约 ───────────────────
+# 契约对端 = monitoring `_parse_payload_diag_filename` + 前端 PayloadDetail：
+# - 文件名 {ts毫秒}__{model}__{msgs_hash}__{N}msg.json（以 msg 结尾、
+#   双下划线分隔——model 内单下划线保留；ts 毫秒，前端 new Date(ts) 按毫秒解析）
+# - 内容顶层即真实 HTTP body（model/messages 在顶层，不包壳）
+# - 开关关（settings.yaml diagnostics.payload_diag=false）零落盘
+# 回归锚：网关化迁移（litellm 退役，0b8e3f775）曾把文件名写成
+# {YYYYMMDD_HHMMSS}_{hash8}.json、内容包成 {model, body}——读端全数
+# 解析失败，「LLM 请求」调试页恒空（2026-11-12 用户报告）。
+
+_PAYLOAD_FNAME_RE = re.compile(
+    r"^(\d{13})__([A-Za-z0-9_-]+)__([0-9a-f]{12})__(\d+)msg\.json$"
+)
+
+
+def _set_payload_diag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, on: bool) -> Path:
+    """用户空间钉到 tmp_path 并写开关（真实 SDK 路径，mtime 缓存真实生效）。"""
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+    from agentos_plugin_sdk import diagnostics_settings as ds
+
+    ds.write_diagnostics({"payload_diag": on})
+    return tmp_path / "logs" / "payload_diag"
+
+
+def test_payload_diag_filename_and_content_match_reader_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """落盘文件名可被读端格式解析、内容顶层即 body（含下划线模型名两组输入）。"""
+    import hashlib
+    import json as _json
+
+    diag_dir = _set_payload_diag(monkeypatch, tmp_path, on=True)
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u"},
+        {"role": "assistant", "content": "a"},
+    ]
+    body = {"model": "deepseek-v4-flash", "messages": msgs, "stream": True}
+    _wire_mod.capture_payload_diag("deepseek-v4-flash", body)
+
+    files = list(diag_dir.glob("*.json"))
+    assert len(files) == 1
+    m = _PAYLOAD_FNAME_RE.match(files[0].name)
+    assert m is not None, f"文件名不符读端契约: {files[0].name}"
+    ts, model_seg, msgs_hash, n = m.groups()
+    assert model_seg == "deepseek-v4-flash"
+    assert int(n) == 3
+    assert msgs_hash == hashlib.md5(
+        _json.dumps(msgs, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:12]
+    assert abs(int(ts) - int(_time.time() * 1000)) < 60_000  # 毫秒、当下
+    doc = _json.loads(files[0].read_text(encoding="utf-8"))
+    assert doc["model"] == "deepseek-v4-flash"  # 顶层即 body（前端 body.model）
+    assert len(doc["messages"]) == 3
+
+
+def test_payload_diag_model_special_chars_sanitized_in_filename_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """模型名含 / @ 空格：文件名段净化，body 内容原样保留（区分度第二组输入）。"""
+    import json as _json
+
+    diag_dir = _set_payload_diag(monkeypatch, tmp_path, on=True)
+    body = {"model": "glm-4.7/flash@x", "messages": [{"role": "user", "content": "hi"}]}
+    _wire_mod.capture_payload_diag("glm-4.7/flash@x", body)
+
+    files = list(diag_dir.glob("*.json"))
+    assert len(files) == 1
+    m = _PAYLOAD_FNAME_RE.match(files[0].name)
+    assert m is not None, f"文件名不符读端契约: {files[0].name}"
+    assert m.group(2) == "glm-4_7_flash_x"  # 非 [A-Za-z0-9_-] → _
+    assert int(m.group(4)) == 1
+    doc = _json.loads(files[0].read_text(encoding="utf-8"))
+    assert doc["model"] == "glm-4.7/flash@x"  # body 原样（只净化文件名）
+
+
+def test_payload_diag_disabled_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """开关关 → 不落盘不建目录（默认关语义由 DEFAULTS+settings.yaml 组合保证）。"""
+    diag_dir = _set_payload_diag(monkeypatch, tmp_path, on=False)
+    _wire_mod.capture_payload_diag("m", {"model": "m", "messages": []})
+    assert not diag_dir.exists()
+
+
+async def test_post_chat_also_captures_payload_diag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """非流式路径同样落快照（旧 litellm 钩子两路都拦，网关化收齐）。"""
+
+    diag_dir = _set_payload_diag(monkeypatch, tmp_path, on=True)
+
+    class _StubResp:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+    class _StubClient:
+        async def post(self, *args: Any, **kwargs: Any) -> _StubResp:
+            return _StubResp()
+
+    monkeypatch.setattr(_wire_mod, "_get_client", lambda: _StubClient())
+    body = {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "q"}]}
+    resp = await _wire_mod.post_chat("http://wire.test", "k", body, timeout=5.0)
+    assert resp.choices[0].message.content == "ok"
+    files = list(diag_dir.glob("*.json"))
+    assert len(files) == 1
+    assert _PAYLOAD_FNAME_RE.match(files[0].name) is not None

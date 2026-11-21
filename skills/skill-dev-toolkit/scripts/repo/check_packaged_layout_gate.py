@@ -44,28 +44,62 @@ def discover_product_roots() -> list[Path]:
     return roots
 
 
+def _check_mxc_runtime(root: Path) -> list[str]:
+    """Windows 产物必须随包携带 MXC 执行器（native-win/wslc 隔离前置）。
+
+    判据 = Windows 产物根（kernel/agentos-kernel.exe 在位）下
+    ``mxc/x64/wxc-exec.exe`` 与 ``MXC_RUNTIME_MANIFEST.json`` 同时存在。
+    Linux/macOS 产物不供应 MXC（ProcessContainer/WSLC 均 Windows 专属）。
+    """
+    if not (root / "kernel" / "agentos-kernel.exe").is_file():
+        return []
+    problems: list[str] = []
+    exe = root / "mxc" / "x64" / "wxc-exec.exe"
+    manifest = root / "mxc" / "MXC_RUNTIME_MANIFEST.json"
+    if not exe.is_file():
+        problems.append(f"MXC_EXECUTOR_MISSING: {exe}")
+    if not manifest.is_file():
+        problems.append(f"MXC_MANIFEST_MISSING: {manifest}")
+    return problems
+
+
 def check_one_root(root: Path) -> int:
-    """对单个产物根实跑检查器，返回其 error 数。"""
-    findings = cpl.check_resources(root)
+    """对单个产物根实跑检查器，返回其 error 数。
+
+    will_relocate 显式 True：打包位产物将被 NSIS 挪位安装，editable 绝对路径行
+    （含指向打包位自身的第四犯形态）必须拦下——不得随默认值漂移。
+    """
+    findings = cpl.check_resources(root, will_relocate=True)
     # 载荷阶段豁免：HOST_VENV_MISSING 属现役设计（resources 排除 venv，装后由
     # 维护轮 junction 步骤/boot autoprovision 供给——配方 §4⑥），不阻断出包；
     # P0 防线是 JUNCTION_IN_PACKAGE（junction 打进包），与「venv 应缺席」是两回事。
     # 装机阶段检查（对已安装 resources 实跑）不受本豁免影响。
     errors = [f for f in findings if f.level == "error" and f.code != "HOST_VENV_MISSING"]
     waived = [f for f in findings if f.level == "error" and f.code == "HOST_VENV_MISSING"]
-    infos = [f for f in findings if f.level != "error"]
+    warns = [f for f in findings if f.level == "warn"]
+    infos = [f for f in findings if f.level == "info"]
+    mxc_errors = _check_mxc_runtime(root)
     print(f"[门禁] 产物根 {root}")
     if not findings:
         print("  结构合格：_host 共享 venv 在位，无 junction/symlink 形态 .venv")
     for f in errors:
         print(f"  [ERROR] {f.code}: {f.path}")
         print(f"          {f.detail}")
+    for problem in mxc_errors:
+        print(f"  [ERROR] {problem}")
     for f in waived:
         print(f"  [豁免 ] {f.code}: {f.path}（载荷阶段现役设计缺席，装后 junction 供给）")
+    for f in warns:
+        print(f"  [WARN ] {f.code}: {f.path}")
+        print(f"          {f.detail}")
     if infos:
         print(f"  [info ] {len(infos)} 条（合法形态备案，不阻断）")
-    print(f"  结论：{'不合格' if errors else '合格'}（error={len(errors)} 豁免={len(waived)} info={len(infos)}）")
-    return len(errors)
+    error_count = len(errors) + len(mxc_errors)
+    print(
+        f"  结论：{'不合格' if error_count else '合格'}"
+        f"（error={error_count} 豁免={len(waived)} warn={len(warns)} info={len(infos)}）"
+    )
+    return error_count
 
 
 def main() -> int:

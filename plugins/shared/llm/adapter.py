@@ -18,7 +18,6 @@ import logging
 import os
 import re
 import time as _time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
@@ -26,6 +25,13 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx
 import wire_client  # noqa: E402  薄客户端直连（网关翻译核心传输半边）
+
+# minimax/think 解析家族拆分至 adapter_minimax（2500 行闸拆分，2026-11-08）；重导出保兼容
+from adapter_minimax import (  # noqa: F401  # 历史导入面：tests 经 adapter 引用这些名字
+    _extract_thinking_from_content,
+    _parse_bare_json_tool_call,
+    parse_minimax_native_tool_calls,
+)
 
 from agentos_plugin_sdk.diagnostics_settings import (
     read_diagnostics,
@@ -435,149 +441,6 @@ def _sync_diag_handlers() -> None:
             _diag_logger.setLevel(logging.DEBUG)
 
 
-_THINK_PATTERN = re.compile(
-    r"<think[^>]*>(.*?)</think[^>]*>",
-    re.DOTALL,
-)
-_THINK_PATTERN_NO_GT = re.compile(
-    r"<think\s(.*?)</think[^>]*>",
-    re.DOTALL,
-)
-
-
-def _extract_thinking_from_content(content: str | None) -> tuple[str | None, str | None]:
-    """从 content 中提取 <think/> 标签内容，返回 (thinking_text, cleaned_content)。
-
-    MiniMax-M2.7 等推理模型把思考内容包裹在 <think/> 标签中混在 content 字段返回，
-    上游把思考内容混在 content 返回时不映射 reasoning_content，因此这里手动解析 <think/> 标签，
-    将思考内容与正文分离。
-
-    支持两种标签格式：
-    1. 标准 XML: <think\\n...\\n</think/> 或 <think type="x">...</think...>
-    2. MiniMax: <think\\n...\\n</think/> (开始标签无 >)
-
-    Args:
-        content: LLM 返回的原始 content 文本
-
-    Returns:
-        (thinking_text, cleaned_content) 元组
-    """
-    if not content:
-        return None, content
-
-    pattern, matches = _THINK_PATTERN, _THINK_PATTERN.findall(content)
-    if not matches:
-        pattern, matches = _THINK_PATTERN_NO_GT, _THINK_PATTERN_NO_GT.findall(content)
-    if not matches:
-        return None, content
-
-    thinking = "\n".join(m.strip() for m in matches if m.strip())
-    cleaned = pattern.sub("", content).strip()
-    return thinking if thinking else None, cleaned if cleaned else None
-
-
-# ── MiniMax 原生工具调用正文兜底解析（BUG-17）────────────────────────────
-# MiniMax-M2/M3 系以特殊标记承载工具调用（<minimax:tool_call> 容器 + invoke/
-# parameter 子标签）。上游未激活 tool-call 解析时（请求未携带 tools 声明等），
-# 调用意图以正文到达，标记还会呈转义倾倒形态 ]<]minimax[>[<invoke ...>
-# （生产 2026-09-15 实测字节）。此处把正文中的调用块解析回结构化 tool_calls
-# 并从正文剥离——否则调用意图泄漏为 UI 正文且工具永不执行。
-# 标签前缀三种到达形态：纯净 <tag>、命名空间 <minimax:tag>、转义倾倒。
-_TAG_OPEN = r"(?:<(?:minimax:)?|\]<\]minimax\[>\[<)"
-_TAG_CLOSE = r"(?:</(?:minimax:)?|\]<\]minimax\[>\[</)"
-# 调用块：容器非贪婪捕获到首个闭合（截断流无闭合时容忍到文本末尾）。
-_MINIMAX_BLOCK_RE = re.compile(
-    _TAG_OPEN + r"tool_call\s*>(.*?)(?:" + _TAG_CLOSE + r"tool_call\s*>|\Z)",
-    re.DOTALL,
-)
-# invoke：闭合以 lookahead 终结（容忍缺闭合，截到文本末尾）。
-_MINIMAX_INVOKE_RE = re.compile(
-    _TAG_OPEN + r'invoke\s+name="([^"]+)"\s*>(.*?)(?=' + _TAG_CLOSE + r"invoke\s*>|\Z)",
-    re.DOTALL,
-)
-# parameter：终结点 = 闭合标签 / 下一个 parameter 开标签 / invoke 闭合——
-# 模型漏写 parameter 闭合时（实测有），截到下一边界保参不丢（值可能带模型
-# 自己写错的残余闭标签，原样交付不做猜测性清洗）。
-_MINIMAX_PARAM_RE = re.compile(
-    _TAG_OPEN + r'parameter\s+name="([^"]+)"\s*>(.*?)'
-    r"(?=" + _TAG_CLOSE + r"parameter\s*>|" + _TAG_OPEN + r"parameter\s+name=|"
-    + _TAG_CLOSE + r"invoke\s*>|\Z)",
-    re.DOTALL,
-)
-
-
-def _parse_bare_json_tool_call(body: str) -> dict[str, Any] | None:
-    """容器内裸 JSON 形态解析（生产 2026-09-15 16:52 实证）。
-
-    形态：``{"name": <工具名>, "arguments": <对象|JSON 字符串>}``。arguments
-    为字符串时原样透传（契约的 arguments 本就是 JSON 字符串；非 JSON 的坏
-    字符串交由下游 tool 层可见失败，不在此猜测修复）；其余类型 json.dumps。
-    body 非 JSON 对象或缺 name → None（不识别，交由调用方保留原文）。
-    """
-    try:
-        obj = json.loads(body.strip())
-    except ValueError:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name")
-    if not isinstance(name, str) or not name:
-        return None
-    raw_args = obj.get("arguments", {})
-    args_out = raw_args if isinstance(raw_args, str) else json.dumps(raw_args, ensure_ascii=False)
-    return {
-        "id": f"call_{uuid.uuid4().hex[:24]}",
-        "name": name,
-        "arguments": args_out,
-    }
-
-
-def parse_minimax_native_tool_calls(text: str) -> tuple[list[dict[str, Any]], str]:
-    """解析正文中的 MiniMax 原生工具调用块。
-
-    容器体内两形态：invoke/parameter 子标签（官方模板）或裸 JSON 对象
-    （name + arguments，arguments 可为对象或 JSON 字符串——生产 16:52 实证）。
-
-    Args:
-        text: LLM 返回的原始正文
-
-    Returns:
-        (tool_calls, cleaned_text)。tool_calls 与 adapter 流式/非流式解析
-        契约同构（id=call_<hex>、name、arguments=JSON 字符串，参数序保持）；
-        无可识别调用块时返回 ([], 原文)——不误吞无法解读的正文。
-        cleaned_text 仅去空白不做猜测性改写。
-    """
-    blocks = list(_MINIMAX_BLOCK_RE.finditer(text))
-    if not blocks:
-        return [], text
-
-    tool_calls: list[dict[str, Any]] = []
-    for block in blocks:
-        body = block.group(1)
-        invokes = list(_MINIMAX_INVOKE_RE.finditer(body))
-        if invokes:
-            for inv in invokes:
-                params: dict[str, str] = {}
-                for prm in _MINIMAX_PARAM_RE.finditer(inv.group(2)):
-                    params[prm.group(1)] = prm.group(2).strip()
-                tool_calls.append(
-                    {
-                        "id": f"call_{uuid.uuid4().hex[:24]}",
-                        "name": inv.group(1),
-                        "arguments": json.dumps(params, ensure_ascii=False),
-                    }
-                )
-        else:
-            bare = _parse_bare_json_tool_call(body)
-            if bare is not None:
-                tool_calls.append(bare)
-
-    if not tool_calls:
-        return [], text
-    cleaned = _MINIMAX_BLOCK_RE.sub("", text).strip()
-    return tool_calls, cleaned
-
-
 # ---------------------------------------------------------------------------
 # 数据类型
 # ---------------------------------------------------------------------------
@@ -789,15 +652,21 @@ class _BaseLLMAdapter:
         ``cancel_event``（流式取消信号）为签名级专用参数：不入 ``**kwargs``
         （避免作为模型参数外发），仅流式路径显式传入 ``_call_streaming``。
         """
-        # 防御性兜底：确保 minimax 不会收到非法 system 消息
-        self._ensure_minimax_role_safety(model, messages)
-
-        # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
-        # 透传 **kwargs（即 default_params），adapter 按需读取自身配置
+        # 防御性兜底 + provider 适配：大历史逐条浅拷贝/角色修复是同步 CPU，
+        # 必须出事件循环——2026-11-12 第 39 轮装机取证栈命中
+        # `minimax.py:44 adapt_messages_before_send`，单次 >30s 触发宿主
+        # watchdog `os._exit(1)`。
         from provider_adapters import get_provider_adapter  # noqa: PLC0415
 
         adapter = get_provider_adapter(model)
-        messages = adapter.adapt_messages_before_send(messages, replay_reasoning=replay_reasoning, **kwargs)
+        messages = await asyncio.to_thread(
+            self._adapt_messages_before_send_sync,
+            adapter,
+            model,
+            messages,
+            replay_reasoning,
+            kwargs,
+        )
 
         # 工具面出站观测（BUG-17 主路径断言点）：行缺失 = 本轮请求无 tools，
         # 模型将凭历史降级为正文输出原生工具标记。
@@ -832,6 +701,20 @@ class _BaseLLMAdapter:
                 **kwargs,
             )
         return await self._call_non_streaming(model, messages, tools=tools, **kwargs)
+
+    def _adapt_messages_before_send_sync(
+        self,
+        adapter: Any,
+        model: str,
+        messages: list[dict[str, Any]],
+        replay_reasoning: bool | str | None,
+        kwargs: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """同步消息适配体（在线程池执行，禁止 await 后读共享实例字段）。"""
+        self._ensure_minimax_role_safety(model, messages)
+        return adapter.adapt_messages_before_send(
+            messages, replay_reasoning=replay_reasoning, **kwargs
+        )
 
     async def health_check(self, model: str) -> bool:
         """检查模型是否可用。"""
@@ -1357,11 +1240,12 @@ class _BaseLLMAdapter:
         verbose: bool,
         enforce_limit: bool,
     ) -> bool:
-        """追加思考片段并发 thinking 事件；enforce_limit 时检查截断阈值。
+        """追加思考片段并发 thinking 事件；返回是否应中断流。
 
-        返回是否因思考内容超过 max_thinking_chars 而应中断流（仅 enforce_limit
-        时可能为 True）。verbose 控制是否打 THINKING 计数 debug 日志（完整段打，
-        标签切片片段不打，与拆分前各调用点行为一致）。
+        两条中断路径：消费方 ``on_chunk`` 返回 ``"stop"``（退化循环守卫，任何
+        enforce_limit 档位都生效）；思考内容超过 ``max_thinking_chars``
+        （仅 enforce_limit 档位检查）。verbose 控制是否打 THINKING 计数 debug
+        日志（完整段打，标签切片片段不打，与拆分前各调用点行为一致）。
         """
         state.thinking_parts.append(text)
         if verbose:
@@ -1370,8 +1254,12 @@ class _BaseLLMAdapter:
                 len(state.thinking_parts),
                 len(text),
             )
-        if state.on_chunk:
-            state.on_chunk({"type": "thinking", "content": text})
+        if state.on_chunk and state.on_chunk({"type": "thinking", "content": text}) == "stop":
+            # 消费方要求停止（退化循环守卫）：思考通道与正文通道同等对待。
+            # 此前该返回值被丢弃——思考通道的 "stop" 形同废纸（2026-11-07
+            # 事故：思考原地刷同一 emoji 452 次、13 分钟无人拦断）。
+            state.stream_repetition = True
+            return True
         if not enforce_limit:
             return False
         thinking_len = sum(len(p) for p in state.thinking_parts)
@@ -1393,17 +1281,19 @@ class _BaseLLMAdapter:
             return False
         return state.on_chunk({"type": "text", "content": text}) == "stop"
 
-    def _strip_think_close(self, seg: str, state: _StreamState) -> str:
+    def _strip_think_close(self, seg: str, state: _StreamState) -> str | None:
         """处理确定含 ``</think`` 的文本段：闭合标记前的部分计入 thinking 通道。
 
         返回闭标签 ``>`` 之后剩余的正文片段（可能为空串/空白，由调用方决定是否
-        发正文事件）。``in_think_tag`` 标志由调用方维护。开标签与闭标签同 chunk
-        到达、跨 chunk 切分两种路径共用本方法。
+        发正文事件）；思考段触发消费方停止时返回 ``None``（调用方据此中断流，
+        残余正文不再发事件）。``in_think_tag`` 标志由调用方维护。开标签与闭
+        标签同 chunk 到达、跨 chunk 切分两种路径共用本方法。
         """
         close_idx = seg.index("</think")
         head = seg[:close_idx]
-        if head:
-            self._append_thinking(head, state, verbose=False, enforce_limit=False)
+        if head and self._append_thinking(head, state, verbose=False, enforce_limit=False):
+            state.in_think_tag = False
+            return None
         tail = seg[close_idx:]
         gt = tail.find(">")
         return tail[gt + 1 :] if gt >= 0 else ""
@@ -1424,6 +1314,8 @@ class _BaseLLMAdapter:
             if "</think" in content:
                 rest = self._strip_think_close(content, state)
                 state.in_think_tag = False
+                if rest is None:
+                    return True
                 if rest.strip() and self._emit_text(rest, state):
                     state.stream_repetition = True
                     return True
@@ -1443,11 +1335,13 @@ class _BaseLLMAdapter:
             if "</think" in inner:
                 rest = self._strip_think_close(inner, state)
                 state.in_think_tag = False
+                if rest is None:
+                    return True
                 if rest.strip() and self._emit_text(rest, state):
                     state.stream_repetition = True
                     return True
             elif inner:
-                self._append_thinking(inner, state, verbose=True, enforce_limit=False)
+                return self._append_thinking(inner, state, verbose=True, enforce_limit=False)
         else:
             # 纯正文：先收口已开的思考段再发正文事件
             if state.on_chunk and state.thinking_parts:
@@ -1620,6 +1514,12 @@ class _BaseLLMAdapter:
             len(tool_calls),
         )
 
+        # 退化循环截断没有上游 finish_reason（流被我们主动掐断）：收敛为
+        # "length"（协议五值里的截断语义），上层按截断轮处理而非当正常收尾。
+        finish_reason = state.finish_reason
+        if state.stream_repetition and finish_reason is None:
+            finish_reason = "length"
+
         return LLMResponse(
             text=result_text,
             tool_calls=tool_calls,
@@ -1627,7 +1527,7 @@ class _BaseLLMAdapter:
             usage=state.stream_usage,
             stream_repetition=state.stream_repetition,
             thinking_truncated=state.thinking_truncated,
-            finish_reason=state.finish_reason,
+            finish_reason=finish_reason,
         )
 
 
@@ -1860,13 +1760,19 @@ class KeyPoolAdapter(_BaseLLMAdapter):
 
     @staticmethod
     def _plugin_response(data: dict[str, Any]) -> Any:
-        """契约聚合响应 → LLMResponse（网关用量/结果组装照常消费）。"""
+        """契约聚合响应 → LLMResponse（网关用量/结果组装照常消费）。
+
+        ``stream_repetition`` 由 provider 插件按契约回传（插件侧共享翻译器
+        判定后在 translate 后收流并把标记写进聚合响应），网关据此对上层
+        如实透出，不吞 provider 侧的退化信号。
+        """
         return LLMResponse(
             text=data.get("text"),
             tool_calls=data.get("tool_calls") or [],
             thinking_text=data.get("thinking_text"),
             usage=data.get("usage") or {},
             finish_reason=data.get("finish_reason") or "stop",
+            stream_repetition=bool(data.get("stream_repetition", False)),
         )
 
     async def _call_plugin_provider(
@@ -2469,12 +2375,21 @@ class KeyPoolAdapter(_BaseLLMAdapter):
         if not base_url:
             raise RuntimeError(f"provider {provider or '?'} 缺 api_base（模型 {model_id}，slot/配置均未提供）")
 
-        _log_prompt_body(model_id, kwargs.get("messages") or [], kwargs.get("tools"))
+        # prompt 审计与 wire body 构建都是同步 CPU/序列化：大历史下整份
+        # json.dumps + 脱敏可达秒级（2026-11-12 第 39 轮取证栈
+        # `adapter.py:418 _log_prompt_body`），必须出事件循环。
+        await asyncio.to_thread(
+            _log_prompt_body,
+            model_id,
+            kwargs.get("messages") or [],
+            kwargs.get("tools"),
+        )
         try:
             timeout = float(kwargs.get("timeout") or kwargs.get("first_chunk_timeout") or 180.0)
         except (TypeError, ValueError):
             timeout = float(kwargs.get("first_chunk_timeout") or 180.0)
-        body = wire_client.build_body(
+        body = await asyncio.to_thread(
+            wire_client.build_body,
             model_name,
             kwargs.get("messages") or [],
             tools=kwargs.get("tools"),

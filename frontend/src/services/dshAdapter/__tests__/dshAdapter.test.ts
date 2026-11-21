@@ -11,6 +11,10 @@ import { loadDshAdapterContributions } from '../index'
 vi.mock('@/services/api/schema', () => ({
   getSchema: vi.fn(),
 }))
+// client-ui 清单拉取在装载末尾同步槽位页：测试里钉成空清单，避免真实网络重试
+vi.mock('@/services/api/client', () => ({
+  apiClient: { get: vi.fn().mockResolvedValue({ data: { bundles: [] } }) },
+}))
 
 const { getSchema } = await import('@/services/api/schema')
 

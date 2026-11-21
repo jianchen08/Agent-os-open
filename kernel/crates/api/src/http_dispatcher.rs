@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 HTTP 面反调身份链 task-local 身份 scope | @ci: rust-test
 //! HTTP 端点 dispatcher（ADR §3.3 / 附录 E.1.2 / E.1.3）。
 //!
 //! 把入站 HTTP 请求路由到插件贡献的端点：
@@ -775,7 +776,7 @@ fn build_datasource_handler(
         .layer(axum::extract::DefaultBodyLimit::max(EXT_BODY_LIMIT_BYTES))
 }
 
-mod static_assets;
+pub mod static_assets;
 
 pub(crate) use static_assets::mime_for_extension;
 use static_assets::{header_map_to_hashmap, try_serve_static_asset};

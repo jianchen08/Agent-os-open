@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-plugin-protocol
+type: standard
+status: active
+---
+
 # 插件协议规则（Plugin Protocol）
 
 > 返回 [开发指南索引](README.md)。协议权威：`plugin.json` 契约、包结构、注册发现、生命周期的一切**横切规则**（供注入遵守）。
@@ -54,15 +60,22 @@ mode_X/                     # 出厂种子 plugins/shared/mode_X/（拍平布局
 
 ### 3.1 热发现全链路
 
-新建插件目录、修改 `plugin.json`、改插件 Python 代码均由 watcher 自动处理（300ms 防抖 + 60s 轮询兜底）：发现 → G2 校验 → 注册/重注册/respawn，秒级生效，无需 re-enable 或重启；声明与实现不一致被 G2 漂移校验**拒注册**。仅 native cdylib 集合变更走 G8 自动重启（排空 + 自拉活；同 id 换产物保守重启）。禁用中的插件改完不注册——先启用，这是"禁用"语义本身。
+新建插件目录、修改 `plugin.json`、改插件 Python 代码均由 watcher 自动处理（300ms 防抖 + 60s 轮询兜底）：发现 → G2 校验 → 注册/重注册/respawn，秒级生效，无需 re-enable 或重启；声明与实现不一致的工具被 G2 判拒后**保留声明 schema 在工具面（失败桩）**、调用时显式失败（`TOOL_DECLARATION_MISMATCH` / `TOOL_TEMPORARILY_UNAVAILABLE`，带原因与修复指引），复验通过自动恢复——工具数组不随校验态增减（ADR 2026-11-12）。仅 native cdylib 集合变更走 G8 自动重启（排空 + 自拉活；同 id 换产物保守重启）。禁用中的插件改完不注册——先启用，这是"禁用"语义本身。
 
 ### 3.2 三层工具过滤链
 
 1. **启用档案**：`manifest.enabled` > `config/kernel/default_profile.yaml` > 默认 true；禁用插件整个不进注册表。watcher 每轮从盘上重读 profile（运行期改即生效）。
-2. **能力注册**：`capabilities.tools[]` → ToolDescriptor 进 CapabilityRegistry；external MCP 工具缺 `input_schema` 拒注册（内置工具缺则 `{}` 补注册 + warn）。
+2. **能力注册**：`capabilities.tools[]` → ToolDescriptor 进 CapabilityRegistry；external MCP 工具缺 `input_schema` 拒注册（内置工具缺则 `{}` 补注册 + warn）。G2 判定/观测失败的声明工具不摘注册表条目（schema 恒在工具面，调用由契约账本显式拦截）；摘除只发生在禁用/卸载路径。
 3. **tool_ids 白名单**：LLM 实际可见 = 注册表 ∩ 当前 agent `tool_ids`；解析不出 tool_ids = **空工具面**（禁止静默全量），仅框架强制工具 `spill_retrieve` 兜底注入。
 
 新工具要让 LLM 用到，三处都要通：插件启用 → 声明合法 → 加进目标 agent `tool_ids`。
+
+**动态类接入（第三种可见性，不需改 `tool_ids`）**：工具也可**不进任何 agent 的 `tool_ids`** 而经动态面可达——`resource_search(mode=detailed)` 返回结构化 `tool_defs`（真实 `input_schema`/`output_schema`/`render`/`plugin_id`，来源 = 本 manifest 的 `capabilities.tools[]` 声明，或零声明 external MCP 的活注册表条目），`tool_schema` 插件把它落 `state["dynamic_tools"]`，模型经薄转发壳 `call_tool`（`input_schema = {tool, arguments}`）转发到既有 `tool-executor.invoke`。
+
+- **定义真值只认声明/活注册表**：插件要把工具做成动态类可调，唯一要求是 manifest 声明**带 `input_schema`（type 必须 `object`）**——缺失或非 object 会在**引入侧**被 fail-closed 拒收（不补 `{}`：补空对象 = 零参数盲调）。`output_schema`/`render` 缺失只降级（前端 generic 回退）。
+- **不绕过权限**：动态工具不在 `tool_ids` 里，但 4 档判定按**目标工具名 + 目标参数**展开（`security_check`/`level_guard`/`duplicate_check`）——危险目标照旧进审批链。
+- **不进 `tool_schemas`**：动态类不写 LLM 原生 `tools` 数组（前缀缓存稳定）；也不写注册表（注册表是纯数据面）。
+- **零声明 external MCP**：`entry: "mcp:external"` 的受管目录（`plugin.json` 无 `capabilities.tools`）由握手 `tools/list` 观测导入，其 `ToolDescriptor` 自带 `input_schema`，动态定义从活注册表取；回收沿用既有 idle GC 的空闲阈值（无「用完即卸」机制）。ADR 2026-11-15-dynamic-tool-surface。
 
 ## 四、manifest 契约规则
 

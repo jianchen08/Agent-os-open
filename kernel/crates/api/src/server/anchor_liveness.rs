@@ -1,3 +1,4 @@
+// @feature: FP-0.2.可观测性 锚点活性探测面(执行路径身份统一批次同落) | @ci: rust-test
 //! 锚点活性守卫（刀4，ADR 草稿 docs/working/2026-10-15-session-anchor-lifecycle-
 //! adr-draft.md 推荐态落码）：锚点驱动投递（POST /api/v1/chat）在消费时刻同步
 //! 校验锚点管线活性——内核簿记键 `run_status` 命中终态（completed/failed/
@@ -13,7 +14,7 @@ use std::sync::Arc;
 /// 失败，降级输入）× 主管线在场性 × 锚点本身 → Keep（保持锚点）或
 /// ReleaseTo（切回主管线）。
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AnchorDecision {
+enum AnchorDecision {
     Keep,
     ReleaseTo(String),
 }
@@ -46,7 +47,7 @@ fn anchor_decision(
 /// REST chat 锚点解析 + 活性守卫（chat_handler 接线）：会话在场 → 锚点守卫
 /// 裁决（终态惰性切回，切回就地 update_session 落库——指针归位一次生效，后续
 /// 消费零重复写）；会话缺席/无锚点 → 空 pipeline_id（调用方既有显式报错路径）。
-pub(crate) async fn resolve_chat_pipeline_id(
+pub(super) async fn resolve_chat_pipeline_id(
     store: &Arc<dyn StorageBackend>,
     tenant: &TenantContext,
     session: Option<SessionRecord>,

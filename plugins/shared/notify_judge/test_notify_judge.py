@@ -705,3 +705,114 @@ def test_trigger_origin_zero_write_and_no_llm(mod):
     state["trigger.source"] = "mode_personal"
     assert _run(mod.NotifyJudge(), state) == {}
     assert calls == []
+
+
+# ════════════════════════════════════════════════════════════
+# 通知出队冲刷（批次 5：管道空闲即冲刷，流式中押单不变）
+# ════════════════════════════════════════════════════════════
+
+
+def _flush_fakes(
+    active: bool | None = False,
+    raise_exc: Exception | None = None,
+):
+    """fake 活跃查询 + 事件发射：记录 notify_flush 发射与活跃查询。"""
+    flushed: list[dict] = []
+    activity_calls: list[dict] = []
+
+    async def activity(method: str, params: dict, timeout: float | None = None) -> Any:
+        activity_calls.append({"method": method, "params": params})
+        if raise_exc is not None:
+            raise raise_exc
+        return {"pipeline_id": params.get("pipeline_id"), "active": active}
+
+    async def emitter(event: str, payload: dict, timeout: float | None = None) -> Any:
+        flushed.append({"event": event, "payload": payload})
+
+    return activity, emitter, flushed, activity_calls
+
+
+def _wire_flush(mod: Any, active: bool | None = False, raise_exc: Exception | None = None):
+    """接线冲刷 fake 并清记账（模块级单例，逐用例复位）。"""
+    activity, emitter, flushed, activity_calls = _flush_fakes(active, raise_exc)
+    mod.set_activity_checker(activity)
+    mod.set_event_emitter(emitter)
+    mod.reset_flush_bookkeeping_for_test()
+    return flushed, activity_calls
+
+
+def test_idle_pipeline_flushes_notify_immediately(mod: Any) -> None:
+    """空闲（无在途链）→ worthy 打标同时补发 notify_flush（立即出队，不等下一事件）。"""
+    flushed, activity_calls = _wire_flush(mod, active=False)
+    mod.set_capability_caller(_recording_caller(calls=[]))
+    mod.set_view_checker(_view_checker_factory(False))
+    messages = [
+        {"role": "user", "content": "把报告整理好"},
+        _assistant("报告搞定了，已经发你邮箱。", seq=7),
+    ]
+    updates = _run(mod.NotifyJudge(), _state(messages))
+    assert _worthy_flag(_sole_op(updates)) is True, "打标照常落库"
+    assert len(flushed) == 1, f"空闲应立即冲刷一次，实际 {len(flushed)}"
+    assert flushed[0]["event"] == "notify_flush"
+    payload = flushed[0]["payload"]
+    assert payload["notify_worthy"] is True
+    assert payload["pipeline_id"] == "pipe-1"
+    assert activity_calls and activity_calls[0]["params"]["pipeline_id"] == "pipe-1"
+
+
+def test_streaming_pipeline_holds_flush(mod: Any) -> None:
+    """流式进行中（活跃链在场）→ 押单不打断流：不发射，打标照常。"""
+    flushed, _ = _wire_flush(mod, active=True)
+    mod.set_capability_caller(_recording_caller(calls=[]))
+    mod.set_view_checker(_view_checker_factory(False))
+    messages = [
+        {"role": "user", "content": "继续"},
+        _assistant("搞定了第一段。", seq=3),
+    ]
+    updates = _run(mod.NotifyJudge(), _state(messages))
+    assert _worthy_flag(_sole_op(updates)) is True, "押单仍打标（帧链路/后续捎出兜底）"
+    assert flushed == [], "流式进行中不得补发（押单语义不变）"
+
+
+def test_long_idle_flushes_once_not_repeated(mod: Any) -> None:
+    """长空闲只冲一次：同消息重复判定（重跑/重放）命中记账不双发。"""
+    flushed, _ = _wire_flush(mod, active=False)
+    mod.set_capability_caller(_recording_caller(calls=[]))
+    mod.set_view_checker(_view_checker_factory(False))
+    messages = [
+        {"role": "user", "content": "提醒事项"},
+        _assistant("放心，已设置提醒，到时候叫你。", seq=5),
+    ]
+    state = _state(messages)
+    _run(mod.NotifyJudge(), state)
+    _run(mod.NotifyJudge(), state)
+    _run(mod.NotifyJudge(), state)
+    assert len(flushed) == 1, f"同消息三轮判定应只冲一次，实际 {len(flushed)}"
+
+
+def test_not_worthy_never_flushes(mod: Any) -> None:
+    """LLM 判否（不值得打断）→ 零打标零发射（出队只随 worthy 面）。"""
+    flushed, _ = _wire_flush(mod, active=False)
+    mod.set_capability_caller(_recording_caller(payload='{"worthy": false, "reason": "碎语"}'))
+    mod.set_view_checker(_view_checker_factory(False))
+    messages = [
+        {"role": "user", "content": "继续"},
+        _assistant("正在继续处理中。", seq=2),
+    ]
+    updates = _run(mod.NotifyJudge(), _state(messages))
+    assert updates == {}, "判否零写入"
+    assert flushed == [], "非 worthy 不发射"
+
+
+def test_flush_activity_query_failure_treated_as_idle(mod: Any) -> None:
+    """活跃查询失败 → 按空闲冲刷（通知面只增不减，与查看态门同口径）。"""
+    flushed, _ = _wire_flush(mod, active=False, raise_exc=RuntimeError("unknown method"))
+    mod.set_capability_caller(_recording_caller(calls=[]))
+    mod.set_view_checker(_view_checker_factory(False))
+    messages = [
+        {"role": "user", "content": "交付"},
+        _assistant("全部搞定了✅。", seq=4),
+    ]
+    updates = _run(mod.NotifyJudge(), _state(messages))
+    assert _worthy_flag(_sole_op(updates)) is True
+    assert len(flushed) == 1, "查询失败按空闲立即冲刷（不减通知面）"

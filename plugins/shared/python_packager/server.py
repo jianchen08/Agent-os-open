@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -40,7 +41,11 @@ def _uv() -> str:
 
 
 def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> dict[str, Any]:
-    """跑 uv 子进程；异常/非零退出 → 带 error 返回（fail-closed，不抛链上崩溃）。"""
+    """跑 uv 子进程；异常/非零退出 → 带 error 返回（fail-closed，不抛链上崩溃）。
+
+    纯同步体：调用方（async handler）一律经 ``asyncio.to_thread`` 下放，
+    uv 解析/装包（timeout=300）不得占用宿主事件循环。
+    """
     try:
         proc = subprocess.run(
             cmd,
@@ -116,6 +121,19 @@ def _check_package_dir(package_dir: str) -> tuple[Path | None, str]:
     )
 
 
+def _remove_parts(package_dir: Path) -> list[str]:
+    """删 ``.venv`` 与 ``uv.lock``（目录 rmtree / 文件 unlink）；返回已删清单。
+
+    纯同步体：调用方经 ``asyncio.to_thread`` 下放（venv 可达万级文件）。
+    """
+    removed: list[str] = []
+    for part in (package_dir / ".venv", package_dir / "uv.lock"):
+        if part.exists() or part.is_symlink():
+            shutil.rmtree(part) if part.is_dir() else part.unlink()
+            removed.append(str(part))
+    return removed
+
+
 def _declared_dependencies(package_dir: Path) -> list[str]:
     """pyproject [project].dependencies（缺失 pyproject/无该字段 → 空清单/报错）。"""
     pyproject = package_dir / "pyproject.toml"
@@ -155,7 +173,7 @@ async def install(package_dir: str) -> dict[str, Any]:
             "ok": False,
             "error": "pyproject 声明了依赖但 uv 不可用（PYTHON_PACKAGER_UV 指向无效）",
         }
-    res = _run([_uv(), "sync", "--project", str(d)], d)
+    res = await asyncio.to_thread(_run, [_uv(), "sync", "--project", str(d)], d)
     if not res["ok"]:
         return res
     venv = d / ".venv"
@@ -190,11 +208,7 @@ async def uninstall(package_dir: str) -> dict[str, Any]:
     if err:
         return {"ok": False, "error": err}
     assert d is not None  # _check_package_dir 约定：err 非空 ⟺ d 为 None
-    removed: list[str] = []
-    for part in (d / ".venv", d / "uv.lock"):
-        if part.exists() or part.is_symlink():
-            shutil.rmtree(part) if part.is_dir() else part.unlink()
-            removed.append(str(part))
+    removed = await asyncio.to_thread(_remove_parts, d)
     return {
         "ok": True,
         "package_dir": str(d),
@@ -230,7 +244,7 @@ async def resolve_dependencies(package_dir: str) -> dict[str, Any]:
     if not d.joinpath("uv.lock").is_file() or not d.joinpath(".venv").is_dir():
         # 未安装过 → 诚实标"未解析"，声明依赖全部计为缺（不假装绿）。
         return {"ok": True, "satisfied": [], "missing": declared, "resolved": False}
-    res = _run([_uv(), "sync", "--project", str(d)], d)  # 幂等：已满足则秒过
+    res = await asyncio.to_thread(_run, [_uv(), "sync", "--project", str(d)], d)  # 幂等：已满足则秒过
     if not res["ok"]:
         return {
             "ok": True,
@@ -265,7 +279,7 @@ async def status(package_dir: str) -> dict[str, Any]:
         declared = _declared_dependencies(d)
     except FileNotFoundError as e:
         return {"ok": False, "error": str(e)}
-    ver = _run([_uv(), "--version"], d)
+    ver = await asyncio.to_thread(_run, [_uv(), "--version"], d)
     return {
         "ok": True,
         "package_dir": str(d),

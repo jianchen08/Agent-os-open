@@ -55,14 +55,160 @@ MODEL_UNAVAILABLE_MARKER = "MODEL_UNAVAILABLE"
 # 实证：额度 429 连败 175 次熔断不触发，仅因每条 request_id 不同）。指纹与
 # 同文判定前剥除这些字段的值（保留键名与前后结构），展示文本不动。
 _VOLATILE_FIELD_RE = re.compile(
-    r"(\\?[\"']?request_id\\?[\"']?\s*[:=]\s*\\?[\"']?)([0-9A-Za-z-]{8,})",
+    # request/trace/call 三族易变 id，下划线与驼峰两种拼写都收（IGNORECASE）：
+    # 2026-11-18 装机实证——gateway 错误正文用 camelCase ``requestId``，旧正则
+    # 只匹配 ``request_id``，同型失败逐调用异文、连击永不达阈（634adfc6a364
+    # 家族 169 连败未触发熔断的直接根因之一）。
+    r"(\\?[\"']?(?:request|trace|call)[_]?id\\?[\"']?\s*[:=]\s*\\?[\"']?)([0-9A-Za-z-]{8,})",
     re.IGNORECASE,
 )
+
+
+DYNAMIC_FORWARD_TOOL = "call_tool"
 
 
 def _stable_error_text(message: str) -> str:
     """剥除每调用易变字段后的错误文本（连击指纹/同文判定专用，不改写原文）。"""
     return _VOLATILE_FIELD_RE.sub(r"\1<volatile>", message)
+
+
+def _effective_fail_target(tool: str, res: dict[str, Any]) -> tuple[str, bool]:
+    """失败归属工具名 → ``(目标名, 是否动态类)``。
+
+    动态工具经薄转发壳 ``call_tool`` 调用，按壳名计连败两个方向都错：摘壳出
+    ``tool_ids`` = 全部动态工具一次性失联；不摘则好坏工具混计、真坏的永不被识别。
+
+    **目标名的真实可达通道 = ``metadata.target_tool``**：``tool_results`` 条目是
+    ``ToolResult`` 七键封闭结构（``tool_name/success/error/data/metadata/duration_ms``
+    + ``extra``），**不含 ``arguments``**——只有 ``metadata`` 能把目标名带到下游。
+    故优先级：``metadata.target_tool`` > ``arguments.tool``（guard 拦截路径的
+    ``extra`` 扩展位）> 回落本名。
+
+    带 ``target_tool`` 而本名不是壳的条目（如 guard 预填按目标名入账的历史形态）
+    同样归动态桶——防「动态面误用一次就摘掉常驻工具」的跨桶污染。
+    """
+    meta = res.get("metadata")
+    target_in_meta = ""
+    if isinstance(meta, dict):
+        target_in_meta = str(meta.get("target_tool") or "").strip()
+
+    if tool == DYNAMIC_FORWARD_TOOL:
+        if target_in_meta and target_in_meta != DYNAMIC_FORWARD_TOOL:
+            return target_in_meta, True
+        args = res.get("arguments")
+        if isinstance(args, dict):
+            target = str(args.get("tool") or "").strip()
+            if target and target != DYNAMIC_FORWARD_TOOL:
+                return target, True
+        # 取不到目标名 = 壳自身失败（TOOL_NOT_FOUND / INVALID_ARGUMENTS /
+        # DYNAMIC_TOOLS_UNAVAILABLE / TOOL_EXECUTOR_UNAVAILABLE）。这仍是「动态面
+        # 被误用」而非「转发壳坏了」：落常规桶会让连败 10 次把 call_tool 摘出
+        # tool_ids → 全部动态工具一次性失联，且当轮不可自愈（次轮 tool_schema 按
+        # tool_ids 不再输出 call_tool 的 schema，agent_config_load 每 run 才重注入）。
+        # 故一律归动态桶：只告警/终止，永不动 tool_ids。
+        return tool, True
+
+    if target_in_meta and target_in_meta != tool:
+        return target_in_meta, True
+    return tool, False
+
+
+def _is_target_failure(res: dict[str, Any]) -> bool:
+    """壳成功、内层信封失败 = **目标**失败（**仅动态类**适用）。
+
+    转发壳的传输层 ``success`` 恒为 True（转发动作本身完成了），目标失败信息在
+    ``data.success`` 内层。只看顶层会把目标失败误判成成功 → 连败计数永不累积。
+    """
+    if res.get("success") is not True:
+        return False
+    data = res.get("data")
+    return isinstance(data, dict) and data.get("success") is False
+
+
+def _failure_is_not_tool_fault(res: dict[str, Any]) -> bool:
+    """失败但不是「工具坏了」的两类豁免（用户裁定 2026-09-28 / 2026-11-11）。
+
+    - ``error_code`` 形如 ``HTTP_404``：请求已送达并拿到响应，目标资源不存在是
+      LLM 可自愈的业务反馈（换 URL/换信源），计连败会把探索性 404 误判成工具故障；
+    - ``metadata.exit_code`` 存在：命令进程已跑完、退出码非零 = 工具执行正常、
+      命令业务失败（跑测试/编译报错、grep 无匹配），几轮就把 bash 摘出工具面。
+    """
+    code = str(res.get("error_code") or "")
+    if code.startswith("HTTP_") and code[5:].isdigit():
+        return True
+    meta = res.get("metadata")
+    return isinstance(meta, dict) and meta.get("exit_code") is not None
+
+
+def _classify_failure_entry(
+    res: Any, exempt_tools: list[str]
+) -> tuple[str, str, bool]:
+    """单条 ``tool_results`` 条目 → ``(kind, 归属名, 是否动态类)``。
+
+    kind：``skip``（不参与）/ ``success``（成功清零）/ ``refusal``（审批通道故障，
+    摘窗口不动计数）/ ``failure``（计连败）。
+
+    审批通道故障豁免（BUG-41）：``security_check`` 审批等待链路异常时返回带
+    ``retry_allowed=True`` 的软拦截——人审结果未知（用户可能已批准但响应丢失）、
+    调用从未执行，「同参重调结果不变」的前提不成立，故不计连败，并从签名窗口摘除
+    该次发射（人审后的重试不得被去重拦截）。
+    """
+    if not isinstance(res, dict):
+        return "skip", "", False
+    call_name = str(res.get("tool_name") or "")
+    if not call_name or call_name in exempt_tools:
+        return "skip", "", False
+
+    target, is_dynamic = _effective_fail_target(call_name, res)
+    # 内层失败只在**动态类**条目上算工具故障：常驻工具的业务载荷
+    # （data.success=false，如 dsh.tool.call 透传的失败信封）是业务结果，
+    # 计入连败会误摘常驻工具面。
+    if is_dynamic and _is_target_failure(res):
+        return "failure", target, is_dynamic
+    if res.get("success") is True:
+        return "success", target, is_dynamic
+    if res.get("retry_allowed") is True:
+        # 通道故障的窗口签名按**原调用名**摘（发射的是壳名那一条）
+        return "refusal", call_name, False
+    if _failure_is_not_tool_fault(res):
+        return "skip", "", False
+    return "failure", target, is_dynamic
+
+
+class _FailBuckets:
+    """失败计数两桶（常规 / 动态），带脏标记供调用方决定写哪些键。
+
+    两桶分离是「动态与常驻分别记账」的落点：动态桶只出告警与硬上限终止，
+    **永不写 ``tool_ids``**（动态目标不在白名单，每轮由搜索结果重建）。
+    """
+
+    __slots__ = ("regular", "dynamic", "regular_dirty", "dynamic_dirty")
+
+    def __init__(self, regular: Any, dynamic: Any) -> None:
+        self.regular: dict[str, int] = dict(regular or {})
+        self.dynamic: dict[str, int] = dict(dynamic or {})
+        self.regular_dirty = False
+        self.dynamic_dirty = False
+
+    def _pick(self, is_dynamic: bool) -> dict[str, int]:
+        return self.dynamic if is_dynamic else self.regular
+
+    def note_success(self, name: str, is_dynamic: bool) -> None:
+        """成功即清零该桶该名（自愈不受伤害）。"""
+        if self._pick(is_dynamic).pop(name, None) is not None:
+            self._mark(is_dynamic)
+
+    def note_failure(self, name: str, is_dynamic: bool) -> int:
+        bucket = self._pick(is_dynamic)
+        bucket[name] = bucket.get(name, 0) + 1
+        self._mark(is_dynamic)
+        return bucket[name]
+
+    def _mark(self, is_dynamic: bool) -> None:
+        if is_dynamic:
+            self.dynamic_dirty = True
+        else:
+            self.regular_dirty = True
 
 
 def _error_detail(message: str, window: int = 160) -> str:
@@ -128,9 +274,11 @@ class DuplicateCheckPlugin(IOutputPlugin):
         self._similarity_threshold = self._config.get("similarity_threshold", 0.9)
         self._signature_window_size = self._config.get("signature_window_size", 8)
         # 失败熔断（ADR 2026-09-09）：同工具连续失败 ≥threshold 摘除工具面逼收尾，
-        # ≥hard_limit 终止管道。阈值依据：合法自愈实测 1-2 次内成功，5 给 2.5 倍裕度。
-        self._fail_break_threshold = self._config.get("fail_break_threshold", 5)
-        self._fail_break_hard_limit = self._config.get("fail_break_hard_limit", 8)
+        # ≥hard_limit 终止管道。阈值依据：合法自愈实测 1-2 次内成功；失败面已
+        # 收窄到「工具本身执行不了」（见 _check_tool_failures），10/15 给足探索性
+        # 重试空间（2026-11-11 用户裁定：原 5/8 过低，几轮探索即摘工具面）。
+        self._fail_break_threshold = self._config.get("fail_break_threshold", 10)
+        self._fail_break_hard_limit = self._config.get("fail_break_hard_limit", 15)
         self._fail_breaker_exempt_tools = self._config.get("fail_breaker_exempt_tools", []) or []
         # LLM 失败连击熔断（2026-10-20 用户裁定「连环失败要快速失败」）：
         # 连续 identical 的 llm_core 调用失败 → 快速失败，终态原因如实写
@@ -238,23 +386,25 @@ class DuplicateCheckPlugin(IOutputPlugin):
         return updates
 
     def _check_tool_failures(self, ctx: PluginContext) -> dict[str, Any]:
-        """失败熔断（ADR 2026-09-09）：同工具连续失败 ≥ 阈值摘工具面逼收尾，
-        ≥ 硬上限终止管道（stop_reason=tool_fail_loop）。
+        """失败熔断（ADR 2026-09-09）：同工具连败达阈值摘工具面逼收尾，
+        达硬上限终止管道（stop_reason=tool_fail_loop）。
 
         连败计数与参数无关——失败循环无法靠改参数（递增序号/换措辞）洗白，
         补上签名级重复检测被绕过的缺口。成功即清零（自愈不受伤害）。
 
-        审批通道故障豁免（BUG-41）：security_check 审批等待链路异常（审批服务
-        异常）的软拦截结果带 retry_allowed=True——人审结果未知（用户可能已批准
-        但响应丢失）、调用从未执行，"同参重调结果不变"的前提不成立。该类结果：
-        - 不计连败（工具从未执行 ≠ 工具坏，摘工具面会把人审重试逼进死路）；
-        - 从签名滑动窗口摘除该次发射（人审后的重试不得被去重拦截）。
-        用户主动拒绝/超时/取消不带标记，照旧入窗计数（拒绝重试死循环的
-        防打扰闸保留；security_check 侧的指纹连拒阈值是对应的终局防线）。
+        三类豁免的判据集中在 ``_failure_is_not_tool_fault`` / ``_classify_failure_entry``：
+        审批通道故障不计连败、HTTP 数字码与已完成执行（``metadata.exit_code``）不算工具坏。
+
+        **动态类另设计数**（方案 §7.2 #14）：经 ``call_tool`` 的失败按目标工具名
+        落 ``router.dynamic_tool_fail_streak``，只出「阈值告警 + 硬上限终止」两级，
+        **永不写 ``tool_ids``**——动态目标不在白名单（每轮由 ``tool_schema`` 重建），
+        且摘转发壳 = 全部动态工具一次性失联。
 
         State 命名空间：
-            - router.tool_fail_streak : {tool: 连续失败次数}
-            - router.tool_fail_banned : 已摘除（禁用）的工具清单
+            - router.tool_fail_streak : {tool: 连续失败次数}（常驻类）
+            - router.tool_fail_banned : 已摘除（禁用）的常驻工具清单
+            - router.dynamic_tool_fail_streak : {目标工具: 连续失败次数}（动态类另计）
+            - router.dynamic_tool_fail_banned : 动态类已告警的目标工具清单
             - router.recent_tool_sigs : 通道故障时摘除对应签名后的窗口
 
         Returns:
@@ -264,64 +414,62 @@ class DuplicateCheckPlugin(IOutputPlugin):
         if not results:
             return {}
 
-        streaks: dict[str, int] = dict(ctx.state.get("router.tool_fail_streak", {}) or {})
-        banned: list[str] = list(ctx.state.get("router.tool_fail_banned", []) or [])
+        buckets = _FailBuckets(
+            ctx.state.get("router.tool_fail_streak", {}),
+            ctx.state.get("router.dynamic_tool_fail_streak", {}),
+        )
         window: list[str] = list(ctx.state.get("router.recent_tool_sigs", []) or [])
-        changed = False
-        window_pruned = False
-        hard_hit: str | None = None
+        window_pruned = self._replay_failure_entries(results, buckets, window)
 
-        for res in results:
-            if not isinstance(res, dict):
-                continue
-            tool = res.get("tool_name") or ""
-            if not tool or tool in self._fail_breaker_exempt_tools:
-                continue
-            if res.get("success") is False and res.get("retry_allowed") is True:
-                # 审批通道故障：从窗口摘除该次未执行的发射（最近一条同签名）
-                sig = self._call_signature(tool, res.get("arguments"))
-                for i in range(len(window) - 1, -1, -1):
-                    if window[i] == sig:
-                        del window[i]
-                        window_pruned = True
-                        break
-                continue
-            if res.get("success") is True:
-                if streaks.pop(tool, None) is not None:
-                    changed = True
-                continue
-            # 不可恢复才计连败（用户裁定 2026-09-28）：连败熔断针对"工具坏
-            # 了"（未注册/无法执行/网络不通），不针对"执行成功但结果未命中"。
-            # error_code 形如 HTTP_404（数字状态码）= 请求已送达并拿到响应
-            # ——工具执行正常，目标资源不存在/不可达是 LLM 可自愈的业务反馈
-            # （换 URL/换信源），计入连败会把探索性 404 误判成工具故障（事故
-            # 2026-09-28：web_operate 连探 5 条 GitHub 死链被禁用断网，模型被
-            # 逼去撞读黑名单）。TIMEOUT/HTTP_ERROR（网络层执行不了）与无
-            # error_code 的裸失败（执行异常）照旧计入。
-            error_code = str(res.get("error_code") or "")
-            if error_code.startswith("HTTP_") and error_code[5:].isdigit():
-                continue
-            # success=False / 缺失均按失败计；结构化业务失败（success=True 但
-            # data.valid=false 等）不算——那是 LLM 可自愈的正常反馈
-            streaks[tool] = streaks.get(tool, 0) + 1
-            changed = True
-            if streaks[tool] >= self._fail_break_hard_limit:
-                hard_hit = tool
-
-        if not changed and not window_pruned:
+        if not (buckets.regular_dirty or buckets.dynamic_dirty or window_pruned):
             return {}
 
         updates: dict[str, Any] = {}
-        if changed:
-            updates["router.tool_fail_streak"] = streaks
+        if buckets.regular_dirty:
+            updates["router.tool_fail_streak"] = buckets.regular
+        if buckets.dynamic_dirty:
+            updates["router.dynamic_tool_fail_streak"] = buckets.dynamic
         if window_pruned:
             updates["router.recent_tool_sigs"] = window
+        return self._apply_failure_breakers(ctx, updates, buckets)
 
-        if hard_hit is not None:
+    def _replay_failure_entries(
+        self, results: list[Any], buckets: _FailBuckets, window: list[str]
+    ) -> bool:
+        """按条目重放计数 → 是否摘过窗口签名（通道故障那条）。"""
+        window_pruned = False
+        for res in results:
+            kind, name, is_dynamic = _classify_failure_entry(res, self._fail_breaker_exempt_tools)
+            if kind == "skip":
+                continue
+            if kind == "success":
+                buckets.note_success(name, is_dynamic)
+            elif kind == "refusal":
+                window_pruned = self._drop_signature(window, name, res) or window_pruned
+            else:
+                buckets.note_failure(name, is_dynamic)
+        return window_pruned
+
+    def _drop_signature(self, window: list[str], call_name: str, res: dict[str, Any]) -> bool:
+        """从窗口摘除最近一条同签名发射（人审后的重试不得被去重拦截）。"""
+        sig = self._call_signature(call_name, res.get("arguments"))
+        for i in range(len(window) - 1, -1, -1):
+            if window[i] == sig:
+                del window[i]
+                return True
+        return False
+
+    def _apply_failure_breakers(
+        self, ctx: PluginContext, updates: dict[str, Any], buckets: _FailBuckets
+    ) -> dict[str, Any]:
+        """硬上限终止 → 动态告警 → 常驻摘除，三级按序收口。"""
+        hard = self._hard_limit_hit(buckets)
+        if hard is not None:
+            name, count = hard
             return self._terminate_pipeline(
                 ctx,
                 updates,
-                f"工具 {hard_hit} 连续失败 {streaks[hard_hit]} 次（失败熔断）",
+                f"工具 {name} 连续失败 {count} 次（失败熔断）",
                 ctx.state.get("router.duplicate_intercepts", 0),
                 message=(
                     "抱歉，执行过程中依赖的工具持续失败，已触发失败熔断，无法继续完成当前任务。"
@@ -329,33 +477,100 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 ),
                 stop_reason="tool_fail_loop",
             )
-
-        newly_banned = [t for t, c in streaks.items() if c >= self._fail_break_threshold and t not in banned]
-        if newly_banned:
-            updates["router.tool_fail_banned"] = banned + newly_banned
-            tool_ids = ctx.state.get("tool_ids")
-            if isinstance(tool_ids, list):
-                updates["tool_ids"] = [t for t in tool_ids if t not in newly_banned]
-            warning = (
-                f"{'、'.join(newly_banned)} 已连续失败 {self._fail_break_threshold} 次并被禁用"
-                f"（后续调用将被拒绝）。请勿再尝试调用它，直接基于已有信息收尾任务，"
-                f"并向用户如实报告失败情况。"
-            )
-            self._inject_warning(ctx, updates, warning)
-            logger.warning(
-                "[%s] Tool fail breaker tripped | banned=%s streaks=%s",
-                self.name,
-                newly_banned,
-                {t: c for t, c in streaks.items() if t in newly_banned},
-            )
+        self._warn_dynamic_targets(ctx, updates, buckets)
+        self._ban_regular_tools(ctx, updates, buckets)
         return updates
+
+    def _hard_limit_hit(self, buckets: _FailBuckets) -> tuple[str, int] | None:
+        """首个达硬上限的归属名（两桶都查；动态类同样只终止、不摘面）。"""
+        for bucket in (buckets.regular, buckets.dynamic):
+            for name, count in bucket.items():
+                if count >= self._fail_break_hard_limit:
+                    return name, count
+        return None
+
+    def _warn_dynamic_targets(
+        self, ctx: PluginContext, updates: dict[str, Any], buckets: _FailBuckets
+    ) -> None:
+        """动态类达阈值只告警（提示模型停用该目标），**不动 tool_ids**。"""
+        warned: list[str] = list(ctx.state.get("router.dynamic_tool_fail_banned", []) or [])
+        newly = [
+            name for name, count in buckets.dynamic.items()
+            if count >= self._fail_break_threshold and name not in warned
+        ]
+        if not newly:
+            return
+        updates["router.dynamic_tool_fail_banned"] = warned + newly
+        self._inject_warning(ctx, updates, self._dynamic_warning_text(newly))
+        logger.warning(
+            "[%s] Dynamic tool fail breaker tripped | warned=%s streaks=%s",
+            self.name,
+            newly,
+            {n: c for n, c in buckets.dynamic.items() if n in newly},
+        )
+
+    def _dynamic_warning_text(self, newly: list[str]) -> str:
+        """按 streak 归属分文案：壳自身失败与目标失败是两种不同处境。
+
+        ``DYNAMIC_FORWARD_TOOL`` 出现在 streak 键里 = **转发壳自己**连续失败
+        （``TOOL_NOT_FOUND`` / ``INVALID_ARGUMENTS`` / ``DYNAMIC_TOOLS_UNAVAILABLE``
+        / ``TOOL_EXECUTOR_UNAVAILABLE``）。此时说「请勿再经 call_tool 调用 call_tool」
+        指代不成立，且真实含义是「动态面持续不可用或被持续误用」——给模型的出路
+        应是回到常驻工具/基于已有信息收尾，而不是「换个工具名再试」。
+        """
+        shell_failed = DYNAMIC_FORWARD_TOOL in newly
+        targets = [n for n in newly if n != DYNAMIC_FORWARD_TOOL]
+        parts: list[str] = []
+        if shell_failed:
+            parts.append(
+                f"动态工具面（{DYNAMIC_FORWARD_TOOL}）已连续失败 {self._fail_break_threshold} 次，"
+                f"当前无法转发任何动态工具。请改用常驻工具，或直接基于已有信息收尾；"
+                f"确需动态工具时先重新 resource_search 确认可引入。"
+            )
+        if targets:
+            parts.append(
+                f"动态工具 {'、'.join(targets)} 已连续失败 {self._fail_break_threshold} 次。"
+                f"请勿再经 {DYNAMIC_FORWARD_TOOL} 调用它，改用其它已引入工具或直接基于已有信息收尾。"
+            )
+        return "".join(parts)
+
+    def _ban_regular_tools(
+        self, ctx: PluginContext, updates: dict[str, Any], buckets: _FailBuckets
+    ) -> None:
+        """常驻类达阈值摘出 ``tool_ids``（动态桶永不进这里）。"""
+        banned: list[str] = list(ctx.state.get("router.tool_fail_banned", []) or [])
+        newly = [
+            name for name, count in buckets.regular.items()
+            if count >= self._fail_break_threshold and name not in banned
+        ]
+        if not newly:
+            return
+        updates["router.tool_fail_banned"] = banned + newly
+        tool_ids = ctx.state.get("tool_ids")
+        if isinstance(tool_ids, list):
+            updates["tool_ids"] = [t for t in tool_ids if t not in newly]
+        self._inject_warning(
+            ctx,
+            updates,
+            f"{'、'.join(newly)} 已连续失败 {self._fail_break_threshold} 次并被禁用"
+            f"（后续调用将被拒绝）。请勿再尝试调用它，直接基于已有信息收尾任务，"
+            f"并向用户如实汇报失败情况。",
+        )
+        logger.warning(
+            "[%s] Tool fail breaker tripped | banned=%s streaks=%s",
+            self.name,
+            newly,
+            {n: c for n, c in buckets.regular.items() if n in newly},
+        )
 
     def _check_llm_failures(self, ctx: PluginContext) -> tuple[dict[str, Any], bool]:
         """LLM 失败连击熔断 → (状态更新, 本轮是否有 LLM 失败)。
 
-        计数口径：引擎 ``_plugin_errors`` 里的 llm_core 条目（run 开头清空、
-        run 内累积）——本轮新增条数即本轮失败次数（成功轮不新增）；错误文本
-        相同才算「同一错误反复」（连击），文本不同则重新起计。
+        计数口径：引擎 ``_plugin_error_stats`` 里的 llm_core 账本（按
+        `(plugin_id, message)` 聚合的 count + seq；run 开头清空、run 内累积）
+        ——本轮新增计数即本轮失败次数（成功轮不新增）；错误文本按
+        `_stable_error_text` 归一后相同才算「同一错误反复」（连击），文本不同
+        则重新起计。账本有界（≤8 条），不再随失败次数线性膨胀。
 
         终态原因按错误类别署名：模型不可用类（错误文本含
         ``MODEL_UNAVAILABLE`` 标记，配置错、永不自愈）→ ``model_unavailable``，
@@ -364,7 +579,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
 
         State 命名空间：
             - router.llm_fail_streak : {fingerprint, count}（连击计数）
-            - router.llm_error_cursor : {run_id, count}（已计入的错误条数）
+            - router.llm_error_cursor : {run_id, count, stable_fingerprint,
+              stable_count}（已计入的总失败数 + 当前同文失败的已计入数）
 
         Returns:
             (状态更新字典, 本轮是否有 LLM 失败)
@@ -372,44 +588,63 @@ class DuplicateCheckPlugin(IOutputPlugin):
         errors = self._llm_core_errors(ctx.state)
         run_id = str(ctx.state.get("run_id") or "")
         cursor = ctx.state.get("router.llm_error_cursor")
-        seen = (
-            int(cursor.get("count") or 0)
-            if isinstance(cursor, dict) and str(cursor.get("run_id") or "") == run_id
-            else 0
-        )
-        new_errors = errors[seen:]
+        same_cursor = isinstance(cursor, dict) and str(cursor.get("run_id") or "") == run_id
+        seen_total = int(cursor.get("count") or 0) if same_cursor else 0
+        seen_stable = int(cursor.get("stable_count") or 0) if same_cursor else 0
+
+        total = sum(int(err.get("count") or 0) for err in errors)
 
         streak = ctx.state.get("router.llm_fail_streak")
         same_run = isinstance(streak, dict) and str(streak.get("run_id") or "") == run_id
         fingerprint = str(streak.get("fingerprint") or "") if same_run else ""
         count = int(streak.get("count") or 0) if same_run else 0
 
-        if not new_errors:
+        if not errors or total <= seen_total:
             # 本轮无新增 LLM 错误（成功轮）→ 连击清零（自愈不误伤）。
             # 无历史连击时零状态更新——不碰无关 state 键。
             if count <= 0:
                 return {}, False
             return {
-                "router.llm_error_cursor": {"run_id": run_id, "count": len(errors)},
+                "router.llm_error_cursor": {
+                    "run_id": run_id,
+                    "count": total,
+                    "stable_fingerprint": "",
+                    "stable_count": 0,
+                },
                 "router.llm_fail_streak": {"run_id": run_id, "fingerprint": "", "count": 0},
             }, False
 
-        message = str(new_errors[-1].get("message") or "")
+        # 最新一条 = seq 最大（并行迭代归并按归并序重发 seq）。
+        latest = max(
+            errors,
+            key=lambda err: (
+                int(err.get("seq") or 0),
+                errors.index(err),
+            ),
+        )
+        message = str(latest.get("message") or "")
         stable = _stable_error_text(message)
         current_fp = hashlib.sha1(stable.encode("utf-8", "replace")).hexdigest()[:12]  # noqa: S324
-        # 本轮新增段内的尾部同文连击长度（段内出现异文即断链）——同文判定用
-        # 稳定化文本：供应商请求号等易变字段不得致盲连击（2026-10-23 教训）
-        run = 1
-        for err in reversed(new_errors[:-1]):
-            if _stable_error_text(str(err.get("message") or "")) == stable:
-                run += 1
-            else:
-                break
-        # 上轮连击同文且本段未出现异文 → 延续计数；否则从本段起计
-        segment_uniform = run == len(new_errors)
+        # 同一稳定文本的累计失败数（覆盖 request_id 等易变字段：
+        # 2026-10-23 教训——按全文指纹会把同一次 429 判成异文，连击永不触发）。
+        stable_total = sum(
+            int(err.get("count") or 0)
+            for err in errors
+            if _stable_error_text(str(err.get("message") or "")) == stable
+        )
+        # 本轮新增的同文失败数（游标跨 run/换文归零）。
+        run = max(0, stable_total - seen_stable)
+        new_total = total - seen_total
+        # 本段是否全为同文失败：否则只计尾段同文数（异文交替不累加）。
+        segment_uniform = run == new_total
         count = count + run if (fingerprint == current_fp and segment_uniform) else run
         updates: dict[str, Any] = {
-            "router.llm_error_cursor": {"run_id": run_id, "count": len(errors)},
+            "router.llm_error_cursor": {
+                "run_id": run_id,
+                "count": total,
+                "stable_fingerprint": current_fp,
+                "stable_count": stable_total,
+            },
             "router.llm_fail_streak": {
                 "run_id": run_id,
                 "fingerprint": current_fp,
@@ -460,8 +695,13 @@ class DuplicateCheckPlugin(IOutputPlugin):
 
     @staticmethod
     def _llm_core_errors(state: dict[str, Any]) -> list[dict[str, Any]]:
-        """本 run 的 llm_core 错误条目（引擎 _plugin_errors：run 开头清空、run 内累积）。"""
-        errors = state.get("_plugin_errors")
+        """本 run 的 llm_core 错误账本条目。
+
+        引擎 ``_plugin_error_stats``：按 `(plugin_id, message)` 聚合的
+        `{plugin_id, code, message, count, seq}` 有界数组（run 开头清空、
+        run 内累积）；不同文本各一条，同文本只累加 count。
+        """
+        errors = state.get("_plugin_error_stats")
         if not isinstance(errors, list):
             return []
         return [

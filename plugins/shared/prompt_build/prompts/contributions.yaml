@@ -18,7 +18,7 @@
 # 抽取"工具使用约定"段并按本仓工具面改写）：
 #   - packages/shell/tool-bash/src/index.ts 提示段（order 105）：
 #     "Check the [exit code: N] marker on every bash result; investigate
-#      failures before moving on." → 本仓 bash_execute 结果带 exit_code 字段，直译。
+#      failures before moving on." → 本仓 bash 结果带 exit_code 字段，直译。
 #   - packages/fs/tool-fs/src/edit.ts 提示段（order 102）：
 #     "Read the file first (the default fs-observation-policy requires it),
 #      unless you just created or edited it in this session." → 本仓无独立 edit
@@ -42,6 +42,6 @@ rules:
     inject:
       order: 100
       content: |
-        - Check the exit_code on every bash_execute result; investigate failures before moving on.
+        - Check the exit_code on every bash result; investigate failures before moving on.
         - Read a file before changing it, unless you just created or edited it in this session; keep changes targeted.
         - Start independent task_submit delegations together in one message and continue useful work while they run.

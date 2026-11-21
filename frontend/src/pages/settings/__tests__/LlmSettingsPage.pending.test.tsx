@@ -1,6 +1,6 @@
 // @feature FP-T12 前端适配（OBS-R258-1 交互反馈即时性收口） | @ci: frontend-test
 /**
- * LlmSettingsPage 保存动作 pending 反馈测试（#1）：
+ * LlmSettingsPage 保存动作 pending 反馈测试（单界面重构版）：
  * - 全部保存按钮 await 窗口 disabled + spinner/文案（保存中.../添加中.../删除中...），
  *   防连点
  * - 失败路径：toast 报错（既有断言面）+ 按钮复位可重试（不残留 disabled）
@@ -88,13 +88,25 @@ const configFixture = {
       has_key: true,
       env_var: 'OPENAI_API_KEY',
     },
+    qwen: {
+      type: 'openai',
+      keys: [{ id: 'qwen_main', api_key: '${DASHSCOPE_API_KEY}', max_concurrent: 6, rpm: 10 }],
+      has_key: false,
+      env_var: 'DASHSCOPE_API_KEY',
+    },
   },
   defaults: { chat: '', embedding: '', tiers: {} },
 }
 
 const presetsFixture = {
   provider_groups: [
-    { label: '国际', providers: [['openai', 'OpenAI']] },
+    {
+      label: '国际',
+      providers: [
+        ['openai', 'OpenAI'],
+        ['qwen', '通义千问'],
+      ],
+    },
   ],
   common_provider_types: ['openai'],
   thinking_strength: { levels: ['high', 'medium', 'low'], allowed_keys: ['thinking'] },
@@ -103,24 +115,22 @@ const presetsFixture = {
 async function renderLoaded() {
   mock.getLLMConfig.mockResolvedValue(configFixture)
   mock.getLLMPresets.mockResolvedValue(presetsFixture)
-  // 展开自定义提供商表单触发懒加载目录（onToggle 链路），未 mock 会 undefined.then 崩
   mock.getProviderTypes.mockResolvedValue({ types: ['openai'] })
+  mock.getRemoteModels.mockResolvedValue({ provider: 'openai', models: [] })
   mock.updateProviderConfig.mockResolvedValue(configFixture.providers)
   mock.saveDefaults.mockResolvedValue(configFixture.defaults)
   mock.deleteModel.mockResolvedValue(configFixture.models)
   mock.updateModel.mockResolvedValue(configFixture.models)
   mock.deleteProvider.mockResolvedValue(configFixture.providers)
+  mock.addProvider.mockResolvedValue(configFixture.providers)
+  mock.addModel.mockResolvedValue({ models: configFixture.models, added_ids: ['x'] })
   renderWithProviders(<LlmSettingsPage />)
-  await waitFor(() => expect(screen.getByText('国际（1）')).toBeInTheDocument())
-}
-
-function cardOf(name: string): HTMLElement {
-  return screen.getByText(name).closest('div[class*="bg-card"]') as HTMLElement
-}
-
-async function gotoModelsTab() {
-  fireEvent.click(screen.getByRole('tab', { name: '模型' }))
   await waitFor(() => expect(screen.getByText('已注册模型 (1)')).toBeInTheDocument())
+}
+
+/** 已注册模型段容器 */
+function modelRegistrySection(): HTMLElement {
+  return screen.getByRole('heading', { name: /已注册模型/ }).closest('section') as HTMLElement
 }
 
 beforeEach(() => {
@@ -134,7 +144,6 @@ afterEach(() => {
 describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态）', () => {
   it('保存默认模型：await 窗口 disabled +「保存中...」，落定复位 + 成功 toast', async () => {
     await renderLoaded()
-    await gotoModelsTab()
     let resolveSave: () => void = () => {}
     mock.saveDefaults.mockReturnValue(
       new Promise((resolve) => {
@@ -142,8 +151,7 @@ describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态�
       }),
     )
 
-    const btn = screen.getByRole('button', { name: '保存默认模型' })
-    fireEvent.click(btn)
+    fireEvent.click(screen.getByRole('button', { name: '保存默认模型' }))
 
     // await 窗口：禁用 + 文案切换，再点不触发第二次
     expect(screen.getByRole('button', { name: '保存中...' })).toBeDisabled()
@@ -151,15 +159,12 @@ describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态�
     expect(mock.saveDefaults).toHaveBeenCalledTimes(1)
 
     resolveSave(configFixture.defaults)
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: '保存默认模型' })).toBeEnabled(),
-    )
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存默认模型' })).toBeEnabled())
     expect(toast.success).toHaveBeenCalledWith('默认模型已保存')
   })
 
   it('保存默认模型失败：toast 报错 + 按钮复位可重试（不残留 disabled）', async () => {
     await renderLoaded()
-    await gotoModelsTab()
     mock.saveDefaults.mockRejectedValueOnce({ message: '后端不可写' })
 
     fireEvent.click(screen.getByRole('button', { name: '保存默认模型' }))
@@ -169,7 +174,7 @@ describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态�
     expect(screen.getByRole('button', { name: '保存默认模型' })).toBeEnabled()
   })
 
-  it('更新 Key：await 窗口按钮「保存中...」disabled；失败 toast + 复位', async () => {
+  it('保存 Key：await 窗口按钮「保存中...」disabled；失败 toast + 复位', async () => {
     await renderLoaded()
     let resolveKey: () => void = () => {}
     mock.updateProviderConfig.mockReturnValue(
@@ -178,37 +183,39 @@ describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态�
       }),
     )
 
-    fireEvent.change(screen.getByPlaceholderText('输入新的 API Key'), {
+    // 已配置的提供商默认不展开 Key 输入（选中内置提供商无需再填），点「更换 Key」进入
+    fireEvent.click(screen.getByRole('button', { name: '更换 Key' }))
+    fireEvent.change(await screen.findByLabelText('填写 openai 的 API Key'), {
       target: { value: 'sk-new' },
     })
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: '更新 Key' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存 Key' }))
     // await 窗口：保存中 + 禁用（连点被挡）
-    expect(within(cardOf('OpenAI')).getByRole('button', { name: /保存中/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /保存中/ })).toBeDisabled()
     expect(mock.updateProviderConfig).toHaveBeenCalledTimes(1)
 
     resolveKey(configFixture.providers)
     // 成功落定：spinner 退场（按钮随输入清空回合法 disabled 态，非 pending 残留）
     await waitFor(() =>
-      expect(within(cardOf('OpenAI')).queryByRole('button', { name: /保存中/ })).not.toBeInTheDocument(),
+      expect(screen.queryByRole('button', { name: /保存中/ })).not.toBeInTheDocument(),
     )
 
-    // 失败路径：toast + spinner 退场（诚实复位可重试）
+    // 失败路径：保存落定后输入区已收合，再点「更换 Key」展开后提交 → toast + spinner 退场
     mock.updateProviderConfig.mockRejectedValueOnce({ message: 'key rejected' })
-    fireEvent.change(screen.getByPlaceholderText('输入新的 API Key'), {
+    fireEvent.click(await screen.findByRole('button', { name: '更换 Key' }))
+    fireEvent.change(await screen.findByLabelText('填写 openai 的 API Key'), {
       target: { value: 'sk-bad' },
     })
-    fireEvent.click(within(cardOf('OpenAI')).getByRole('button', { name: '更新 Key' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存 Key' }))
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('保存密钥失败', { description: 'key rejected' }),
     )
     await waitFor(() =>
-      expect(within(cardOf('OpenAI')).queryByRole('button', { name: /保存中/ })).not.toBeInTheDocument(),
+      expect(screen.queryByRole('button', { name: /保存中/ })).not.toBeInTheDocument(),
     )
   })
 
   it('删除模型：await 窗口「删除中...」disabled；落定复位', async () => {
     await renderLoaded()
-    await gotoModelsTab()
     let resolveDelete: () => void = () => {}
     mock.deleteModel.mockReturnValue(
       new Promise((resolve) => {
@@ -216,21 +223,34 @@ describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态�
       }),
     )
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }))
-    expect(screen.getByRole('button', { name: '删除中...' })).toBeDisabled()
+    fireEvent.click(within(modelRegistrySection()).getByRole('button', { name: '删除' }))
+    expect(within(modelRegistrySection()).getByRole('button', { name: '删除中...' })).toBeDisabled()
 
     resolveDelete(configFixture.models)
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: '删除中...' })).not.toBeInTheDocument(),
+      expect(
+        within(modelRegistrySection()).queryByRole('button', { name: '删除中...' }),
+      ).not.toBeInTheDocument(),
     )
-    expect(screen.getByRole('button', { name: '删除' })).toBeEnabled()
+    expect(within(modelRegistrySection()).getByRole('button', { name: '删除' })).toBeEnabled()
   })
 
   it('添加提供商：await 窗口「添加中...」disabled；失败 toast + 复位', async () => {
     await renderLoaded()
-    fireEvent.click(screen.getByText('添加自定义提供商（类型来自 litellm，升级 litellm 后自动出现新提供者）'))
-    fireEvent.change(screen.getByPlaceholderText('如: myproxy'), { target: { value: 'myproxy' } })
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
+    fireEvent.change(await screen.findByLabelText('提供商 ID'), {
+      target: { value: 'myproxy' },
+    })
 
+    // 失败路径：toast 报错 + 按钮复位可重试（不残留 disabled）
+    mock.addProvider.mockRejectedValueOnce({ message: 'dup' })
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('添加提供商失败', { description: 'dup' }),
+    )
+    expect(screen.getByRole('button', { name: '添加提供商' })).toBeEnabled()
+
+    // await 窗口：文案切「添加中...」+ 禁用（连点被挡，不再发第二次请求）
     let resolveAdd: () => void = () => {}
     mock.addProvider.mockReturnValue(
       new Promise((resolve) => {
@@ -239,23 +259,44 @@ describe('LlmSettingsPage 保存动作 pending（await 窗口可见进行中态�
     )
     fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
     expect(screen.getByRole('button', { name: '添加中...' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '添加中...' }))
+    expect(mock.addProvider).toHaveBeenCalledTimes(2)
 
-    mock.addProvider.mockRejectedValueOnce({ message: 'dup' })
-    resolveAdd(configFixture.providers)
-    // 成功落定：spinner 退场（表单已重置，按钮随空 ID 回合法 disabled 态）
+    // 落定：spinner 退场（表单重置并切到新增的提供商）
+    resolveAdd({
+      ...configFixture.providers,
+      myproxy: { type: 'openai', keys: [], has_key: false, env_var: null },
+    })
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: '添加中...' })).not.toBeInTheDocument(),
     )
-    expect(screen.getByRole('button', { name: '添加提供商' })).toBeDisabled()
+  })
 
-    // 失败路径：toast + spinner 退场可重试
-    fireEvent.change(screen.getByPlaceholderText('如: myproxy'), { target: { value: 'myproxy2' } })
-    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('添加提供商失败', { description: 'dup' }),
+  it('添加模型：await 窗口「添加中...」disabled（防重复提交）', async () => {
+    await renderLoaded()
+    const modelSection = screen
+      .getByRole('heading', { name: '模型', level: 3 })
+      .closest('section') as HTMLElement
+
+    fireEvent.change(within(modelSection).getByLabelText('自定义模型名'), {
+      target: { value: 'gpt-7' },
+    })
+    fireEvent.keyDown(within(modelSection).getByLabelText('自定义模型名'), { key: 'Enter' })
+
+    let resolveAdd: () => void = () => {}
+    mock.addModel.mockReturnValue(
+      new Promise((resolve) => {
+        resolveAdd = resolve
+      }),
     )
+    fireEvent.click(within(modelSection).getByRole('button', { name: /添加模型 \(1\)/ }))
+    expect(within(modelSection).getByRole('button', { name: /添加中/ })).toBeDisabled()
+
+    resolveAdd({ models: configFixture.models, added_ids: ['gpt-7'] })
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: '添加中...' })).not.toBeInTheDocument(),
+      expect(
+        within(modelSection).queryByRole('button', { name: /添加中/ }),
+      ).not.toBeInTheDocument(),
     )
   })
 })

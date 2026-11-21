@@ -1,3 +1,4 @@
+// @feature: FP-0.2.内核API面 | @vision: V3 可嵌入 | @ci: rust-test
 use super::*;
 
 /// 提取注册调用里的路径字面量：定位 `.route(`，跳过空白后取下一个

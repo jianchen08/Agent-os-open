@@ -17,7 +17,7 @@
 
 | 端 | 导出（serve） | 挂载（mount） | 锚点（D16） |
 |---|---|---|---|
-| 云端 Linux 162.14.69.153（VM-0-16-ubuntu） | OpenSSH 内建 SFTP（sshd 已在，零安装） | sshfs over 反向隧道（`agentos-device-mount@.service`） | 根下 `/<设备名>/`（物理即规范） |
+| 云端 Linux 203.0.113.153（VM-0-16-ubuntu） | OpenSSH 内建 SFTP（sshd 已在，零安装） | sshfs over 反向隧道（`agentos-device-mount@.service`） | 根下 `/<设备名>/`（物理即规范） |
 | 桌面 Windows DESKTOP-41ST1LM（主力端） | sshd over 反向隧道（`deploy/remote/agentos-fmin-tunnel.service`） | rclone mount（WinFsp）（`desktop_setup.sh`） | 盘根 junction `C:\<设备名>` + Git 安装根 junction `/<设备名>` |
 | Android/MuMu（proot 内） | proot 内 rclone serve sftp | proot `-b <挂载目录> /<设备名>` binding（骨架见 §proot，实施待后续刀） | proot 内 `/<设备名>/`（物理即规范） |
 
@@ -45,36 +45,40 @@
   `rclone-v1.75.2-windows-amd64.zip` 解压入 PATH 或装机包预带；云端
   `rclone` 二进制同版钉选。
 
-## §1.1 桌面依赖预带口径（2026-10-18 用户拍板"预安装放到安装包里"+同日拍板安装器管理员启动）
+## §1.1 桌面依赖预带口径（2026-10-18 用户拍板"预安装放到安装包里"；2026-11-12 拍板安装免管理员）
 
 装机包（NSIS）预带两件：`resources/prereqs/winfsp-2.1.25156.msi` +
 `resources/bin/rclone.exe`（备料实物 `electron/prereqs/`，gitignore 不入库；
 版本钉选单源=`scripts/check_prereqs.mjs`，electron:build 链首自动直连补齐）。
 
-**提权语义（2026-10-18 晚拍板）**：`nsis.perMachine=true` → 安装器 manifest
-requireAdministrator（模板 RequestExecutionLevel admin）→ customInstall 的
-`msiexec /qn /norestart` 天然在提权上下文执行，**装机即静默装完 WinFsp，零
-补装步骤**（pack14 装机实证：非提权上下文 msiexec 静默装失败 exit 103，本改造
-即其解）。双击安装器本身弹出的单次 UAC = OS 级知情面。
+**提权语义（用户裁定 2026-11-12「安装应用不得使用管理员账户」）**：
+`nsis.perMachine=false` + `allowElevation=false` → 安装器 manifest
+RequestExecutionLevel user，安装全程普通用户权限，默认落
+`%LOCALAPPDATA%\Programs\<产品名>`；双击与 `/S` 无人值守都零 UAC。WinFsp 是
+系统级驱动（`msiexec` 必须提权，1018 pack14 实证：非提权上下文静默装失败
+exit 103），因此 customInstall 先探当前进程是否提权：**已提权（右键「以管理员
+身份运行」/维护轮显式提权）才静默装 MSI；普通用户安装跳过并打印手动安装
+路径**，不弹 UAC、不阻断主程序（ADR 2026-11-12-installer-per-user-no-admin）。
 
 **三条安装路径**（`desktop_setup.sh` 同步口径）：
 
 | 路径 | 触发 | 机制 |
 |---|---|---|
-| ① 预带（默认） | 用户安装灵汐助手 | 提权安装器内 customInstall 静默装 WinFsp，零补装；失败不阻断主程序（退出码仅日志）；重复安装 msiexec 1638 幂等跳过 |
-| ② 存量修复 | 存量/老包环境显式动作 | `desktop_setup.sh --bootstrap-winfsp`（winget/官方 MSI，**需提权上下文运行**，已装即跳过）；设置页修复入口待前端刀并入 |
+| ① 预带（默认） | 用户安装灵汐助手 | 已提权安装器内 customInstall 静默装 WinFsp，零补装；普通用户安装跳过并提示路径②；失败不阻断主程序（退出码仅日志）；重复安装 msiexec 1638 幂等跳过 |
+| ② 存量修复 | 存量/老包/普通用户安装后的显式动作 | `desktop_setup.sh --bootstrap-winfsp`（winget/官方 MSI，**需提权上下文运行**，已装即跳过）；设置页修复入口待前端刀并入 |
 | ③ agent 审批代装 | agent 提审批卡 | "永不自动装"纪律不变：agent 代装/后台场景必须显式审批，任何自动链不得静默代装 |
 
 **预带与"永不自动装"的边界**：预带的知情同意 = **用户安装灵汐助手这个动作
-本身**（用户主动装机即知情选择预带依赖，安装器启动 UAC 为其知情面）；"永不
-自动装"约束的是 **agent 代装与后台静默场景**（需显式审批）——两者并存不冲突，
-③路径纪律原样保留。
+本身**（用户主动装机即知情选择预带依赖；默认安装不提权，提权安装时的 UAC
+为其知情面）；"永不自动装"约束的是 **agent 代装与后台静默场景**（需显式
+审批）——两者并存不冲突，③路径纪律原样保留。
 
-**per-machine 安装语义（随提权改造连带生效）**：默认安装目录从 per-user
-LocalAppData 变为 `$PROGRAMFILES64\<产品名>`（assisted 界面仍可改；
-`/D=` 静默强设与提权并存不受影响——维护轮 `/D=D:\agentos-r297-main` 语义
-不变）；**无人值守静默装（/S）必须以管理员运行**，非提权上下文会在安装器
-启动时弹 UAC/被拒。AGENTOS_ADMIN_PASSWORD env 播种仍在安装用户 HKCU。
+**per-user 安装语义（2026-11-12 恢复）**：默认安装目录回归
+`%LOCALAPPDATA%\Programs\<产品名>`（assisted 界面仍可改，`/D=` 静默强设照旧
+生效——维护轮 `/D=D:\agentos-r297-main` 语义不变）；**静默装（/S）不再需要
+管理员**。AGENTOS_ADMIN_PASSWORD env 播种仍在安装用户 HKCU。存量 per-machine
+安装（Program Files）不会被新包覆盖，需手动卸载旧版一次（用户数据/凭据保留，
+见 ADR 2026-11-08-installer-credential-retention）。
 
 **WinFsp 2.1 布局注（1018 装机实证）**：dll/sys 落
 `Program Files (x86)\WinFsp\SxS\sxs.<ts>\bin\`（无顶层 `bin\winfsp.dll`），
@@ -107,7 +111,7 @@ manifest/注册表/同步面/仓）：
 # 桌面 → 云端（挂云端领地）：专用密钥一把，公钥入云端 authorized_keys
 ssh-keygen -t ed25519 -f ~/.ssh/agentos_mount_cloud -N ""
 # rclone 配置落用户空间（key_file 引用密钥文件，密文不进配置体）
-rclone config create agentos-cloud sftp host 162.14.69.153 user ubuntu \
+rclone config create agentos-cloud sftp host 203.0.113.153 user ubuntu \
   key_file ~\\.ssh\\agentos_mount_cloud
 
 # 云端 → 桌面（挂桌面领地）：云端专用密钥，公钥入桌面 sshd authorized_keys

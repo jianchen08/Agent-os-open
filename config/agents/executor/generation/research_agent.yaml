@@ -45,16 +45,26 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
-- web_operate
+# ── 直接面（2026-11-19 缩减）：web_operate/文件管理四件套/enhanced_search
+# 经两步法动态可达；检索双件为本职保留 ──
+- universal_search
+- web_reader
 - memory
 - task_evaluate
 - file_read
 - file_write
-- create_directory
-- copy_file
-- move_file
-- delete_file
-- enhanced_search
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 必须明确调研类型
 - 关键发现必须有信息来源，且每条结论必须按「结论」← 来源[等级] 格式绑定来源

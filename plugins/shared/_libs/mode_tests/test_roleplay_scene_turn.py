@@ -87,7 +87,7 @@ class _FakeToolExecutor:
 
 
 @pytest.fixture
-def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, patch_shared: Any) -> Any:
     """server 模块 + 用户空间隔离 + pipeline-state provider + tool-executor 桩 +
     用户空间 llm.yaml 缺省模型档（defaults.chat=test-model）。"""
     user_config = tmp_path / "user_config"
@@ -110,6 +110,7 @@ def rp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     fake_te = _FakeToolExecutor(module)
     module.plugin = _StubPlugin(fake_te)
+    patch_shared("plugin", module.plugin)  # 拆分后 rp_* 各持绑定，传播到消费点
     module.fake_te = fake_te
 
     async def _state_rows(**_kwargs: Any) -> list[dict[str, Any]]:
@@ -477,9 +478,9 @@ def test_scene_turn_llm_transport_fail_502(
     assert "error" in payload
 
 
-def test_scene_turn_model_missing_502(rp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scene_turn_model_missing_502(rp: Any, patch_shared: Any) -> None:
     """llm.yaml 缺省模型不可得（候选面全空）→ 502，不发起 LLM 调用。"""
-    monkeypatch.setattr(rp, "_llm_yaml_candidates", lambda: [])
+    patch_shared("_llm_yaml_candidates", lambda: [])  # 消费点在 rp_content 自持绑定
     result = _call(rp, _valid_body())
     assert _status_of(result) == 502
     assert "error" in _body_json(result)

@@ -25,6 +25,8 @@ declare module 'axios' {
   export interface AxiosRequestConfig {
     optional?: boolean
     silent?: boolean
+    /** 请求级关闭拦截器自动重试（登录等「重试无益、只需长等待」的端点用） */
+    noAutoRetry?: boolean
   }
 }
 
@@ -282,7 +284,10 @@ apiClient.interceptors.response.use(
       details: error.response?.data,
     }
 
-    const shouldRetry = isRetryableError(error) && originalRequest._retryCount < 2
+    const shouldRetry =
+      originalRequest.noAutoRetry !== true &&
+      isRetryableError(error) &&
+      originalRequest._retryCount < 2
 
     if (shouldRetry) {
       originalRequest._retryCount++

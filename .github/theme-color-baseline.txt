@@ -6,3 +6,20 @@
 # 2026-10-25 存量债全量清偿（53 件 932 处 → 0）：定义层归位（config/themes 纳入豁免、
 # 预览样本/默认色值迁具名常量），组件面 42 文件 153 处换主题 token 消费。
 # 台账现空：任何新增字面量命中即红，无需登记。
+
+# ── 2026-11-07 扩面挂账（用户裁定：扫描面扩至插件 web/webview 资产）────────
+# 插件 HTML 资产的 :root 兜底字面量 / 主题未覆盖色首次入账（12 件 162 处）；
+# 大头为 var(--ag-*, 字面量) 形态的首帧兜底值。清偿路径：接 theme.sync token 或
+# 进 theme-contrast 门的资产对比度核算后收敛。逐件只减不增，新增即红。
+plugins/shared/browser/webview/browser_live.html 4
+plugins/shared/context_window_guard/web/cards/compression.html 7
+plugins/shared/mode_coding/webview/coding_panel.html 16
+plugins/shared/mode_evolution/webview/evolution_panel.html 8
+plugins/shared/mode_godot/webview/godot_panel.html 15
+plugins/shared/mode_personal/webview/pim_today.html 47
+plugins/shared/mode_research/webview/research_panel.html 14
+plugins/shared/mode_roleplay/webview/game_host.html 12
+plugins/shared/mode_roleplay/webview/roleplay_panel.html 15
+plugins/shared/mode_writing/webview/writing_panel.html 11
+plugins/shared/todo_track/web/cards/todo_badge.html 11
+plugins/shared/todo_track/webview/todo_plan.html 2

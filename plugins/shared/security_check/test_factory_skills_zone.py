@@ -133,7 +133,7 @@ async def test_factory_skills_denied_even_in_bypass_tier(factory_env):
         "file_write",
         {"path": str(factory_env["repo"] / "skills" / "new.md"), "content": "x"},
         workspace=str(factory_env["ws"]),
-        execution_contexts=[{"provider": "docker", "level": "isolated", "task_isolated": True}],
+        execution_contexts=[{"provider": "host", "level": "isolated", "task_isolated": True}],
     )
     assert cap.calls == []
     assert "出厂 skills/" in result["pre_decided_results"][0]["error"]
@@ -245,7 +245,7 @@ async def test_bash_write_to_project_skills_passes(factory_env):
         {"command": "echo x > skills/seed.md"},
         project_root=str(factory_env["project"]),
         workspace=str(factory_env["ws"]),
-        execution_contexts=[{"provider": "docker", "level": "isolated", "task_isolated": True}],
+        execution_contexts=[{"provider": "host", "level": "isolated", "task_isolated": True}],
     )
     assert result.get("pre_decided_results") is None
     assert cap.calls == []
@@ -260,7 +260,7 @@ async def test_bash_read_of_factory_skills_passes(factory_env):
         "bash_execute",
         {"command": f"cat {target}"},
         workspace=str(factory_env["ws"]),
-        execution_contexts=[{"provider": "docker", "level": "isolated", "task_isolated": True}],
+        execution_contexts=[{"provider": "host", "level": "isolated", "task_isolated": True}],
     )
     assert result.get("pre_decided_results") is None
     assert cap.calls == []
@@ -273,7 +273,7 @@ async def test_bash_write_marker_prefix_noise_not_blocked(factory_env):
         "bash_execute",
         {"command": f"cat {factory_env['repo'] / 'skills' / 'doc.md'} > {factory_env['ws'] / 'out.md'}"},
         workspace=str(factory_env["ws"]),
-        execution_contexts=[{"provider": "docker", "level": "isolated", "task_isolated": True}],
+        execution_contexts=[{"provider": "host", "level": "isolated", "task_isolated": True}],
     )
     assert result.get("pre_decided_results") is None
     assert cap.calls == []

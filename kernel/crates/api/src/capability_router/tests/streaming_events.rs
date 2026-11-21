@@ -493,3 +493,93 @@ async fn test_frontend_emit_no_thread_id_dropped() {
 }
 
 // ── tool-executor._call_context 透传（task_observability 任务 2）──
+
+// ── 合宿身份 → 成员 streaming 声明归约（2026-11-10）────────────────────
+// 反调 `_plugin_id` 是进程身份：合宿时是 `group:<group>:<slot>`，manifest 里
+// 只有成员 id。精确匹配会把整组合宿进程判成"未声明 streaming"→ 事件全被丢
+// （实测 group:light:1 的 plugin_error 9 次全拒）。本组用例锁归约口径。
+
+fn streaming_decl(
+    conduit: bool,
+    events: Option<&[&str]>,
+) -> Option<agentos_core::traits::StreamingCapability> {
+    Some(agentos_core::traits::StreamingCapability {
+        conduit,
+        events: events.map(|list| list.iter().map(|s| (*s).to_string()).collect()),
+        part_types: None,
+        persist: None,
+    })
+}
+
+/// 全部成员装箱到 light 组（与生产 `host_group: light` 同形）。
+fn host_key_of_light(_id: &str) -> String {
+    "group:light:1".to_string()
+}
+
+#[test]
+fn streaming_declaration_exclusive_id_hits_exact_manifest() {
+    // 独占身份：精确命中，不做归约。
+    let entries = vec![
+        (
+            "llm_service".to_string(),
+            streaming_decl(false, Some(&["plugin_error"])),
+        ),
+        (
+            "other".to_string(),
+            streaming_decl(false, Some(&["stream_chunk"])),
+        ),
+    ];
+    let decl = streaming_declaration_for_caller(&entries, host_key_of_light, "llm_service")
+        .expect("独占身份必须命中");
+    assert!(!decl.conduit);
+    assert_eq!(decl.events, Some(vec!["plugin_error".to_string()]));
+}
+
+#[test]
+fn streaming_declaration_group_key_reduces_to_member_union() {
+    // 合宿宿主键：归约到成员声明并集（events 并集 + 去重）。
+    let entries = vec![
+        (
+            "llm_service".to_string(),
+            streaming_decl(false, Some(&["plugin_error"])),
+        ),
+        (
+            "tool_core".to_string(),
+            streaming_decl(true, Some(&["tool_start", "plugin_error"])),
+        ),
+        ("idle".to_string(), None),
+    ];
+    let decl = streaming_declaration_for_caller(&entries, host_key_of_light, "group:light:1")
+        .expect("合宿宿主键必须归约到成员声明");
+    // 混装组不得升格为 conduit（conduit 取全体成员）。
+    assert!(!decl.conduit);
+    assert_eq!(
+        decl.events,
+        Some(vec!["plugin_error".to_string(), "tool_start".to_string()])
+    );
+}
+
+#[test]
+fn streaming_declaration_group_all_conduit_stays_conduit() {
+    // 全 conduit 组（生产 group:llm 形态）：保持引擎器官豁免与 a_ 命名空间。
+    let entries = vec![
+        ("pipeline_llm_core".to_string(), streaming_decl(true, None)),
+        ("pipeline_tool_core".to_string(), streaming_decl(true, None)),
+    ];
+    let decl = streaming_declaration_for_caller(&entries, host_key_of_light, "group:light:1")
+        .expect("全 conduit 组必须命中");
+    assert!(decl.conduit);
+    assert_eq!(decl.events, None); // 成员未设限 → 归约结果同样不设限
+}
+
+#[test]
+fn streaming_declaration_unknown_caller_is_fail_closed() {
+    // 未申报宿主的调用方 → None（fail-closed，声明闸照旧拒绝）。
+    let entries = vec![(
+        "llm_service".to_string(),
+        streaming_decl(false, Some(&["plugin_error"])),
+    )];
+    assert!(
+        streaming_declaration_for_caller(&entries, host_key_of_light, "group:other:2").is_none()
+    );
+}

@@ -52,6 +52,22 @@ ignore = [
     # serde_yaml 迁移（报告 §二 #2 三步走：serde_yaml2/yaml-peg 评估），迁移
     # 完成移除本条。
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml 0.2.11 via serde_yaml 0.9（api/config/engine/plugin-loader/integration-tests 消费）；unmaintained 无已知漏洞，serde_yaml 上游已归档，随 serde_yaml 迁移（报告 §二 #2 三步走）处理，迁移完成移除" },
+    # libsqlite3-sys 0.30.1（rusqlite 0.32 bundled，六 crate 消费）：bundled
+    # SQLite 3.53.2 的 CVE-2026-119375（页面缓存未初始化内存——需受害者打开
+    # 攻击者构造的「库文件 + 页面大小不一致的同级 -wal」文件对，本地攻击面）。
+    # 2026-11-10 打包轮实测：补丁版 libsqlite3-sys 0.39.0 随 rusqlite 0.41
+    # 发布，后者声明 rust 1.89，本仓 rust-toolchain 钉 1.88 无法编译；本仓
+    # 数据库由内核自建自用（用户空间单写者），不打开外部不可信 DB+-wal 对，
+    # 实际暴露面不成立。随 toolchain 升 1.89（或 rusqlite 0.41 降 MSRV）升级
+    # 后移除本条——ADR 2026-11-10-msrv-blocked-rustsec-baseline。
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.30.1 via rusqlite 0.32 bundled（api/core/db-admin/engine/user-admin/integration-tests）；补丁版 libsqlite3-sys 0.39.0 随 rusqlite 0.41 发布、声明 rust 1.89（本仓钉 1.88 无法编译），且单写者自建库不打开不可信 DB+-wal 对，暴露面不成立；随 toolchain 升 1.89 升级后移除" },
+    # chrono 0.4.45（经 rmcp 3.9.0 → agentos-mcp 传递，api/config/core 等多
+    # crate 消费）：unmaintained 公告——chrono 上游归档（官方推荐 jiff/time
+    # 替代），无已知漏洞，仅维护状态。2026-11-18 打包轮实测：chrono 由 rmcp
+    # 3.9.0 传递引入，切换到 jiff/time 的决策点在上游 MCP SDK 依赖面（非本仓
+    # 单方可决），本仓仅消费其日期时间格式化/序列化能力，无不受信输入解析面。
+    # 随 rmcp/mcp SDK 上游迁移到 jiff/time 后移除本条。
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 via rmcp 3.9.0 (mcp SDK 传递依赖)；unmaintained 无已知漏洞，替代方案 jiff/time 的切换点在上游 rmcp 依赖面，随上游迁移处理，迁移后移除" },
 ]
 
 [licenses]
@@ -63,7 +79,6 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "CDLA-Permissive-2.0",
     # notify 7.0.0 声明 CC0-1.0（文件系统监听，热重载核心依赖）
     "CC0-1.0",
     # option-ext 0.2.0 声明 MPL-2.0（notify 传递依赖）

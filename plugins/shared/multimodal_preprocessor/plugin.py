@@ -29,6 +29,7 @@ llm_core 在请求装配时读文件转 base64 data URL（发送前转换，二�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -73,6 +74,12 @@ _MD_TEXT_LINK_PATTERN = re.compile(
     rf"(?<!!)\[([^\]]*)\]\((/uploads/[^\s)]+\.(?:{_TEXT_ATTACHMENT_EXTS}))\)",
     re.IGNORECASE,
 )
+
+
+def _read_file_bytes(path: str) -> bytes:
+    """整文件读字节（纯同步；调用方经 ``asyncio.to_thread`` 下放出事件循环）。"""
+    with open(path, "rb") as f:
+        return f.read()
 
 
 class MultimodalPreprocessor(IInputPlugin):
@@ -343,11 +350,11 @@ class MultimodalPreprocessor(IInputPlugin):
             logger.warning("[MultimodalPreprocessor] 文本附件文件不存在: %s", url)
             return self._attachment_failure_notice(url, "文件不存在")
 
-        # 纯文本类：直接 UTF-8 解码
+        # 纯文本类：直接 UTF-8 解码（整文件读是同步阻塞，出事件循环执行）
         if self._is_plain_text_mime(mime_type):
             try:
-                with open(full_path, "rb") as f:
-                    return f.read().decode("utf-8", errors="replace")
+                raw = await asyncio.to_thread(_read_file_bytes, full_path)
+                return raw.decode("utf-8", errors="replace")
             except OSError as exc:
                 logger.error("[MultimodalPreprocessor] 读取文本附件失败: %s, %s", full_path, exc)
                 return self._attachment_failure_notice(url, "文件读取失败")

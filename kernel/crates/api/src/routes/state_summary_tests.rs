@@ -38,6 +38,7 @@ fn export_manifest(fields: &[&str]) -> PluginManifest {
         export_fields: fields.iter().map(|s| s.to_string()).collect(),
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 

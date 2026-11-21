@@ -251,7 +251,7 @@ async def test_gateway_managed_keys_inject_slot_and_cooldown(
 
 
 def test_plugin_provider_route_from_provider_via(monkeypatch: pytest.MonkeyPatch) -> None:
-    """build_router 按 providers.<name>.via=plugin 填路由表；reset 清空。"""
+    """build_router 按 providers.<name>.via=plugin 填路由表；重置后下一代整体替换。"""
     data = {
         "models": {
             "m-plugin": {"provider": "prov-x", "model_name": "m-plugin"},
@@ -277,4 +277,20 @@ def test_plugin_provider_route_from_provider_via(monkeypatch: pytest.MonkeyPatch
         assert _rf_mod.get_plugin_provider_route("unknown") is None
     finally:
         _rf_mod.reset_router()
+    # 重置只丢单例槽位：读侧仍解析上一代完整表（审计 P2-12 读侧无空窗）
+    assert _rf_mod.get_plugin_provider_route("m-plugin") == {"provider_type": "sample"}
+    # 下一代按新配置整体替换（配置真正变更生效）
+    _rf_mod.build_router(model_loader=_FakeLoader({"models": {}, "providers": {}}))
     assert _rf_mod.get_plugin_provider_route("m-plugin") is None
+
+
+async def test_via_plugin_repetition_flag_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """provider 插件回传 stream_repetition → 聚合响应透出（网关不吞插件侧退化信号）。"""
+    _patch_route(monkeypatch, "sample-model")
+    caller = _StubCaller([{**_ok_data("半截"), "stream_repetition": True}])
+    ad = _make_adapter(caller)
+
+    resp = await ad._do_completion(**_base_kwargs())
+
+    assert resp.text == "半截"
+    assert resp.stream_repetition is True

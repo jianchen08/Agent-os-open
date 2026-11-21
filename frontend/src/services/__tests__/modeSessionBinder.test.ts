@@ -36,7 +36,10 @@ vi.mock('@/services/api/client', () => ({
   apiClient: { get: (...args: unknown[]) => apiGetMock(...args) },
 }))
 import { presetThemes } from '@/config/themes'
+import { queryClient } from '@/services/query/queryClient'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
 import {
   applyDefaultModeBinding,
   clearSessionAgentBinding,
@@ -47,9 +50,6 @@ import {
   syncModeThemeForSession,
 } from '../modeSessionBinder'
 import { loadSessionExecutionOptions } from '../sessionExecutionOptions'
-import { useNotificationStore } from '@/stores/notificationStore'
-import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
-import { queryClient } from '@/services/query/queryClient'
 import type { ModesRegistryResponse } from '@/services/api/modes'
 
 /** 合成 registry：roleplay（persona 接管+对话链+面板页+theme 未声明）与 writing（零声明形态） */

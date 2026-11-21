@@ -19,8 +19,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronUp, FolderTree, Search } from '@/assets/icons'
 import { Input } from '@/components/ui/input'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import {
+  isImageIcon,
+  type PageDeclaration,
+  type PageSpace,
+} from '@/services/schema/ContributionRegistry'
 import { openPluginPage } from '@/services/workspacePanelOpener'
-import type { PageDeclaration, PageSpace } from '@/services/schema/ContributionRegistry'
 
 /** 一级直属空间分组（大卡片、不折叠，按表序渲染在活动栏组之后） */
 const PRIMARY_SPACE_GROUPS: ReadonlyArray<{ space: PageSpace; label: string }> = [
@@ -51,6 +55,21 @@ function matchesQuery(page: PageDeclaration, query: string): boolean {
   return haystack.toLowerCase().includes(query)
 }
 
+/** 页面图标内容：图片资源渲染 <img>（1em 随字号缩放），其余按原样文本（emoji/兜底 ◆） */
+function PageIconContent({ icon }: { icon?: string }) {
+  if (isImageIcon(icon)) {
+    return (
+      <img
+        src={icon}
+        alt=""
+        draggable={false}
+        className="inline-block h-[1em] w-[1em] object-contain align-[-0.125em]"
+      />
+    )
+  }
+  return <>{icon || '◆'}</>
+}
+
 /** 导航卡片公共骨架：点击经 opener 打开对应工作区页签，尺寸差异由参数注入 */
 function NavCard({
   page,
@@ -72,7 +91,7 @@ function NavCard({
       className={className}
     >
       <span aria-hidden="true" className={iconClassName}>
-        {page.icon || '◆'}
+        <PageIconContent icon={page.icon} />
       </span>
       <span className={titleClassName}>{page.title ?? page.id}</span>
     </button>

@@ -6,7 +6,7 @@
   ],
   "name": "Sync Agent",
   "description": "多端同步端侧常驻插件：可同步层变更捕获（两通道架构，ADR 2026-10-17-sync-two-channel-routing——file 通道=config yaml 快照对比 + T2 git 仓库化（plugins/skills/artifact_index，变更=commit/墓碑=删除即提交/增量=bundle，恒 ff 零合并）；db 通道=管道步骤捕获消息/任务+域事件捕获会话）→ 打 HLC → sync_event 批上行（outbox+指数退避，断网不丢）；按 cursor 拉取下行 → 按通道路由合并（file=HLC-LWW 落盘；db=单一通用镜像表只读落地，属主面他端不接管不删除）；设备心跳上报；入网自举。配对流（/ext/sync_agent/join）：未配对不拒载，输入网码换正式 per-device token。手动备份（T6 拍板③a，/ext/sync_agent/backup/**）：DB 会话/任务逻辑记录导出（T1 形态 JSONL）+指定工作空间 → 本地 git 仓库，commit 即备份点（增量/可回溯/可恢复），离线可用。relay 不可达不阻塞本机执行（离线第一）。设备页数据面 GET /ext/sync_agent/relay/devices 云端权威注册表透传（R30 销项：中枢 routing_view 单点换源，降级诚实标记）。",
-  "version": "1.9.3",
+  "version": "1.10.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
@@ -274,6 +274,66 @@
       "auth": "admin",
       "handler_capability": "http.handle",
       "description": "借权出站代理（仅已登录本机前端）：代持本机 per-device token 与目标内核完成 borrow_auth 握手，令牌对回传前端按 @base 分键落盘"
+    },
+    {
+      "route_id": "fs_targets",
+      "method": "GET",
+      "path": "/ext/sync_agent/fs/targets",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "远端文件面目标表（不含密钥路径；SFTP）"
+    },
+    {
+      "route_id": "fs_probe",
+      "method": "GET",
+      "path": "/ext/sync_agent/fs/probe",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 2,
+      "description": "远端连通体检（建连/认证/normalize + 复用判定）"
+    },
+    {
+      "route_id": "fs_list",
+      "method": "GET",
+      "path": "/ext/sync_agent/fs/list",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "列远端目录（query: target, path）"
+    },
+    {
+      "route_id": "fs_stat",
+      "method": "GET",
+      "path": "/ext/sync_agent/fs/stat",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 15000,
+      "max_concurrency": 4,
+      "description": "远端路径 stat（query: target, path）"
+    },
+    {
+      "route_id": "fs_read",
+      "method": "GET",
+      "path": "/ext/sync_agent/fs/read",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 4,
+      "description": "读远端文件（query: target, path, offset, length；单次上限 1MiB，base64）"
+    },
+    {
+      "route_id": "fs_write",
+      "method": "POST",
+      "path": "/ext/sync_agent/fs/write",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 2,
+      "description": "写远端文件（query: target, path；body {\"content_base64\":..., \"append\":bool}）"
     }
   ],
   "config_files": [

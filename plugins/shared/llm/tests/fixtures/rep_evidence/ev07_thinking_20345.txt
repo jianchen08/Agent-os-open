@@ -1,0 +1,17 @@
+already guards qing for secession. tick_standing also does: construction tick, mandate gain, building effects, integration climb — all fine for qing (regions 华北 etc. exist). eternal/pacify etc. iterate leaves — fine.
+However careful: tick_standing calls tick_construction which needs 完工 fields — fine. It also reads w.material.fields.get_mut("旱度") — qing has 旱度 field? snapshot uses rb_q.bindings["drought"] — the qing drought field name might be different (e.g., "旱度"? bindings map "drought" → actual field name). If field missing, get_mut returns None → skipped. Safe.
+But also: the game standing block uses `st.worlds.get_mut(&cur)` — in qing branch, `w` borrow already ended (the qing branch used w for step_year then released; series push uses st.worlds[&cur] immutable). After the if/else, getting `st.worlds.get_mut(&cur)` again is fine.
+Also qing series push: `st.series.entry(cur).or_default()` — moves cur! In qing branch they use `entry(cur)` (moves) vs else branch `entry(cur.clone())`. After the if/else, `cur` may have been moved in the qing branch → compile error if we use cur after. So I need to clone before: in qing branch change `entry(cur)` → `entry(cur.clone())`. Then the moved-out block uses `let sc = st.scenario.clone(); let w = st.worlds.get_mut(&cur)...`.
+Python patch for web.rs:
+- Anchor A (qing branch series push):
+```
+st.series.entry(cur).or_default()
+.push([tick as f64, wmean, umean, brew]);
+```
+occurs twice? Else branch: `st.series.entry(cur.clone()).or_default()` — different text (cur.clone()). So qing's `entry(cur).or_default()` unique. Replace `entry(cur).or_default()` → `entry(cur.clone()).or_default()`. (1 occurrence)
+- Anchor B: the game standing block. Current (from read, lines 622-627 approx):
+```
+// v5 玩法扩展常驻段：营建转化/天命积累/词条常驻/失地/整合
+{
+let sc = st.scenario.clone();
+let w = st.worlds.get_mut(&cur).unwrap();

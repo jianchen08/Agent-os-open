@@ -262,7 +262,7 @@ def project_registry_env(tool_module, monkeypatch, tmp_path):
 
     # 规范 monkeypatch（自动还原）：替换读取源而非整个 getter 函数，
     # 防止泄漏到同文件后续用例（顺序耦合）。
-    monkeypatch.setattr(tool_module, "_state_reader", fake_reader)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", fake_reader)
     monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
     return paths, rows
 
@@ -278,9 +278,10 @@ async def test_l1_project_task_anchors_to_project_folder(tool_module, tmp_path, 
     result = await tool.execute(inputs)
     assert result.success, result.error
     ec = captured["dispatch"]["execution_context"]
-    # 挂项目 = 显式 workspace（项目文件夹）+ 默认 worktree（从项目仓库分叉）
+    # 挂项目 = 显式 workspace（项目文件夹）+ 默认 plain（直接在项目目录工作，
+    # 2026-11-11 用户裁定；worktree 仅显式选择）
     assert ec["workspace"]["source_path"] == paths["proj00112233"]
-    assert ec["workspace"]["mode"] == "worktree"
+    assert ec["workspace"]["mode"] == "plain"
     assert ec["workspace"]["explicit"] is True
     state = captured["params"]["state"]
     assert state["task.parent_project_id"] == "proj00112233"
@@ -459,7 +460,7 @@ async def test_ordinary_subtask_can_inherit_failed_task_workspace(tool_module, t
     service = ordinary_child_service()
     tool, captured = make_tool(tool_module, service)
     monkeypatch.setattr(
-        tool_module,
+        sys.modules["acceptance"],
         "_state_reader",
         lambda: [
             {
@@ -485,7 +486,7 @@ async def test_ordinary_subtask_inherit_missing_source_rejected(tool_module, tmp
     """普通子任务：inherit_from 查无源任务 → 显式报错（不静默当普通任务）。"""
     service = ordinary_child_service()
     tool, _ = make_tool(tool_module, service)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
 
     inputs = base_inputs(task_id="parent_p", inherit_from="ghost_task")
     result = await tool.execute(inputs)
@@ -518,6 +519,34 @@ async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
     # 任务域字段出生即入 state（task=pipeline，单一真值在 state）
     state = captured["params"]["state"]
     assert state["task.goal"] == "测试任务"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_root_task_workspace_without_mode_defaults_plain(tool_module, tmp_proj):
+    """显式 workspace 但未传 workspace_mode：缺省落 plain（2026-11-11 用户裁定——
+    多数任务不存在同文件域并行冲突，worktree 降为显式选择）。性质断言：
+    显式传 worktree 仍按原语义落 worktree（能力不回退），缺省与显式可区分。"""
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+
+    # 缺省：显式 workspace + 未传 mode → plain（直接在目标目录干活）
+    result = await tool.execute(base_inputs(parent_agent_level=1, workspace=tmp_proj))
+    assert result.success, result.error
+    ec = captured["dispatch"]["execution_context"]
+    assert ec["workspace"]["source_path"] == tmp_proj
+    assert ec["workspace"]["mode"] == "plain"
+    assert ec["workspace"]["explicit"] is True
+
+    # 对照组：同一输入显式传 worktree → 仍落 worktree（显式语义不变）
+    service2 = FakeTaskService()
+    tool2, captured2 = make_tool(tool_module, service2)
+    result2 = await tool2.execute(
+        base_inputs(parent_agent_level=1, workspace=tmp_proj, workspace_mode="worktree")
+    )
+    assert result2.success, result2.error
+    ec2 = captured2["dispatch"]["execution_context"]
+    assert ec2["workspace"]["mode"] == "worktree"
+
 
 
 @pytest.mark.asyncio
@@ -745,7 +774,7 @@ def test_metric_required_examples_skips_unknown_and_optional(tool_module):
 def test_error_examples_follow_yaml_definitions(tool_module, monkeypatch):
     """错误文案示例动态跟随指标定义（required/description 改动即生效，零硬编码）。"""
     monkeypatch.setattr(
-        tool_module,
+        sys.modules["acceptance"],
         "_load_metric_definitions",
         lambda: {
             "custom_metric": {
@@ -770,7 +799,7 @@ def test_error_examples_follow_yaml_definitions(tool_module, monkeypatch):
 
 def test_metric_params_validation_skips_without_definitions(tool_module, monkeypatch):
     """指标定义加载失败（fail-open）→ 不拦截（与指标 ID 校验同款降级语义）。"""
-    monkeypatch.setattr(tool_module, "_load_metric_definitions", lambda: {})
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions", lambda: {})
     normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
         {"file_check": {}}
     )
@@ -788,7 +817,7 @@ def test_metric_params_validation_skips_without_definitions(tool_module, monkeyp
 
 def test_inherit_source_missing_rejected(tool_module, monkeypatch):
     """state 聚合无源任务 → 失败信封（不静默当普通任务）。"""
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     import asyncio
 
     tool = tool_module.TaskSubmitTool()
@@ -804,7 +833,7 @@ def test_inherit_running_source_rejected(tool_module, monkeypatch, tmp_path_fact
 
     ws = tmp_path_factory.mktemp("running_src_ws")
     monkeypatch.setattr(
-        tool_module,
+        sys.modules["acceptance"],
         "_state_reader",
         lambda: [
             {
@@ -839,7 +868,7 @@ def test_inherit_source_state_row_serves_ws_meta(tool_module, monkeypatch):
             "task.ws_meta": _json.dumps({"path": str(_REPO_ROOT), "mode": "plain"}),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(tool._resolve_inherit_coordinate("srcfull123456"))
     assert fail is None
@@ -883,7 +912,7 @@ def test_inherit_same_project_root_allowed_outside_plugin_layout(
     ws = project / "workspace"
     ws.mkdir(parents=True)
     monkeypatch.setattr(
-        tool_module,
+        sys.modules["acceptance"],
         "_state_reader",
         lambda: _ws_rows("samebase1234", ws, project_root=project),
     )
@@ -916,7 +945,7 @@ def test_inherit_sibling_workspace_same_project_allowed(
     parent_ws.mkdir(parents=True)
     sibling_ws.mkdir(parents=True)
     monkeypatch.setattr(
-        tool_module,
+        sys.modules["acceptance"],
         "_state_reader",
         lambda: _ws_rows("sibling1234", sibling_ws, project_root=project),
     )
@@ -942,7 +971,7 @@ def test_inherit_foreign_project_root_rejected(tool_module, monkeypatch, tmp_pat
     base = tmp_path_factory.mktemp("proj_a")
     other = tmp_path_factory.mktemp("proj_b") / "unrelated"
     other.mkdir(parents=True)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: _ws_rows("otherbase123", other))
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: _ws_rows("otherbase123", other))
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(
         tool._resolve_inherit_coordinate(
@@ -970,7 +999,7 @@ def test_inherit_workspace_under_repo_root_but_other_project_rejected(
     project.mkdir()
     other.mkdir()
     monkeypatch.setattr(
-        tool_module,
+        sys.modules["acceptance"],
         "_state_reader",
         lambda: _ws_rows("inrepo12345", other, project_root=other),
     )
@@ -1000,7 +1029,7 @@ def test_inherit_without_any_base_allowed(tool_module, monkeypatch, tmp_path_fac
     import asyncio
 
     ws = tmp_path_factory.mktemp("no_base_ws")
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: _ws_rows("nobase1234567", ws))
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: _ws_rows("nobase1234567", ws))
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(tool._resolve_inherit_coordinate("nobase1234567", {}))
     assert fail is None
@@ -1010,7 +1039,7 @@ def test_inherit_without_any_base_allowed(tool_module, monkeypatch, tmp_path_fac
 
 def test_inherit_state_bridge_down_fail_honest(tool_module, monkeypatch):
     """桥未就绪（None）→ 显式失败信封（不静默当任务不存在）。"""
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: None)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: None)
     import asyncio
 
     tool = tool_module.TaskSubmitTool()
@@ -1051,7 +1080,7 @@ def test_inherit_worktree_source_serves_own_path(tool_module, monkeypatch, tmp_p
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(tool._resolve_inherit_coordinate("wtsrc12345678"))
     assert fail is None
@@ -1081,7 +1110,7 @@ def test_inherit_worktree_source_lost_git_rejected(tool_module, monkeypatch, tmp
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(tool._resolve_inherit_coordinate("bare123456789"))
     assert meta is None
@@ -1113,7 +1142,7 @@ def test_inherit_dead_coordinate_rejected_not_downgraded(tool_module, monkeypatc
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(tool._resolve_inherit_coordinate("dead123456789"))
     assert meta is None
@@ -1143,7 +1172,7 @@ def test_inherit_parent_ws_meta_never_serves_as_source_coordinates(
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = asyncio.run(tool._resolve_inherit_coordinate("owncoord12345"))
     assert meta is None

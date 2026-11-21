@@ -723,9 +723,15 @@
     return new Promise(function (resolve, reject) {
       if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
       var id = window.agentos.postMessage(path, params);
+        /* M4：全局超时竞速——桥有去无回时 reject，防 Promise 永挂把面板锁死 */
+        var timer = setTimeout(function () {
+          window.removeEventListener('message', handler);
+          reject(new Error('请求超时（桥无响应）：' + path));
+        }, 15000);
       function handler(e) {
         var d = e.data;
         if (!d || !d.__agentos_webview || d.id !== id) return;
+          clearTimeout(timer);
         window.removeEventListener('message', handler);
         if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
         else resolve(d.params);
@@ -809,11 +815,14 @@
   var POLL_MS = 3000;
   function poll() {
     fetchAll().then(function (rs) {
+      /* S5：弹卡判定每轮执行（不依赖快照变化）——早退只跳过渲染不跳过弹卡；
+         reminderPoll 自带 reminderShown 去重 + reminderCur 单卡守卫，幂等 */
+      S.today = rs[0] || {};
+      S.todos = (rs[1] && rs[1].items) || [];
+      reminderPoll(S.today);
       var sig = JSON.stringify(rs);
       if (sig === lastSnapshot) return;
       lastSnapshot = sig;
-      S.today = rs[0] || {};
-      S.todos = (rs[1] && rs[1].items) || [];
       render();
     }).catch(function () { /* 等下轮 */ });
   }
@@ -823,6 +832,9 @@
     var due = String(t.due || '').slice(0, 10);
     var today = todayStr();
     if (t.status === 'done') return 'done';
+      /* N2 同源锚：TODO_ACTIVE = pim_store.TODO_ACTIVE_STATUSES（Python 单源）的 webview 副本，两端同步改 */
+      var TODO_ACTIVE = ['backlog','today','doing'];
+      if (String(t.repeat || '') && TODO_ACTIVE.indexOf(t.status) >= 0) return 'today'; /* P0③ repeat 活跃卡恒归今日；failed/wait 非活跃仍走原判定 */
     if (due && due < today) return 'today';
     if (due === today) return 'today';
     if (due) return 'next';
@@ -901,10 +913,10 @@
       if (priorityRank(a) !== priorityRank(b)) return priorityRank(a) - priorityRank(b);
       return String(a.due || '9999').localeCompare(String(b.due || '9999'));
     });
-    /* 逾期标记（due < today） */
+    /* 逾期标记（due < today；repeat 卡随周期滚动不标逾期——P0③） */
     active.forEach(function (t) {
       var due = String(t.due || '').slice(0, 10);
-      var overdue = due && due < today;
+      var overdue = due && due < today && !String(t.repeat || '');
       var tags = [];
       if (t.domain) tags.push('<span class="tag' + (t.domain === '工作' ? ' work' : '') + '">' + esc(t.domain) + '</span>');
       var p = String(t.priority || '').toUpperCase();
@@ -1287,6 +1299,90 @@
   bindStatic();
   load();
   setInterval(poll, POLL_MS);
+    /* ── P0④ direct 弹卡层：today.reminders（direct 活跃卡到点未确认）→ 面板内
+       overlay 弹卡 →「知道了」写 ack_reminder（10s 超时兜底；成功才标记已弹）。
+       失败提示渲染在弹卡层内部（不被 backdrop 压暗），卡片留在原地可重试，
+       亦可「稍后」/ESC 关闭（用户主动关闭=已阅，不再轮询重弹）。配色全走
+       主题 token；桌面系统级通知属「通知分层」P0 外差距，不在此实现。 ── */
+    var reminderEl = null, reminderCur = null, reminderShown = {}, reminderBusy = false, reminderEscBound = false;
+    function fetchTimeout(p, ms) {
+      return Promise.race([p, new Promise(function (_, rej) { setTimeout(function () { rej(new Error('确认请求超时')); }, ms); })]);
+    }
+    function reminderEnsure() {
+      if (reminderEl) return reminderEl;
+      var backdrop = document.createElement('div');
+      backdrop.id = 'pim-remind-backdrop';
+      backdrop.style.cssText = 'position:fixed;inset:0;background:var(--p-bg);opacity:.62;display:none;z-index:9998';
+      reminderEl = document.createElement('div');
+      reminderEl.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:9999';
+      reminderEl.innerHTML = '<div style="background:var(--p-surface);color:var(--p-fg);border:1px solid var(--p-border);border-radius:var(--p-radius);padding:20px 24px;max-width:420px;box-shadow:0 8px 30px var(--p-border)"><div id="pim-remind-title" style="font-size:16px;font-weight:600;margin-bottom:6px"></div><div id="pim-remind-time" style="font-size:13px;color:var(--p-muted);margin-bottom:10px"></div><div id="pim-remind-err" style="display:none;color:var(--p-err);font-size:12.5px;margin-bottom:6px"></div><div style="display:flex;gap:8px"><button id="pim-remind-ack" style="flex:1;padding:8px 0;border:1px solid var(--p-accent);border-radius:var(--p-radius);background:var(--p-surface);color:var(--p-fg);font-size:14px;cursor:pointer">知道了</button><button id="pim-remind-close" style="flex:none;padding:8px 14px;border:1px solid var(--p-border);border-radius:var(--p-radius);background:var(--p-surface);color:var(--p-fg);font-size:13px;cursor:pointer">稍后</button></div></div>';
+      document.body.appendChild(backdrop);
+      document.body.appendChild(reminderEl);
+      reminderEl.querySelector('#pim-remind-ack').addEventListener('click', reminderAck);
+      reminderEl.querySelector('#pim-remind-close').addEventListener('click', reminderDismiss);
+      if (!reminderEscBound) {
+        reminderEscBound = true;
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && reminderCur) reminderDismiss(); /* M4：ESC 关闭途径，面板不可被锁死 */
+        });
+      }
+      return reminderEl;
+    }
+    function reminderAck() {
+      if (!reminderCur || reminderBusy) return; /* 防连点：在途请求期间按钮已禁用 */
+      var cur = reminderCur;
+      reminderBusy = true;
+      var btn = reminderEl && reminderEl.querySelector('#pim-remind-ack');
+      if (btn) btn.disabled = true;
+      var errBox = reminderEl && reminderEl.querySelector('#pim-remind-err');
+      if (errBox) errBox.style.display = 'none';
+      fetchTimeout(agentosFetch('/ext/mode_personal/' + cur.entity + 's/' + encodeURIComponent(cur.id) + '/ack_reminder', {}).then(unwrap), 10000)
+        .then(function () {
+          reminderShown[cur.entity + ':' + cur.id + ':' + cur.occurrence] = 1; /* 成功才标记已弹 */
+          reminderHide();
+          poll();
+        })
+        .catch(function (err) {
+          /* M3：失败提示渲染在弹卡层内部（modal 上下文内可见），卡片原地可重试 */
+          if (errBox) {
+            errBox.textContent = '确认失败：' + (err && err.message ? err.message : String(err)) + '（可重试或点「稍后」）';
+            errBox.style.display = 'block';
+          }
+        })
+        .then(function () {
+          reminderBusy = false;
+          if (btn) btn.disabled = false;
+        });
+    }
+    function reminderDismiss() {
+      /* 用户主动关闭（稍后/ESC）：标记已弹避免轮询重弹打扰；确认坐标不写，下次发生仍走 ack */
+      if (reminderCur) reminderShown[reminderCur.entity + ':' + reminderCur.id + ':' + reminderCur.occurrence] = 1;
+      reminderHide();
+    }
+    function reminderHide() {
+      reminderCur = null;
+      if (reminderEl) reminderEl.style.display = 'none';
+      var b = document.getElementById('pim-remind-backdrop');
+      if (b) b.style.display = 'none';
+    }
+    function reminderPoll(data) {
+      if (reminderCur) return; /* 一次一张；失败/关闭处置见 reminderAck/reminderDismiss */
+      var list = (data && data.reminders) || [];
+      for (var i = 0; i < list.length; i++) {
+        var r = list[i];
+        if (reminderShown[r.entity + ':' + r.id + ':' + r.occurrence]) continue;
+        reminderCur = r;
+        var el = reminderEnsure();
+        el.querySelector('#pim-remind-title').textContent = r.title || '日程提醒';
+        el.querySelector('#pim-remind-time').textContent = '到点：' + String(r.occurrence || '').replace('T', ' ');
+        el.style.display = 'flex';
+        var b = document.getElementById('pim-remind-backdrop');
+        if (b) b.style.display = 'block';
+        return;
+      }
+    }
+      /* S5：弹卡层不再独立轮询 /today——reminderPoll 由 poll() 渲染链驱动
+         （fetchAll 结果第 0 项即 today 聚合），消除每 3s 两次同端点请求。 */
 })();
 
   </script>

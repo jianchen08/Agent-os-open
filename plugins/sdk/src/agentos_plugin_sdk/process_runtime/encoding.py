@@ -33,6 +33,13 @@ _WIN_CMD_ENCODINGS: tuple[str, ...] = (
 )
 
 
+# 孤立代理（U+D800-U+DFFF）→ U+FFFD 映射表：str.translate 的 C 级实现查表，
+# 供出口清洗用（str.translate 按 Unicode 码位键查表，1:1 替换不改变文本长度）
+_LONE_SURROGATE_TO_FFFD: dict[int, str] = dict.fromkeys(
+    range(0xD800, 0xDFFF + 1), "\ufffd"
+)
+
+
 class EncodingHandler:
     """编码自适应处理器。
 
@@ -68,22 +75,62 @@ class EncodingHandler:
 
         解码优先级：
         1. UTF-8 严格解码（Git Bash / WSL / 现代工具）
-        2. UTF-8 + surrogateescape（保留少量无效字节，处理 WSL 通过 CMD 的污染）
+        2. UTF-8 + surrogateescape（混入少量无效字节暂存为代理字符，出口统一清洗，
+           处理 WSL 通过 CMD 的污染）
         3. 系统编码（CMD 输出 GBK/CP936）
         4. Windows 其他代码页
         5. UTF-8 + replace（兜底）
+
+        出口契约：返回文本保证无孤立代理字符（U+D800-U+DFFF）——孤立代理无法被
+        JSON 序列化，会在 MCP stdio 响应序列化时炸掉插件进程。
 
         Args:
             data: 从 subprocess stdout/stderr 读取的原始字节
 
         Returns:
-            解码后的字符串（已去除 null bytes）
+            解码后的字符串（已去除 null bytes，无孤立代理）
         """
         if not data:
             return ""
 
         text = cls._try_decode(data)
-        return text.replace("\x00", "")
+        text = text.replace("\x00", "")
+        return cls._sanitize_lone_surrogates(text, len(data))
+
+    @staticmethod
+    def _sanitize_lone_surrogates(text: str, original_size: int) -> str:
+        """出口清洗孤立代理字符，保证文本可被 JSON 序列化。
+
+        孤立代理（U+D800-U+DFFF）无法被 JSON 序列化（pydantic
+        model_dump_json 抛 UnicodeEncodeError，会炸掉 MCP stdio 插件进程），
+        故解码出口强制清洗：干净文本经 C 级试编码直通（零成本）；含孤立代理的
+        文本将代理字符逐个替换为 U+FFFD，并打 debug 日志（替换字符数 +
+        原字节数）供装机侧采集修复频率数据。
+
+        Args:
+            text: 待清洗文本
+            original_size: 产生该文本的原始输入字节数（仅用于日志）
+
+        Returns:
+            无孤立代理的文本
+        """
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            pass
+        else:
+            return text
+
+        surrogate_count = sum(
+            1 for c in text if "\ud800" <= c <= "\udfff"
+        )
+        cleaned = text.translate(_LONE_SURROGATE_TO_FFFD)
+        logger.debug(
+            "lone surrogates sanitized: %d replaced with U+FFFD, input %d bytes",
+            surrogate_count,
+            original_size,
+        )
+        return cleaned
 
     @classmethod
     def decode_output_text(cls, data: bytes) -> str:
@@ -95,7 +142,7 @@ class EncodingHandler:
             data: 完整的输出字节
 
         Returns:
-            解码后的完整字符串（已去除 null bytes）
+            解码后的完整字符串（已去除 null bytes，无孤立代理）
         """
         return cls.decode_output_line(data)
 

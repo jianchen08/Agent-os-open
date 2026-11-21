@@ -32,7 +32,7 @@ export function composerPlaceholder(state: ComposerPlaceholderState): string {
   if (state.sendInFlight) return '发送中…'
   if (state.isExecuting) return state.mode === 'smart' ? '执行中...' : '正在生成回复...'
   if (state.isDragging && state.canDragDrop) return '松开鼠标上传文件'
-  if (state.isMobile) return '输入消息'
+  if (state.isMobile) return '输入消息，可按住麦克风说话'
   if (state.canAttach) return 'Enter 发送 · Shift+Enter 换行 · 支持拖拽上传'
   return 'Enter 发送 · Shift+Enter 换行'
 }
@@ -45,7 +45,7 @@ export interface ComposeSendParamsInput {
   attachments: Attachment[]
   /** 在途/待发附件（只并入上传完成的） */
   pendingFiles: PendingFile[]
-  /** 思考强度（参数组 JSON 串，'' = 不覆盖） */
+  /** 思考强度（参数组 JSON 串，'' = 本轮未选择——不覆盖，继承管道上次选择） */
   thinkingStrength: ThinkingStrength
   /** 显式模型选择（'' = 不带字段，跟随配置） */
   modelId: string

@@ -153,14 +153,35 @@ class TestResolveTargetPath:
 
         assert p._resolve_target_path(_ctx(), rel_path) is None
 
-    async def test_absolute_path_used_verbatim(self, tmp_path: Path) -> None:
-        """绝对路径原样返回（不受系统根影响）。"""
+    async def test_absolute_path_inside_root_used_verbatim(self, tmp_path: Path) -> None:
+        """绝对路径落在允许根内 → 原样（归一化后）返回。
+
+        允许根 = 系统项目根 / 模式包根；根外绝对路径由
+        ``test_path_boundary.py`` 锁为越界拒收（P1-1 修复后的契约）。
+        """
         p = _plugin()
-        target = tmp_path / "abs" / "file.md"
+        root = tmp_path / "repo"
+        target = root / "abs" / "file.md"
         target.parent.mkdir(parents=True)
         target.write_text("x", encoding="utf-8")
+        p._system_root = lambda: root  # type: ignore[method-assign]
 
-        assert p._resolve_target_path(_ctx(), str(target)) == target
+        assert p._resolve_target_path(_ctx(), str(target)) == target.resolve()
+
+    async def test_absolute_path_outside_root_rejected(self, tmp_path: Path) -> None:
+        """绝对路径越出允许根 → None + reason=escape（不回落、不静默放行）。"""
+        p = _plugin()
+        root = tmp_path / "repo"
+        root.mkdir()
+        outside = tmp_path / "elsewhere" / "secret.md"
+        outside.parent.mkdir()
+        outside.write_text("secret", encoding="utf-8")
+        p._system_root = lambda: root  # type: ignore[method-assign]
+
+        resolved = p._resolve_target(_ctx(), str(outside))
+
+        assert resolved.path is None
+        assert resolved.reason == "escape"
 
     async def test_relative_path_joined_to_system_root(self, tmp_path: Path) -> None:
         """相对路径以系统根拼接（配置声明的 config/... 不随 CWD 漂移）。"""

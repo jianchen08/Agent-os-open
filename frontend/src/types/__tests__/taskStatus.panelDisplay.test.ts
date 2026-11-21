@@ -12,6 +12,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import {
   TASK_PANEL_DISPLAY_LABELS,
+  taskAncestorsWithRunningDescendant,
   taskPanelDisplayKey,
   taskPendingSubtaskParents,
 } from '../taskStatus'
@@ -129,5 +130,35 @@ describe('taskPendingSubtaskParents：子任务挂号推导', () => {
       { id: 'c-camel', status: 'running', parentTaskId: 'p-camel' },
     ])
     expect(parents.has('p-camel')).toBe(true)
+  })
+})
+
+
+describe('taskAncestorsWithRunningDescendant — 任务链活跃聚合（用户实测 2026-11-19）', () => {
+  const t = (id: string, status: string, parent?: string) =>
+    ({ id, status, ...(parent ? { parent_task_id: parent } : {}) }) as Record<string, unknown>
+
+  it('三层链 A→B→C 且 C 运行中：A、B 都标记（不只直接父级）', () => {
+    const set = taskAncestorsWithRunningDescendant([t('A', 'stopped'), t('B', 'stopped', 'A'), t('C', 'running', 'B')])
+    expect(set.has('A')).toBe(true)
+    expect(set.has('B')).toBe(true)
+    expect(set.has('C')).toBe(false) // 自己不算祖先
+  })
+
+  it('子孙全部终态 → 祖先不标记（链已停，不能显示活）', () => {
+    const set = taskAncestorsWithRunningDescendant([t('A', 'stopped'), t('B', 'completed', 'A'), t('C', 'failed', 'B')])
+    expect(set.size).toBe(0)
+  })
+
+  it('pending/evaluating 与 running 同归活跃（taskPanelDisplayKey 一词一义）', () => {
+    expect(taskAncestorsWithRunningDescendant([t('A', 'stopped'), t('B', 'pending', 'A')]).has('A')).toBe(true)
+    expect(taskAncestorsWithRunningDescendant([t('A', 'stopped'), t('B', 'evaluating', 'A')]).has('A')).toBe(true)
+  })
+
+  it('自挂与成环脏数据不死循环（A→B→A）：只标真祖先，环上停在已访问节点', () => {
+    const set = taskAncestorsWithRunningDescendant([t('A', 'running', 'B'), t('B', 'stopped', 'A')])
+    // 活跃的是 A 自己；A 的祖先链 = B →(B 的父是 A，已访问即停)
+    expect(set.has('B')).toBe(true)
+    expect(set.has('A')).toBe(false)
   })
 })

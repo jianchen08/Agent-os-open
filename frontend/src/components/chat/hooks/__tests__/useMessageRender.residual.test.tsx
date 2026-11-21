@@ -4,7 +4,7 @@
  *
  * 覆盖既有 thinkingOrderFix.test.tsx 未触达的分支：
  * - system part → RenderFragment（level/notificationType 透传；空内容跳过）
- * - makeStablePartKey 的 system 分支（内容前 16 字作稳定键）与未知 type 默认分支
+ * - makeStablePartKey 的 system 分支（类型 + seq 作稳定键）与未知 type 默认分支
  * - 默认详情块的 result / partialOutput 两段（buildDefaultDetails）
  * - tool_call part → activity 增强时 onOpenFile 经 taskId 覆盖 record 的 containerTaskId
  * - isStreaming 判定（isGenerating && isLast && role=assistant 三者合取）
@@ -49,7 +49,7 @@ afterEach(() => {
 })
 
 describe('system part → 渲染片段', () => {
-  it('system 片段透传 level / notificationType 与稳定 key（前 16 字内容片段）', () => {
+  it('system 片段透传 level / notificationType 与稳定 key（类型 + seq）', () => {
     const content = '系统通知正文超过十六个字符的测试内容'
     const fragments = buildFragmentsFromParts(
       makeMessage([{ type: 'system', content, level: 'warning', notificationType: 'task_failed' }]),
@@ -62,8 +62,8 @@ describe('system part → 渲染片段', () => {
     expect(frag.level).toBe('warning')
     expect(frag.notificationType).toBe('task_failed')
     expect(frag.content).toBe(content)
-    // 稳定键含内容前缀（seq 缺省回落索引 0）
-    expect(frag.key).toBe(`part-system-0-${content.substring(0, 16)}`)
+    // 键 = 类型 + seq（缺省回落索引 0）；键内禁放内容（流式追加会导致重挂）
+    expect(frag.key).toBe('part-system-0')
   })
 
   it.each([
@@ -76,7 +76,7 @@ describe('system part → 渲染片段', () => {
     expect(fragments).toHaveLength(0)
   })
 
-  it('system part 缺 content（历史消息容错）→ 稳定键前缀为空，且不崩', () => {
+  it('system part 缺 content（历史消息容错）→ 不产出片段，且不崩', () => {
     const part = { type: 'system', level: 'info', notificationType: 'n' } as unknown as MessagePart
     const fragments = buildFragmentsFromParts(makeMessage([part]))
     expect(fragments).toHaveLength(0)
@@ -85,20 +85,23 @@ describe('system part → 渲染片段', () => {
 
 describe('稳定 key 生成分支', () => {
   it.each([
-    ['text', 'part-text-0-'],
-    ['thinking', 'part-thinking-0-'],
-  ] as const)('%s part 的 key 携带内容前 16 字（避免索引变化重建 DOM）', (type, prefix) => {
-    const content = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-    const part = { type, content, state: 'done' } as unknown as MessagePart
+    ['text', 'part-text-0'],
+    ['thinking', 'part-thinking-0'],
+  ] as const)('%s part 的 key 只含类型 + seq（内容变化不改键）', (type, expectedKey) => {
+    const part = { type, content: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', state: 'done' } as unknown as MessagePart
     const fragments = buildFragmentsFromParts(makeMessage([part]))
-    expect(fragments[0].key).toBe(`${prefix}${content.substring(0, 16)}`)
+    expect(fragments[0].key).toBe(expectedKey)
+
+    // 流式追加（内容变长且越过前 16 字）键保持不变——键变即整棵重挂即闪烁
+    const grown = { ...part, content: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' } as unknown as MessagePart
+    expect(buildFragmentsFromParts(makeMessage([grown]))[0].key).toBe(expectedKey)
   })
 
   it('sequence 存在时优先于数组索引（历史消息按 seq 保证有序）', () => {
     const fragments = buildFragmentsFromParts(
       makeMessage([{ type: 'text', content: 'hi', state: 'done', sequence: 42 }]),
     )
-    expect(fragments[0].key).toBe('part-text-42-hi')
+    expect(fragments[0].key).toBe('part-text-42')
   })
 
   it('tool_call part 的 key 只含 callId（不含内容片段）', () => {

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'reac
 import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
+import { pipelineStatusToTabStatus } from '@/components/schema/widgets/pipelineStatusVisuals'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useLlmConfigQuery, useThinkingLevelsQuery } from '@/hooks/queries/useLlmQueries'
 import { usePipelineRunsQuery } from '@/hooks/queries/usePipelineRunsQuery'
@@ -15,6 +16,7 @@ import { syncPluginStylesForSession } from '@/services/pluginStyles'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
+import { useModelSelectStore, useExplicitModelSelect } from '@/stores/modelSelectStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -22,21 +24,21 @@ import {
   useThinkingModeStore,
   useExplicitThinkingStrength,
 } from '@/stores/thinkingModeStore'
-import { useModelSelectStore, useExplicitModelSelect } from '@/stores/modelSelectStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { type ThinkingStrength } from '@/types/thinkingMode'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import { resolveModelDisplayName } from '@/utils/modelName'
 import { AgentTabBar } from './AgentTabBar'
+import { ChatFloatingLayer } from './ChatFloatingLayer'
 import { ChatInput } from './ChatInput'
 import { MessageList } from './MessageList'
 import { PendingInputQueueBar } from './PendingInputQueueBar'
 import { ReferenceSelectionRow } from './ReferenceSelectionRow'
 import { VotingPanel } from './VotingPanel'
-import { ChatFloatingLayer } from './ChatFloatingLayer'
 import type { ChatContainerProps } from './types'
 import type { Message } from '@/types/models'
+import type { PipelineRunInfo } from '@/types/pipeline'
 
 const EMPTY_MESSAGES: Message[] = []
 
@@ -80,23 +82,45 @@ function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
   )
 }
 
-/** 主标签名回落：主标签现以会话标题为名（agentTabStore.buildMainTab 建立，
+/** 主标签名回落：主标签以主管道标题为名（agentTabStore.buildMainTab 建立，
  *  改名经 sessionListStore.renameSession 同步），仅当标签名缺失时兜底显示
- *  agent 名「灵汐」（与新建会话默认标题同源；内部词汇不进用户可见面）。 */
+ *  agent 名「灵汐」（内部词汇不进用户可见面）。 */
 const MAIN_TAB_NAME = '灵汐'
+
+/** 管道标题尚未加载时的标签标题降级名（注册表无行/无 title 键）。
+ *  不得用 agentName 顶替：那是 agent/工具侧词汇（交互标题、node.agent_name、
+ *  config_id 等来源混入该字段），占标题位即把工具名当任务名显示。 */
+const UNNAMED_TAB_NAME = '未命名任务'
 
 /** 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式 */
 function mapStoreTabsToBarFormat(
   storeTabs: ReturnType<typeof useAgentTabStore.getState>['tabs'],
   activeTabId: string | null,
   unreadCounts: Record<string, number>,
+  runsSnapshot: Record<string, PipelineRunInfo>,
 ) {
   return storeTabs.map((tab) => {
-    const name = tab.agentLevel === 1 ? tab.agentName || MAIN_TAB_NAME : tab.agentName
+    // 标签标题 = 管道标题（注册表 run.title，ADR 2026-10-27-pipeline-title-field
+    // 单字段真值；与任务管理面板、TaskSceneEntryButton 同源同口径）。runs 快照
+    // 随 30s 轮询 + WS 增量刷新，标签名因此跟随管道出生/改名对账，不再冻结在
+    // 开签时写入的 agentName 快照上（子 Tab 此前无任何回写路径，一次错永久错）。
+    // 管道标题缺失：主标签回落 agent 名「灵汐」（既有命名契约），子标签落
+    // 「未命名任务」——agentName 只行进悬浮提示（AgentTabItem 的 title=path）。
+    const pipelineTitle = tab.pipelineRunId ? runsSnapshot[tab.pipelineRunId]?.title : undefined
+    const name = pipelineTitle
+      ? pipelineTitle
+      : tab.agentLevel === 1
+        ? tab.agentName || MAIN_TAB_NAME
+        : UNNAMED_TAB_NAME
+    // 标签状态对齐权威 run 态：store 快照只在开签时写一次、之后无人回写
+    // （管道恢复运行后标签仍显示旧终态 ✕，与任务管理页不一致——2026-11-07
+    // 用户实证）。runs 快照 = 任务管理页同源数据（stream_start/end/error
+    // 增量 + 30s 兜底轮询），有行即以它投影；无行保持快照（缺数据不猜）。
+    const runStatus = tab.pipelineRunId ? runsSnapshot[tab.pipelineRunId]?.status : undefined
     return {
       id: tab.id,
       name,
-      status: tab.status,
+      status: runStatus ? pipelineStatusToTabStatus(runStatus) : tab.status,
       isActive: tab.id === activeTabId,
       unreadCount: unreadCounts[tab.id] || 0,
       canClose: tab.canClose,
@@ -190,6 +214,9 @@ export const ChatContainer = ({
   /** 从 pipelineMessageStore 获取当前激活管道的消息 管道激活统一由 initSessionTabs（会话初始化）和 switchToTab（Tab切换）负责。
    *  单一消息数组：乐观 user/流式 assistant/已确认消息全在
    *  messagesByPipeline 同一数组，按 status 状态机区分生命周期——渲染层零拼接。 */
+  /** 当前激活管道（消息流真实数据面）：会话主标签没有单一 taskId 时用它兜底 */
+  const sceneTaskId = usePipelineMessageStore((st) => st.activePipelineId)
+
   const pipelineMessages = usePipelineMessageStore(
     // useShallow：快照每次都是新引用（数组元素级稳定），zustand v5 useSyncExternalStore
     // 会因引用不稳触发 forceStoreRerender 无限循环（e2e 实测 Maximum update
@@ -245,15 +272,16 @@ export const ChatContainer = ({
   const roundQueueDepth = usePipelineMessageStore((s) =>
     currentTabPipelineId ? (s.roundQueueDepthByPipeline?.[currentTabPipelineId] ?? 0) : 0,
   )
-  // 停止受理中：run_status 已变 suspended 但引擎长步骤未退出 → 保持「停止中」，
-  // 直到 run 级终止事件/下一轮 stream_start 清除。
+  // 停止受理中：点停即置位（router.handleStopGenerate），run 级终止事件/下一轮
+  // stream_start 清除；护栏 TTL（streaming handlers utils STOP_REQUEST_TTL_MS）
+  // 过期仍无终态事件时由其定时翻转解除。
   const stoppingActive = usePipelineMessageStore((s) =>
     currentTabPipelineId ? (s.stoppingByPipeline?.[currentTabPipelineId] ?? false) : false,
   )
-  // 生成态单一真值：runs 快照（stream_start 实时写 running）+ 两个收尾快照。
+  // 生成态单一真值：runs 快照（stream_start 实时写 running）+ 收尾快照。
   // 原 streamingActive 双源已删——stream_start 已同步 runs cache，重复订阅只会
   // 制造两套状态不一致。
-  // stopping 兜底：终止事件丢失时 runs 轮询到达终态也要解除「停止中」，
+  // stopping 终态守卫：终止事件丢失时 runs 轮询到达终态也要解除「停止中」，
   // 不能靠 pipeline_round_finished 单通道（断线重放溢出即永久停止中）。
   const runStatus = runsSnapshot[currentTabPipelineId]?.status
   const stoppingLive =
@@ -261,8 +289,14 @@ export const ChatContainer = ({
     runStatus !== 'completed' &&
     runStatus !== 'failed' &&
     runStatus !== 'cancelled'
-  const effectiveIsGenerating =
-    runStatus === 'running' || roundQueueDepth > 0 || stoppingLive
+  // 点停即时反馈（2026-11-07）：停止受理期间生成观感立即让位——转圈停、发送
+  // 按钮恢复可用，不等后端 round_finished（收尾链秒级延迟曾造成「点了没反应」）；
+  // 正文冻结由 handleStopGenerate 的 stopStreaming 落地。护栏 TTL 过期 stopping
+  // 被翻转解除后，生成观感回落 runs 真值：run 仍在跑则转圈恢复（停止未生效
+  // 可辨别、可再点），不静默装作已停。
+  const effectiveIsGenerating = stoppingLive
+    ? false
+    : runStatus === 'running' || roundQueueDepth > 0
 
   /** 发送在途：当前标签管道有已受理未落定的发送（chatInputStore 登记，气泡认领/
    *  队列条出现/5s 落定超时/失败判死四口撤下，2026-11-04 落定语义重定义）→
@@ -270,6 +304,19 @@ export const ChatContainer = ({
   const sendInFlight = useChatInputStore((s) =>
     currentTabPipelineId ? (s.sendInFlightByPipeline[currentTabPipelineId]?.length ?? 0) > 0 : false,
   )
+
+  /** 等待 AI 响应壳（ADR 2026-11-17-awaiting-reply-render-shell）：直跑 user 气泡
+   *  已落定、AI 真气泡（stream_start）未出现的窗口锚点。流式中/排队中（队列条
+   *  是排队期唯一视图）不亮壳——三口清除在 store（startStreaming/stopStreaming/
+   *  TTL），此处只收敛「不与既有视图抢位」两条件。 */
+  const streamingActive = usePipelineMessageStore((s) =>
+    currentTabPipelineId ? (s.streamingState?.[currentTabPipelineId]?.isStreaming ?? false) : false,
+  )
+  const awaitingReplySinceRaw = usePipelineMessageStore((s) =>
+    currentTabPipelineId ? (s.awaitingReplyByPipeline?.[currentTabPipelineId] ?? 0) : 0,
+  )
+  const awaitingReplySince =
+    !streamingActive && roundQueueDepth === 0 ? awaitingReplySinceRaw : 0
 
   /**
    * 待定位消息 → MessageList 消费目标：仅当跳转目标管道正是当前激活管道时透传。
@@ -311,8 +358,9 @@ export const ChatContainer = ({
   )
 
   /**
-   * 消息级 thinking_strength 路由（llm_core 按 thinking_strength_params 解析）：
-   * 选择记入标签级记忆（localStorage，随路由联动），随消息透传——零后端参谋调用。
+   * 思考选择路由（llm_core 按 thinking_strength_params 解析）：选择记入标签级
+   * 记忆（localStorage，随路由联动），随消息透传落管道持久 state——零后端参谋
+   * 调用；重发/回退不重传参数，管道按回退后的状态正常跑时自动继承。
    */
   const handleThinkingStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
@@ -329,10 +377,10 @@ export const ChatContainer = ({
    */
   const activeMessages = pipelineMessages
 
-  /** 将 store Tab 映射为 AgentTabBar 所需格式 */
+  /** 将 store Tab 映射为 AgentTabBar 所需格式（状态以 runs 权威态实时投影） */
   const barTabs = useMemo(
-    () => mapStoreTabsToBarFormat(tabs, activeTabId, unreadCounts),
-    [tabs, activeTabId, unreadCounts],
+    () => mapStoreTabsToBarFormat(tabs, activeTabId, unreadCounts, runsSnapshot),
+    [tabs, activeTabId, unreadCounts, runsSnapshot],
   )
 
   /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */
@@ -359,6 +407,24 @@ export const ChatContainer = ({
       closeTab(tabId)
     },
     [closeTab],
+  )
+
+  /**
+   * 标签栏节点（portal 与内联回退共用同一份，避免两处参数漂移）：
+   * 能力集与工作区标签栏对齐——切换/关闭/固定/拖拽换位/右键菜单（含批量关签
+   * 确认层）/激活签滚动可见；组件内部直接复用 components/layout 的共用实现，
+   * 此处只把 agentTabStore 通道接上。
+   */
+  const tabBarNode = (
+    <AgentTabBar
+      tabs={barTabs}
+      onTabChange={handleTabChange}
+      onTabClose={handleTabClose}
+      onReorder={(dragId, targetId) => useAgentTabStore.getState().reorderTab(dragId, targetId)}
+      onCloseOtherTabs={(tabId) => useAgentTabStore.getState().closeOtherTabs(tabId)}
+      onCloseAllTabs={() => useAgentTabStore.getState().closeAllTabs()}
+      onTogglePin={(tabId) => useAgentTabStore.getState().togglePinTab(tabId)}
+    />
   )
 
   /** 过滤消息 */
@@ -406,6 +472,13 @@ export const ChatContainer = ({
       className={`theme-chat-area relative flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       data-testid="chat-container"
       data-session-id={sessionId}
+      // 皮肤垂坠带让位（skinRuntime 写列级变量）：图形花边悬在让位留白上，
+      // 不压顶带标签行/消息列顶/输入卡底；无皮肤时变量恒 0 零影响
+      data-skin-inset-target="chat"
+      style={{
+        paddingTop: 'var(--skin-chat-inset-top, 0px)',
+        paddingBottom: 'var(--skin-chat-inset-bottom, 0px)',
+      }}
       // 聊天容器状态（我方词汇）：empty=空态欢迎页 / active=对话态。
       // DSH 皮肤的 [data-phase=hero/active] 由适配器递送层转译到这里
       // （位置映射，不给组件贴 DSH 名字）
@@ -413,20 +486,16 @@ export const ChatContainer = ({
     >
       {/* 通用悬浮挂载槽（2026-10-24 用户裁定：位置按插件声明 anchor 定位，
           本槽零业务知识；无 anchor 声明时零渲染） */}
-      <ChatFloatingLayer />
+      {/* 任务现场入口已下沉到「最新 AI 气泡下方的状态行」（TaskSceneStatusRow，
+            用户裁定 2026-11-20）：消息流是主入口，右上角浮动入口退役。
+            悬浮槽保留——插件声明 anchor 的挂件仍走这里，本槽零业务知识。 */}
+        <ChatFloatingLayer />
       {/* 对话标签行：桌面 portal 进布局顶带槽位（chat-top-band-tabs）——
           顶带是唯一拖拽容器，标签行作为其 DOM 子元素自动获得 no-drag 洞；
           槽位不存在（移动端/无顶带形态）回退内联渲染。 */}
       {showTabBar && tabsSlot &&
         createPortal(
-          <div className="flex h-full min-w-0 items-center justify-center">
-            <AgentTabBar
-              tabs={barTabs}
-              onTabChange={handleTabChange}
-              onTabClose={handleTabClose}
-              onReorder={(dragId, targetId) => useAgentTabStore.getState().reorderTab(dragId, targetId)}
-            />
-          </div>,
+          <div className="flex h-full min-w-0 items-center justify-center">{tabBarNode}</div>,
           tabsSlot,
         )}
       {showTabBar && !tabsSlot && (
@@ -440,14 +509,7 @@ export const ChatContainer = ({
           }}
           data-testid="chat-session-header"
         >
-          <div className="min-w-0">
-            <AgentTabBar
-              tabs={barTabs}
-              onTabChange={handleTabChange}
-              onTabClose={handleTabClose}
-              onReorder={(dragId, targetId) => useAgentTabStore.getState().reorderTab(dragId, targetId)}
-            />
-          </div>
+          <div className="min-w-0">{tabBarNode}</div>
         </div>
       )}
 
@@ -464,10 +526,19 @@ export const ChatContainer = ({
         onLoadMore={onLoadMoreMessages}
         sessionId={sessionId}
         searchQuery={searchQuery}
-        taskId={activeTab?.taskId}
+        // 任务坐标兜底：会话标签可能只有 pipelineRunId（无 taskId）——按「任务=管道」
+        // 同源口径回落，否则最新气泡状态行的任务现场入口会因空坐标整块不渲染
+        // （2026-11-20 真实数据实测：entry=0、data-task-id=""）
+        taskId={
+          activeTab?.taskId ||
+          currentTabPipelineId ||
+          sceneTaskId ||
+          undefined
+        }
         onEdit={onEdit}
         onRegenerate={onRegenerate}
         onRollbackTo={onRollbackTo}
+        awaitingReplySince={awaitingReplySince}
         jumpTarget={effectiveJumpTarget}
         onJumpConsumed={() => setMessageJump(null)}
       />

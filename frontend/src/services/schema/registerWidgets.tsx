@@ -11,9 +11,9 @@ import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPrevi
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
 import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
-import { ModelSelectWidget } from '@/components/schema/widgets/ModelSelectWidget'
 import { DebugCenterHubWidget } from '@/components/schema/widgets/DebugCenterHubWidget'
 import { DigitalHumanWidget } from '@/components/schema/widgets/DigitalHumanWidget'
+import { DshSlotWidget } from '@/components/schema/widgets/DshSlotWidget'
 import { EditorWidget } from '@/components/schema/widgets/EditorWidget'
 import { FileTreeWidget } from '@/components/schema/widgets/FileTreeWidget'
 import { DecisionFormAdapter, FormWidget } from '@/components/schema/widgets/FormWidget'
@@ -21,6 +21,7 @@ import { GalleryWidget } from '@/components/schema/widgets/GalleryWidget'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { InlineEditWidget } from '@/components/schema/widgets/InlineEditWidget'
 import { KanbanWidget } from '@/components/schema/widgets/KanbanWidget'
+import { ModelSelectWidget } from '@/components/schema/widgets/ModelSelectWidget'
 import { OnboardingPanel } from '@/components/schema/widgets/OnboardingPanel'
 import {
   AgentsPanel,
@@ -38,6 +39,9 @@ import { WidgetStage } from '@/components/schema/widgets/WidgetStage'
 import { WizardWidget } from '@/components/schema/widgets/WizardWidget'
 import { ZonePolicySettingsWidget } from '@/components/schema/widgets/ZonePolicySettingsWidget'
 import { TextDiffView } from '@/components/shared/TextDiffView'
+// 任务现场面板（按 taskId 聚合运行现场；组件在 components/workspace/taskScene/，
+// 不落 widgets 目录——它要用 stores，而 widgets 目录禁 store 依赖）
+import { TaskScenePanel } from '@/components/workspace/taskScene/TaskScenePanel'
 import { DbAdminPage } from '@/pages/debug/DbAdminPage'
 import { DebugEvaluationMetricsPage } from '@/pages/debug/DebugEvaluationMetricsPage'
 import { DebugExecutionRecordsPage } from '@/pages/debug/DebugExecutionRecordsPage'
@@ -47,11 +51,12 @@ import { DebugSessionsPage } from '@/pages/debug/DebugSessionsPage'
 import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
 import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
+import { GrantsLedgerPage } from '@/pages/settings/GrantsLedgerPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { contributionRegistry } from './ContributionRegistry'
 import { widgetRegistry } from './WidgetRegistry'
-import type { WidgetComponent } from './WidgetRegistry'
 import type { ContentCardDeclaration } from './contentCard'
+import type { WidgetComponent } from './WidgetRegistry'
 import type { Annotation } from '@/types/review'
 import type { RenderingSpaceType } from '@/types/schema'
 
@@ -131,6 +136,11 @@ const WIDGETS: WidgetEntry[] = [
   // 授权区管理（security_check contributes.pages space=settings 声明页；
   // RenderingSpaceType 无 settings——get() 直查不筛 spaces，元数据仅降级用）
   { name: 'zone_policy_settings', component: ZonePolicySettingsWidget, spaces: ['workspace'] },
+  // 授权账本管理（grants contributes.pages space=settings 声明页，P3 运营面：
+  // 只读管理 + 撤销，授予面仍是审批卡；同 zone_policy_settings 的 settings 挂载
+  // 口径。内联箭头承载 embedded 适配——文件混合导出面不再新增顶层组件 const，
+  // 避免给 react-refresh/only-export-components 基线添新错）
+  { name: 'grants_ledger_admin', component: () => <GrantsLedgerPage embedded />, spaces: ['workspace'] },
   // agents_panel = agent_manager 插件页面承载（原 AgentsPage 内容迁移；
   // tools_panel 已随 ToolsPage 退役，plugins_panel 独立面板随双入口收敛撤除——
   // 能力浏览并入设置中枢「插件注册表」kernel-plugins）
@@ -145,6 +155,10 @@ const WIDGETS: WidgetEntry[] = [
   // 注：webcomponent（WebComponentCardHost，eval 注入）已于 0.2 废弃并删除代码，
   // 插件自定义完整 UI 一律走 webview / 主题插件 / CSS 注入（task_plugin_frontend_customization）。
   { name: 'webview', component: WebviewWidget, spaces: ['workspace', 'floating', 'fullscreen'], fallback: 'html_preview' },
+  // DSH 插件组件挂载位：页面声明 props{bundle,slot,contributionId} 指定
+  // 「哪个已装 DSH 包注册在哪个槽位的组件」，本 widget 装载其 client bundle
+  // 后原样渲染插件自己的 React 组件（不是页面翻译、不生成信息页）。
+  { name: 'dsh-slot', component: DshSlotWidget, spaces: ['workspace', 'floating'] },
   // 数字人/形象占位 widget（ADR §2.1 / §7.6）：形象是 workspace 的 widget，不占独立空间。
   // 现阶段只占位（不引入渲染库），0.7.0 由插件接入 Live2D/VRM/TTS；支持 detachable 三态（浮窗/桌面组件/全屏）
   {
@@ -200,6 +214,10 @@ const WIDGETS: WidgetEntry[] = [
   // 统一导航页（新标签页按钮与空标签态同一内容源：workspace 卡片主体验 +
   // 顶部搜索 + 非 workspace 空间「更多」折叠区，长尾页面全量收录）
   { name: 'workspace_nav_page', component: WorkspaceNavPage, spaces: ['workspace'] },
+  // 任务现场（按 taskId 聚合运行/产物现场，工作区页签）：
+  // 数据走既有 pipelineMessageStore（任务=管道，消息面为复盘主干），不新增端点。
+  // 启动页签 id = ws-scene-<taskId>（openTaskSceneTab 幂等打开）。
+  { name: 'task_scene', component: TaskScenePanel, spaces: ['workspace'] },
   // 四模式面板已退役（模式体系 §2 末 2026-09-15 用户裁定：面板=模式插件自带
   // webview 页，contributes.pages 声明 widget:'webview' 走上方内建注册，前端
   // 不再持有具名面板 widget）

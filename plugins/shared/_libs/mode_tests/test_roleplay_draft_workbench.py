@@ -347,7 +347,9 @@ def test_lint_html_danger_warns_without_rejecting(rp: Any) -> None:
     assert payload["report"]["lint_pass"] is True
 
 
-def test_lint_single_source_calls_card_lint(rp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lint_single_source_calls_card_lint(
+    rp: Any, monkeypatch: pytest.MonkeyPatch, patch_shared: Any
+) -> None:
     """同源执法：创作 lint 直调共享单源 card_lint.lint_card_extensions（禁第三套）。
 
     豁免注释（评审 B）：此处 spy 调用计数/入参断言是对「测试断行为不断实现/
@@ -364,6 +366,7 @@ def test_lint_single_source_calls_card_lint(rp: Any, monkeypatch: pytest.MonkeyP
         return real(ext)
 
     monkeypatch.setattr(card_lint, "lint_card_extensions", _spy)
+    patch_shared("lint_card_extensions", _spy)  # 拆分后 rp_game 模块级绑定须同步传播
     module = rp
     body = _register(module)
     _post(module, "/lint", {"draft_id": body["draft_id"]})
@@ -739,11 +742,12 @@ def test_draft_routes_method_and_action_mismatch(rp: Any) -> None:
 
 
 def test_register_write_failure_500_when_user_space_unavailable(
-    rp: Any, monkeypatch: pytest.MonkeyPatch
+    rp: Any, monkeypatch: pytest.MonkeyPatch, patch_shared: Any
 ) -> None:
     """写面不静默降级：用户空间不可得 = 500 如实报错（登记与入库两侧同口径）。"""
     module = rp
     monkeypatch.setattr(module, "_user_config_root", lambda: None)
+    patch_shared("_user_config_root", lambda: None)  # 拆分后消费点在 rp_* 自持绑定
     result = _post(module, "/register", {
         "author_session": "s", "content": _clean_card(),
     })
@@ -752,13 +756,14 @@ def test_register_write_failure_500_when_user_space_unavailable(
 
 
 def test_approve_write_failure_500_when_card_space_unavailable(
-    rp: Any, monkeypatch: pytest.MonkeyPatch
+    rp: Any, monkeypatch: pytest.MonkeyPatch, patch_shared: Any
 ) -> None:
     """approve 入库写失败（用户卡目录不可得）= 500 如实报错，草稿态不谎报。"""
     module = rp
     body = _register(module)
     _walk_to(module, body["draft_id"], "awaiting_review")
     monkeypatch.setattr(module, "_user_cards_dir", lambda: None)
+    patch_shared("_user_cards_dir", lambda: None)  # 拆分后消费点在 rp_* 自持绑定
     result = _post(module, "/approve", {"draft_id": body["draft_id"]}, headers=_AUTH)
     assert _status(result) == 500
     assert "无处落盘" in _body_json(result)["error"]

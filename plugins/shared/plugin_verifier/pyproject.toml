@@ -1,0 +1,15 @@
+[project]
+name = "agentos-plugin-plugin-verifier"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — plugin_verifier（宿主侧插件验证工具）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    "pyyaml",
+    "psutil>=5.9",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（与 resource_search_tool 同式）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

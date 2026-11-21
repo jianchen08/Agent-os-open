@@ -10,13 +10,24 @@
 ```
 config/pipelines/
 ├── README.md          # 本文件
-└── autonomous.yaml    # 唯一现役管道（G10 DSL 多循环体模型 + core_type 双形态迭代）
+├── autonomous.yaml    # 任务域缺省管道（G10 DSL 多循环体模型 + core_type 双形态迭代）
+└── roleplay.yaml      # 对话域特化链（RP 纯对话精简链，按消息 pipeline_config_id 选择）
 ```
 
-## 现役管道：autonomous.yaml
+## 现役管道
 
-所有 Agent 共用同一条管道，差异由 Agent 配置（`config/agents/**/*.yaml` 的
-system_prompt / tool_ids / model_tier）体现，管道文件不按 Agent 区分。
+- `autonomous.yaml` = **任务域缺省链**：所有 Agent 共用，差异由 Agent 配置
+  （`config/agents/**/*.yaml` 的 system_prompt / tool_ids / model_tier）体现，
+  **管道文件不按 Agent 区分**。这也是「不按模式另立管道」的依据：模式差异走
+  mode.yaml（物料/chain/tool 面）与 agent 配置，管道仍走本缺省链。
+- `roleplay.yaml` = **对话域特化链**：RP 会话无任务域步骤（无 workspace 合并/
+  评估闸门），init/prepare/tool_exec/llm/post/exit 纯对话链，带 `/cheat` 守卫
+  门控（`_cheat_guard` opt-in 键）。选择方式 = 会话消息携
+  `pipeline_config_id: roleplay`（`mode_roleplay/server.py` 经登记存在性闸校验，
+  未登记名 fail-closed 回落缺省），**不是**按模式名硬编码。
+- 新增按名管道：落 `config/pipelines/<name>.yaml` + 在消费面声明
+  `pipeline_config_id`；内核 `load_pipeline_config_by_name` 按名加载（文件缺失
+  返回默认空配置，不崩），启动期不扫全目录。
 
 - **加载**：内核启动期 `pipeline_loader.rs::load_pipeline_config`
   硬编码加载 `config/pipelines/autonomous.yaml`；文件缺失时返回空配置 +

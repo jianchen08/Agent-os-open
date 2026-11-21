@@ -19,12 +19,13 @@
  * dangerouslySetInnerHTML。
  */
 
+import { useHighlight } from '@lobehub/ui/es/hooks/useHighlight'
+
+;
 import { createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it } from 'vitest'
-import { useHighlight } from '@lobehub/ui/es/hooks/useHighlight'
-
-;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = false
+(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = false
 
 const PY_CODE = ['def greet():', '    return "hi"', ''].join('\n')
 

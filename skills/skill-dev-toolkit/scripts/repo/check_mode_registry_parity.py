@@ -65,9 +65,13 @@ _MODE_DECL_KNOWN = {
     "weights",
     "budget",
     # 与 agent_manager._MODE_DECL_KNOWN 同源补齐（default = 默认模式声明；
-    # inject_tools = 包级工具并入声明，守卫 C）
+    # inject_tools = 包级工具并入声明，守卫 C；ci/foreground_selectable = 任务
+    # 门禁与前台可选声明；inject_tool_ids = 按激活模式注入外部工具）
     "default",
     "inject_tools",
+    "ci",
+    "foreground_selectable",
+    "inject_tool_ids",
 }
 _PIPELINE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 # 技能名形态（与 plugins/shared/mode_keys.py is_skill_name 同源；本脚本仅
@@ -77,6 +81,8 @@ _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # mode_X/<stem>（模式名小写标识/stem 字母数字下划线）或系统 agent 裸名。
 _MODE_AGENT_KEY_RE = re.compile(r"^mode_([a-z][a-z0-9_]{0,63})/([A-Za-z0-9_]+)$")
 _BARE_AGENT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# 工具 id 形态（与 plugins/shared/mode_keys.py _TOOL_ID_RE 同源，双侧同步）。
+_TOOL_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 # 消费者对账豁免台账：字段 → (豁免原因, 升级触发条件)。台账外的声明字段必须
 # 在仓内有消费点（grep 佐证由本脚本对 tool_card 之外的字段抽查主消费面）。
@@ -157,6 +163,15 @@ def validate_declaration(data: object) -> str:
                 and (_MODE_AGENT_KEY_RE.match(key) is not None or _BARE_AGENT_KEY_RE.match(key) is not None)
             ):
                 return f"planning_executors[] 执行者键须为 mode_X/<stem> 或系统 agent 裸名形态: {key!r}"
+    # inject_tool_ids（2026-11-11 模式标签注入）：可选非空列表，元素 = 工具 id
+    # 形态（工具由别的插件注册；空列表拒——不声明即零贡献）。
+    if "inject_tool_ids" in data:
+        declared = data["inject_tool_ids"]
+        if not isinstance(declared, list) or not declared:
+            return "inject_tool_ids 须为非空列表（不声明 = 零贡献）"
+        for name in declared:
+            if not (isinstance(name, str) and _TOOL_ID_RE.match(name) is not None):
+                return f"inject_tool_ids[] 工具 id 形态非法: {name!r}"
     return ""
 
 

@@ -7,8 +7,8 @@
  * modeSessionBinder 开新会话，无内存态档位。）
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import type * as chatInputStoreMod from '@/stores/chatInputStore'
 import { userScopedKey } from '@/utils/userScopedStorage'
+import type * as chatInputStoreMod from '@/stores/chatInputStore'
 
 vi.mock('@/utils/logger', () => ({
   loggers: { storage: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } },

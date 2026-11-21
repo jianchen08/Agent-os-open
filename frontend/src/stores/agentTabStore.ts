@@ -8,8 +8,10 @@ import { loggers } from '@/utils/logger'
 
 /** 子Tab消息加载日志器（404 竞态窗口 debug 留痕），走会话域日志通道 */
 const tabLogger = loggers.sessionStore
+import { readPipelineRuns } from '@/hooks/queries/usePipelineRunsQuery'
 import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { mainPipelineIdOf } from '@/utils/mappers'
+import { isTabClosable, keepSetAfterBulkClose } from '@/utils/tabCloseSemantics'
 import type { AgentTab } from '@/types/task'
 
 /** 获取主管道 ID（映射真值 pipelineIds[0]，与任务管理面板同源） */
@@ -18,7 +20,11 @@ function getMainPipelineId(sessionId: string): string | null {
   const session = sessions.find((s) => s.id === sessionId)
   const mainPid = session ? mainPipelineIdOf(session) : undefined
   if (!mainPid) {
-    console.warn('[getMainPipelineId] 主 pipeline 缺失: sessionId=%s pipelineIds=%o', sessionId, session?.pipelineIds)
+    console.warn(
+      '[getMainPipelineId] 主 pipeline 缺失: sessionId=%s pipelineIds=%o',
+      sessionId,
+      session?.pipelineIds,
+    )
   }
   return mainPid ?? null
 }
@@ -178,25 +184,32 @@ function upsertTabInState(
   }
 }
 
-/** prune：移除 Tab 并连带清理未读/pipeline 映射/活跃位回落主 Tab */
-function pruneTabFromState(
+/**
+ * prune：按保留集裁剪 Tab，并连带清理未读/pipeline 映射、活跃位回落。
+ *
+ * 单签关闭与批量关签共用这一条裁剪通道（工作区标签栏同款语义），差异只在
+ * 保留集怎么算——单签 = 全集减该签，批量 = `keepSetAfterBulkClose`。
+ * 活跃位落在被关签上时回落主 Tab（无主 Tab 取首个，全空取 null）。
+ */
+function pruneTabsToKeep(
   state: TabCollectionFields,
-  tabId: string,
+  keepIds: ReadonlySet<string>,
 ): TabCollectionFields {
-  const newTabs = state.tabs.filter((t) => t.id !== tabId)
-  const newUnreadCounts = { ...state.unreadCounts }
-  delete newUnreadCounts[tabId]
+  const newTabs = state.tabs.filter((t) => keepIds.has(t.id))
 
-  // 清理指向该 Tab 的 pipeline 映射
+  const newUnreadCounts = { ...state.unreadCounts }
+  for (const tabId of Object.keys(newUnreadCounts)) {
+    if (!keepIds.has(tabId)) delete newUnreadCounts[tabId]
+  }
+
+  // 清理指向已关签的 pipeline 映射
   const newPipelineTabMap = { ...state.pipelineTabMap }
   for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
-    if (tid === tabId) {
-      delete newPipelineTabMap[pid]
-    }
+    if (!keepIds.has(tid)) delete newPipelineTabMap[pid]
   }
 
   let newActiveTabId = state.activeTabId
-  if (state.activeTabId === tabId) {
+  if (!newActiveTabId || !keepIds.has(newActiveTabId)) {
     const mainTab = newTabs.find((t) => t.agentLevel === 1)
     newActiveTabId = mainTab?.id || newTabs[0]?.id || null
   }
@@ -207,6 +220,11 @@ function pruneTabFromState(
     unreadCounts: newUnreadCounts,
     pipelineTabMap: newPipelineTabMap,
   }
+}
+
+/** prune：移除单个 Tab（批量关签裁剪的单签特例） */
+function pruneTabFromState(state: TabCollectionFields, tabId: string): TabCollectionFields {
+  return pruneTabsToKeep(state, new Set(state.tabs.filter((t) => t.id !== tabId).map((t) => t.id)))
 }
 
 interface AgentTabState {
@@ -250,7 +268,14 @@ interface AgentTabState {
   /** 打开子 Tab */
   openSubTab: (tab: Omit<AgentTab, 'messages'>) => void
   /** 关闭 Tab（增强版，支持主 Tab 保护） */
+
   closeTab: (tabId: string) => void
+  /** 关闭指定 Tab 外的其他标签（固定签与业务禁关签保留） */
+  closeOtherTabs: (tabId: string) => void
+  /** 关闭全部标签（固定签与业务禁关签保留） */
+  closeAllTabs: () => void
+  /** 切换固定态（固定签不受批量关签影响、无单签关闭入口） */
+  togglePinTab: (tabId: string) => void
   /** 切换子 Tab（增强版，自动清除未读） */
   switchToTab: (tabId: string) => void
   /** 标记 Tab 完成 */
@@ -280,22 +305,35 @@ interface AgentTabState {
 }
 
 /** 构建会话主标签（新会话/恢复补建共用，避免字面量复制漂移）。
- * 主标签名 = 会话标题（2026-10-16 用户拍板：主标签以会话标题为名，内部词汇
- * 不进用户可见面；新会话标题默认即 agent 名「灵汐」，起名/改名后随会话标题
- * 走），会话缓存未就绪时回落「灵汐」。 */
+ * 主标签名 = 主管道标题（2026-11-11 用户裁定：标签名只显示管道标题不显示
+ * 会话标题；数据真值 = 注册表 run.title，ADR 2026-10-27-pipeline-title-field，
+ * 内核出生/改名传播同源），主管道缺失或注册表无标题时回落 agent 名「灵汐」。
+ * 静默解析（不走 getMainPipelineId 的 warn：缺数据是显示兜底不是异常）。 */
+function resolveMainTabName(sessionId: string | null | undefined): string {
+  if (!sessionId) return '灵汐'
+  const mainPid = mainPipelineIdOf(readSessions().find((s) => s.id === sessionId) ?? {})
+  return (mainPid && readPipelineRuns()[mainPid]?.title) || '灵汐'
+}
+
 function buildMainTab(
   sessionId: string,
   mainPipelineId: string | null,
   mainAgentId: ReturnType<typeof getMainAgentId>,
 ): AgentTab {
-  const mainTabName = readSessions().find((s) => s.id === sessionId)?.title || '灵汐'
+  const mainTabName = resolveMainTabName(sessionId)
   return {
     id: `main-${sessionId}`,
-    agentId: mainAgentId, agentName: mainTabName, agentLevel: 1,
-    taskId: undefined, parentRecordId: undefined,
+    agentId: mainAgentId,
+    agentName: mainTabName,
+    agentLevel: 1,
+    taskId: undefined,
+    parentRecordId: undefined,
     pipelineRunId: mainPipelineId || undefined,
-    path: [mainTabName], status: 'running', hasUnread: false,
-    canClose: false, messages: [],
+    path: [mainTabName],
+    status: 'running',
+    hasUnread: false,
+    canClose: false,
+    messages: [],
   }
 }
 
@@ -313,10 +351,10 @@ function buildInitialTabs(
   mainAgentId: ReturnType<typeof getMainAgentId>,
 ): { tabs: AgentTab[]; activeTabId: string | null } {
   if (saved && saved.tabs.length > 0) {
-    // 主标签名随会话标题刷新：持久化的旧名/存量「主管道」在恢复时矫正到当前
-    // 标题（与 buildMainTab 同一命名契约）；会话缓存未就绪时保持持久化名——
-    // 缺数据不是改名依据（与下方绑定保持同一不变量）。
-    const sessionTitle = readSessions().find((s) => s.id === sessionId)?.title
+    // 主标签名随主管道标题刷新：持久化的旧名在恢复时矫正到注册表当前标题
+    // （与 buildMainTab 同一命名契约，resolveMainTabName）；主管道缺失或注册表
+    // 无标题（缓存未就绪/存量无键）时保持持久化名——缺数据不是改名依据。
+    const registryTitle = mainPipelineId ? readPipelineRuns()[mainPipelineId]?.title : undefined
     // 子 Tab 缺 pipelineRunId 时保持 undefined（不污染）
     let tabs = saved.tabs.map((tab) => {
       if (tab.agentLevel === 1) {
@@ -328,7 +366,7 @@ function buildInitialTabs(
           ...tab,
           pipelineRunId: mainPipelineId ?? tab.pipelineRunId,
           agentId: mainAgentId,
-          ...(sessionTitle ? { agentName: sessionTitle, path: [sessionTitle] } : {}),
+          ...(registryTitle ? { agentName: registryTitle, path: [registryTitle] } : {}),
         }
       }
       return tab
@@ -393,6 +431,34 @@ function rebindMainTabToSession(mainTabId: string): boolean {
     void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
   }
   return true
+}
+
+/**
+ * 关签后活跃位结算（单签关闭与批量关签共用）：
+ * 关签可能把活跃位落到主 Tab 上——此时按会话权威主管道重绑并激活（改绑时内部
+ * 已激活 + 空桶补拉）；绑定本就正确时保持原激活语义，只补拉空桶。
+ * 持久化与裁剪本身由各 action 负责，本函数只做「活跃位对齐」这一条不变量。
+ */
+function settleAfterTabClose(get: () => AgentTabState): void {
+  const { currentSessionId, tabs, activeTabId } = get()
+  get().saveCurrentTabs()
+  if (!currentSessionId) return
+
+  const mainTab = tabs.find((t) => t.agentLevel === 1)
+  if (!mainTab || activeTabId !== mainTab.id) return
+
+  if (rebindMainTabToSession(mainTab.id)) return
+
+  const pipelineStore = usePipelineMessageStore.getState()
+  const mainPipelineId = getMainPipelineId(currentSessionId)
+  if (!mainPipelineId) return
+
+  pipelineStore.activatePipeline(mainPipelineId)
+  // 统一加载入口：仅当本地无消息时拉历史（mode='auto'，未初始化走全量）。
+  // 不 await，保持 fire-and-forget 行为。
+  if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
+    void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
+  }
 }
 
 /** Agent Tab Store */
@@ -505,7 +571,11 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (from === -1 || to === -1) return
     const tabs = [...get().tabs]
     const [moved] = tabs.splice(from, 1)
-    tabs.splice(tabs.findIndex((t) => t.id === targetTabId), 0, moved)
+    tabs.splice(
+      tabs.findIndex((t) => t.id === targetTabId),
+      0,
+      moved,
+    )
     set({ tabs })
     get().saveCurrentTabs()
   },
@@ -608,35 +678,45 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         return state
       }
 
-      if (!tab.canClose) {
-        console.warn(`[AgentTabStore] Cannot close main tab: ${tabId}`)
+      // 不可关签 = 业务禁关签（主对话签 canClose=false）∪ 固定签——判定单源
+      // 与工作区标签栏同一份（utils/tabCloseSemantics）
+      if (!isTabClosable(tab)) {
+        console.warn(`[AgentTabStore] Tab not closable (pinned or protected): ${tabId}`)
         return state
       }
 
       return pruneTabFromState(state, tabId)
     })
-    get().saveCurrentTabs()
+    settleAfterTabClose(get)
+  },
 
-    const { currentSessionId, tabs, activeTabId } = get()
-    if (currentSessionId) {
-      const mainTab = tabs.find((t) => t.agentLevel === 1)
-      if (mainTab && activeTabId === mainTab.id) {
-        // 激活即重绑：回落主 Tab 先矫正残留绑定（改绑时内部已按权威主管道
-        // 激活 + 空桶补拉）；绑定本就正确时保持原激活语义（重置未读 + 补拉）。
-        if (!rebindMainTabToSession(mainTab.id)) {
-          const pipelineStore = usePipelineMessageStore.getState()
-          const mainPipelineId = getMainPipelineId(currentSessionId)
-          if (mainPipelineId) {
-            pipelineStore.activatePipeline(mainPipelineId)
-            // 统一加载入口：仅当本地无消息时拉历史（mode='auto'，未初始化走全量）。
-            // 不 await，保持 fire-and-forget 行为。
-            if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
-              void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
-            }
-          }
-        }
+  /**
+   * 批量关签：保留集 = 基准签 + 固定签 + 业务禁关签（主对话签），其余全关。
+   * 判定与工作区标签栏同一单源（`keepSetAfterBulkClose`），只差"业务禁关签"
+   * 在对话流侧由 canClose=false 表达。
+   */
+  closeOtherTabs: (tabId) => {
+    set((state) => pruneTabsToKeep(state, keepSetAfterBulkClose(state.tabs, 'closeOther', tabId)))
+    settleAfterTabClose(get)
+  },
+
+  /** 关闭全部标签：固定签与业务禁关签（主对话签）保留 */
+  closeAllTabs: () => {
+    set((state) => pruneTabsToKeep(state, keepSetAfterBulkClose(state.tabs, 'closeAll')))
+    settleAfterTabClose(get)
+  },
+
+  /** 切换固定态（固定签：无单签关闭入口、不受批量关签影响） */
+  togglePinTab: (tabId) => {
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === tabId)
+      // 业务禁关签（主对话签）不参与固定——它本就不可关，固定无意义且会误导
+      if (!tab || tab.canClose === false) return state
+      return {
+        tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, isPinned: !t.isPinned } : t)),
       }
-    }
+    })
+    get().saveCurrentTabs()
   },
 
   /** 切换子 Tab（增强版，自动清除未读，激活对应管道） */
@@ -663,7 +743,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const effectivePipelineId = get().tabs.find((t) => t.id === tabId)?.pipelineRunId
     if (!effectivePipelineId) {
       console.error('[switchToTab] Tab 数据损坏：pipelineRunId 为空，中止切换: tabId=%s', tabId)
-      return  // 中止切换，避免用错误 pipelineId 路由
+      return // 中止切换，避免用错误 pipelineId 路由
     }
     pipelineStore.activatePipeline(effectivePipelineId)
 
@@ -687,7 +767,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, status: 'completed' } : t)),
     }))
   },
-
 
   /** 清除未读（别名） */
   clearUnread: (tabId) => {
@@ -717,10 +796,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const tabId = `sub-${parentRecordId}`
 
     set((state) => {
-      // 面包屑首段 = 会话标题（主标签现以会话标题为名，见 buildMainTab），
-      // 会话缓存未就绪回落「灵汐」（与 buildMainTab 同一命名契约）
-      const mainTabName =
-        readSessions().find((s) => s.id === state.currentSessionId)?.title || '灵汐'
+      // 面包屑首段 = 主管道标题（与 buildMainTab 同一命名契约，见
+      // resolveMainTabName），主管道缺失/注册表无标题回落「灵汐」
+      const mainTabName = resolveMainTabName(state.currentSessionId)
       const path = [mainTabName, agentName]
       const existingTab = state.tabs.find((t) => t.id === tabId)
 

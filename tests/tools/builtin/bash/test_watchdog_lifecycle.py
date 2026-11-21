@@ -114,6 +114,7 @@ def _register(
     backend: Any = None,
     metadata: dict[str, Any] | None = None,
     last_access: float | None = None,
+    last_output: float | None = None,
     output_task: Any = None,
 ) -> ProcessInfo:
     info = ProcessInfo(
@@ -125,6 +126,7 @@ def _register(
         status=status,
         backend=backend,
         last_access_time=last_access if last_access is not None else time.time(),
+        last_output_time=last_output if last_output is not None else time.time(),
         metadata=metadata or {},
         output_task=output_task,
     )
@@ -147,14 +149,19 @@ async def test_watchdog_check_once_without_running_processes_returns(tmp_path) -
 
 
 async def test_watchdog_check_once_kills_orphan_beyond_timeout(tmp_path) -> None:
-    """孤儿兜底：idle 超 orphan_timeout 无条件杀（内存水位无关）。"""
+    """孤儿兜底：无输出超 orphan_timeout 无条件杀（内存水位无关）。
+
+    ADR 2026-11-07 判据改版：无输出时长（last_output_time）取代无访问时长——
+    last_access 保持新鲜（agent 仍轮询）也照杀，钉死判据语义。
+    """
     mgr = _make_manager(tmp_path)
     backend = FakeBackend(memory_ratios=[0.1])  # 低水位，不触发水位判据
     mgr._memory_backend = backend
     proc = FakeProcess(pid=7, returncode=None)
     _register(
         mgr, 7, process=proc, backend=backend,
-        last_access=time.time() - mgr._orphan_timeout - 1,
+        last_access=time.time() - 1,  # 刚被访问过（轮询）
+        last_output=time.time() - mgr._orphan_timeout - 1,  # 无输出超阈值
     )
 
     await mgr._watchdog_check_once()
@@ -325,7 +332,7 @@ async def test_reap_after_kill_force_kills_when_wait_times_out(tmp_path) -> None
     proc = FakeProcess(pid=61, wait_forever=True)
     info = _register(mgr, 61, process=proc)
 
-    await asyncio.wait_for(mgr._reap_after_kill(61, info), timeout=5.0)
+    await asyncio.wait_for(mgr._reap_after_kill(61, info, "unit_memory"), timeout=5.0)
 
     assert proc.kill_called == 1
     assert info.status == "terminated"
@@ -337,7 +344,7 @@ async def test_reap_after_kill_waits_clean_exit(tmp_path) -> None:
     proc = FakeProcess(pid=62, returncode=0)
     info = _register(mgr, 62, process=proc)
 
-    await mgr._reap_after_kill(62, info)
+    await mgr._reap_after_kill(62, info, "orphan")
 
     assert proc.kill_called == 0
     assert info.status == "terminated"
@@ -654,7 +661,13 @@ async def test_wait_output_settled_noop_for_missing_or_done(tmp_path) -> None:
     await mgr.wait_output_settled(152)
 
 
-async def test_read_container_pid_falls_back_to_host_pid() -> None:
+async def test_read_container_pid_never_falls_back_to_host_pid() -> None:
+    """首行协议：有效 pid 正常解析；无效/超时返回 None。
+
+    契约变更（2026-11-17 WSL 挂死事故）：读不到首行时**不得**退回宿主 pid
+    ——拿宿主 pid 去执行环境里 kill 会命中数字相同的无关进程（误杀面）。
+    返回 None 由 spawn 门控消费：宿主级杀树 + 探测门控重试/快速失败。
+    """
     stdout = SimpleNamespace(
         readline=lambda: asyncio.sleep(0, result=b"1234\n")
     )
@@ -663,7 +676,11 @@ async def test_read_container_pid_falls_back_to_host_pid() -> None:
 
     bad_stdout = SimpleNamespace(readline=lambda: asyncio.sleep(0, result=b"not-a-pid\n"))
     proc2 = SimpleNamespace(pid=778, stdout=bad_stdout)
-    assert await ProcessManager._read_container_pid(proc2) == 778
+    assert await ProcessManager._read_container_pid(proc2) is None
+
+    silent_stdout = SimpleNamespace(readline=lambda: asyncio.sleep(10, result=b""))
+    proc3 = SimpleNamespace(pid=779, stdout=silent_stdout)
+    assert await ProcessManager._read_container_pid(proc3, timeout=0.02) is None
 
 
 # ─────────────────────────── 复合命令判定（引号状态机） ───────────────────────────

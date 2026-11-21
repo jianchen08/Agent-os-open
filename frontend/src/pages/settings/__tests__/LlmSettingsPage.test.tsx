@@ -1,13 +1,14 @@
 /** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
- * LlmSettingsPage 组件测试（2 Tab 重构版）
+ * LlmSettingsPage 组件测试（单界面重构版）
  *
- * 覆盖「提供商与密钥」优先的核心交互：
- * - 默认打开提供商 Tab，未配置 Key 的提供者排前、显示 env var 提示
- * - 死掉的「模型参数」Tab 已删除（仅 2 个 Tab）
- * - 填 Key / 更新 Key → updateProviderConfig（明文 keys[0].api_key）
- * - 拉取模型对话框：远端列表勾选 + 自定义输入 → addModel 批量写入
- * - 模型 Tab：每模型「参数」编辑 → updateModel(default_params 合并保留)
+ * 覆盖「提供商选择器 + 同界面模型选择」的核心交互：
+ * - 提供商是一个选择控件：每个内置提供商 = 一个选项，另有「自定义」选项；
+ *   不再有 Tab 与卡片墙
+ * - 选中内置提供商无需填 URL/API Key（已配置时无输入框；未配置时仅给 Key 入口）
+ * - 选中「自定义」→ 同一界面下方出现 Base URL 与 API Key 输入框
+ * - 模型选择在同一界面完成：拉取列表勾选 + 手填模型名，一次提交写 addModel
+ * - 已注册模型逐行条目；tier 区只留选择栏位与当前值（不列模型清单）
  *
  * 测试策略：Mock 仅外部依赖（API 层 + UI 基础组件），组件真实渲染。
  */
@@ -21,27 +22,32 @@ import { LlmSettingsPage } from '../LlmSettingsPage'
 import { DEFAULT_MAX_TOKENS } from '../modelParams'
 
 // ── Mock API 层 ──
-const mockGetLLMConfig = vi.fn()
-const mockGetLLMPresets = vi.fn()
-const mockGetDefaults = vi.fn()
-const mockGetProviderTypes = vi.fn()
-const mockGetRemoteModels = vi.fn()
-const mockUpdateProviderConfig = vi.fn()
-const mockAddModel = vi.fn()
-const mockUpdateModel = vi.fn()
-
-vi.mock('@/services/api/config', () => ({
-  getLLMConfig: (...args: unknown[]) => mockGetLLMConfig(...args),
-  getLLMPresets: (...args: unknown[]) => mockGetLLMPresets(...args),
-  getDefaults: (...args: unknown[]) => mockGetDefaults(...args),
-  getProviderTypes: (...args: unknown[]) => mockGetProviderTypes(...args),
-  getRemoteModels: (...args: unknown[]) => mockGetRemoteModels(...args),
-  addModel: (...args: unknown[]) => mockAddModel(...args),
-  updateModel: (...args: unknown[]) => mockUpdateModel(...args),
+const mock = {
+  getLLMConfig: vi.fn(),
+  getLLMPresets: vi.fn(),
+  getProviderTypes: vi.fn(),
+  getRemoteModels: vi.fn(),
+  addModel: vi.fn(),
+  updateModel: vi.fn(),
   deleteModel: vi.fn(),
   addProvider: vi.fn(),
   deleteProvider: vi.fn(),
-  updateProviderConfig: (...args: unknown[]) => mockUpdateProviderConfig(...args),
+  updateProviderConfig: vi.fn(),
+  saveDefaults: vi.fn(),
+}
+
+vi.mock('@/services/api/config', () => ({
+  getLLMConfig: (...a: unknown[]) => mock.getLLMConfig(...a),
+  getLLMPresets: (...a: unknown[]) => mock.getLLMPresets(...a),
+  getProviderTypes: (...a: unknown[]) => mock.getProviderTypes(...a),
+  getRemoteModels: (...a: unknown[]) => mock.getRemoteModels(...a),
+  addModel: (...a: unknown[]) => mock.addModel(...a),
+  updateModel: (...a: unknown[]) => mock.updateModel(...a),
+  deleteModel: (...a: unknown[]) => mock.deleteModel(...a),
+  addProvider: (...a: unknown[]) => mock.addProvider(...a),
+  deleteProvider: (...a: unknown[]) => mock.deleteProvider(...a),
+  updateProviderConfig: (...a: unknown[]) => mock.updateProviderConfig(...a),
+  saveDefaults: (...a: unknown[]) => mock.saveDefaults(...a),
 }))
 
 // ── Mock UI 基础组件（简化依赖，聚焦业务行为）──
@@ -60,11 +66,7 @@ vi.mock('@/components/ui/input', () => ({
 }))
 
 vi.mock('@/components/ui/sonner', () => ({
-  toast: {
-    error: vi.fn(),
-    success: vi.fn(),
-    warning: vi.fn(),
-  },
+  toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }))
 
 vi.mock('@/components/ui/select', async () => {
@@ -81,24 +83,20 @@ vi.mock('@/components/ui/select', async () => {
     SelectGroup: ({ children }: any) => <div>{children}</div>,
     SelectLabel: ({ children }: any) => <div>{children}</div>,
     SelectItem: ({ value, children }: any) => {
-      const { onValueChange: onItemChange } = useContext(SelectCtx)
+      const { onValueChange } = useSelectCtx(SelectCtx)
       return (
-        <button type="button" onClick={() => onItemChange?.(value)}>
+        <button type="button" onClick={() => onValueChange?.(value)}>
           {children}
         </button>
       )
     },
   }
+  function useSelectCtx(ctx: React.Context<{ onValueChange?: (v: string) => void }>) {
+    return useContext(ctx)
+  }
 })
 
-vi.mock('@/components/ui/dialog', () => ({
-  Dialog: ({ open, children }: any) => (open ? <div role="dialog">{children}</div> : null),
-  DialogContent: ({ children }: any) => <div>{children}</div>,
-  DialogHeader: ({ children }: any) => <div>{children}</div>,
-  DialogTitle: ({ children }: any) => <div>{children}</div>,
-}))
-
-/** 样例 LLM 配置：预置提供者（已配/未配）+ 自定义 + 一个模型 */
+/** 样例配置：两个内置提供商（openai 已配 / qwen 未配）+ 一个自定义提供商 + 两个模型 */
 const sampleLLMConfig = {
   models: {
     'deepseek-v4-flash': {
@@ -106,6 +104,11 @@ const sampleLLMConfig = {
       model_name: 'deepseek-v4-flash',
       display_name: 'DeepSeek V4 Flash',
       default_params: { temperature: 0.5, max_tokens: 100000 },
+    },
+    'gpt-5.1': {
+      provider: 'openai',
+      model_name: 'gpt-5.1',
+      display_name: 'GPT-5.1',
     },
   },
   providers: {
@@ -131,13 +134,10 @@ const sampleLLMConfig = {
       env_var: null,
     },
   },
-  defaults: { chat: 'deepseek-v4-flash', embedding: '', tiers: {} },
+  defaults: { chat: 'deepseek-v4-flash', embedding: '', tiers: { large: 'gpt-5.1' } },
 }
 
-const sampleDefaults = { chat: 'deepseek-v4-flash', embedding: '', tiers: {} }
-
-// 预置声明样例（llm_service /ext 端点下发；分组与显示名全部来自声明）：
-// 声明外的 provider（myproxy）落「自定义」组
+// 预置声明样例（llm_service /ext 端点下发）：声明外 provider（myproxy）落「其他已添加」
 const samplePresets = {
   provider_groups: [
     { label: '国内', providers: [['qwen', '通义千问']] },
@@ -151,283 +151,206 @@ const samplePresets = {
 }
 
 async function renderLoaded() {
-  mockGetLLMConfig.mockResolvedValue(sampleLLMConfig)
-  mockGetLLMPresets.mockResolvedValue(samplePresets)
-  mockGetDefaults.mockResolvedValue(sampleDefaults)
-  mockGetProviderTypes.mockResolvedValue({ types: ['openai', 'anthropic', 'zai'] })
+  mock.getLLMConfig.mockResolvedValue(sampleLLMConfig)
+  mock.getLLMPresets.mockResolvedValue(samplePresets)
+  mock.getProviderTypes.mockResolvedValue({ types: ['openai', 'anthropic', 'zai'] })
   renderWithProviders(<LlmSettingsPage />)
   await waitFor(() => {
-    expect(screen.getByText('通义千问')).toBeInTheDocument()
+    expect(screen.getByText('已注册模型 (2)')).toBeInTheDocument()
   })
 }
 
-describe('LlmSettingsPage', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
+/** 模型区（第 2 段）容器：用于把查询限定在「同一界面内完成模型选择」的范围 */
+function modelSection(): HTMLElement {
+  return screen.getByRole('heading', { name: '模型', level: 3 }).closest('section') as HTMLElement
+}
+
+/** 已注册模型段容器（逐行条目） */
+function registrySection(): HTMLElement {
+  return screen.getByRole('heading', { name: /已注册模型/ }).closest('section') as HTMLElement
+}
+
+/** 默认模型（tier）区容器 */
+function tierSection(): HTMLElement {
+  return screen.getByRole('heading', { name: '默认模型' }).closest('section') as HTMLElement
+}
+
+beforeEach(() => {
+  vi.resetAllMocks()
+})
+
+describe('LlmSettingsPage 单界面形态', () => {
+  it('提供商改成一个选择控件：内置提供商各占一个选项 + 「自定义」选项，且无 Tab', async () => {
+    await renderLoaded()
+    // 不再有 Tab 结构（原「提供商与密钥 / 模型」两 Tab 已合并为单界面）
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+    // 每个内置提供商是一个选项；声明外的已添加提供商也出现在选项里
+    expect(screen.getByRole('button', { name: 'OpenAI' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '通义千问' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'myproxy' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '自定义（新增提供商）' })).toBeInTheDocument()
   })
 
-  it('默认打开「提供商与密钥」Tab，仅 2 个 Tab（死掉的「模型参数」已删除）', async () => {
+  it('选中内置且已配置的提供商：无需填 URL/Key（无输入框，仅状态与只读 Base URL）', async () => {
     await renderLoaded()
-    // Tab 数量：提供商与密钥 + 模型
-    const tablist = screen.getByRole('tablist')
-    expect(within(tablist).getAllByRole('tab')).toHaveLength(2)
-    expect(screen.getByRole('tab', { name: '提供商与密钥' })).toBeInTheDocument()
-    expect(screen.queryByText('模型参数')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'OpenAI' }))
+    await waitFor(() => expect(screen.getByText('已配置')).toBeInTheDocument())
+    // Base URL 只读展示，不是输入框
+    expect(screen.getByText('Base URL: https://api.openai.com/v1')).toBeInTheDocument()
+    expect(screen.queryByLabelText('填写 openai 的 API Key')).not.toBeInTheDocument()
+    // 「更换 Key」是可选的后续动作，不是必填
+    expect(screen.getByRole('button', { name: '更换 Key' })).toBeInTheDocument()
   })
 
-  it('分组展示提供者；未配置 Key 的排前并显示 env var 提示', async () => {
+  it('选中内置但未配置的提供商：不给 URL 输入，仅给 Key 填写入口', async () => {
     await renderLoaded()
-    expect(screen.getByText('国内（1）')).toBeInTheDocument() // qwen
-    expect(screen.getByText('国际（1）')).toBeInTheDocument() // openai
-    expect(screen.getByText('自定义（1）')).toBeInTheDocument() // myproxy
-    // 未配置提示：env var 占位符可见
-    expect(screen.getByText('DASHSCOPE_API_KEY')).toBeInTheDocument()
-    // 状态徽标（未配置 ×2：qwen + myproxy；已配置 ×1：openai）
-    expect(screen.getAllByText('未配置')).toHaveLength(2)
-    expect(screen.getAllByText('已配置')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '通义千问' }))
+    await waitFor(() => expect(screen.getByText('未配置')).toBeInTheDocument())
+    expect(screen.getByLabelText('填写 qwen 的 API Key')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/https:\/\/my.proxy/)).not.toBeInTheDocument()
   })
 
-  it('未配置提供者内嵌填 Key：输入明文保存 → updateProviderConfig', async () => {
+  it('选中「自定义」：同一界面下方出现 Base URL 与 API Key 输入框，提交走 addProvider', async () => {
     await renderLoaded()
-    const input = screen.getByLabelText('填写 qwen 的 API Key')
-    fireEvent.change(input, { target: { value: 'sk-new-qwen-key' } })
-    // 作用域限定在 qwen 卡片内（myproxy 也有「保存」按钮）
-    const card = input.closest('div[class*="space-y-2"]') as HTMLElement
-    fireEvent.click(within(card).getByRole('button', { name: '保存' }))
-    await waitFor(() => {
-      expect(mockUpdateProviderConfig).toHaveBeenCalledWith(
-        'qwen',
-        { keys: [{ id: 'qwen_main', api_key: 'sk-new-qwen-key' }] },
-      )
-    })
+    fireEvent.click(screen.getByRole('button', { name: '自定义（新增提供商）' }))
+
+    const urlInput = await screen.findByLabelText('Base URL')
+    const keyInput = screen.getByLabelText('API Key')
+    fireEvent.change(screen.getByLabelText('提供商 ID'), { target: { value: 'myproxy2' } })
+    fireEvent.change(urlInput, { target: { value: 'https://p2/v1' } })
+    fireEvent.change(keyInput, { target: { value: 'sk-p2' } })
+    mock.addProvider.mockResolvedValueOnce(sampleLLMConfig.providers)
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+
+    await waitFor(() =>
+      expect(mock.addProvider).toHaveBeenCalledWith('myproxy2', {
+        type: 'openai',
+        api_base: 'https://p2/v1',
+        api_key: 'sk-p2',
+      }),
+    )
   })
 
-  it('已配置提供者：更新 Key → updateProviderConfig（明文）', async () => {
+  it('模型选择在同一界面完成：拉取列表勾选 + 手填模型名 → 批量 addModel', async () => {
     await renderLoaded()
-    expect(screen.getByText('Key: sk-1********abcd')).toBeInTheDocument()
-    const input = screen.getByPlaceholderText('输入新的 API Key')
-    fireEvent.change(input, { target: { value: 'sk-rotated' } })
-    fireEvent.click(screen.getByRole('button', { name: '更新 Key' }))
-    await waitFor(() => {
-      expect(mockUpdateProviderConfig).toHaveBeenCalledWith(
-        'openai',
-        { keys: [{ id: 'openai_main', api_key: 'sk-rotated' }] },
-      )
-    })
-  })
-
-  it('拉取模型对话框：勾选远端模型 + 自定义输入 → 批量 addModel', async () => {
-    await renderLoaded()
-    mockGetRemoteModels.mockResolvedValue({
+    fireEvent.click(screen.getByRole('button', { name: 'OpenAI' }))
+    mock.getRemoteModels.mockResolvedValue({
       provider: 'openai',
       models: [
-        { id: 'gpt-5.1', owned_by: 'openai' },
-        { id: 'gpt-5.1-mini', owned_by: 'openai' },
+        { id: 'gpt-6', owned_by: 'openai' },
+        { id: 'gpt-6-mini', owned_by: 'openai' },
       ],
     })
-    mockAddModel.mockResolvedValue({
-      models: { ...sampleLLMConfig.models },
-      added_ids: ['gpt-5.1-mini', 'gpt-6-preview'],
-    })
+    mock.addModel.mockResolvedValue({ models: sampleLLMConfig.models, added_ids: ['x'] })
 
-    // 作用域限定在 openai 卡片内（未配置的提供者也有禁用的「拉取模型」按钮）
-    const masked = screen.getByText('Key: sk-1********abcd')
-    const card = masked.closest('div[class*="space-y-2"]') as HTMLElement
-    fireEvent.click(within(card).getByRole('button', { name: /拉取模型/ }))
-    await waitFor(() => {
-      expect(mockGetRemoteModels).toHaveBeenCalledWith('openai')
-      expect(screen.getByText('gpt-5.1')).toBeInTheDocument()
-    })
+    // 拉取与手填都在同一段的同一界面内（不弹窗）
+    const panel = modelSection()
+    fireEvent.click(within(panel).getByRole('button', { name: /拉取模型列表/ }))
+    await waitFor(() => expect(within(panel).getByText('gpt-6')).toBeInTheDocument())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
-    // 勾选一个远端模型
-    fireEvent.click(screen.getByText('gpt-5.1-mini'))
-
-    // 自定义输入：列表没有的模型
-    const customInput = screen.getByPlaceholderText(/自定义模型名/)
+    fireEvent.click(within(panel).getByText('gpt-6'))
+    const customInput = within(panel).getByLabelText('自定义模型名')
     fireEvent.change(customInput, { target: { value: 'gpt-6-preview' } })
     fireEvent.keyDown(customInput, { key: 'Enter' })
-    expect(screen.getByText('gpt-6-preview')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: /添加所选/ }))
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型 \(2\)/ }))
 
     await waitFor(() => {
-      expect(mockAddModel).toHaveBeenCalledTimes(2)
-      // 远端列表模型带 litellm 事实上限时按事实写入
-      expect(mockAddModel).toHaveBeenCalledWith('gpt-5.1-mini', {
+      expect(mock.addModel).toHaveBeenCalledTimes(2)
+      expect(mock.addModel).toHaveBeenCalledWith('gpt-6', {
         provider: 'openai',
-        model_name: 'gpt-5.1-mini',
-        display_name: 'gpt-5.1-mini',
-        default_params: {
-          temperature: 0.7,
-          max_tokens: DEFAULT_MAX_TOKENS,
-          top_p: 1,
-        },
+        model_name: 'gpt-6',
+        display_name: 'gpt-6',
+        default_params: { temperature: 0.7, max_tokens: DEFAULT_MAX_TOKENS, top_p: 1 },
       })
-      // 自定义模型不在远端列表里（无事实）→ 同样走兜底而非 4096
-      expect(mockAddModel).toHaveBeenCalledWith('gpt-6-preview', {
+      // 手填模型不在远端列表 → 无事实，同样走兜底上限
+      expect(mock.addModel).toHaveBeenCalledWith('gpt-6-preview', {
         provider: 'openai',
         model_name: 'gpt-6-preview',
         display_name: 'gpt-6-preview',
-        default_params: {
-          temperature: 0.7,
-          max_tokens: DEFAULT_MAX_TOKENS,
-          top_p: 1,
-        },
+        default_params: { temperature: 0.7, max_tokens: DEFAULT_MAX_TOKENS, top_p: 1 },
       })
     })
   })
 
-  it('拉取添加：远端下发上限事实 → context_window 与 max_tokens 按事实写入', async () => {
+  it('远端下发上限事实：context_window 与 max_tokens 按事实写入（不覆盖为默认值）', async () => {
     await renderLoaded()
-    mockGetRemoteModels.mockResolvedValue({
+    fireEvent.click(screen.getByRole('button', { name: 'OpenAI' }))
+    mock.getRemoteModels.mockResolvedValue({
       provider: 'openai',
       models: [
-        {
-          id: 'glm-5.2',
-          owned_by: 'z-ai',
-          context_window: 1000000,
-          max_output_tokens: 128000,
-        },
+        { id: 'glm-5.2', owned_by: 'z-ai', context_window: 1000000, max_output_tokens: 128000 },
       ],
     })
-    mockAddModel.mockResolvedValue({
-      models: { ...sampleLLMConfig.models },
-      added_ids: ['glm-5.2'],
-    })
+    mock.addModel.mockResolvedValue({ models: sampleLLMConfig.models, added_ids: ['glm-5.2'] })
 
-    const masked = screen.getByText('Key: sk-1********abcd')
-    const card = masked.closest('div[class*="space-y-2"]') as HTMLElement
-    fireEvent.click(within(card).getByRole('button', { name: /拉取模型/ }))
-    await waitFor(() => {
-      expect(screen.getByText('glm-5.2')).toBeInTheDocument()
-    })
+    const panel = modelSection()
+    fireEvent.click(within(panel).getByRole('button', { name: /拉取模型列表/ }))
+    await waitFor(() => expect(within(panel).getByText('glm-5.2')).toBeInTheDocument())
+    fireEvent.click(within(panel).getByText('glm-5.2'))
+    fireEvent.click(within(panel).getByRole('button', { name: /添加模型/ }))
 
-    fireEvent.click(screen.getByText('glm-5.2'))
-    fireEvent.click(screen.getByRole('button', { name: /添加所选/ }))
-
-    await waitFor(() => {
-      expect(mockAddModel).toHaveBeenCalledWith('glm-5.2', {
+    await waitFor(() =>
+      expect(mock.addModel).toHaveBeenCalledWith('glm-5.2', {
         provider: 'openai',
         model_name: 'glm-5.2',
         display_name: 'glm-5.2',
         context_window: 1000000,
-        default_params: {
-          temperature: 0.7,
-          max_tokens: 128000,
-          top_p: 1,
-        },
-      })
-    })
-  })
-
-  it('模型 Tab：每模型完整设置（上下文/采样/think 参数）→ updateModel 合并保留原字段', async () => {
-    await renderLoaded()
-    fireEvent.click(screen.getByRole('tab', { name: '模型' }))
-    await waitFor(() => {
-      expect(screen.getByText('默认模型')).toBeInTheDocument()
-    })
-
-    // 展开参数面板（添加表单也挂了同一编辑器，查询须限定在模型行面板内）
-    fireEvent.click(screen.getByRole('button', { name: /参数/ }))
-    const panel = screen.getByRole('button', { name: /参数/ }).closest('div.bg-card') as HTMLElement
-
-    // 上下文窗口（样例模型未设置 → 空输入，填入值）
-    const ctxInput = within(panel).getByPlaceholderText('未设置')
-    fireEvent.change(ctxInput, { target: { value: '1000000' } })
-
-    // 采样参数：temperature 0.5 → 0.9
-    fireEvent.change(within(panel).getByDisplayValue('0.5'), { target: { value: '0.9' } })
-
-    // think 参数：思考模式/推理力度（原生 select）
-    fireEvent.change(within(panel).getByLabelText('思考模式'), { target: { value: 'enabled' } })
-    fireEvent.change(within(panel).getByLabelText('推理力度'), { target: { value: 'high' } })
-
-    // 自定义参数：字符串 + 数字（类型自动解析）
-    fireEvent.change(within(panel).getByLabelText('自定义参数名'), { target: { value: 'service_tier' } })
-    fireEvent.change(within(panel).getByLabelText('自定义参数值'), { target: { value: 'auto' } })
-    fireEvent.click(within(panel).getByRole('button', { name: '加入' }))
-    fireEvent.change(within(panel).getByLabelText('自定义参数名'), { target: { value: 'top_k' } })
-    fireEvent.change(within(panel).getByLabelText('自定义参数值'), { target: { value: '50' } })
-    fireEvent.keyDown(within(panel).getByLabelText('自定义参数值'), { key: 'Enter' })
-    // chip 可见（字符串与数字各一条）
-    expect(screen.getByText(/service_tier=auto/)).toBeInTheDocument()
-    expect(screen.getByText(/top_k=50/)).toBeInTheDocument()
-
-    mockUpdateModel.mockResolvedValue({ models: { ...sampleLLMConfig.models } })
-    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
-
-    await waitFor(() => {
-      expect(mockUpdateModel).toHaveBeenCalledWith('deepseek-v4-flash', {
-        context_window: 1000000,
-        reasoning_model: false,
-        default_params: {
-          temperature: 0.9,
-          max_tokens: 100000,
-          top_p: 1,
-          thinking: { type: 'enabled' },
-          reasoning_effort: 'high',
-          service_tier: 'auto',
-          top_k: 50,
-        },
-      })
-    })
-  })
-
-  it('手动添加模型：模型名称即身份，参数随添加一并提交，自动改名时提示最终 ID', async () => {
-    await renderLoaded()
-    fireEvent.click(screen.getByRole('tab', { name: '模型' }))
-    const addSection = (await waitFor(() =>
-      screen.getByRole('heading', { name: '添加模型' }).closest('section'),
-    )) as HTMLElement
-
-    // 填模型名称 + 选提供商（样例配置已有 deepseek 提供商下的同名模型 →
-    // 后端按 added_ids 回报自动改名结果）
-    fireEvent.change(
-      within(addSection).getByPlaceholderText(/作为模型 ID 与调用名/),
-      { target: { value: 'deepseek-v4-flash' } },
+        default_params: { temperature: 0.7, max_tokens: 128000, top_p: 1 },
+      }),
     )
-    fireEvent.click(within(addSection).getByRole('button', { name: 'openai' }))
+  })
 
-    // 参数随添加直接填写：默认思考模式 + 多模态图片
-    fireEvent.change(within(addSection).getByLabelText('思考模式'), {
-      target: { value: 'enabled' },
-    })
-    fireEvent.click(within(addSection).getByLabelText('图片'))
+  it('已注册模型逐行条目：两个模型两行（显示名 + provider/模型名）', async () => {
+    await renderLoaded()
+    const registry = registrySection()
+    expect(within(registry).getByText('DeepSeek V4 Flash')).toBeInTheDocument()
+    expect(within(registry).getByText('GPT-5.1')).toBeInTheDocument()
+    expect(within(registry).getByText('deepseek / deepseek-v4-flash')).toBeInTheDocument()
+    expect(within(registry).getByText('openai / gpt-5.1')).toBeInTheDocument()
+    // 逐行条目各带「参数」「删除」操作（提供商段的删除按钮不在该段内）
+    expect(within(registry).getAllByRole('button', { name: /参数/ })).toHaveLength(2)
+    expect(within(registry).getAllByRole('button', { name: '删除' })).toHaveLength(2)
+  })
 
-    mockAddModel.mockResolvedValue({
-      models: {
-        ...sampleLLMConfig.models,
-        'deepseek-v4-flash-openai': {
-          provider: 'openai',
-          model_name: 'deepseek-v4-flash',
-          display_name: '',
-        },
-      },
-      added_ids: ['deepseek-v4-flash-openai'],
-    })
-    fireEvent.click(within(addSection).getByRole('button', { name: '添加模型' }))
+  it('tier 区只留选择栏位与当前值：不展示已注册模型清单条目', async () => {
+    await renderLoaded()
+    const tier = tierSection()
+    // 大/中/小三个档位栏位 + 对话/向量用途
+    expect(within(tier).getByText('大模型')).toBeInTheDocument()
+    expect(within(tier).getByText('中模型')).toBeInTheDocument()
+    expect(within(tier).getByText('小模型')).toBeInTheDocument()
+    expect(within(tier).getByText('默认对话模型')).toBeInTheDocument()
+    expect(within(tier).getByText('默认向量模型')).toBeInTheDocument()
+    // 模型清单条目（显示名 / provider 行 / 参数按钮）不在 tier 区内
+    expect(within(tier).queryByText('DeepSeek V4 Flash')).not.toBeInTheDocument()
+    expect(within(tier).queryByText('openai / gpt-5.1')).not.toBeInTheDocument()
+    expect(within(tier).queryByRole('button', { name: /参数/ })).not.toBeInTheDocument()
+    expect(within(tier).queryByText(/已注册模型/)).not.toBeInTheDocument()
+  })
 
-    await waitFor(() => {
-      expect(mockAddModel).toHaveBeenCalledWith('deepseek-v4-flash', {
-        provider: 'openai',
-        model_name: 'deepseek-v4-flash',
-        display_name: '',
-        reasoning_model: false,
-        default_params: {
-          temperature: 0.7,
-          max_tokens: DEFAULT_MAX_TOKENS,
-          top_p: 1,
-          thinking: { type: 'enabled' },
-        },
-        multimodal: {
-          supports_image: true,
-          supported_image_types: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
-          max_image_size: 20 * 1024 * 1024,
-        },
-      })
+  it('tier 区改档位后保存 → saveDefaults 带上新的 tiers', async () => {
+    await renderLoaded()
+    const tier = tierSection()
+    // 「中模型」栏位行内选择已注册模型（样例初始只设了 large）
+    const mediumRow = within(tier)
+      .getByText('中模型')
+      .closest('div[class*="flex-col"]') as HTMLElement
+    fireEvent.click(within(mediumRow).getByRole('button', { name: 'deepseek-v4-flash' }))
+    mock.saveDefaults.mockResolvedValue({
+      chat: 'deepseek-v4-flash',
+      embedding: '',
+      tiers: { large: 'gpt-5.1', medium: 'deepseek-v4-flash' },
     })
-    await waitFor(() => {
-      expect(toast.success).toHaveBeenCalled()
-    })
+    fireEvent.click(screen.getByRole('button', { name: '保存默认模型' }))
+
+    await waitFor(() =>
+      expect(mock.saveDefaults).toHaveBeenCalledWith({
+        chat: 'deepseek-v4-flash',
+        embedding: '',
+        tiers: { large: 'gpt-5.1', medium: 'deepseek-v4-flash' },
+      }),
+    )
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('默认模型已保存'))
   })
 })

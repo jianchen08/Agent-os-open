@@ -60,6 +60,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # ── 源码登记点（路由面/常量组搬移时同刀改这里）──────────────────────
 SERVER_RS = ROOT / "kernel" / "crates" / "api" / "src" / "server.rs"
+AUTH_SURFACE_RS = ROOT / "kernel" / "crates" / "api" / "src" / "server" / "auth_surface.rs"
 DISPATCHER_RS = ROOT / "kernel" / "crates" / "api" / "src" / "http_dispatcher.rs"
 OUT_PATH = ROOT / "docs" / "api" / "openapi.yaml"
 
@@ -241,21 +242,21 @@ def parse_routes(src: str, source_name: str) -> list[Route]:
         rest = after[close:]
 
 
-AUTH_CONST_RE_TMPL = r"pub const {name}\s*:[^=]*=\s*&\[(?P<body>.*?)\]"
+AUTH_CONST_RE_TMPL = r"pub(?:\(\w+\))? const {name}\s*:[^=]*=\s*&\[(?P<body>.*?)\]"
 AUTH_ENTRY_RE = re.compile(r'"([^"]+)"')
 
 
-def parse_auth_lists(server_src: str) -> dict[str, list[str]]:
-    """解析 P-2 鉴权面五常量（server.rs 单一真值源）。
+def parse_auth_lists(server_src: str, auth_surface_src: str = "") -> dict[str, list[str]]:
+    """解析 P-2 鉴权面五常量（server.rs + server/auth_surface.rs 双源拼接抽取）。
 
     缺任一常量/空清单即 fail-closed——security 分类不允许退化为拍脑袋。
     """
-    body = _strip_tests(server_src)
+    body = _strip_tests(server_src) + _strip_tests(auth_surface_src)
     lists: dict[str, list[str]] = {}
     for name in AUTH_CONSTS:
         m = re.search(AUTH_CONST_RE_TMPL.format(name=name), body, re.S)
         if not m:
-            raise DriftGateError(f"server.rs 抽不到 {name} 声明——常量改名/搬移须同刀更新本脚本")
+            raise DriftGateError(f"server.rs/auth_surface.rs 抽不到 {name} 声明——常量改名/搬移须同刀更新本脚本")
         entries = AUTH_ENTRY_RE.findall(m.group("body"))
         if not entries:
             raise DriftGateError(f"{name} 清单为空——与 P-2 常量组现状不符，拒绝生成")
@@ -493,9 +494,15 @@ def _emit(value: object, lines: list[str], indent: int) -> None:
 
 
 # ── 汇总入口 ─────────────────────────────────────────────────────────
-def generate(server_src: str, dispatcher_src: str, *, min_routes: int = MIN_ROUTE_COUNT) -> str:
+def generate(
+    server_src: str,
+    dispatcher_src: str,
+    auth_surface_src: str = "",
+    *,
+    min_routes: int = MIN_ROUTE_COUNT,
+) -> str:
     routes = parse_routes(server_src, "server.rs") + parse_routes(dispatcher_src, "http_dispatcher.rs")
-    lists = parse_auth_lists(server_src)
+    lists = parse_auth_lists(server_src, auth_surface_src)
     violations = reconcile(routes, lists, min_routes)
     if violations:
         raise DriftGateError("；".join(violations))
@@ -538,13 +545,15 @@ def _stats(fresh: str) -> str:
 def run_generate(
     server_rs: Path = SERVER_RS,
     dispatcher_rs: Path = DISPATCHER_RS,
+    auth_surface_rs: Path = AUTH_SURFACE_RS,
     out_path: Path = OUT_PATH,
     min_routes: int = MIN_ROUTE_COUNT,
 ) -> int:
     try:
         server_src = server_rs.read_text(encoding="utf-8")
         dispatcher_src = dispatcher_rs.read_text(encoding="utf-8")
-        fresh = generate(server_src, dispatcher_src, min_routes=min_routes)
+        auth_surface_src = auth_surface_rs.read_text(encoding="utf-8")
+        fresh = generate(server_src, dispatcher_src, auth_surface_src, min_routes=min_routes)
     except (OSError, DriftGateError) as e:
         print(f"[openapi-drift] FAIL: {e}")
         return 1
@@ -557,13 +566,15 @@ def run_generate(
 def run_check(
     server_rs: Path = SERVER_RS,
     dispatcher_rs: Path = DISPATCHER_RS,
+    auth_surface_rs: Path = AUTH_SURFACE_RS,
     out_path: Path = OUT_PATH,
     min_routes: int = MIN_ROUTE_COUNT,
 ) -> int:
     try:
         server_src = server_rs.read_text(encoding="utf-8")
         dispatcher_src = dispatcher_rs.read_text(encoding="utf-8")
-        fresh = generate(server_src, dispatcher_src, min_routes=min_routes)
+        auth_surface_src = auth_surface_rs.read_text(encoding="utf-8")
+        fresh = generate(server_src, dispatcher_src, auth_surface_src, min_routes=min_routes)
     except (OSError, DriftGateError) as e:
         print(f"[openapi-drift] FAIL: {e}")
         return 1

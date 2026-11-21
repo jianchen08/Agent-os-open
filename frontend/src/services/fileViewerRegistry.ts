@@ -49,8 +49,40 @@ const BUILTIN_VIEWERS: FileViewerDeclaration[] = [
   {
     id: 'image_viewer',
     label: '图片查看器',
-    extensions: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp'],
+    // .svg 走同一图片查看器：浏览器原生可渲染（矢量按 viewBox 缩放），
+    // 不必单列一个查看器类型（与 FilePreview.IMAGE_EXTENSIONS 同集合）
+    extensions: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.svg'],
     render: { widget: 'image_preview' },
+  },
+  {
+    id: 'markdown_viewer',
+    label: 'Markdown 预览',
+    // .md 之前落默认文本编辑器（只显示源码）；渲染态预览单列，语法高亮源码
+    // 仍可从查看器内切换（FilePreview markdown 分支同时给「原文」入口）
+    extensions: ['.md', '.markdown'],
+    render: { widget: 'markdown_preview' },
+  },
+  {
+    id: 'media_viewer',
+    label: '音视频播放',
+    // 浏览器原生 <video>/<audio>；取流走 workspace file-content 的原始字节面
+    // （FilePreview 拼同一 URL，不走文本解码）
+    extensions: ['.mp4', '.webm', '.mov', '.m4v', '.mp3', '.wav', '.ogg', '.m4a', '.flac'],
+    render: { widget: 'media_preview' },
+  },
+  {
+    id: 'binary_viewer',
+    label: '二进制文件提示',
+    // 冷门/不可渲染类型（压缩包、可执行、字体…）：明确提示「不支持预览」+
+    // 下载 / 外部打开，不塞进文本编辑器吐出乱码（本轮之前 .zip 落 code_editor
+    // 会显示一屏替换字符）
+    extensions: [
+      '.zip', '.rar', '.7z', '.gz', '.tar', '.bz2', '.xz',
+      '.exe', '.msi', '.dll', '.so', '.dylib', '.bin', '.iso', '.dmg', '.apk',
+      '.woff', '.woff2', '.ttf', '.otf', '.eot',
+      '.db', '.sqlite', '.sqlite3', '.pyc', '.class', '.jar',
+    ],
+    render: { widget: 'binary_notice' },
   },
   {
     id: 'pdf_viewer',
@@ -63,6 +95,26 @@ const BUILTIN_VIEWERS: FileViewerDeclaration[] = [
     label: 'HTML 预览',
     extensions: ['.html', '.htm'],
     render: { widget: 'html_preview' },
+  },
+  // 文档查看器（任务现场批 5）：PDF/Word/PPT 走统一「文档查看器」渲染件
+  // （pdfjs-dist / docx-preview / pptx-preview 接入 + 批注层），渲染件本体在
+  // components/workspace/docViewer/DocumentViewer.tsx，装配层按 widget 名分派。
+  // 声明化保留：插件后续可声明同名扩展覆盖（路由优先级 插件 > 内置）。
+  {
+    id: 'document_viewer',
+    label: '文档查看器（可批注）',
+    extensions: ['.pdf', '.docx', '.pptx'],
+    render: { widget: 'document_viewer' },
+  },
+  // Excel 查看器（选型接入，真值 = docs/working/971600b7ff1e_查看器选型与双链方案.md
+  // §1.2 Excel 节）：解析 @e965/xlsx（Apache-2.0，SheetJS 社区镜像——官方 npm
+  // `xlsx` 停更 4 年不采用）+ FilePreview 自绘只读表格（前 N 行）。.xlsb 未声明
+  // （BIFF 二进制变体 @e965/xlsx 支持度弱，宁缺勿滥落默认文本编辑器）。
+  {
+    id: 'excel_viewer',
+    label: 'Excel 预览',
+    extensions: ['.xlsx', '.xlsm', '.xls'],
+    render: { widget: 'excel_preview' },
   },
 ]
 

@@ -31,7 +31,6 @@ for _d in [_DIR, _SHARED]:
         sys.path.insert(0, str(_d))
 
 import mode_keys  # noqa: E402
-
 from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
 
 # 出厂根真实包（真依赖）：mode_personal 声明 pim 单工具
@@ -91,6 +90,25 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AGENTOS_USER_PLUGINS_DIR", str(user_root / "plugins"))
     monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
     return user_root
+
+
+def _seed_external_tool_package(
+    user_root: Path, mode: str, tool_ids: Any
+) -> Path:
+    """用户层假模式包：mode.yaml 只声明 inject_tool_ids（外部工具注入面）。"""
+    pkg = user_root / "plugins" / "modes" / f"mode_{mode}"
+    pkg.mkdir(parents=True)
+    (pkg / "plugin.json").write_text(
+        json.dumps({"id": f"mode_{mode}", "capabilities": {"tools": []}}),
+        encoding="utf-8",
+    )
+    if isinstance(tool_ids, str):
+        body = f"mode: {mode}\nname: 假包\ninject_tool_ids: {tool_ids}\n"
+    else:
+        entries = "".join(f"  - {json.dumps(item)}\n" for item in tool_ids)
+        body = f"mode: {mode}\nname: 假包\ninject_tool_ids:\n{entries}"
+    (pkg / "mode.yaml").write_text(body, encoding="utf-8")
+    return pkg
 
 
 def _isolated_factory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -356,3 +374,130 @@ class TestDeclarationFace:
         assert aliased.state_updates["tool_ids.mode_source"] == {
             MODE_TOOL_NAME: MODE_PKG_ID,
         }
+
+
+class TestTaskModeTagInjection:
+    """任务模式标签注入（ADR 2026-11-11 D2）：激活模式的 inject_tool_ids 在
+    **任务管道**也并入；模式包 capabilities.tools 的 lineage 守卫不变。"""
+
+    def test_task_pipeline_injects_external_tool_of_active_mode(
+        self, env: Path, factory_root: Path
+    ) -> None:
+        calls: list[tuple[str, dict]] = []
+        plugin = _plugin_with(_caller_with({"plugin_verify"}, calls))
+        _write_agent_yaml(env, "executor", "tool_ids: [file_read]")
+
+        res = _run(plugin.execute(_ctx({
+            "agent.id": "executor",
+            "lineage.parent_pipeline_id": "pipe-parent",
+            "task.id": "pipe-child",
+            "execution_context": {"mode": ["evolution"]},
+        })))
+
+        assert res.state_updates["tool_ids"] == ["file_read", "plugin_verify"]
+        assert res.state_updates["tool_ids.mode_source"] == {
+            "plugin_verify": "mode_evolution",
+        }
+        assert calls == [("schemas", {"tool_ids": ["plugin_verify"]})]
+
+    def test_task_pipeline_capabilities_guard_still_holds(
+        self, env: Path, factory_root: Path
+    ) -> None:
+        """任务管道仍不并入模式包 capabilities.tools（pim 零探针零并入）。"""
+        calls: list[tuple[str, dict]] = []
+        plugin = _plugin_with(_caller_with({MODE_TOOL_NAME}, calls))
+        _write_agent_yaml(env, "executor", "tool_ids: [file_read]")
+
+        res = _run(plugin.execute(_ctx({
+            "agent.id": "executor",
+            "lineage.parent_pipeline_id": "pipe-parent",
+            "task.id": "pipe-child",
+            "execution_context": {"mode": ["personal"]},
+        })))
+
+        assert res.state_updates["tool_ids"] == ["file_read"]
+        assert "tool_ids.mode_source" not in res.state_updates
+        assert calls == []
+
+    def test_multitag_primary_is_last_tag(
+        self, env: Path, factory_root: Path
+    ) -> None:
+        """标签集主标签 = 末元素（最新激活优先），按主标签包取 inject_tool_ids。"""
+        _seed_external_tool_package(env, "zeta", ["zeta_tool"])
+        plugin = _plugin_with(_caller_with({"zeta_tool"}))
+        _write_agent_yaml(env, "executor", "tool_ids: [file_read]")
+
+        res = _run(plugin.execute(_ctx({
+            "agent.id": "executor",
+            "lineage.parent_pipeline_id": "pipe-parent",
+            "execution_context": {"mode": ["evolution", "zeta"]},
+        })))
+
+        assert res.state_updates["tool_ids"] == ["file_read", "zeta_tool"]
+        assert res.state_updates["tool_ids.mode_source"] == {"zeta_tool": "mode_zeta"}
+
+    def test_live_registry_miss_skips_task_injection(
+        self, env: Path, factory_root: Path
+    ) -> None:
+        """活注册表不命中（插件未装载/G2 遮挡）→ 不并入，权限面不放宽。"""
+        plugin = _plugin_with(_caller_with(set()))
+        _write_agent_yaml(env, "executor", "tool_ids: [file_read]")
+
+        res = _run(plugin.execute(_ctx({
+            "agent.id": "executor",
+            "lineage.parent_pipeline_id": "pipe-parent",
+            "execution_context": {"mode": ["evolution"]},
+        })))
+
+        assert res.state_updates["tool_ids"] == ["file_read"]
+        assert "tool_ids.mode_source" not in res.state_updates
+
+
+class TestModeKeysHelpers:
+    """mode_keys 模式标签/外部工具声明解析的形态闸（单点语义）。"""
+
+    def test_primary_mode_tag_forms(self) -> None:
+        assert mode_keys.primary_mode_tag(["coding", " evolution "]) == "evolution"
+        assert mode_keys.primary_mode_tag(" coding ") == "coding"
+        assert mode_keys.primary_mode_tag(["", "  "]) == ""
+        assert mode_keys.primary_mode_tag(None) == ""
+        assert mode_keys.primary_mode_tag({"mode": "x"}) == ""
+
+    def test_resolve_active_mode_priority_and_package_gate(self) -> None:
+        assert mode_keys.resolve_active_mode(
+            {"execution_context": {"mode": ["evolution"]}}
+        ) == "evolution"
+        assert mode_keys.resolve_active_mode({"mode": "coding"}) == "coding"
+        assert mode_keys.resolve_active_mode(
+            {"agent.id": "mode_research/research_agent"}
+        ) == "research"
+        # 包不存在 → 不派生（防凭空键伪造）
+        assert mode_keys.resolve_active_mode({"agent.id": "mode_nope/x"}) == ""
+        assert mode_keys.resolve_active_mode({"agent.id": "plain_agent"}) == ""
+
+    def test_collect_inject_tool_ids_shape_guard(
+        self, env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _isolated_factory(monkeypatch, tmp_path)
+        assert mode_keys.collect_mode_inject_tool_ids("../evil") == {}
+        assert mode_keys.collect_mode_inject_tool_ids("") == {}
+        assert mode_keys.collect_mode_inject_tool_ids("missing") == {}
+
+        # 未声明 / 非列表 = 零贡献
+        _seed_external_tool_package(env, "scalar", "single_tool")
+        assert mode_keys.collect_mode_inject_tool_ids("scalar") == {}
+
+        # 合法条目收、非法条目跳过
+        _seed_external_tool_package(env, "mixed", ["ok_tool", "bad name", 3])
+        assert mode_keys.collect_mode_inject_tool_ids("mixed") == {
+            "ok_tool": "mode_mixed",
+        }
+
+        # mode.yaml 读失败（目录占位）→ 零贡献
+        broken = env / "plugins" / "modes" / "mode_broken"
+        broken.mkdir(parents=True)
+        (broken / "plugin.json").write_text(
+            json.dumps({"id": "mode_broken"}), encoding="utf-8"
+        )
+        (broken / "mode.yaml").mkdir()
+        assert mode_keys.collect_mode_inject_tool_ids("broken") == {}

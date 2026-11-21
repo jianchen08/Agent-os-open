@@ -129,6 +129,8 @@ function installVoiceTestEnv() {
   beforeEach(() => {
     vi.useFakeTimers()
     mockTranscribe.mockReset()
+    FakeRecognition.lastInstance = undefined
+    FakeMediaRecorder.lastInstance = undefined
     installSpeechEnv(vi.fn(async () => makeStream()))
   })
   afterEach(() => {
@@ -148,7 +150,7 @@ async function startRecognition(options: UseVoiceInputOptions = {}) {
 
 /** 启动录音并注入识别错误触发服务端 ASR 降级（默认 network），推进 timers 使切型稳定 */
 async function fallbackToServerAsr(options: UseVoiceInputOptions = {}, errorCode = 'network') {
-  const started = await startRecognition(options)
+  const started = await startRecognition({ preferBrowser: true, ...options })
   await act(async () => {
     started.instance.onerror?.({ error: errorCode, message: '' } as SpeechRecognitionErrorEvent)
     await vi.advanceTimersByTimeAsync(0)
@@ -167,15 +169,17 @@ async function stopRecordingAndAwaitTranscribe(result: LatestHook) {
 /** 错误路径族共用：挂载带 onError 的 hook 并启动录音，返回可断言三元组 */
 async function startRecordingWithErrorHook() {
   const onError = vi.fn()
-  const started = await startRecognition({ onError })
+  const started = await startRecognition({ preferBrowser: true, onError })
   return { onError, ...started }
 }
 
-describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
+describe('useVoiceInput: 浏览器 SpeechRecognition 模式（preferBrowser=true）', () => {
   installVoiceTestEnv()
 
   it('启动：lang/continuous/interimResults 正确下发，进入 recording，计时器走秒', async () => {
-    const { result } = renderHook(() => useVoiceInput({ language: 'en-US', continuous: false }))
+    const { result } = renderHook(() =>
+      useVoiceInput({ language: 'en-US', continuous: false, preferBrowser: true }),
+    )
     expect(result.current.isSupported).toBe(true)
     await act(async () => {
       await result.current.startRecording()
@@ -192,7 +196,11 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
   it('中间结果实时上屏回调；最终结果确认回调并更新 transcript', async () => {
     const onInterimResult = vi.fn()
     const onTranscriptionComplete = vi.fn()
-    const { result, instance } = await startRecognition({ onInterimResult, onTranscriptionComplete })
+    const { result, instance } = await startRecognition({
+      preferBrowser: true,
+      onInterimResult,
+      onTranscriptionComplete,
+    })
     expect(instance).toBeDefined()
     act(() => {
       instance.onresult?.(makeResultEvent([{ isFinal: false, transcript: '你好' }]))
@@ -236,7 +244,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
     const onError = vi.fn()
     const getUserMedia = vi.fn(async () => makeStream())
     installSpeechEnv(getUserMedia)
-    const { result, instance } = await startRecognition({ onError })
+    const { result, instance } = await startRecognition({ preferBrowser: true, onError })
     act(() => result.current.stopRecording())
     expect(result.current.state).toBe('idle')
     act(() => {
@@ -247,7 +255,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
   })
 
   it('连续模式 onend 且非手动停止 → 自动重启识别', async () => {
-    const { result, instance } = await startRecognition({ continuous: true })
+    const { result, instance } = await startRecognition({ preferBrowser: true, continuous: true })
     const startCallsBefore = instance.start.mock.calls.length
     act(() => instance.onend?.())
     expect(instance.start.mock.calls.length).toBe(startCallsBefore + 1)
@@ -297,6 +305,28 @@ describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => 
     expect(mockTranscribe).toHaveBeenCalledTimes(1)
     expect(onTranscriptionComplete).toHaveBeenCalledWith('你好世界')
     expect(result.current.state).toBe('idle')
+  })
+
+  it('上传前转 WAV：AudioContext 可用时 transcribeAudio 收到 audio/wav', async () => {
+    mockTranscribe.mockResolvedValue({ text: 'ok' })
+    class FakeAudioContext {
+      decodeAudioData = vi.fn(async () => ({
+        sampleRate: 16000,
+        numberOfChannels: 1,
+        getChannelData: () => new Float32Array(160),
+      }))
+      close = vi.fn(async () => {})
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { result } = await fallbackToServerAsr()
+    const recorder = lastRecorder()
+    act(() => {
+      recorder.ondataavailable?.({ data: new Blob(['x'], { type: 'audio/webm' }) })
+    })
+    await stopRecordingAndAwaitTranscribe(result)
+    const [blob, mime] = mockTranscribe.mock.calls[0] as [Blob, string]
+    expect(mime).toBe('audio/wav')
+    expect(blob.type).toBe('audio/wav')
   })
 
   it('后端 ASR 未配置（空 text）→ not_supported 友好提示', async () => {
@@ -391,7 +421,7 @@ describe('useVoiceInput: 卸载清理', () => {
   installVoiceTestEnv()
 
   it('卸载时停止识别（资源清理；state 不再更新属卸载后语义）', async () => {
-    const { unmount, instance } = await startRecognition()
+    const { unmount, instance } = await startRecognition({ preferBrowser: true })
     unmount()
     expect(instance.stop).toHaveBeenCalled()
   })
@@ -437,3 +467,264 @@ describe('useVoiceInput: 错误映射补遗（audio-capture / 未知错误码 / 
     expect(result.current.state).toBe('idle')
   })
 })
+
+describe('useVoiceInput: 默认服务端 ASR 直录通道（preferBrowser=false）', () => {
+  installVoiceTestEnv()
+
+  it('startRecording 默认不启动浏览器识别：直接 getUserMedia，且设备就绪前已进入录音态', async () => {
+    const getUserMedia = vi.fn(async () => makeStream())
+    installSpeechEnv(getUserMedia)
+    const { result } = renderHook(() => useVoiceInput())
+
+    let started!: Promise<void>
+    act(() => {
+      started = result.current.startRecording()
+    })
+    // 起录即时反馈：不等 getUserMedia 完成就亮录音态（横幅可见）
+    expect(result.current.state).toBe('recording')
+
+    await act(async () => {
+      await started
+    })
+    expect(FakeRecognition.lastInstance).toBeUndefined()
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true })
+    expect(result.current.mode).toBe('server-asr')
+    expect(lastRecorder()).toBeDefined()
+  })
+
+  it('startServerASR：停止后上传转写，成功回调最终文字', async () => {
+    mockTranscribe.mockResolvedValue({ text: '桌面直录' })
+    const onTranscriptionComplete = vi.fn()
+    const { result } = renderHook(() => useVoiceInput({ onTranscriptionComplete }))
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    expect(result.current.mode).toBe('server-asr')
+    expect(result.current.isRecording).toBe(true)
+
+    const recorder = lastRecorder()
+    act(() => {
+      recorder.ondataavailable?.({ data: new Blob(['x'], { type: 'audio/webm' }) })
+    })
+    await stopRecordingAndAwaitTranscribe(result)
+
+    expect(mockTranscribe).toHaveBeenCalledTimes(1)
+    expect(onTranscriptionComplete).toHaveBeenCalledWith('桌面直录')
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('startServerASR：后端 ASR 未配置（空 text）→ not_supported 配置引导', async () => {
+    mockTranscribe.mockResolvedValue({ text: '' })
+    const onError = vi.fn()
+    const { result } = renderHook(() => useVoiceInput({ onError }))
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    await stopRecordingAndAwaitTranscribe(result)
+    expect(onError).toHaveBeenCalledWith({
+      type: 'not_supported',
+      message: '未配置语音转文字服务，请在 设置 → 插件配置 → 语音转写（ASR）中配置',
+    })
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('getUserMedia 失败：立即复位到 idle 并上报权限错误（起录反馈不残留）', async () => {
+    installSpeechEnv(vi.fn(async () => {
+      throw new Error('denied')
+    }))
+    const onError = vi.fn()
+    const { result } = renderHook(() => useVoiceInput({ onError }))
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    expect(result.current.state).toBe('idle')
+    expect(result.current.isRecording).toBe(false)
+    expect(onError).toHaveBeenCalledWith({
+      type: 'permission_denied',
+      message: '无法访问麦克风，请检查权限设置',
+    })
+  })
+
+  it('起录在途被停止：不进入录音，设备流被释放', async () => {
+    let resolveStream!: (stream: MediaStream) => void
+    const trackStop = vi.fn()
+    installSpeechEnv(vi.fn(() => new Promise<MediaStream>((resolve) => {
+      resolveStream = resolve
+    })))
+    const { result } = renderHook(() => useVoiceInput())
+
+    let started!: Promise<void>
+    act(() => {
+      started = result.current.startServerASR()
+    })
+    expect(result.current.state).toBe('recording')
+
+    await act(async () => {
+      result.current.stopRecording()
+      resolveStream({ getTracks: () => [{ stop: trackStop }] } as unknown as MediaStream)
+      await started
+    })
+    expect(trackStop).toHaveBeenCalled()
+    expect(FakeMediaRecorder.lastInstance).toBeUndefined()
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('录音上限：60s 到点自动停止并走转写流程', async () => {
+    mockTranscribe.mockResolvedValue({ text: '到点了' })
+    const onTranscriptionComplete = vi.fn()
+    const { result } = renderHook(() => useVoiceInput({ onTranscriptionComplete }))
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    act(() => {
+      lastRecorder().ondataavailable?.({ data: new Blob(['x'], { type: 'audio/webm' }) })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(59_000)
+    })
+    expect(mockTranscribe).not.toHaveBeenCalled()
+    expect(result.current.recordingDuration).toBe(59)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(mockTranscribe).toHaveBeenCalledTimes(1)
+    expect(onTranscriptionComplete).toHaveBeenCalledWith('到点了')
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('录音上限可配置：maxDurationSeconds=2 时 2s 即停止', async () => {
+    mockTranscribe.mockResolvedValue({ text: '短上限' })
+    const onTranscriptionComplete = vi.fn()
+    const { result } = renderHook(() =>
+      useVoiceInput({ onTranscriptionComplete, maxDurationSeconds: 2 }),
+    )
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(mockTranscribe).not.toHaveBeenCalled()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(mockTranscribe).toHaveBeenCalledTimes(1)
+    expect(onTranscriptionComplete).toHaveBeenCalledWith('短上限')
+  })
+})
+
+describe('useVoiceInput: 取消录音', () => {
+  installVoiceTestEnv()
+
+  it('cancelRecording：丢弃音频——不转写、不落附件，且音频块不残留到下一次录音', async () => {
+    const onTranscriptionComplete = vi.fn()
+    const onRecordingComplete = vi.fn()
+    const { result } = renderHook(() =>
+      useVoiceInput({ onTranscriptionComplete, onRecordingComplete }),
+    )
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    act(() => {
+      lastRecorder().ondataavailable?.({ data: new Blob(['丢弃'], { type: 'audio/webm' }) })
+    })
+
+    await act(async () => {
+      result.current.cancelRecording()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(result.current.state).toBe('idle')
+    expect(mockTranscribe).not.toHaveBeenCalled()
+    expect(onTranscriptionComplete).not.toHaveBeenCalled()
+    expect(onRecordingComplete).not.toHaveBeenCalled()
+
+    // 取消已清空音频块：下一次录音无新数据时上传的是空 Blob（不夹带上一次的语音）
+    mockTranscribe.mockResolvedValue({ text: '' })
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    await stopRecordingAndAwaitTranscribe(result)
+    const uploaded = mockTranscribe.mock.calls[0][0] as Blob
+    expect(uploaded.size).toBe(0)
+  })
+
+  it('转写中取消：晚到的转写结果不回调', async () => {
+    let resolveTranscribe!: (value: { text: string }) => void
+    mockTranscribe.mockImplementation(
+      () =>
+        new Promise<{ text: string }>((resolve) => {
+          resolveTranscribe = resolve
+        }),
+    )
+    const onTranscriptionComplete = vi.fn()
+    const { result } = renderHook(() => useVoiceInput({ onTranscriptionComplete }))
+    await act(async () => {
+      await result.current.startServerASR()
+    })
+    await act(async () => {
+      result.current.stopRecording()
+    })
+    expect(result.current.isTranscribing).toBe(true)
+
+    await act(async () => {
+      result.current.cancelRecording()
+      resolveTranscribe({ text: '不该出现' })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(onTranscriptionComplete).not.toHaveBeenCalled()
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('音频模型（supportsAudio）取消：不回调附件', async () => {
+    const onRecordingComplete = vi.fn()
+    const { result } = renderHook(() => useVoiceInput({ supportsAudio: true, onRecordingComplete }))
+    await act(async () => {
+      await result.current.startRecording()
+    })
+    const recorder = lastRecorder()
+    act(() => {
+      recorder.ondataavailable?.({ data: new Blob(['x'], { type: 'audio/webm' }) })
+    })
+    await act(async () => {
+      result.current.cancelRecording()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(onRecordingComplete).not.toHaveBeenCalled()
+    expect(result.current.state).toBe('idle')
+  })
+})
+
+describe('useVoiceInput: isSupported 能力矩阵', () => {
+  installVoiceTestEnv()
+
+  it('无 SpeechRecognition + 有 MediaRecorder → true，入口默认走服务端 ASR', async () => {
+    removeSpeechEnv()
+    const getUserMedia = vi.fn(async () => makeStream())
+    vi.stubGlobal('MediaRecorder', FakeMediaRecorder)
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia },
+      configurable: true,
+    })
+    const { result } = renderHook(() => useVoiceInput())
+    expect(result.current.isSpeechRecognitionSupported).toBe(false)
+    expect(result.current.isMediaRecorderSupported).toBe(true)
+    expect(result.current.isSupported).toBe(true)
+
+    await act(async () => {
+      await result.current.startRecording()
+    })
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true })
+    expect(result.current.mode).toBe('server-asr')
+  })
+
+  it('既无 SpeechRecognition 也无 MediaRecorder → false', () => {
+    removeSpeechEnv()
+    const { result } = renderHook(() => useVoiceInput())
+    expect(result.current.isSpeechRecognitionSupported).toBe(false)
+    expect(result.current.isMediaRecorderSupported).toBe(false)
+    expect(result.current.isSupported).toBe(false)
+  })
+})
+

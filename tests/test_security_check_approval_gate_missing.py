@@ -94,7 +94,7 @@ def _make_plugin() -> SecurityCheckPlugin:
     mock_policy.execution = "host_direct"
     sc_mod._policy_loader.resolve = MagicMock(return_value=mock_policy)  # type: ignore[method-assign]
     p = SecurityCheckPlugin(config={"enabled": True, "rules": []})
-    p._dangerous_ops_by_tool = {"bash_execute": ["rm -rf"]}
+    p._dangerous_ops_by_tool = {"bash": ["rm -rf"]}
     return p
 
 
@@ -102,7 +102,7 @@ def _dangerous_ctx() -> PluginContext:
     return PluginContext(
         state={
             StateKeys.CORE_TYPE: "tool_execute",
-            StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "rm -rf /x"}}],
+            StateKeys.RAW_TOOL_CALLS: [{"name": "bash", "args": {"command": "rm -rf /x"}}],
             "messages": [],
         },
         config={},

@@ -1,0 +1,16 @@
+[project]
+name = "agentos-plugin-llm-provider-gateway"
+version = "0.1.0"
+description = "Lingxi AgentOS 0.2 plugin — llm_provider_gateway（LLM 网关 provider 插件：CLIProxyAPI 随插件分发 + 自包含拉起 + via=plugin 契约方）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    # 网关上游 HTTP 客户端（OpenAI 兼容 /v1/chat/completions + SSE）。
+    # 与 llm 插件 wire_client 同栈（共享 httpx 生态）。
+    "httpx>=0.27",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判例：acp_quota_pool/pyproject 同轨）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

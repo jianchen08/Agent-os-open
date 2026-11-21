@@ -6,11 +6,42 @@
 import ConfigProvider from '@lobehub/ui/es/ConfigProvider/index'
 import Markdown from '@lobehub/ui/es/Markdown/index'
 import { motion } from 'motion/react'
-import { useMemo, type FC, type MouseEvent, type ReactNode } from 'react'
+import {
+  createContext,
+  useContext,
+  useMemo,
+  type ComponentProps,
+  type FC,
+  type MouseEvent,
+  type ReactNode,
+} from 'react'
 import { AttachmentImage } from '@/components/shared/markdown/AttachmentImage'
-import { preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
+import { markdownUrlTransform, preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
 import { ContentCardGate, TaskListGate } from './contentCard/ContentCardGate'
 import './LobeChatMarkdown.css'
+
+/**
+ * 流式门上下文：pre 覆写必须是模块级稳定组件身份。
+ *
+ * react-markdown 按组件类型（引用）做元素协调，components.pre 若是每次渲染新造的
+ * 内联箭头函数，流式 token 到达即整棵代码块重挂：@lobehub/ui useHighlight 的高亮
+ * 状态随卸载清零，新内容（新缓存键）还要走异步高亮——每 token 一帧无高亮纯文本
+ * fallback，代码块肉眼可见闪烁。isStreaming 因此改由 context 下发。
+ */
+const MarkdownStreamingContext = createContext(false)
+
+/** 消息流 pre 门（稳定身份）：isStreaming 从 context 取，内容卡分发逻辑仍归 ContentCardGate */
+const MarkdownPreGate: FC<ComponentProps<'pre'>> = (preProps) => {
+  const isStreaming = useContext(MarkdownStreamingContext)
+  return <ContentCardGate {...preProps} isStreaming={isStreaming} />
+}
+
+/**
+ * react-markdown 覆写参数（模块级稳定对象）：@lobehub/ui 未传 urlTransform，
+ * 默认实现会把 preprocessSvgCodeBlocks 产出的 data URI 图片清空 → 消息流 SVG
+ * 代码块闭合即消失。放行策略见 shared.markdownUrlTransform。
+ */
+const MARKDOWN_REACT_PROPS = { urlTransform: markdownUrlTransform }
 
 interface LobeChatMarkdownProps {
   content: string
@@ -38,6 +69,23 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
     [content],
   )
 
+  // components 只在流式门翻转时换新（pre 恒为模块级 MarkdownPreGate）：
+  // 内容变化不改变组件身份，代码块不重挂
+  const markdownComponents = useMemo(
+    () => ({
+      img: AttachmentImage,
+      pre: MarkdownPreGate,
+      // task-list 块声明路由（2026-10-24 用户裁定：渲染归插件声明，
+      // 本组件只接通用 gate，零业务知识）；流式原样。
+      // 流式必须整键缺席而非值 undefined：react-markdown v10 组件解析
+      // 按键存在性取值（hast-util-to-jsx-runtime own.call 命中即用值），
+      // undefined 值会渲染成 undefined 组件 → React 错误码 130 整页崩
+      // （2026-10-25 装机实证：流式输出含列表消息必崩）。
+      ...(isStreaming ? {} : { ul: TaskListGate }),
+    }),
+    [isStreaming],
+  )
+
   /** 容器级链接点击委托：命中 onLinkClick 即阻止默认导航 */
   const handleContainerClick = (e: MouseEvent<HTMLDivElement>) => {
     if (!onLinkClick) return
@@ -61,31 +109,24 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
 
   return (
     <ConfigProvider motion={motion}>
-      <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick} onClick={handleContainerClick}>
+      <div className="lobe-chat-isolated" data-testid="message-markdown" onDoubleClick={onDoubleClick} onClick={handleContainerClick}>
         {children ?? (
-          <Markdown
-            variant="chat"
-            enableStream={false}
-            enableMermaid={true}
-            // 附件图片引用（![f](/uploads/x.png)）加载失败 → 显式失败卡
-            // （2026-09-08 附件解析失败显式化：前端要说明，禁无文字占位图）
-            // pre 覆写 = content_cards 分发门（ADR 2026-10-14-content-card-registry）：
-            // 按 fence language 查表换渲染，未命中/流式中回投默认代码块（现状原样）；
-            // isStreaming 经闭包携带（消息级流式门，§7）
-            components={{
-              img: AttachmentImage,
-              pre: (preProps) => <ContentCardGate {...preProps} isStreaming={isStreaming} />,
-              // task-list 块声明路由（2026-10-24 用户裁定：渲染归插件声明，
-              // 本组件只接通用 gate，零业务知识）；流式原样。
-              // 流式必须整键缺席而非值 undefined：react-markdown v10 组件解析
-              // 按键存在性取值（hast-util-to-jsx-runtime own.call 命中即用值），
-              // undefined 值会渲染成 undefined 组件 → React 错误码 130 整页崩
-              // （2026-10-25 装机实证：流式输出含列表消息必崩）。
-              ...(isStreaming ? {} : { ul: TaskListGate }),
-            }}
-          >
-            {processedContent}
-          </Markdown>
+          // 流式门下发经 context（不是闭包）：pre 组件身份恒定，代码块不随 token 重挂
+          <MarkdownStreamingContext.Provider value={isStreaming}>
+            <Markdown
+              variant="chat"
+              enableStream={false}
+              enableMermaid={true}
+              reactMarkdownProps={MARKDOWN_REACT_PROPS}
+              // 附件图片引用（![f](/uploads/x.png)）加载失败 → 显式失败卡
+              // （2026-09-08 附件解析失败显式化：前端要说明，禁无文字占位图）
+              // pre 覆写 = content_cards 分发门（ADR 2026-10-14-content-card-registry）：
+              // 按 fence language 查表换渲染，未命中/流式中回投默认代码块（现状原样）
+              components={markdownComponents}
+            >
+              {processedContent}
+            </Markdown>
+          </MarkdownStreamingContext.Provider>
         )}
         {isStreaming && <span className="md-cursor" />}
       </div>

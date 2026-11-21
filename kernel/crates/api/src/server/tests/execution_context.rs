@@ -1,3 +1,4 @@
+// @feature: FP-0.2.内核API面 | @vision: V3 可嵌入 | @ci: rust-test
 use super::*;
 
 /// 带 contributes.thread_fields 声明的测试 manifest（模拟 workspace_lifecycle /
@@ -38,6 +39,7 @@ fn thread_field_manifest(
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 
@@ -95,7 +97,6 @@ async fn session_execution_context_assembled_from_thread_field_declarations() {
         "thread-ec1",
         "m1",
         "u1",
-        "",
         None,
         "run-ec1",
     )
@@ -153,7 +154,6 @@ async fn session_execution_context_no_kernel_mode_default() {
         "thread-ec2",
         "m1",
         "u1",
-        "",
         None,
         "run-ec2",
     )
@@ -206,7 +206,6 @@ async fn session_execution_context_disabled_plugin_declarations_ignored() {
         "thread-ec3",
         "m1",
         "u1",
-        "",
         None,
         "run-ec3",
     )
@@ -273,7 +272,6 @@ async fn message_execution_context_merges_per_key_over_session_level() {
         "thread-ec4",
         "m1",
         "u1",
-        "",
         Some(&message_ec),
         "run-ec4",
     )
@@ -324,7 +322,6 @@ async fn message_execution_context_lands_when_no_session_level_values() {
         "thread-ec5",
         "m1",
         "u1",
-        "",
         Some(&message_ec),
         "run-ec5",
     )

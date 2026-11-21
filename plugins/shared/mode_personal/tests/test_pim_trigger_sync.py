@@ -142,7 +142,7 @@ class TestRegistration:
     async def test_future_due_registers_schedule(self, store: Any, caller: FakeCaller) -> None:
         sync = _make_sync(store, caller)
         await _activate(sync)
-        todo, _ = store.create("todo", {"title": "交周报", "due": "2026-10-12 10:00"})
+        todo, _ = store.create("todo", {"title": "交周报", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         payloads = caller.register_payloads()
         assert len(payloads) == 1
@@ -158,7 +158,7 @@ class TestRegistration:
     async def test_past_due_registers_delay(self, store: Any, caller: FakeCaller) -> None:
         sync = _make_sync(store, caller)
         await _activate(sync)
-        store.create("todo", {"title": "逾期", "due": "2026-10-12 08:00"})
+        store.create("todo", {"title": "逾期", "due": "2026-10-12 08:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         payload = caller.register_payloads()[0]
         assert payload["trigger_type"] == "delay"
@@ -166,7 +166,7 @@ class TestRegistration:
 
     async def test_no_target_is_pending_until_session(self, store: Any, caller: FakeCaller) -> None:
         sync = _make_sync(store, caller)
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert caller.register_payloads() == []
         await _activate(sync)
@@ -180,7 +180,7 @@ class TestRegistration:
         await sync.on_domain_event(
             {"event": "session.active_changed", "pipeline_id": "task-1", "session_id": "t"}
         )
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert caller.register_payloads() == []
 
@@ -197,7 +197,7 @@ class TestCapabilityMethodContract:
     ) -> None:
         sync = _make_sync(store, caller, state)
         await _activate(sync)
-        store.create("todo", {"title": "交周报", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "交周报", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert caller.methods(), "必须存在 trigger-control 调用"
         assert all(
@@ -216,7 +216,7 @@ class TestCapabilityMethodContract:
         """状态通道未注入（旧装配/能力缺席）→ 核验放行，不阻断同步主路径。"""
         sync = _make_sync(store, caller, state=None)
         await _activate(sync)
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert len(caller.register_payloads()) == 1
 
@@ -233,7 +233,7 @@ class TestCapabilityMethodContract:
         )
         store.set_on_change(sync.on_change)
         await _activate(sync)
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert len(caller.register_payloads()) == 1
 
@@ -264,7 +264,7 @@ class TestUnregisterAndRetarget:
     async def test_complete_unregisters(self, store: Any, caller: FakeCaller) -> None:
         sync = _make_sync(store, caller)
         await _activate(sync)
-        todo, _ = store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        todo, _ = store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         store.complete_todo(todo["id"])
         await _settle(sync)
@@ -273,7 +273,7 @@ class TestUnregisterAndRetarget:
     async def test_accept_event_unregisters(self, store: Any, caller: FakeCaller) -> None:
         sync = _make_sync(store, caller)
         await _activate(sync)
-        event, _ = store.create("event", {"title": "例会", "at": "2026-10-12 10:00"})
+        event, _ = store.create("event", {"title": "例会", "at": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         store.accept("event", event["id"])
         await _settle(sync)
@@ -282,7 +282,7 @@ class TestUnregisterAndRetarget:
     async def test_defer_reregisters_new_time(self, store: Any, caller: FakeCaller) -> None:
         sync = _make_sync(store, caller)
         await _activate(sync)
-        todo, _ = store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        todo, _ = store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         store.defer_todo(todo["id"], "2026-10-12 11:00")
         await _settle(sync)
@@ -299,7 +299,7 @@ class TestUnregisterAndRetarget:
         sync = _make_sync(store, caller, state)
         store.create(
             "todo",
-            {"title": "A", "due": "2026-10-12 10:00", "source_pipeline_id": "pipe-src"},
+            {"title": "A", "due": "2026-10-12 10:00", "source_pipeline_id": "pipe-src", "reminder_mode": "agent_classified"},
         )
         await _settle(sync)
         payloads = caller.register_payloads()
@@ -326,7 +326,7 @@ class TestUnregisterAndRetarget:
             store, caller, clock=lambda: NOW, session_creator=creator
         )
         store.set_on_change(sync.on_change)
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         payloads = caller.register_payloads()
         assert len(payloads) == 1
@@ -341,7 +341,7 @@ class TestUnregisterAndRetarget:
         """creator 缺席（旧内核 session 能力不在声明面）→ 保持 pending（现状
         降级，不抛不炸）。"""
         sync = _make_sync(store, caller)
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert caller.register_payloads() == []
 
@@ -352,7 +352,7 @@ class TestUnregisterAndRetarget:
         （兼容存量数据；新数据 capture 即带 source，钉住不再跟随）。"""
         sync = _make_sync(store, caller, state)
         await _activate(sync, "pipe-1")
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         state.rows = [{"pipeline_id": "pipe-2", "agent.id": "agentos"}]
         await sync.on_domain_event(
@@ -366,7 +366,7 @@ class TestUnregisterAndRetarget:
         sync = _make_sync(store, caller)
         await _activate(sync)
         await sync.on_domain_event({"event": "session.deleted", "session_id": "thread-1"})
-        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         assert caller.register_payloads() == []
 
@@ -376,7 +376,7 @@ class TestFiredAndIdempotence:
         sync = _make_sync(store, caller)
         await _activate(sync)
         todo, _ = store.create(
-            "todo", {"title": "每日站会", "due": "2026-10-12 10:00", "repeat": "daily"}
+            "todo", {"title": "每日站会", "due": "2026-10-12 10:00", "repeat": "daily", "reminder_mode": "agent_classified"}
         )
         await _settle(sync)
         await sync.on_domain_event(
@@ -400,7 +400,7 @@ class TestFiredAndIdempotence:
         sync = _make_sync(store, caller)
         await _activate(sync)
         todo, _ = store.create(
-            "todo", {"title": "每日站会", "due": "2026-10-12 10:00", "repeat": "daily"}
+            "todo", {"title": "每日站会", "due": "2026-10-12 10:00", "repeat": "daily", "reminder_mode": "agent_classified"}
         )
         await sync.on_domain_event(
             {
@@ -418,7 +418,7 @@ class TestFiredAndIdempotence:
     ) -> None:
         sync = _make_sync(store, caller)
         await _activate(sync)
-        todo, _ = store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        todo, _ = store.create("todo", {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"})
         await _settle(sync)
         store.mark_reminded("todo", todo["id"], "2026-10-12 10:00")
         store.update("todo", todo["id"], {"title": "改名"})
@@ -434,3 +434,119 @@ def test_trigger_id_is_deterministic() -> None:
     assert pim_trigger_sync.trigger_id_for("todo", "abc") != pim_trigger_sync.trigger_id_for(
         "event", "abc"
     )
+
+
+class TestRepeatAutoOccurrence:
+    """P0①：repeat 卡无结构化时刻 → 按周期合成到点坐标注册（合理默认当日 09:00，
+    已过取下一次发生）。时间来源=卡片时间字段（缺）或该默认。"""
+
+    async def test_daily_no_due_registers_next_day_9(
+        self, store: Any, caller: FakeCaller
+    ) -> None:
+        sync = _make_sync(store, caller)
+        await _activate(sync)
+        store.create(
+            "todo",
+            {"title": "华为刷题", "repeat": "daily", "reminder_mode": "agent_classified"},
+        )
+        await _settle(sync)
+        payloads = caller.register_payloads()
+        assert len(payloads) == 1
+        assert payloads[0]["trigger_type"] == "schedule"
+        # NOW=2026-10-12（周一）09:00 整已过 → 次日 09:00（scheduled_at 为 ISO T 分隔）
+        assert payloads[0]["metadata"]["occurrence"] == "2026-10-13 09:00"
+        assert "2026-10-13T09:00" in payloads[0]["scheduled_at"]
+
+    async def test_weekly_no_due_registers_next_weekday(
+        self, store: Any, caller: FakeCaller
+    ) -> None:
+        sync = _make_sync(store, caller)
+        await _activate(sync)
+        store.create(
+            "todo",
+            {"title": "周会", "repeat": "weekly:1", "reminder_mode": "agent_classified"},
+        )
+        await _settle(sync)
+        payloads = caller.register_payloads()
+        assert len(payloads) == 1
+        assert payloads[0]["trigger_type"] == "schedule"
+        # 周一 NOW → weekly:1（周二）= 次日 09:00（scheduled_at 为 ISO T 分隔）
+        assert "2026-10-13T09:00" in payloads[0]["scheduled_at"]
+
+    async def test_daily_before_9am_registers_today(
+        self, tmp_path: Path, caller: FakeCaller
+    ) -> None:
+        """AC-3：当日 09:00 未过 → 当日（clock=08:00）。"""
+        early = datetime(2026, 10, 12, 8, 0, 0)
+        store2 = pim_store.PimStore(tmp_path / "data2", clock=lambda: early)
+        sync = pim_trigger_sync.PimTriggerSync(store2, caller, clock=lambda: early)
+        store2.set_on_change(sync.on_change)
+        await _activate(sync)
+        store2.create(
+            "todo",
+            {"title": "晨报", "repeat": "daily", "reminder_mode": "agent_classified"},
+        )
+        await _settle(sync)
+        payloads = caller.register_payloads()
+        assert len(payloads) == 1
+        assert "2026-10-12T09:00" in payloads[0]["scheduled_at"]
+
+    async def test_occurrence_deterministic_per_clock(self, store: Any) -> None:
+        caller = FakeCaller()
+        sync = _make_sync(store, caller)
+        record = {"id": "x", "title": "t", "repeat": "daily"}
+        a = sync._occurrence("todo", record)
+        b = sync._occurrence("todo", record)
+        assert a == b == "2026-10-13 09:00"
+
+    async def test_non_repeat_no_due_not_registered(
+        self, store: Any, caller: FakeCaller
+    ) -> None:
+        """AC-2 现状保持：非 repeat 卡无时间坐标 → 不注册。"""
+        sync = _make_sync(store, caller)
+        await _activate(sync)
+        store.create("todo", {"title": "无期事项"})
+        await _settle(sync)
+        assert caller.register_payloads() == []
+
+
+class TestReminderModeRouting:
+    """P0④分流：direct（含缺省）到点直接弹卡不进 LLM 管道 → 不注册触发器，
+    已有触发器注销；agent_classified 保持事实消息注册链路。"""
+
+    async def test_agent_classified_registers(
+        self, store: Any, caller: FakeCaller
+    ) -> None:
+        sync = _make_sync(store, caller)
+        await _activate(sync)
+        store.create(
+            "todo",
+            {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"},
+        )
+        await _settle(sync)
+        assert len(caller.register_payloads()) == 1
+
+    async def test_default_direct_skips_registration(
+        self, store: Any, caller: FakeCaller
+    ) -> None:
+        sync = _make_sync(store, caller)
+        await _activate(sync)
+        store.create("todo", {"title": "A", "due": "2026-10-12 10:00"})
+        await _settle(sync)
+        assert caller.register_payloads() == []
+
+    async def test_direct_unregisters_existing_trigger(
+        self, store: Any, caller: FakeCaller
+    ) -> None:
+        """缺省 direct 卡已有触发器（先 agent_classified 后改回）→ 注销。"""
+        sync = _make_sync(store, caller)
+        await _activate(sync)
+        todo, _ = store.create(
+            "todo",
+            {"title": "A", "due": "2026-10-12 10:00", "reminder_mode": "agent_classified"},
+        )
+        await _settle(sync)
+        assert len(caller.register_payloads()) == 1
+        store.update("todo", todo["id"], {"reminder_mode": "direct"})
+        await _settle(sync)
+        assert "unregister" in caller.methods()

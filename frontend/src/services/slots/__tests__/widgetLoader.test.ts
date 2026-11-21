@@ -23,6 +23,14 @@ import { PLUGIN_WIDGET_BUNDLE_PATH, WIDGET_SDK_ESBUILD_EXTERNALS } from '../widg
 import type { WidgetHostApi } from '../widgetSdk'
 import type React from 'react'
 
+const apiClientMock = { get: vi.fn(), request: vi.fn() }
+vi.mock('@/services/api/client', () => ({
+  apiClient: {
+    get: (...a: unknown[]) => apiClientMock.get(...(a as [string])),
+    request: (...a: unknown[]) => apiClientMock.request(...(a as [unknown])),
+  },
+}))
+
 beforeEach(() => {
   widgetRegistry.clear()
 })
@@ -143,5 +151,41 @@ describe('loadPluginWidgets（W 动态装载链）', () => {
     })
     expect(errs).toHaveLength(1)
     expect(widgetRegistry.has('myplug/good')).toBe(true)
+  })
+
+  it('bridge.request：GET/无 body 走 apiClient.get；带 body 写方法走 apiClient.request', async () => {
+    apiClientMock.get.mockResolvedValue({ ok: 1 })
+    apiClientMock.request.mockResolvedValue({ written: 2 })
+    // activate 不被装载器 await：把激活体包成 promise 由用例统一等待
+    let done: Promise<void> = Promise.resolve()
+    const seen: unknown[] = []
+    await loadPluginWidgets('myplug', {
+      importBundle: vi.fn().mockResolvedValue({
+        activate: (api: WidgetHostApi) => {
+          done = (async () => {
+            seen.push(await api.bridge.request('/api/v1/things'))
+            // POST 无 body：body === undefined 仍按读路径处理
+            seen.push(await api.bridge.request('/api/v1/things', { method: 'POST' }))
+            seen.push(
+              await api.bridge.request('/api/v1/things', {
+                method: 'PUT',
+                body: { size: 3 },
+              }),
+            )
+          })()
+        },
+      }),
+    })
+    await done
+    expect(seen).toEqual([{ ok: 1 }, { ok: 1 }, { written: 2 }])
+    expect(apiClientMock.get).toHaveBeenCalledTimes(2)
+    expect(apiClientMock.get).toHaveBeenNthCalledWith(1, '/api/v1/things')
+    expect(apiClientMock.get).toHaveBeenNthCalledWith(2, '/api/v1/things')
+    expect(apiClientMock.request).toHaveBeenCalledTimes(1)
+    expect(apiClientMock.request).toHaveBeenCalledWith({
+      url: '/api/v1/things',
+      method: 'PUT',
+      data: { size: 3 },
+    })
   })
 })

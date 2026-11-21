@@ -1,0 +1,15 @@
+# 实例启动配置——插件分级单副本三根（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2）
+#
+# 内核启动读取（缺省位 <AGENTOS_CONFIG_ROOT>/kernel/instance.yaml，可用环境变量
+# AGENTOS_INSTANCE_CONFIG 显式钉位配置文件路径）。三根全部显式配置：缺失/字段缺
+# 失/目录不存在 = 拒绝启动并报「插件根未配置」（fail-closed，内核零推导零回落）。
+# 相对路径按本文件所在目录解析。
+#
+# 本文件 = dev 仓形态的**退化配置**（ADR §2.2 显式写明）：三根同指仓内插件真源
+# plugins/shared（Tier1/Tier2 不分家，同一路径不构成双源，守卫放行）；用户数据面
+# （DB/配置/modes 播种）仍由 AGENTOS_USER_ROOT 交付（dev 启动链钉 <repo>\user_root，
+# 不放插件副本）。装机形态由安装器写自己的实例配置（刀 3），不消费本文件。
+schema: 1
+tier1_root: ../../plugins/shared
+tier2_root: ../../plugins/shared
+shared_root: ../../plugins/shared

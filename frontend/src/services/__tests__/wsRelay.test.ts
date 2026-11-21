@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION } from '@/constants/websocket'
 import { resolveRelayWsUrl } from '../wsRelay'
 
-const BASE = 'http://162.14.69.153:9101'
+const BASE = 'http://203.0.113.153:9101'
 const RELAY_URL = 'ws://127.0.0.1:39101/ws/chat'
 
 interface WsRelayStub {

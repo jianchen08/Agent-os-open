@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OAuth Broker 插件 MCP 服务端——工具注册 + 本机回调路由（接口适配层）。
 
-- ``oauth``（authorize / status 二合一，工具面退役任务C刀3）：声明面单源 =
+- ``oauth``（authorize / paste_callback / status，声明面单源）：
   ``plugin.json`` ``capabilities.tools``（tools/list 上报与声明逐字一致）；
 - ``http.handle``：内核 ``/ext/oauth_broker/**`` 分发面，只服务 ``GET CALLBACK_PATH``
   （授权服务器把浏览器重定向到这里；``auth=none`` 是声明面事实，凭 ``state`` +
@@ -28,10 +28,15 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
 import flow  # noqa: E402
+import grants_link  # noqa: E402
 from _libs.tool_server_base import load_tool_class, tool_result_envelope  # noqa: E402
 from _root_api import json_response, ok  # noqa: E402
 
 plugin = AgentOSPlugin("oauth_broker")
+
+# grants 账本接线（P2）生产解析缝：经 plugin ref 按 provides namespace（grants.ledger）
+# 解析；grants 缺席时解析失败 → 接线面按记录面降级（OAuth 主流程零阻断，grants_link）。
+grants_link.set_ref_resolver(lambda: plugin)
 
 _impl_cls: dict[str, Any] = {}
 
@@ -61,7 +66,8 @@ def _load_tool_class(class_name: str) -> Any:
 
 
 _STATUS_ONLY_PARAMS = ("client_id", "scope", "wait_seconds", "callback_base_url",
-                       "client_secret", "resource_metadata_url", "guidance_action")
+                       "client_secret", "resource_metadata_url", "guidance_action",
+                       "mode", "callback_url")
 
 
 @plugin.tool(
@@ -70,15 +76,18 @@ _STATUS_ONLY_PARAMS = ("client_id", "scope", "wait_seconds", "callback_base_url"
     description=_MANIFEST_TOOLS["oauth"]["description"],
 )
 async def oauth(action: str = "", **kwargs: Any) -> dict[str, Any]:
-    """oauth 操作面（authorize / status 二合一，工具面退役任务C刀3）。
+    """oauth 操作面（authorize / paste_callback / status，声明面单源）。
 
-    按 action 分发到既有实现体（OAuthAuthorizeTool / OAuthStatusTool 原地复用）；
-    跨动作参数运行时教学错误（错误教改法）。
+    按 action 分发到既有实现体（OAuthAuthorizeTool / OAuthPasteCallbackTool /
+    OAuthStatusTool 原地复用）；跨动作参数运行时教学错误（错误教改法）。
     """
     if action == "authorize":
         result = await _load_tool_class("OAuthAuthorizeTool")(
             guidance=(plugin.get_config() or {}).get("guidance"),
         ).execute(kwargs)
+        return tool_result_envelope(result)
+    if action == "paste_callback":
+        result = await _load_tool_class("OAuthPasteCallbackTool")().execute(kwargs)
         return tool_result_envelope(result)
     if action == "status":
         foreign = [k for k in _STATUS_ONLY_PARAMS if k in kwargs]

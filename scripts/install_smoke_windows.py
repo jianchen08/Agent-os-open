@@ -2,18 +2,22 @@
 """NSIS 静默安装 + 装后冒烟（CI 打包车道的「装得上、装得对、起得来」实测）。
 
 用户裁定 2026-10-28：CI 必含打包环境的检测与测试——本脚本是 pack-windows
-车道的收口断言，对 electron-builder 产物做四段验证：
+车道的收口断言，对 electron-builder 产物做五段验证：
 
-  1. 静默安装   安装器 /S /D=<临时目录>（perMachine 提权、installer-custom.nsh
-                的孤儿清障/静默语义一并实测——装机坑集 NSIS /S 必带 /D= 的
-                机械回归）；
+  1. 静默安装   安装器 /S /D=<临时目录>（per-user 免提权安装，2026-11-12 起
+                不再需要管理员；installer-custom.nsh 的孤儿清障/静默语义一并
+                实测——装机坑集 NSIS /S 必带 /D= 的机械回归）；
   2. 装后布局   复用 scripts/check_packaged_layout.py（单一真值）校验
                 <安装目录>/resources，再加随包件硬断言（内核 exe/合宿 venv/
                 离线三件套 uv+python+wheels/rclone/WinFsp msi）；
-  3. 内核启动   安装位内核带临时库+隔离端口拉起，/health 轮询 200（同
+  3. 清单回读   复用 deploy/verify_deploy_manifest.py（单一真值，--strict）把
+                安装位实际字节与包内 deploy-manifest.json 逐文件对账——缺失/
+                哈希不符/旧版残留一律红（ADR 2026-11-10-deploy-freshness-
+                verification 的 CP 执法位：装完是否真的落地）；
+  4. 内核启动   安装位内核带临时库+隔离端口拉起，/health 轮询 200（同
                 release.yml Linux 冒烟范式；CI 一次性 runner 无装机实例，
                 不触「bash 直拉内核=毒化」铁律的共存机边界）；
-  4. 插件运行时健康（2026-10-29 装机实证补课）：/health 绿 ≠ 插件活——
+  5. 插件运行时健康（2026-10-29 装机实证补课）：/health 绿 ≠ 插件活——
                 启动日志失败签名扫描（No module named/venv 解释器缺失/
                 has no attribute）+ 随包 _host venv 的 SDK 导入与
                 editable 安装指向越界检查（check_plugin_runtime_health.py
@@ -22,7 +26,7 @@
 用法：
   python scripts/install_smoke_windows.py --installer "release/灵汐助手 Setup 0.2.2.exe"
       [--dest <安装目录>] [--port 9117] [--install-timeout 600] [--boot-timeout 120]
-退出码：0 = 四段全过；1 = 任一断言红；2 = 环境错（非 Windows/参数缺）。
+退出码：0 = 五段全过；1 = 任一断言红；2 = 环境错（非 Windows/参数缺）。
 仅 Windows 可执行（NSIS 安装器与内核 exe 均为 Windows 产物）。
 """
 
@@ -45,6 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CARRY_SPEC: list[tuple[str, str, int]] = [
     ("kernel/agentos-kernel.exe", "file", 1_000_000),
     ("frontend/dist/index.html", "file", 1),
+    ("deploy-manifest.json", "file", 1),  # 装后回读清单（afterPack 钩子产出）
     ("plugins/shared", "dir", 50),  # plugin.json 计数下限（百级平铺）
     ("plugins/shared/_host/.venv", "dir", 3),  # 合宿 venv 真身随包
     ("plugins/sdk/src", "dir", 1),
@@ -89,6 +94,34 @@ def find_resources(dest: Path) -> Path:
     return resources
 
 
+def verify_deployed_manifest(resources: Path) -> tuple[bool, str]:
+    """部署清单回读（ADR 2026-11-10）：安装位实际字节 vs 包内 deploy-manifest.json。
+
+    --strict：缺失 / 哈希不符 / 旧版多余文件任一即红——CI 打包车道对「装完是否
+    真的把本次发版落地」的机械执法位。清单本身缺失同样判红（afterPack 钩子未
+    生效 = 打包链缺陷，不是可跳过的环境问题）。
+    """
+    manifest = resources / "deploy-manifest.json"
+    if not manifest.is_file():
+        return False, f"缺部署清单 {manifest}（afterPack 钩子未产出？）"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "deploy" / "verify_deploy_manifest.py"),
+            "verify",
+            "--root", str(resources),
+            "--manifest", str(manifest),
+            "--strict",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return proc.returncode == 0, f"{proc.stdout}{proc.stderr}".strip()
+
+
 def run_installer(installer: Path, dest: Path, timeout_s: int) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
@@ -104,6 +137,29 @@ def run_installer(installer: Path, dest: Path, timeout_s: int) -> None:
         raise RuntimeError(f"静默安装非零退出 {proc.returncode}：{proc.stdout} {proc.stderr}")
     if not any(dest.iterdir()):
         raise RuntimeError("静默安装后安装目录为空（/S /D 未生效或安装器静默失败）")
+
+
+def cleanup_install(dest: Path, wait_s: float = 30.0) -> None:
+    """收尾：先跑安装位卸载器（清 HKCU 卸载项/快捷方式），再删安装目录。
+
+    per-user 安装的卸载器零提权（RequestExecutionLevel user）；卸载器缺席或
+    失败不阻断，目录删除兜底。冒烟安装位必须在测试后消失——失败路径同样
+    收尾（诊断信息已随输出打印）。
+    """
+    for exe in sorted(dest.glob("Uninstall*.exe")):
+        try:
+            proc = subprocess.run([str(exe), "/S"], capture_output=True, timeout=120, check=False)
+            print(f"[install-smoke] 卸载器 {exe.name} rc={proc.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[install-smoke] 卸载器 {exe.name} 执行失败（继续删目录）：{exc}")
+    # NSIS 卸载器把自身复制到临时目录执行后原进程即返回，删除是异步的：
+    # 等目录自然消失（上限 30s），超时再 rmdir 兜底，避免把在途删除误判成残留。
+    deadline = time.monotonic() + wait_s
+    while dest.exists() and time.monotonic() < deadline:
+        time.sleep(0.5)
+    subprocess.run(["cmd", "/C", "rmdir", "/S", "/Q", str(dest)], capture_output=True, check=False)
+    if dest.exists():
+        print(f"[install-smoke] WARN 安装目录未完全删除：{dest}")
 
 
 def boot_smoke(kernel_exe: Path, port: int, timeout_s: int) -> tuple[bool, str, Path]:
@@ -173,7 +229,7 @@ def main() -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="NSIS 静默安装 + 装后冒烟（CI 打包车道收口）")
     parser.add_argument("--installer", required=True, help="electron-builder NSIS 安装器路径")
-    parser.add_argument("--dest", help="安装目标目录（缺省临时目录，冒烟后尽力清理）")
+    parser.add_argument("--dest", help="安装目标目录（缺省临时目录；冒烟结束卸载并清理）")
     parser.add_argument("--port", type=int, default=9117, help="内核冒烟端口（隔离面）")
     parser.add_argument("--install-timeout", type=int, default=600)
     parser.add_argument("--boot-timeout", type=int, default=120)
@@ -193,21 +249,35 @@ def main() -> int:
     dest = Path(args.dest).resolve() if args.dest else Path(tempfile.mkdtemp(prefix="agentos-install-smoke-"))
 
     try:
-        run_installer(installer, dest, args.install_timeout)
-        print(f"[install-smoke] PASS 静默安装 → {dest}")
-    except (RuntimeError, subprocess.TimeoutExpired) as exc:
-        print(f"[install-smoke] FAIL 静默安装：{exc}")
-        return 1
+        try:
+            run_installer(installer, dest, args.install_timeout)
+            print(f"[install-smoke] PASS 静默安装 → {dest}")
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(f"[install-smoke] FAIL 静默安装：{exc}")
+            return 1
+        return verify_installed(dest, args)
+    finally:
+        # 成功/失败都收尾：冒烟安装位（目录 + HKCU 卸载项/快捷方式）不留驻
+        cleanup_install(dest)
 
+
+def verify_installed(dest: Path, args: argparse.Namespace) -> int:
+    """五段验证主体（安装位已就绪）；调用方负责收尾清理。"""
     try:
         resources = find_resources(dest)
     except FileNotFoundError as exc:
         print(f"[install-smoke] FAIL {exc}")
         return 1
 
-    # 布局单一真值复用（packaged layout gate 同一检查器，装机形态再跑一遍）
+    # 布局单一真值复用（packaged layout gate 同一检查器，装机形态再跑一遍；
+    # --installed：装后树不再挪位，包内绝对路径行合法，只拦越界/缺目标）
     layout = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "check_packaged_layout.py"), str(resources)],
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_packaged_layout.py"),
+            str(resources),
+            "--installed",
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -224,7 +294,12 @@ def main() -> int:
         for p in problems:
             print(f"[install-smoke] FAIL 随包契约：{p}")
         return 1
-    print(f"[install-smoke] PASS 随包契约 {len(CARRY_SPEC)} 项（内核/venv/离线三件套/挂载件）")
+    print(f"[install-smoke] PASS 随包契约 {len(CARRY_SPEC)} 项（内核/清单/venv/离线三件套/挂载件）")
+
+    ok, detail = verify_deployed_manifest(resources)
+    print(f"[install-smoke] {'PASS' if ok else 'FAIL'} 部署清单回读（本次发版是否真的落地）：{detail}")
+    if not ok:
+        return 1
 
     ok, detail, boot_workdir = boot_smoke(resources / "kernel" / "agentos-kernel.exe", args.port, args.boot_timeout)
     print(f"[install-smoke] {'PASS' if ok else 'FAIL'} 内核启动：{detail}")
@@ -257,8 +332,7 @@ def main() -> int:
         return 1
     print("[install-smoke] PASS 插件运行时健康（boot 日志签名 + _host venv + editable 根）")
 
-    print(f"[install-smoke] 装后冒烟全绿（安装目录 {dest}，稍后尽力清理）")
-    subprocess.run(["cmd", "/C", "rmdir", "/S", "/Q", str(dest)], capture_output=True, check=False)
+    print(f"[install-smoke] 装后冒烟全绿（安装目录 {dest}，收尾卸载并清理）")
     return 0
 
 

@@ -1,4 +1,5 @@
 use super::*;
+use agentos_core::types::PendingInputSource;
 
 // ── 分层持久化投影测试 ──────────────────────────────────────
 
@@ -35,20 +36,19 @@ async fn test_upsert_and_load_pipeline_state() {
 fn pending_input(id: &str, pid: &str, content: &str, created: &str) -> PendingInputRecord {
     PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: pid.to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: content.to_string(),
-        thread: format!("thread-{pid}"),
-        source: PendingInputSource::User,
-        agent_id: "agentos".to_string(),
-        route_id: pid.to_string(),
-        thinking_strength: String::new(),
-        client_message_id: String::new(),
-        execution_context: None,
-        state_overlay: Some(json!({"task.goal": content})),
-        pipeline_config_id: None,
         created_at: created.to_string(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: format!("thread-{pid}"),
+            user_id: "u1".to_string(),
+            pipeline_id: pid.to_string(),
+            content: content.to_string(),
+            client_message_id: String::new(),
+            source: PendingInputSource::User,
+            execution_context: None,
+            state_overlay: Some(json!({"task.goal": content})),
+            pipeline_config_id: None,
+        },
     }
 }
 
@@ -61,21 +61,18 @@ async fn test_pending_inputs_enqueue_list_pop_fifo() {
     store
         .enqueue_pending_input(
             "default",
-            pid,
             &pending_input("in_3", pid, "第三条", "2026-08-26T03:00:00Z"),
         )
         .unwrap();
     store
         .enqueue_pending_input(
             "default",
-            pid,
             &pending_input("in_1", pid, "第一条", "2026-08-26T01:00:00Z"),
         )
         .unwrap();
     store
         .enqueue_pending_input(
             "default",
-            pid,
             &pending_input("in_2", pid, "第二条", "2026-08-26T02:00:00Z"),
         )
         .unwrap();
@@ -87,10 +84,10 @@ async fn test_pending_inputs_enqueue_list_pop_fifo() {
         vec!["in_1", "in_2", "in_3"],
         "FIFO 序 = created_at 升序"
     );
-    assert_eq!(listed[0].content, "第一条");
-    assert_eq!(listed[0].source, PendingInputSource::User);
+    assert_eq!(listed[0].request.content, "第一条");
+    assert_eq!(listed[0].request.source, PendingInputSource::User);
     assert_eq!(
-        listed[0].state_overlay,
+        listed[0].request.state_overlay,
         Some(json!({"task.goal": "第一条"})),
         "overlay 往返保真"
     );
@@ -118,16 +115,14 @@ async fn test_pending_input_roundtrips_pipeline_config_id() {
         "指定配置",
         "2026-09-25T01:00:00Z",
     );
-    explicit.pipeline_config_id = Some("custom_pipe".to_string());
-    store
-        .enqueue_pending_input("default", "pipe_pcid_a", &explicit)
-        .unwrap();
+    explicit.request.pipeline_config_id = Some("custom_pipe".to_string());
+    store.enqueue_pending_input("default", &explicit).unwrap();
     let got = store
         .pop_pending_input("default", "pipe_pcid_a")
         .unwrap()
         .expect("显式条目应可弹出");
     assert_eq!(
-        got.pipeline_config_id.as_deref(),
+        got.request.pipeline_config_id.as_deref(),
         Some("custom_pipe"),
         "管道配置 id 必须经持久化往返保留（排队后消费仍用原配置）"
     );
@@ -135,16 +130,16 @@ async fn test_pending_input_roundtrips_pipeline_config_id() {
     // 缺省：None 入队 → None 出队（旧客户端行为不变）
     let default_rec = pending_input("in_pcid_2", "pipe_pcid_b", "缺省", "2026-09-25T02:00:00Z");
     store
-        .enqueue_pending_input("default", "pipe_pcid_b", &default_rec)
+        .enqueue_pending_input("default", &default_rec)
         .unwrap();
     let got = store
         .pop_pending_input("default", "pipe_pcid_b")
         .unwrap()
         .expect("缺省条目应可弹出");
     assert!(
-        got.pipeline_config_id.is_none(),
+        got.request.pipeline_config_id.is_none(),
         "缺省往返必须保持 None，不得伪造指定: {:?}",
-        got.pipeline_config_id
+        got.request.pipeline_config_id
     );
 
     // list 路径同样保真（等待窗口列表视图）
@@ -154,12 +149,13 @@ async fn test_pending_input_roundtrips_pipeline_config_id() {
         "列表视图",
         "2026-09-25T03:00:00Z",
     );
-    explicit2.pipeline_config_id = Some("other_pipe".to_string());
-    store
-        .enqueue_pending_input("default", "pipe_pcid_c", &explicit2)
-        .unwrap();
+    explicit2.request.pipeline_config_id = Some("other_pipe".to_string());
+    store.enqueue_pending_input("default", &explicit2).unwrap();
     let listed = store.list_pending_inputs("default", "pipe_pcid_c").unwrap();
-    assert_eq!(listed[0].pipeline_config_id.as_deref(), Some("other_pipe"));
+    assert_eq!(
+        listed[0].request.pipeline_config_id.as_deref(),
+        Some("other_pipe")
+    );
 }
 
 /// 空队列 pop 返回 None；不同租户/管道隔离。
@@ -176,7 +172,6 @@ async fn test_pending_inputs_empty_and_isolation() {
     store
         .enqueue_pending_input(
             "default",
-            "pipe_a",
             &pending_input("a1", "pipe_a", "A", "2026-08-26T01:00:00Z"),
         )
         .unwrap();
@@ -202,8 +197,8 @@ async fn test_pending_inputs_enqueue_idempotent() {
     let store = SqliteStore::open_memory().unwrap();
     let pid = "pipe_pending_idem";
     let rec = pending_input("dup1", pid, "原始", "2026-08-26T01:00:00Z");
-    store.enqueue_pending_input("default", pid, &rec).unwrap();
-    store.enqueue_pending_input("default", pid, &rec).unwrap();
+    store.enqueue_pending_input("default", &rec).unwrap();
+    store.enqueue_pending_input("default", &rec).unwrap();
     let listed = store.list_pending_inputs("default", pid).unwrap();
     assert_eq!(listed.len(), 1, "同 id 重复入队不产生重复条目");
 }
@@ -216,14 +211,12 @@ async fn test_pending_inputs_update_delete_clear() {
     store
         .enqueue_pending_input(
             "default",
-            pid,
             &pending_input("m1", pid, "旧内容", "2026-08-26T01:00:00Z"),
         )
         .unwrap();
     store
         .enqueue_pending_input(
             "default",
-            pid,
             &pending_input("m2", pid, "另一条", "2026-08-26T02:00:00Z"),
         )
         .unwrap();
@@ -236,7 +229,7 @@ async fn test_pending_inputs_update_delete_clear() {
         "存在的条目更新返回 true"
     );
     let listed = store.list_pending_inputs("default", pid).unwrap();
-    assert_eq!(listed[0].content, "新内容", "update 覆盖 content");
+    assert_eq!(listed[0].request.content, "新内容", "update 覆盖 content");
     assert_eq!(listed[0].id, "m1", "update 不改变 FIFO 位置");
     assert!(
         !store
@@ -355,4 +348,108 @@ fn decode_slot_message_distinguishes_missing_from_corruption() {
     let (v, reason) = decode_slot_message(Some("b_ok"), Some(br#"{"role":"user"}"#));
     assert_eq!(v["role"], json!("user"));
     assert!(reason.is_none());
+}
+
+// ── 表形状与 v1→v2 迁移（ADR-2026-11-17）───────────────────────────
+
+/// 表形状闸：pending 行 = 队列信封列 + request 单列（6 列固定）。
+/// 旧 15 列强类型形态复活即红（新增查询需求应加索引/投影，不加业务列）。
+#[test]
+fn pending_table_is_envelope_plus_request_only() {
+    let store = SqliteStore::open_memory().unwrap();
+    let conn = store.conn.lock();
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info('pipeline_pending_inputs')")
+        .unwrap();
+    let mut cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    cols.sort();
+    assert_eq!(
+        cols,
+        vec![
+            "client_message_id",
+            "created_at",
+            "id",
+            "pipeline_id",
+            "request",
+            "tenant_id",
+        ],
+        "pending 表只允许信封列 + request（业务载荷在 request JSON 内）"
+    );
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "新库打开即盖 v2 版本章（旧内核打开 v2 库必须拒绝）"
+    );
+}
+
+/// v1 → v2 迁移：旧 15 列行 → request 单列，且
+/// legacy `agent_id` / `thinking_strength` 非空值并入 `state_overlay`
+/// 对应键（排队中的用户选择不因列收窄而丢失）；幂等（第二次直接跳过）。
+#[test]
+fn migrate_pending_inputs_backfills_request_and_preserves_legacy_choices() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE pipeline_pending_inputs (
+            id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+            user_id TEXT NOT NULL, content TEXT NOT NULL, thread TEXT NOT NULL,
+            source TEXT NOT NULL, agent_id TEXT NOT NULL DEFAULT 'agentos',
+            route_id TEXT NOT NULL DEFAULT '', thinking_strength TEXT NOT NULL DEFAULT '',
+            client_message_id TEXT NOT NULL DEFAULT '', execution_context TEXT,
+            state_overlay TEXT, pipeline_config_id TEXT, created_at TEXT NOT NULL);
+         CREATE INDEX idx_pending_pipeline
+            ON pipeline_pending_inputs(tenant_id, pipeline_id, created_at, id);
+         INSERT INTO pipeline_pending_inputs
+            (id, pipeline_id, tenant_id, user_id, content, thread, source, agent_id,
+             route_id, thinking_strength, client_message_id, execution_context,
+             state_overlay, pipeline_config_id, created_at)
+         VALUES
+            ('p_old1', 'pipe_old', 'default', 'u1', '旧消息', 'T-old', '\"user\"',
+             'persona_a', 'pipe_old', '{\"reasoning_effort\":\"max\"}', 'cm-old',
+             '{\"workspace\":{\"mode\":\"plain\"}}', '{\"task.goal\":\"g1\"}',
+             'autonomous', '2026-11-01T00:00:00Z');",
+    )
+    .unwrap();
+
+    super::super::schema::migrate_pending_input_dispatch_request(&conn).unwrap();
+    // 幂等：再跑一次不报错、不重复改动
+    super::super::schema::migrate_pending_input_dispatch_request(&conn).unwrap();
+
+    let mut stmt = conn
+        .prepare("SELECT request FROM pipeline_pending_inputs WHERE id='p_old1'")
+        .unwrap();
+    let raw: String = stmt.query_row([], |r| r.get(0)).unwrap();
+    let request: DispatchRequest = serde_json::from_str(&raw).expect("回填 request 必须可解析");
+    assert_eq!(request.pipeline_id, "pipe_old", "路由键取 route_id 列");
+    assert_eq!(request.thread_id, "T-old");
+    assert_eq!(request.user_id, "u1");
+    assert_eq!(request.content, "旧消息");
+    assert_eq!(request.client_message_id, "cm-old");
+    assert_eq!(request.source, PendingInputSource::User);
+    assert_eq!(request.pipeline_config_id.as_deref(), Some("autonomous"));
+    let overlay = request.state_overlay.expect("legacy 选择应并入 overlay");
+    assert_eq!(
+        overlay["agent.id"], "persona_a",
+        "legacy agent_id 并入 agent.id"
+    );
+    assert_eq!(
+        overlay["thinking_strength"], "{\"reasoning_effort\":\"max\"}",
+        "legacy thinking_strength 并入同名声明键"
+    );
+    assert_eq!(overlay["task.goal"], "g1", "原 overlay 键保留");
+
+    // 旧列已收窄，只剩 6 列
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('pipeline_pending_inputs')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 6, "迁移后表只保留信封 + request 列");
 }

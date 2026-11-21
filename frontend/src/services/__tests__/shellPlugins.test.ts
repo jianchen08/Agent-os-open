@@ -5,7 +5,6 @@
  * 权限映射（default→prompt 同义归一）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 import {
   getShellKernelHost,
   queryNotificationPermission,

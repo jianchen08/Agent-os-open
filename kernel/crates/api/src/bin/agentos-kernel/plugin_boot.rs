@@ -16,7 +16,7 @@ use tracing::{info, warn};
 /// → no-op（双根兜底，内置根模式插件仍可用）；单轮失败只 warn 不阻断启动
 /// （fail 方向是"本次不播种不升级"，绝不破坏既有用户副本——账本损坏时
 /// 对账整体不动任何文件，fail-closed 语义在 core 侧）。
-pub(super) fn reconcile_mode_seeds_at_boot(
+pub fn reconcile_mode_seeds_at_boot(
     plugins_dir: &std::path::Path,
     user_plugins_dir: Option<&std::path::Path>,
 ) -> Vec<agentos_core::user_space::ModeSeedOutcome> {
@@ -86,7 +86,7 @@ pub(super) fn reconcile_mode_seeds_at_boot(
 /// 用户仓已初始化（管辖面 `<USER_ROOT>/{plugins,config}`，`.env`/`data/` 及
 /// 其余一切排除）。已初始化 → 幂等跳过；git 缺席或初始化失败 → warn 降级
 /// （git 化是增强不是依赖，绝不阻断启动），绝不 push。
-pub(super) fn init_user_repo_at_boot() {
+pub fn init_user_repo_at_boot() {
     let Some(user_root) = agentos_core::user_space::user_root() else {
         return;
     };
@@ -108,9 +108,7 @@ pub(super) fn init_user_repo_at_boot() {
 /// 种子对账联动提交（设计稿 2026-09-15 §2.2）：本轮对账有落盘变化（播种/
 /// 升级/补账）→ 自动提交一笔 `seed: reconcile <n> files`（只暂存对账写下的
 /// 文件，用户工作区改动不自动提交）。失败只 warn（增强降级，绝不阻断启动）。
-pub(super) fn commit_seed_reconciliation_at_boot(
-    outcomes: &[agentos_core::user_space::ModeSeedOutcome],
-) {
+pub fn commit_seed_reconciliation_at_boot(outcomes: &[agentos_core::user_space::ModeSeedOutcome]) {
     if outcomes.is_empty() {
         return;
     }
@@ -137,7 +135,7 @@ pub(super) fn commit_seed_reconciliation_at_boot(
 /// `scan_root(root)` 扫描 root 的直接子目录，查找 `<child>/plugin.json`。
 /// plugins/shared/ 的结构是 `tools/simple/plugin.json`（二级嵌套），
 /// 因此需要收集所有直接包含 plugin.json 的目录的**父目录**作为扫描根。
-pub(super) fn discover_plugin_roots(base: &std::path::Path) -> Vec<String> {
+pub fn discover_plugin_roots(base: &std::path::Path) -> Vec<String> {
     if !base.exists() {
         return Vec::new();
     }
@@ -155,20 +153,22 @@ pub(super) fn discover_plugin_roots(base: &std::path::Path) -> Vec<String> {
     parent_set.into_iter().collect()
 }
 
-/// 启动期 discover 的扫描根全集：内置根 + 用户根（用户根缺席 = 仅内置根）。
+/// 启动期 discover 的扫描根全集：Tier1 根 + Tier2 根（实例启动配置的三根；
+/// Tier2 根缺席/与 Tier1 根同指 = 仅 Tier1 根）。
 ///
-/// 双根都必须递归到插件目录父级：用户空间模式包 `modes/<mode_id>/plugin.json`
-/// 是二级嵌套（装机布局契约），discover 内建的内置/用户根扫描（一级子目录）
-/// 看不到，双根同 id 用户赢全靠 root_paths 里带进用户根父目录 + loader 的用户
-/// 根子树优先裁决。与热路径 `PluginInvokerImpl::collect_plugin_roots` 同源
-/// （那里也是双根父目录全集）。
-pub(super) fn collect_boot_plugin_roots(
-    plugins_dir: &std::path::Path,
-    user_plugins_dir: Option<&std::path::Path>,
+/// 双根都必须递归到插件目录父级：Tier2 根下模式包 `modes/<mode_id>/plugin.json`
+/// 是二级嵌套（装机布局契约），discover 内建的根扫描（一级子目录）看不到。
+/// 与热路径 `PluginInvokerImpl::collect_plugin_roots` 同源（tier1/tier2 两 env
+/// 载体的父目录全集）。
+pub fn collect_boot_plugin_roots(
+    tier1_root: &std::path::Path,
+    tier2_root: Option<&std::path::Path>,
 ) -> Vec<String> {
-    let mut roots = discover_plugin_roots(plugins_dir);
-    if let Some(user_dir) = user_plugins_dir {
-        roots.extend(discover_plugin_roots(user_dir));
+    let mut roots = discover_plugin_roots(tier1_root);
+    if let Some(tier2_dir) = tier2_root {
+        if tier2_dir != tier1_root {
+            roots.extend(discover_plugin_roots(tier2_dir));
+        }
     }
     roots
 }
@@ -182,7 +182,7 @@ pub(super) fn collect_boot_plugin_roots(
 ///
 /// 不阻断启动：告警 + 指明迁移命令。数据没丢（legacy 文件原样在），用户按提示
 /// 迁移即可；若已在新库产生数据，迁移脚本的合并语义由脚本自己把关。
-pub(super) fn warn_legacy_db_not_migrated(
+pub fn warn_legacy_db_not_migrated(
     storage_cfg: &agentos_engine::storage_factory::StorageConfig,
     config_root: &std::path::Path,
 ) {
@@ -230,10 +230,10 @@ pub(super) fn warn_legacy_db_not_migrated(
 /// 单测验证「config_root 已接到 loader」。
 ///
 /// # Arguments
-/// * `plugins_dir` - 内置插件根目录（只读）
-/// * `user_plugins_dir` - 用户插件根目录（可选，可写）
+/// * `plugins_dir` - Tier1 根（分级单副本安全级，应用目录只读）
+/// * `user_plugins_dir` - Tier2 根（可选；与 Tier1 同指的 dev 退化配置传 None）
 /// * `config_root` - 配置文件根目录（如 `config/`），loader 据此加载 YAML
-pub(crate) fn build_plugin_loader(
+pub fn build_plugin_loader(
     plugins_dir: &std::path::Path,
     user_plugins_dir: Option<PathBuf>,
     config_root: &std::path::Path,
@@ -244,14 +244,11 @@ pub(crate) fn build_plugin_loader(
     let allowlist = agentos_plugin_loader::load_allowlist_file(
         &config_root.join("kernel/plugin_allowlist.yaml"),
     );
-    // 双源同 id 裁决策略（ADR 2026-09-20-packaged-dual-source-adjudication）：
-    // 装机链（electron buildKernelEnv）设 AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin
-    // → 打包副本压过用户空间陈旧副本（除非用户副本 semver 严格更新）；dev 不设
-    // → UserFirst 历史口径逐位不变。
-    let dual_source_policy = agentos_plugin_loader::DualSourcePolicy::from_env();
+    // 双源同 id 裁决已退役（ADR 2026-11-07-plugin-tiered-single-copy-model §2.5）：
+    // 跨根双源由启动守卫拒启（零仲裁），loader 内只剩 version-max 归约兜同根
+    // 畸形布局，无策略可配。
     PluginLoaderImpl::new(plugins_dir, user_plugins_dir)
         // 接入 config_root：否则 load_config() 因 config_root=None 恒返回空 {}
         .with_config_root(config_root)
         .with_allowlist(allowlist)
-        .with_dual_source_policy(dual_source_policy)
 }

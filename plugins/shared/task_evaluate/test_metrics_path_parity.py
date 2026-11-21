@@ -85,9 +85,13 @@ def test_both_sides_probe_same_path_in_same_tree(
     expected.write_text("metrics: []\n", encoding="utf-8")
 
     # 布局经模块 __file__ 替身模拟（安装位置是外部环境条件，与 tmp 文件系统
-    # mock 同级），被测函数为真实实现
+    # mock 同级），被测函数为真实实现。e2ab643d1 拆分后探测锚随 _metrics_config_path
+    # 落在 acceptance.py（tool.py 的裸名 from-import 同目录同锚），一并替身
     monkeypatch.setattr(exec_mod, "__file__", str(te_file))
     monkeypatch.setattr(tool_mod, "__file__", str(ts_file))
+    monkeypatch.setattr(
+        sys.modules["acceptance"], "__file__", str(ts_file.parent / "acceptance.py")
+    )
 
     from_tool = tool_mod._metrics_config_path()
     from_exec = Path(exec_mod.default_metrics_path())
@@ -108,6 +112,10 @@ def test_both_sides_fallback_identical_when_all_miss(
     ts_file.parent.mkdir(parents=True)
     monkeypatch.setattr(exec_mod, "__file__", str(te_file))
     monkeypatch.setattr(tool_mod, "__file__", str(ts_file))
+    # 同上：探测锚真身在 acceptance.py（tool.py 裸名导入的同目录模块）
+    monkeypatch.setattr(
+        sys.modules["acceptance"], "__file__", str(ts_file.parent / "acceptance.py")
+    )
 
     from_tool = tool_mod._metrics_config_path()
     from_exec = Path(exec_mod.default_metrics_path())

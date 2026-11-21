@@ -15,8 +15,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readPipelineRuns, updatePipelineRunsCache } from '@/hooks/queries/usePipelineRunsQuery'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import type { PipelineRunInfo } from '@/types/pipeline'
 import { handleRunFailed, handleStreamError } from '../handlers/streamHandler'
+import type { PipelineRunInfo } from '@/types/pipeline'
 
 // 模块级失败卡去重账本跨用例存活：每用例独立管道 id 隔离（生产语义=不同管道）。
 const PID_SIGNED = 'pipe-rf-signed-0000000000000000000001'

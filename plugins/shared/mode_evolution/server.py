@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -29,6 +30,7 @@ import evolution_metrics  # noqa: E402
 import proposal as proposal_mod  # noqa: E402
 import screening  # noqa: E402
 import suite_reader  # noqa: E402
+import workflow_ledger as wf_ledger  # noqa: E402
 from _libs.mode_server_base import (  # noqa: E402
     html_text_response,
     load_mode_profile,
@@ -144,6 +146,51 @@ def _save_ledger(state: dict[str, Any]) -> None:
     os.makedirs(_EVAL_REPORTS, exist_ok=True)
     with open(os.path.join(_EVAL_REPORTS, "eval_state.json"), "w", encoding="utf-8") as fh:
         json.dump(state, fh, ensure_ascii=False, indent=1)
+
+
+# ── 回顾工作流埋点（步骤节点由真实工具调用驱动，不靠提示词上报）──────────────
+# 四个业务工具 handler 在业务动作后落事件；事件层（workflow_ledger）写盘失败只
+# warn、不抛——埋点失败不能让评测动作失败（非核心 best-effort，日志带
+# wf_id/step 上下文即合规）。
+async def _wf_begin(step: str, tool: str, mode: str = "", round_type: str = "",
+                    inputs: dict[str, Any] | None = None) -> None:
+    """登记步骤开始（T1 测量 / T5 裁决这类跨多次工具调用的长动作的起点）。
+
+    落盘经 ``asyncio.to_thread`` 出事件循环：工作流文件与账本同盘（可能是慢盘/
+    网络挂载），同步写在合宿宿主里会饿死心跳（watchdog 30s 判停滞整组
+    ``os._exit``）——与 ``_git`` 同一纪律。
+    """
+    await asyncio.to_thread(wf_ledger.begin_step, "", step,
+                            dict(inputs or {}), f"tool:{tool}", mode, round_type)
+
+
+async def _wf_finish(step: str, tool: str, mode: str = "", round_type: str = "",
+                     artifacts: dict[str, Any] | None = None,
+                     status: str = "done") -> None:
+    """登记步骤结束；该步骤无 running 节点时补一条已完成节点（事件即证据）。"""
+    await asyncio.to_thread(wf_ledger.finish_step, "", step, status,
+                            dict(artifacts or {}), None, f"tool:{tool}",
+                            mode, round_type)
+
+
+def _round_regressions(ledger: dict[str, Any], mode: str,
+                       case_results: dict[str, bool]) -> list[str] | None:
+    """本轮相对上一 treatment 轮的退化 case（T6.5 保留率复验的真实观测面）。
+
+    case 集可轮换：只在前轮通过集上判退化，本轮未出现的 case 不算退化（与
+    evolution_metrics.retention 同口径）。无前序 treatment 轮 → None（首轮无
+    保留率可言，不冒领「零退化」）。
+    """
+    prev: dict[str, Any] | None = None
+    for row in reversed(ledger.get("rounds") or []):
+        if (row.get("mode") == mode
+                and str(row.get("round_type") or "treatment") != "control"):
+            prev = row
+            break
+    if prev is None:
+        return None
+    prev_ok = {str(k) for k, v in (prev.get("case_results") or {}).items() if v}
+    return sorted(cid for cid in prev_ok if case_results.get(cid) is False)
 
 
 # ── eval_query：评测查询面（三读合一） ───────────────────────────────────
@@ -266,6 +313,10 @@ async def _eval_view_suite(mode: str, tier: str = "smoke",
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
         return _err(f"mode={mode} tier={tier}: {exc}")
     batches = suite_reader.expand_batches(data, cases or None)
+    await _wf_begin("T1", "eval_query", mode=mode, inputs={
+        "suite": suite_rel, "tier": tier, "cases": str(cases or ""),
+        "case_ids": [b["case_id"] for b in batches],
+    })
     return {"success": True, "mode": data.get("mode", ""), "suite": suite_rel,
             "batches": batches,
             "note": "逐条用自己的 task_submit 派发；完成后用 task_manage 查终态"
@@ -336,20 +387,42 @@ async def eval_summarize(mode: str, results: list[dict[str, Any]],
     path = _save_summary(run_id, mode, summary)
     # 重放键（ADR 2026-09-16）：material_ref/model/逐 case 结果落账——
     # 保留率、学习率曲线、去噪声复算的数据基座；旧账缺字段时指标降级
-    # insufficient_data，不误判。
+    # insufficient_data，不误判。_git_head 是同步 subprocess（timeout 120s），
+    # 必须出事件循环：async handler 直调会饿死合宿宿主心跳（watchdog 30s
+    # 判停滞整组 os._exit）。
     round_row = {
         "run_id": run_id, "mode": mode, "round_type": round_type,
         "passed": summary["passed"], "total": summary["total"],
         "failed_cases": [r["case_id"] for r in summary["results"] if not r["passed"]],
         "case_results": {str(r["case_id"]): bool(r["passed"])
                          for r in summary["results"]},
-        "material_ref": _git_head(), "model": str(model or ""),
+        "material_ref": await asyncio.to_thread(_git_head),
+        "model": str(model or ""),
     }
     if "repeat_detail" in summary:
         round_row["repeat_detail"] = summary["repeat_detail"]
+    case_results = {str(r["case_id"]): bool(r["passed"]) for r in summary["results"]}
+    regressed = _round_regressions(ledger, mode, case_results)
     ledger.setdefault("rounds", []).append(round_row)
     ledger["rounds"] = ledger["rounds"][-200:]
     _save_ledger(ledger)
+    # 步骤落账：T1 测量收口（带本轮 run_id 作提案↔轮次的软关联键）+ T6.5 保留率
+    # 复验（退化名单是本轮真实观测；首轮无前序轮 / 对照轮 → skipped，不冒领零退化）
+    await _wf_finish("T1", "eval_summarize", mode=mode, round_type=round_type, artifacts={
+        "run_id": run_id, "passed": summary["passed"], "total": summary["total"],
+        "round_type": round_type, "model": str(model or ""),
+    })
+    if round_type == "control":
+        await _wf_finish("T6.5", "eval_summarize", mode=mode, status="skipped",
+                         artifacts={"run_id": run_id, "reason": "control_round"})
+    elif regressed is None:
+        await _wf_finish("T6.5", "eval_summarize", mode=mode, status="skipped",
+                         artifacts={"run_id": run_id, "reason": "no_previous_round"})
+    else:
+        await _wf_finish("T6.5", "eval_summarize", mode=mode, artifacts={
+            "run_id": run_id, "regressed_cases": regressed,
+            "case_count": len(case_results),
+        })
     return {"success": True, "run_id": run_id, "summary_path": path,
             "passed": summary["passed"], "total": summary["total"],
             "delta": summary.get("delta"),
@@ -398,6 +471,9 @@ async def eval_run_heldout(mode: str = "coding") -> dict[str, Any]:
             data_field = res.get("data") or res
             task_id = str(data_field.get("task_id") or data_field.get("id") or "")
         mapping.append({"case_id": batch["case_id"], "task_id": task_id})
+    await _wf_begin("T5", "eval_run_heldout", mode=mode,
+                    inputs={"run_tag": tag,
+                            "case_ids": [m["case_id"] for m in mapping]})
     return {"success": True, "run_tag": tag, "dispatched": mapping,
             "note": "用 task_manage 查这些任务的终态与验收结果；聚合时 mode 传 "
                     f"'{mode}'，case_id 与任务状态喂 eval_summarize。题面与"
@@ -635,6 +711,7 @@ async def _proposal_submit(layer: str, target: str, change_type: str,
             "version_note": proposal_mod.content_version_note(_PROJECT_ROOT),
         }
         entry["content"] = content_info
+    entry["round_id"] = await asyncio.to_thread(wf_ledger.current_round_id)
     ledger.setdefault("proposals", {})[proposal_id] = entry
     if accepted:
         os.makedirs(os.path.join(_EVAL_REPORTS, "proposals"), exist_ok=True)
@@ -642,8 +719,15 @@ async def _proposal_submit(layer: str, target: str, change_type: str,
                   "w", encoding="utf-8") as fh:
             json.dump(proposal, fh, ensure_ascii=False, indent=1)
     _save_ledger(ledger)
+    # T3 提案节点：受理/被拒都落（被拒也是真实发生过的提案动作，带违规清单）
+    await _wf_finish("T3", "proposal", artifacts={
+        "proposal_ids": [proposal_id], "accepted": accepted,
+        "target": str(target), "violations": list(violations),
+        "round_id": str(entry.get("round_id") or ""),
+    }, status="done" if accepted else "failed")
     out: dict[str, Any] = {"success": True, "accepted": accepted,
-                           "proposal_id": proposal_id, "violations": violations}
+                           "proposal_id": proposal_id, "violations": violations,
+                           "round_id": entry["round_id"]}
     if content_info is not None:
         out["content"] = content_info
     return out
@@ -666,14 +750,19 @@ async def _proposal_apply(proposal_id: str, message: str = "") -> dict[str, Any]
     os.makedirs(os.path.dirname(abs_target) or ".", exist_ok=True)
     with open(abs_target, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(str(proposal["content"]))
-    code, out = _git(["add", "--", target_rel])
+    # 三段 git 均为同步 subprocess（_git timeout=120s）：大仓索引锁等待/
+    # 钩子/慢盘都落在这里，直调会饿死合宿宿主心跳（watchdog 30s 判停滞
+    # 整组 os._exit）。to_thread 透传返回值、异常与超时语义不变。
+    code, out = await asyncio.to_thread(_git, ["add", "--", target_rel])
     if code != 0:
         return _err(f"git add 失败: {out}")
-    code, out = _git(["commit", "-m",
-                      message or f"evolve: apply {proposal_id}", "--", target_rel])
+    code, out = await asyncio.to_thread(
+        _git,
+        ["commit", "-m", message or f"evolve: apply {proposal_id}", "--", target_rel],
+    )
     if code != 0:
         return _err(f"git commit 失败: {out}")
-    code, out = _git(["rev-parse", "--short", "HEAD"])
+    code, out = await asyncio.to_thread(_git, ["rev-parse", "--short", "HEAD"])
     commit_hash = out.strip().splitlines()[-1] if code == 0 else ""
     prop["outcome"] = "applied"
     prop["commit"] = commit_hash
@@ -683,6 +772,10 @@ async def _proposal_apply(proposal_id: str, message: str = "") -> dict[str, Any]
         # 版本 bump + sync（人审批准环节执行，BuiltinFirst 严格大于内置副本）
         note = proposal_mod.content_version_note(_PROJECT_ROOT)
     _save_ledger(ledger)
+    await _wf_finish("T6", "proposal", artifacts={
+        "proposal_ids": [proposal_id], "commit": commit_hash,
+        "target": target_rel, "outcome": "applied",
+    })
     return {"success": True, "applied": True, "commit": commit_hash,
             "target": target_rel, "note": note}
 
@@ -701,6 +794,10 @@ async def _proposal_reject(proposal_id: str, reason: str,
         prop["reason"] = reason
         prop["category"] = category
         _save_ledger(ledger)
+        await _wf_finish(wf_ledger.reject_step(category), "proposal", artifacts={
+            "proposal_ids": [proposal_id], "category": category,
+            "outcome": "reverted", "reason": str(reason)[:200],
+        })
         return {"success": True, "ok": True, "proposal_id": proposal_id,
                 "outcome": "reverted",
                 "note": "已应用提案标记 reverted，git 层回滚由用户执行"}
@@ -711,16 +808,35 @@ async def _proposal_reject(proposal_id: str, reason: str,
     if os.path.isfile(prop_path):
         os.remove(prop_path)
     _save_ledger(ledger)
+    await _wf_finish(wf_ledger.reject_step(category), "proposal", artifacts={
+        "proposal_ids": [proposal_id], "category": category,
+        "outcome": "rejected", "reason": str(reason)[:200],
+    })
     return {"success": True, "ok": True, "proposal_id": proposal_id}
 
 
 # ── health 域实现体：轻量账本聚合 + P0-P3 自进化裁决 ─────────────────────
 async def _eval_health() -> dict[str, Any]:
+    """流程健康度 + P0-P3 裁决；健康度查询即 T8 循环决策步骤的真实发生点。
+
+    T1 前置的 health 体检（工作流尚未开或尚无节点）不落 T8 节点——那是闸门
+    检查，不是循环决策；已有节点之后的 health 才是 T8 出口，并据裁决收口工作流
+    （verdict=vetoed 是明确出口；其余无法从 health 单点判定具体出口，显式记
+    unknown 而不编造四选一）。
+    """
     ledger = _load_ledger()
     evolution = evolution_metrics.verdict(ledger)
+    verdict = str(evolution.get("verdict") or "")
+    breaker = verdict == "vetoed"
+    wf_id = wf_ledger.resolve_wf_id()
+    opened = wf_ledger.load_workflow(wf_id)
+    if opened is not None and (opened.get("steps") or []):
+        await _wf_finish("T8", "eval_query",
+                         artifacts={"verdict": verdict, "breaker_tripped": breaker})
+        wf_ledger.close_workflow(wf_id, "vetoed" if breaker else "unknown")
     return {"success": True, "rounds": len(ledger.get("rounds") or []),
             "evolution": evolution,
-            "breaker_tripped": evolution["verdict"] == "vetoed",
+            "breaker_tripped": breaker,
             **aggregate.health_summary(ledger)}
 
 
@@ -762,6 +878,8 @@ _PANEL_HTML_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "webview", "evolution_panel.html"
 )
 _SNAPSHOT_ANCHOR = "null/*__SNAPSHOT_INJECT__*/"
+# 供页读最近 20 个工作流（目录上限 200，一次只投影最近 N 轮，控供页耗时）
+_PANEL_WORKFLOW_LIMIT = 20
 
 
 def _json_response(payload: dict[str, Any], status: int = 200) -> dict[str, Any]:
@@ -775,8 +893,106 @@ def _json_response(payload: dict[str, Any], status: int = 200) -> dict[str, Any]
     }
 
 
-def _panel_html_response(daily: dict[str, Any] | None = None) -> dict[str, Any]:
-    """包内面板页 + 账本快照内联 → HttpHandleResponse（text/html，body base64）。"""
+# 步骤派生证据：T2 归因（复盘插件工具）与 T7 记忆回填（内核 memory 工具）没有
+# 本插件 handler 可埋，按用户裁定走 traces.list_by_pipeline **派生**，不埋点。
+_TRACE_STEP_TOOLS = {"T2": ("review_improvement",), "T7": ("memory",)}
+
+
+def _trace_rows_to_steps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """traces 行 → 派生步骤事件（工具名是真实调用证据；无命中返回空列表）。
+
+    证据面：``patch_data.execution_contexts[].tool_name``（实测形态）与
+    ``patch_data.tool_name``（直挂形态）两向兼容；行结构不符就跳过，不臆断。
+    """
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        patch = row.get("patch_data")
+        names: set[str] = set()
+        if isinstance(patch, dict):
+            for ctx in patch.get("execution_contexts") or []:
+                if isinstance(ctx, dict) and ctx.get("tool_name"):
+                    names.add(str(ctx["tool_name"]))
+            if patch.get("tool_name"):
+                names.add(str(patch["tool_name"]))
+        for step in ("T2", "T7"):
+            if step in found:
+                continue
+            for tool in _TRACE_STEP_TOOLS[step]:
+                if tool in names:
+                    found[step] = {"step": step,
+                                   "at": str(row.get("created_at") or ""),
+                                   "evidence": f"tool:{tool}"}
+                    break
+    return [found[k] for k in sorted(found)]
+
+
+async def _derive_trace_steps(wf_id: str, pipeline_id: str
+                              ) -> tuple[dict[str, list[dict[str, Any]]], bool]:
+    """按 pipeline 派生 T2/T7 步骤；返回 ``({wf_id: [...]}, 能力是否可用)``。
+
+    best-effort：能力未注入/调用失败一律 ``({}, False)``——投影层据此记缺口，
+    不造节点（无运行证据不猜；ADR 2026-09-16 同口径）。
+    """
+    if not wf_id or not pipeline_id:
+        return {}, False
+    try:
+        handle = plugin.get_capability("service-registry")
+        caller = bind_capability_caller(handle, "service-registry")
+        res = await caller("traces.list_by_pipeline", {"pipeline_id": pipeline_id})
+    except Exception:  # noqa: BLE001 —— 读面降级：能力缺失不阻断供页
+        return {}, False
+    rows = res.get("data") if isinstance(res, dict) else res
+    if not isinstance(rows, list):
+        return {}, False
+    steps = _trace_rows_to_steps([r for r in rows if isinstance(r, dict)])
+    return ({wf_id: steps} if steps else {}), True
+
+
+def _workflow_projection(ledger: dict[str, Any] | None = None,
+                         workflows: list[dict[str, Any]] | None = None,
+                         trace_steps: dict[str, list[dict[str, Any]]] | None = None
+                         ) -> dict[str, Any]:
+    """工作流图投影（骨架 + 实例 + 改进产物）；trace_steps=None 即记 T2/T7 缺口。"""
+    return aggregate.workflow_projection(
+        ledger if ledger is not None else _load_ledger(),
+        workflows if workflows is not None
+        else wf_ledger.list_workflows(limit=_PANEL_WORKFLOW_LIMIT),
+        defs=wf_ledger.step_catalog(), edges=wf_ledger.flow_edges(),
+        trace_steps=trace_steps,
+    )
+
+
+async def _workflow_projection_with_traces() -> dict[str, Any]:
+    """供页用：先按 traces 派生 T2/T7 再投影（派生不可用则按缺口出图）。"""
+    ledger = _load_ledger()
+    workflows = wf_ledger.list_workflows(limit=_PANEL_WORKFLOW_LIMIT)
+    focus = ""
+    for doc in reversed(workflows):
+        if str(doc.get("status") or "running") == "running":
+            focus = str(doc.get("wf_id") or "")
+            break
+    if not focus and workflows:
+        focus = str(workflows[-1].get("wf_id") or "")
+    pipeline_id = ""
+    for doc in workflows:
+        if str(doc.get("wf_id") or "") == focus:
+            pipeline_id = str(doc.get("pipeline_id") or "")
+    trace_steps, trace_ok = await _derive_trace_steps(focus, pipeline_id)
+    return _workflow_projection(ledger, workflows,
+                                trace_steps if trace_ok else None)
+
+
+def _panel_html_response(daily: dict[str, Any] | None = None,
+                         workflow: dict[str, Any] | None = None
+                         ) -> dict[str, Any]:
+    """包内面板页 + 账本快照内联 → HttpHandleResponse（text/html，body base64）。
+
+    快照含 ``workflow`` 通道（骨架 defs/edges + 本次回顾实例节点 + 改进产物）；
+    供页走 ``_workflow_projection_with_traces``（T2/T7 按 traces 派生），直调缺省
+    按无派生投影（缺口如实记）。
+    """
     with open(_PANEL_HTML_PATH, encoding="utf-8") as fh:
         html = fh.read()
     if _SNAPSHOT_ANCHOR not in html:
@@ -784,6 +1000,8 @@ def _panel_html_response(daily: dict[str, Any] | None = None) -> dict[str, Any]:
     snapshot = aggregate.panel_snapshot(_load_ledger(),
                                         library=_load_library_summary(),
                                         daily=daily)
+    snapshot["workflow"] = (workflow if workflow is not None
+                            else _workflow_projection())
     injected = json.dumps(snapshot, ensure_ascii=False).replace("</", "<\\/")
     return html_text_response(html.replace(_SNAPSHOT_ANCHOR, injected, 1))
 
@@ -856,7 +1074,9 @@ async def http_handle(
     if path == _PANEL_ENDPOINT and method == "GET":
         try:
             daily = aggregate.daily_projection(await _load_recent_runs(headers))
-            return {"success": True, "data": _panel_html_response(daily=daily)}
+            workflow = await _workflow_projection_with_traces()
+            return {"success": True,
+                    "data": _panel_html_response(daily=daily, workflow=workflow)}
         except (OSError, ValueError) as exc:
             return {
                 "success": False,
@@ -867,6 +1087,11 @@ async def http_handle(
 
 
 def _git(args: list[str]) -> tuple[int, str]:
+    """git 子进程封装（同步阻塞，timeout=120s）。
+
+    async handler 内必须经 ``asyncio.to_thread`` 调用：直调会同步阻塞合宿
+    宿主事件循环，饿死心跳（watchdog 30s 判停滞整组 ``os._exit``）。
+    """
     import subprocess
     proc = subprocess.run(["git", *args], cwd=_PROJECT_ROOT, capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=120,

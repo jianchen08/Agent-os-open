@@ -12,6 +12,7 @@ GET /ext/browser_tool/live 换直播票（工作区「浏览器」页签经 Brid
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -223,7 +224,9 @@ async def http_handle(
     if path == _LIVE_ROUTE and method == "GET":
         try:
             client = BridgeClient(_bridge_config())
-            result = client.live_ticket()
+            # 同步 Bridge 调用（timeout=min(_timeout, 15s)）出事件循环：本 handler
+            # 是 async，直接调用会饿死合宿宿主循环（前端直播页重复轮询放大，审计 P2-10）。
+            result = await asyncio.to_thread(client.live_ticket)
         except BridgeClientError as e:
             # 构造失败（token 缺失等）→ 等待态语义（页面轮询重试，非终态错误）
             return _ok(_json_response(_live_unavailable("runtime_down", str(e)), 200))

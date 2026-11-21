@@ -96,6 +96,16 @@ pub fn build_router_with_http_routes(
 }
 """
 
+# auth_surface.rs 伪源：鉴权面常量组第二源（run_generate/run_check 自
+# f6c6d0396 起双源解析 AUTH_*——签名多一个 auth_surface_rs 位置参）。
+# 本伪源只承载拼接抽取的第二源占位，五常量仍在 SERVER_FAKE 内。
+AUTH_SURFACE_FAKE = """\
+// server/auth_surface.rs 伪源（占位：AUTH_* 常量组在 server.rs 伪源内）
+pub fn classify_auth_surface(path: &str) -> AuthSurfaceClass {
+    AuthSurfaceClass::Protected
+}
+"""
+
 # 伪源的期望路径全集（/ext 排除；{*rest} 翻译为 {rest}）
 FAKE_PATHS = {
     "/health",
@@ -138,12 +148,16 @@ def _gen(server: str = SERVER_FAKE, dispatcher: str = DISPATCHER_FAKE, **kwargs)
     return mod.generate(server, dispatcher, **kwargs)
 
 
-def _write_sources(tmp_path: Path, server: str = SERVER_FAKE, dispatcher: str = DISPATCHER_FAKE):
+def _write_sources(
+    tmp_path: Path, server: str = SERVER_FAKE, dispatcher: str = DISPATCHER_FAKE
+):
     server_rs = tmp_path / "server.rs"
     dispatcher_rs = tmp_path / "http_dispatcher.rs"
+    auth_surface_rs = tmp_path / "auth_surface.rs"
     server_rs.write_text(server, encoding="utf-8")
     dispatcher_rs.write_text(dispatcher, encoding="utf-8")
-    return server_rs, dispatcher_rs, tmp_path / "openapi.yaml"
+    auth_surface_rs.write_text(AUTH_SURFACE_FAKE, encoding="utf-8")
+    return server_rs, dispatcher_rs, auth_surface_rs, tmp_path / "openapi.yaml"
 
 
 # ── 生成绿 ──────────────────────────────────────────────────────────
@@ -202,36 +216,41 @@ def test_auth_lists_parsed_from_source() -> None:
 # ── 漂移检测红绿 ────────────────────────────────────────────────────
 def test_drift_check_red_then_green(tmp_path: Path) -> None:
     """生成物被手改 → --check 红；重新生成 → 绿（run_gates 消费同一语义）。"""
-    server_rs, dispatcher_rs, out = _write_sources(tmp_path)
-    assert mod.run_generate(server_rs, dispatcher_rs, out, min_routes=8) == 0
+    server_rs, dispatcher_rs, auth_surface_rs, out = _write_sources(tmp_path)
+    assert mod.run_generate(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 0
     stale = out.read_text(encoding="utf-8") + "# 手编漂移\n"
     out.write_text(stale, encoding="utf-8")
-    assert mod.run_check(server_rs, dispatcher_rs, out, min_routes=8) == 1
-    assert mod.run_generate(server_rs, dispatcher_rs, out, min_routes=8) == 0
-    assert mod.run_check(server_rs, dispatcher_rs, out, min_routes=8) == 0
+    assert mod.run_check(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 1
+    assert mod.run_generate(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 0
+    assert mod.run_check(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 0
 
 
 def test_route_changed_without_regen_red(tmp_path: Path) -> None:
     """改路由忘了再生成即红（漂移闸的立身之本）。"""
-    server_rs, dispatcher_rs, out = _write_sources(tmp_path)
-    assert mod.run_generate(server_rs, dispatcher_rs, out, min_routes=8) == 0
+    server_rs, dispatcher_rs, auth_surface_rs, out = _write_sources(tmp_path)
+    assert mod.run_generate(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 0
     mutated = SERVER_FAKE.replace(
         '.route("/api/v1/schema", get(schema_handler))',
         '.route("/api/v1/schema-v2", get(schema_handler))',
     )
     server_rs.write_text(mutated, encoding="utf-8")
-    assert mod.run_check(server_rs, dispatcher_rs, out, min_routes=8) == 1
+    assert mod.run_check(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 1
 
 
 def test_missing_output_file_red(tmp_path: Path) -> None:
-    server_rs, dispatcher_rs, out = _write_sources(tmp_path)
-    assert mod.run_check(server_rs, dispatcher_rs, out, min_routes=8) == 1  # 库内无生成物
+    server_rs, dispatcher_rs, auth_surface_rs, out = _write_sources(tmp_path)
+    assert (
+        mod.run_check(server_rs, dispatcher_rs, auth_surface_rs, out, min_routes=8) == 1
+    )  # 库内无生成物
 
 
 # ── fail-closed（解析退化/对账不过即红，防永绿假闸）─────────────────
 def test_missing_source_file_fail_closed(tmp_path: Path) -> None:
-    _, dispatcher_rs, out = _write_sources(tmp_path)
-    assert mod.run_check(tmp_path / "ghost.rs", dispatcher_rs, out, min_routes=8) == 1
+    _, dispatcher_rs, auth_surface_rs, out = _write_sources(tmp_path)
+    assert (
+        mod.run_check(tmp_path / "ghost.rs", dispatcher_rs, auth_surface_rs, out, min_routes=8)
+        == 1
+    )
 
 
 def test_auth_const_missing_fail_closed() -> None:

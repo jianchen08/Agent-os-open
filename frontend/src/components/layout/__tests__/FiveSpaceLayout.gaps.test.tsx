@@ -928,43 +928,36 @@ describe('FiveSpaceLayout 顶带三区切分与内容列严格同域', () => {
   })
 })
 
-describe('FiveSpaceLayout 移动端工作区全屏（M28 黑屏死路修复）', () => {
-  // 契约：移动端工作区唯一宿主=覆盖层（聊天区全屏时 hidden 让位），铺满全屏
-  // 不得卸载覆盖层——修复前条件带 !workspaceFullscreen，进全屏即卸载唯一宿主
-  // 且聊天已隐藏 → 整 app 无内容可渲染（黑屏死路，ESC 为唯一出口而移动端
-  // 无键盘）。修复后覆盖层恒挂载：全屏=覆盖层占满（顶栏「返回对话」仍是
-  // 出口），再点全屏钮（取反）或 ESC 退出均还原。
+describe('FiveSpaceLayout 移动端工作区覆盖层（M28 黑屏死路修复延续）', () => {
+  // 契约：移动端工作区唯一宿主=覆盖层，恒挂载不卸载（卸载即黑屏死路——
+  // ESC 为唯一出口而移动端无键盘）。2026-11-14 起覆盖层=inset-0 真全屏，
+  // 不再透传 onFullscreen：WorkspaceHost 的「铺满全屏」钮在真全屏下冗余，
+  // 且与顶栏返回浮钮在右端坐标重叠（真机 M332BF 实测误触）——移动面只留
+  // 返回浮钮一个（z-40 恒在覆盖层之上）。
   function setMobileOpen(open: boolean) {
     act(() => {
       useUIStore.getState().setMobileWorkspaceOpen(open)
     })
   }
 
-  it('铺满全屏后覆盖层保持挂载（全屏本体），不落入无内容死态', () => {
+  it('移动覆盖层不渲染「铺满全屏」钮（真全屏下冗余，且与返回浮钮右端重叠）', () => {
     setViewportWidth(375)
     setMobileOpen(true)
     seedTab({ id: 't1', title: '任务' })
     renderLayout()
 
     expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '铺满全屏' }))
-
-    // 修复断言：全屏态覆盖层仍在（此前被卸载 → 黑屏）
-    expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '铺满全屏' })).not.toBeInTheDocument()
+    // 返回浮钮在位（覆盖层打开态 aria-label=返回对话）
+    expect(screen.getByTestId('workspace-expand-float')).toHaveAttribute('aria-label', '返回对话')
   })
 
-  it('全屏后再点全屏钮（取反）退出，覆盖层依旧在、可继续退出到对话', () => {
-    setViewportWidth(375)
-    setMobileOpen(true)
+  it('桌面工作区列的「铺满全屏」钮不受影响（仅移动覆盖层面移除）', () => {
+    setViewportWidth(1280)
     seedTab({ id: 't1', title: '任务' })
     renderLayout()
 
-    const fsBtn = () => screen.getByRole('button', { name: '铺满全屏' })
-    fireEvent.click(fsBtn())
-    fireEvent.click(fsBtn())
-
-    expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
-    // 聊天区恢复可见（全屏退出）
-    expect(screen.getByTestId('chat-content')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '铺满全屏' })).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-toggle-fullscreen')).toBeInTheDocument()
   })
 })

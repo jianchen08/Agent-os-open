@@ -161,7 +161,7 @@ cases:
       outcome: completed
       assertions:
         - type: no_tool_called
-          value: bash_execute
+          value: bash
         - type: file_contains
           file: eval_head.md
           fixture:

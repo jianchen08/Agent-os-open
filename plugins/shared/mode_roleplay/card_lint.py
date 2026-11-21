@@ -478,10 +478,72 @@ def _lint_ui_option(
     return warnings
 
 
+# extensions 内 ST 脚本承载键（casefold 匹配）：酒馆卡把 Quick Replies / 脚本扩展
+# 挂在 extensions 下。脚本执行面当前不实现——RP 方案 §十.E 语言选型（2026-10-10
+# 五版/六版裁定）：脚本层改道宿主 JS，STscript 降 import 转译 shim 后置池（触发
+# 条件=ST 卡带脚本转译需求真机出现）。导入侧只做结构透传，本处如实降级标注，
+# 避免"导入成功却静默不执行"。
+SCRIPT_EXTENSION_KEYS = (
+    "scripts",
+    "quick_replies",
+    "quickreplies",
+    "stscript",
+    "tavern_helper",
+)
+
+
+def _script_entry_count(value: Any) -> int:
+    """脚本条目数：列表按元素数，映射按内层脚本键条目数合流，标量算 1 条。"""
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        inner = [v for k, v in value.items() if str(k).casefold() in SCRIPT_EXTENSION_KEYS]
+        if inner:
+            return sum(_script_entry_count(v) for v in inner)
+    return 1
+
+
+def _script_warning(path: str, value: Any) -> str:
+    """单条如实降级 warning（键路径 + 条目数 + 不执行原因与后置触发条件）。"""
+    return (
+        f"{path}: 携带 ST 脚本声明 {_script_entry_count(value)} 条——结构透传、当前不执行"
+        "（脚本执行面未实现：RP 方案 §十.E 语言选型改道宿主 JS，STscript 转译 shim 后置，"
+        "触发条件=带脚本 ST 卡转译需求真机出现）"
+    )
+
+
+def lint_scripts(extensions: Any) -> list[str]:
+    """extensions 内 ST 脚本声明的如实降级标注（只标注，不阻断、不清洗）。
+
+    命中口径：extensions 顶层键或二层键（如 tavern_helper.scripts）casefold 命中
+    SCRIPT_EXTENSION_KEYS 即报；extensions 非映射（含 None）= 空表。同一脚本键
+    只报一条（嵌套命中优先报内层路径，条目数按内层合流）。
+    """
+    if not isinstance(extensions, dict):
+        return []
+    warnings: list[str] = []
+    for key, value in extensions.items():
+        path = f"extensions.{key}"
+        inner = (
+            {k: v for k, v in value.items() if str(k).casefold() in SCRIPT_EXTENSION_KEYS}
+            if isinstance(value, dict)
+            else {}
+        )
+        if str(key).casefold() in SCRIPT_EXTENSION_KEYS:
+            if inner:
+                warnings.extend(_script_warning(f"{path}.{k}", v) for k, v in inner.items())
+            else:
+                warnings.append(_script_warning(path, value))
+        else:
+            warnings.extend(_script_warning(f"{path}.{k}", v) for k, v in inner.items())
+    return warnings
+
+
 def lint_card_extensions(extensions: Any) -> list[str]:
-    """卡 extensions 四面（variables/behaviors/actions/engine）warnings 汇总便捷入口。
+    """卡 extensions 五面（variables/behaviors/actions/engine/scripts）warnings 汇总入口。
 
     导入侧/创作 lint 用；extensions 非映射（含 None，无声明卡形态）= 空表。
+    scripts 面 = 脚本类扩展的如实降级标注（结构透传、不执行）。
     """
     if not isinstance(extensions, dict):
         return []
@@ -491,6 +553,7 @@ def lint_card_extensions(extensions: Any) -> list[str]:
         *lint_behaviors(extensions.get("behaviors")),
         *actions_warnings,
         *lint_engine(extensions.get("engine")),
+        *lint_scripts(extensions),
     ]
 
 

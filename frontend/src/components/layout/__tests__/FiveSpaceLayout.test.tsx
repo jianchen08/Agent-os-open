@@ -255,7 +255,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(screen.queryByTestId('mobile-sidebar-drawer')).not.toBeInTheDocument()
   })
 
-  it('移动端顶栏右上角工作区入口：点开覆盖层（抽屉一并收起），再点返回对话', async () => {
+  it('移动端顶栏右上角工作区入口：点开覆盖层（抽屉一并收起），band 返回钮关回对话', async () => {
     setViewportWidth(390)
     renderLayout()
     await act(async () => {})
@@ -270,10 +270,14 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(useUIStore.getState().mobileWorkspaceOpen).toBe(true)
     expect(useUIStore.getState().sidebarCollapsed).toBe(true)
     expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
-    expect(btn).toHaveAttribute('aria-label', '返回对话')
+    // 打开态：对话页浮钮卸载，返回钮改为覆盖层标签行末尾的 band 原生按钮
+    //（同 testid 重查）——同款同排，尺寸位置与 + / 只看当前会话 一致
+    expect(btn).not.toBeInTheDocument()
+    const backBtn = screen.getByTestId('workspace-expand-float')
+    expect(backBtn).toHaveAttribute('aria-label', '返回对话')
 
-    // 再点 = 返回对话（覆盖层收起）
-    fireEvent.click(btn)
+    // 点 band 返回钮 = 返回对话（覆盖层收起）
+    fireEvent.click(backBtn)
     expect(useUIStore.getState().mobileWorkspaceOpen).toBe(false)
     expect(screen.queryByTestId('mobile-workspace-overlay')).not.toBeInTheDocument()
   })
@@ -285,7 +289,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(screen.getByTestId('workspace-toggle-float')).toBeInTheDocument()
   })
 
-  it('移动端：顶栏工作区按钮 → 工作区全屏视图（返回按钮回到对话）', () => {
+  it('移动端：工作区视图由顶栏按钮打开，顶栏浮钮返回对话（覆盖层真全屏）', () => {
     setViewportWidth(375)
     renderLayout()
 
@@ -293,8 +297,10 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     fireEvent.click(screen.getByTestId('mobile-workspace-btn'))
     expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
 
-    // 返回按钮 → 回到对话（覆盖层关闭）
-    fireEvent.click(screen.getByTestId('mobile-workspace-back'))
+    // 覆盖层内部无操作栏（2026-11-14 用户裁定：真全屏 + 顶栏浮钮唯一出口）
+    expect(screen.queryByTestId('mobile-workspace-back')).not.toBeInTheDocument()
+    // 顶栏浮钮（打开态 z-40 恒可见）→ 回到对话（覆盖层关闭）
+    fireEvent.click(screen.getByTestId('workspace-expand-float'))
     expect(screen.queryByTestId('mobile-workspace-overlay')).not.toBeInTheDocument()
   })
 

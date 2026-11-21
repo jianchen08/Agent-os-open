@@ -8,6 +8,7 @@
 
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { WS_LOCAL_EVENTS } from '@/constants/websocket'
 import { usePendingInputResync } from '@/hooks/usePendingInputResync'
 import { usePendingInputStore } from '@/stores/pendingInputStore'
 
@@ -35,7 +36,6 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
   },
 }))
 
-import { WS_LOCAL_EVENTS } from '@/constants/websocket'
 
 function item(id: string): { id: string; content: string; source: string; created_at: string } {
   return { id, content: `内容 ${id}`, source: 'user', created_at: '2026-10-23T03:00:00Z' }

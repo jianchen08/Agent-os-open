@@ -186,7 +186,7 @@ export const userApi = {
 
 进入测试阶段时（测试通用规范已在常驻提示词）：
 
-- **UI 功能类任务**：必须用 bash_execute 跑 npx playwright test 做浏览器级测试，不能只用 Jest 组件测试代替
+- **UI 功能类任务**：必须用 bash 跑 npx playwright test 做浏览器级测试，不能只用 Jest 组件测试代替
 - **渲染/显示类任务**：验证阶段包含视觉验证（截图对比）
 - **交互类任务**（按钮点击、表单提交、页面跳转）：在真实浏览器环境验证交互流程
 

@@ -1,0 +1,18 @@
+ll}，两半同额走账）` (count=1).
+f) grain_gift: `w.material.spawn_at("库银", 300.0, "京畿", None, None, Some("天命"));` → `let tcell = treasury_cell(w);\r\n            w.material.spawn_at("库银", 300.0, &tcell, None, None, Some("天命"));` and ledger line `"SPAWN 库银@京畿 n=300 owner=天命（词条：点石成金）"` → `format!("SPAWN 库银@{tcell} n=300 owner=天命（词条：点石成金）")` — need to change the push arg: `w.material.ledger.push("SPAWN 库银@京畿 ...".into());` → `w.material.ledger.push(format!("SPAWN 库银@{tcell} n=300 owner=天命（词条：点石成金）"));`
+g) recruit: `let aid = w.entities.spawn("代理人", Some("京畿"), None);` → `let tcell = treasury_cell(w);\r\n            let aid = w.entities.spawn("代理人", Some(&tcell), None);` and `e.ctx.insert("region".into(), "京畿".into());` → `e.ctx.insert("region".into(), tcell.clone());`
+h) tick_construction: add invested to first borrow tuple + settle block after mutate. Anchors:
+- `let (region, building) = {` → `let (region, building, invested) = {`
+- `(e.ctx.get("building").cloned().unwrap_or_default())` → `(e.ctx.get("building").cloned().unwrap_or_default(),\r\n               e.fields.get("投入").copied().unwrap_or(0.0))`
+- after `w.material.ledger.push(format!("DONE {building}@{region}（{name} 建成，效果激活）"));` insert settle lines. Anchor: that full line (unique).
+i) work branch: replace the whole ("work", true) block. Multi-line — use regex or replace with full block text incl \r\n. I'll craft the old block exactly from the read (with \r\n). From my rewritten game.rs earlier (LF at write time, now CRLF): the block is:
+```
+("work", true) => {
+let earn = 0.15 * (0.5 + integrity);
+// 走账铁律 MF#2：得银必有源头——本区仓粮对价扣出（双记账对）
+let taken = w.material.consume_from_cell(&region, "仓粮", earn * 2.0);
+if taken + 1e-9 < earn * 2.0 {
+note = "营生未成（本区产出不足对价，无账可记）".into();
+} else {
+if let Some(e) = w.entities.get_mut(eid) {
+e.fields.insert("随身银".into(),

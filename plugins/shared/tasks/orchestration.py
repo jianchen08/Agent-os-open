@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -205,6 +206,20 @@ def load_step_required_inputs(
                 )
             index[name] = keys
     return index
+
+
+async def load_step_required_inputs_async(
+    pipeline_plugins_root: str | os.PathLike[str] | None = None,
+) -> dict[str, list[str]]:
+    """load_step_required_inputs 的线程卸载版（合宿事件循环保护）。
+
+    manifest 扫描是纯同步 FS 遍历（plugin.json 计数过百、慢盘实测 30s+），
+    直跑在合宿 asyncio 事件循环线程上会堵死全部并发请求（2026-11-18 装机
+    事故 stall 实锤：task_submit 预派发 39.4s 全程占循环）。本包装把整段
+    扫描卸到线程池，事件循环仅 await；不走缓存面——每次扫描即最新视图，
+    插件热发现（新增/修改）天然被下一轮扫描感知，无失效机制负担。
+    """
+    return await asyncio.to_thread(load_step_required_inputs, pipeline_plugins_root)
 
 
 def iter_step_refs(raw: dict[str, Any]) -> list[str]:

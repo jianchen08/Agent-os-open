@@ -319,6 +319,7 @@ gui-test-screenshots/
 # 构建产物不入库同 ADR 2026-10-16：viewer.html 渲染规定入库，数据文件
 # 与增量 state 留本地（file:// 下 viewer 直接可开，被工作区还原即再生）
 docs/graph/graph.js
+docs/graph/backlinks.json
 docs/graph/.graph_state.json
 
 # ─── scratch 测试内核实例（spawn_test_kernel.py，运行时产物不入库）───
@@ -327,3 +328,18 @@ docs/graph/.graph_state.json
 
 # ─── 个人隐私面（用户裁定 2026-11-01：停止跟踪不推送；本地文件保留）───
 docs/working/private/
+
+# ─── 部署真值面（2026-11-18 个人信息出仓处置）：fmin local mcp 真值配置与
+# 审计日志属部署机私有信息，不进开源仓（example 为出厂形态；历史清理由
+# filter-repo 路径清除承接）───
+deploy/remote/local_mcp_server/config.json
+deploy/remote/local_mcp_server/logs/
+
+# ─── 插件验证 scratch（2026-11-18 个人信息出仓处置）：verify 跑出会拷贝用户空间
+# 覆盖层（含真端点配置），属运行产物不入库 ───
+plugins/shared/.verify_scratch/
+
+# ─── llm_provider_gateway 网关捆绑二进制（ADR 2026-10-16 构建产物不入库）───
+# bin/ 由 scripts/ensure_gateway_binary.py（版本锁定+SHA-256 pin）下载填充，
+# 打包链出包前调用；cli-proxy-api.exe（MIT）+ 日志/运行产物不进 git。
+plugins/shared/llm_provider_gateway/bin/

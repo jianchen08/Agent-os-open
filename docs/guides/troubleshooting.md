@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-troubleshooting
+type: standard
+status: active
+---
+
 # 排障 FAQ / Troubleshooting 知识库
 
 > 返回 [开发指南索引](README.md)。
@@ -26,7 +32,7 @@
 ### A3. 改了 plugin.json 不生效
 
 - **症状**：改 manifest（工具声明/能力/配置）后行为不变。
-- **根因**：watcher 推送路径只认**目录创建**与 **plugin.json 增/改**（`plugin_watcher.rs:1331-1339` 附近），其余源码变更不触发；兜底是 60s 轮询（`plugin_watcher.rs:58`）。声明与实现不一致会被 G2 漂移**拒注册**（日志 warn）；`enabled_plugin_ids` 是启动期快照，被显式禁用的插件改 manifest 也不会启用。
+- **根因**：watcher 推送路径只认**目录创建**与 **plugin.json 增/改**（`plugin_watcher.rs:1331-1339` 附近），其余源码变更不触发；兜底是 60s 轮询（`plugin_watcher.rs:58`）。声明与实现不一致的工具会被 G2 判拒（声明 schema 保留在工具面、调用显式失败，ADR 2026-11-12；日志 warn）；`enabled_plugin_ids` 是启动期快照，被显式禁用的插件改 manifest 也不会启用。
 - **解法**：查内核日志有无 G2 漂移 warn；确认插件未被 `config/kernel/default_profile.yaml` 禁用；必要时 reenable 重注册；前端 schema 变化需**刷新页面**。
 - **来源**：[来源: docs/working/B15_watcher热重载失灵根因_20260906.md（watcher 机制）；AGENTS.md:57-60；.project/widget_contracts.md §九（reenable/刷新口径）]
 - **注**：旧报告 `docs/working/hot_reload_e2e_report.md:59-60` 的「改插件代码/配置后必须重启 kernel 才生效」为 0.2 早期状态（当时 reload 端点未实现）；HEAD 现状以 AGENTS.md 口径为准（watcher 自动处理）。另：`server.rs:148` 注释显示 `history/reload*` 死端点已删除。
@@ -194,6 +200,6 @@
 | 部署/环境变量 | `docs/guides/deployment.md` |
 | 执行语义（Agent/管道） | `docs/guides/execution-semantics.md` |
 | CI/门禁 | `docs/guides/ci-cd-guide.md`、`docs/working/机械门禁统一入口与覆盖率豁免.md` |
-| 关键 ADR | `2026-09-09-approval-lifecycle-invariants.md`（源仓）、`2026-08-18-plugin-dependency-package.md`、`2026-09-11-corrupt-db-fail-closed.md`、`2026-09-07-plugin-venv-dedup.md`、`2026-09-03-subtask-inherit-parent-workspace.md` |
+| 关键 ADR | `docs/decisions/2026-09-09-approval-lifecycle-invariants.md`、`2026-08-18-plugin-dependency-package.md`、`2026-09-11-corrupt-db-fail-closed.md`、`2026-09-07-plugin-venv-dedup.md`、`2026-09-03-subtask-inherit-parent-workspace.md` |
 | 诊断实证 | `docs/working/B15_watcher热重载失灵根因_20260906.md`、`docs/working/`（20260913 批次档案）、`docs/working/test_traceability.md` |
 | 组件契约 | `.project/widget_contracts.md` |

@@ -209,20 +209,10 @@ struct StreamEchoDispatcher {
 impl PipelineDispatcher for StreamEchoDispatcher {
     async fn dispatch_user_input(
         &self,
-        thread_id: &str,
-        _user_id: &str,
-        _content: &str,
-        _pipeline_id: &str,
-        _thinking_strength: &str,
-        _execution_context: Option<&serde_json::Value>,
-        _state_overlay: Option<&serde_json::Value>,
-        _agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: agentos_core::types::PendingInputSource,
+        request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         let session = self.session.clone();
-        let thread = thread_id.to_string();
+        let thread = request.thread_id.clone();
         let first = self.first_emit_delay_ms;
         let gap = self.step_gap_ms;
         tokio::spawn(async move {

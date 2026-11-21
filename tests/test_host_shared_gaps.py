@@ -421,13 +421,16 @@ class TestMainSuccessPath:
         exit code 语义与清理顺序在 test_host_exit_cleanup 另测。"""
         root = tmp_path / "shared"
         _write_member(root, "system", "alpha", "alpha_id")
-        served: list[tuple[Any, float]] = []
+        served: list[tuple[Any, float, str | None]] = []
         hard_exits: list[int] = []
 
         async def _fake_serve(
-            server: CohostServer, stall_secs: float = host._WATCHDOG_STALL_SECS_DEFAULT
+            server: CohostServer,
+            stall_secs: float = host._WATCHDOG_STALL_SECS_DEFAULT,
+            *,
+            host_name: str | None = None,
         ) -> None:
-            served.append((server, stall_secs))
+            served.append((server, stall_secs, host_name))
 
         def _fake_hard_exit() -> None:
             hard_exits.append(0)
@@ -442,10 +445,11 @@ class TestMainSuccessPath:
 
         assert hard_exits == [0]
         assert len(served) == 1
-        server, stall_secs = served[0]
+        server, stall_secs, host_name = served[0]
         assert isinstance(server, CohostServer)
         assert server.tool_names == ["alpha_id.echo", "alpha_id.last_lifecycle"]
         assert stall_secs == host._WATCHDOG_STALL_SECS_DEFAULT
+        assert host_name == "light:2", "宿主名随 spawn 参数进入 watchdog 取证头"
         err = capsys.readouterr().err
         assert "group=light" in err
         assert "members=1" in err

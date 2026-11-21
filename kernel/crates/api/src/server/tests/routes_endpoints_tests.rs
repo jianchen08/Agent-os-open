@@ -1,3 +1,4 @@
+// @feature: FP-0.2.内核API面 | @vision: V3 可嵌入 | @ci: rust-test
 use super::*;
 use crate::routes::{
     get_pipeline_config_handler, get_plugin_config_handler, ActionsExecuteRequest, EnabledBody,

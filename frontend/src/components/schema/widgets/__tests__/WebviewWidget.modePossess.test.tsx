@@ -20,10 +20,12 @@ import { apiClient } from '@/services/api/client'
 import { queryClient } from '@/services/query/queryClient'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 import {
   findDownMessage,
   postUp as bridgePostUp,
 } from './webviewTestBridge'
+import { WebviewWidget } from '../WebviewWidget'
 import type { Mock } from 'vitest'
 
 vi.mock('@/services/api/client', () => ({
@@ -40,8 +42,6 @@ vi.mock('@/stores/sessionStore', async () => {
   }
 })
 
-import { WebviewWidget } from '../WebviewWidget'
-import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const apiGet = apiClient.get as unknown as Mock
 const apiPost = apiClient.post as unknown as Mock

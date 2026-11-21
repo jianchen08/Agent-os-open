@@ -791,6 +791,25 @@ pub async fn delete_session_handler(
         let store_clone = store.clone();
         let id_for_scope = id.clone();
         let del_result = agentos_tenant::scope(tenant_ctx, async move {
+            // 删除前先挂起在途 run：删除只清数据，不会让 run 立刻停手——不挂起
+            // 时它会在删后继续回写 state / 用已删会话 id 派生新管道（孤儿根源，
+            // 2026-11-10 装机实证）。挂起失败不阻断删除：数据面由 store 删除
+            // 墓碑写屏障兜底（迟到写入一律丢弃）。
+            match store_clone.suspend_cascade_runs(&id_for_scope).await {
+                Ok(run_ids) => {
+                    let hub = crate::run_signal::RunSignalHub::global();
+                    for run_id in &run_ids {
+                        hub.signal(run_id);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id = %id_for_scope,
+                        error = %e,
+                        "删除会话前挂起在途 run 失败（继续删除，写屏障兜底）"
+                    );
+                }
+            }
             let deleted = store_clone.delete_session(&id_for_scope).await;
             // DB 已净而内存 state 注册表残留会让 /pipelines/state 继续出口幽灵行
             // （管理页「删了还在」的另一半）——按实际删除清单逐出。租户解析与

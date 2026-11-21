@@ -109,7 +109,10 @@ tool_ids:
 - delete_file
 - create_directory
 - enhanced_search
-- bash_execute
+- bash
+- log
+- input
+- kill
 - task_evaluate
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估

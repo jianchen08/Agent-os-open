@@ -41,6 +41,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types.jsonrpc import INVALID_PARAMS
 
 from agentos_plugin_sdk.capability import bind_reverse_call_identity, reset_reverse_call_identity
+from agentos_plugin_sdk.failure_breaker import ToolFailureBreaker
 from agentos_plugin_sdk.step_dispatch import dispatch_pipe_hook_registry
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 
@@ -303,6 +304,14 @@ class McpServer:
         self._on_call_config = on_call_config
         self._steps: dict[str, Any] = steps or {}
         self._pipe_hooks: dict[str, list[Any]] = pipe_hooks or {}
+        # 同步 handler 串行锁（按插件粒度）：下放线程池后仍保持单插件内调用串行，
+        # 避免历史「同步 handler 在事件循环内天然排队」语义被并发打破。
+        self._handler_locks: dict[str, asyncio.Lock] = {}
+        # 同签名工具失败熔断器（run 生命周期防线③b，监控台账 198-200 轮
+        # 91 连败实锤）：失败出口计数，达阈值后失败返回带 retryable:false
+        # 聚合诊断；同点成功清零。经 _breaker() 惰性取（测试桩绕过 __init__
+        # 时兜底自建），见该方法注释。
+        self._failure_breaker: ToolFailureBreaker | None = None
         self._sdk = self._build_sdk_server()
         # AgentOS 私有扩展请求（如合宿 agentos/reload_member）：方法名 →
         # (params 模型, handler)。模型校验同官方 handler 体系；原始 mapping
@@ -398,6 +407,89 @@ class McpServer:
         """tools/call——调用指定工具并返回结果（原始 dict 分发层见 _handle_tools_call）。"""
         return await self._handle_tools_call({"name": params.name, "arguments": dict(params.arguments or {})})
 
+    def _breaker(self) -> ToolFailureBreaker:
+        """同签名失败熔断器（惰性单例）。
+
+        __init__ 正常装配 ``_failure_breaker``；测试桩绕过 ``__init__`` 构造
+        （test_env_face.py 风格 _FakeServer）时此处兜底自建，分发路径不因
+        缺属性而炸。
+        """
+        breaker = getattr(self, "_failure_breaker", None)
+        if breaker is None:
+            breaker = ToolFailureBreaker()
+            self._failure_breaker = breaker
+        return breaker
+
+    def _tool_failure_result(self, name: str, error_code: str, base_error: str) -> types.CallToolResult:
+        """工具分发失败出口单点（run 生命周期防线③）。
+
+        三件事一次做齐：①env_face 增强（原错误保留 + 执行面定向诊断，失败
+        返回自包含「在哪执行+意味着什么+怎么修」）；②同签名失败计数（熔断
+        阈值面）；③熔断标记态（计数已达阈值）追加聚合诊断 + ``retryable:
+        False`` 语义标记（强制熔断上报——调用照常执行，标记只升级失败返回，
+        修复后的首次调用仍可到达并清零计数）。
+        """
+        breaker = self._breaker()
+        breaker_open = breaker.breaker_open(name)
+        breaker.record_failure(name, f"{error_code}: {base_error}")
+        from agentos_plugin_sdk.env_face import enrich_error_message
+
+        error_text = enrich_error_message(base_error)
+        if breaker_open:
+            error_text = f"{error_text}\n{breaker.aggregated_diagnosis(name)}"
+            logger.error(
+                "[mcp] 工具 %s 失败（连败 %d 达熔断阈值 %d，已带 retryable=false）: %s",
+                name,
+                breaker.streak(name),
+                breaker.threshold,
+                base_error,
+            )
+        else:
+            logger.error("[mcp] 工具 %s 执行失败（已附执行面诊断）: %s", name, error_text)
+        payload: dict[str, Any] = {
+            "success": False,
+            "error": error_text,
+            "error_code": error_code,
+        }
+        if breaker_open:
+            payload["retryable"] = False
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(payload, default=str),
+                )
+            ],
+            is_error=True,
+        )
+
+    def _mark_business_failure(self, name: str, result: dict[str, Any]) -> dict[str, Any]:
+        """业务级 ``success: False`` 结果的增强面（防线③①：结构化失败返回过
+        env_face）+ 熔断计数（与异常出口同签名同阈值；91 连败事故形态正是
+        业务级失败——工具执行返回失败信封而非抛异常）。
+
+        不改 is_error（保持 False）：内核 normalize 按 success 字段判失败，
+        结构化增强字段（retryable/聚合诊断）随 dict 原样透传到 agent。
+        """
+        breaker = self._breaker()
+        breaker_open = breaker.breaker_open(name)
+        error_val = result.get("error")
+        breaker.record_failure(
+            name,
+            error_val if isinstance(error_val, str) and error_val else json.dumps(result, default=str),
+        )
+        marked = dict(result)
+        if isinstance(error_val, str) and error_val:
+            from agentos_plugin_sdk.env_face import enrich_error_message
+
+            error_val = enrich_error_message(error_val)
+        if breaker_open:
+            error_val = f"{error_val if error_val else ''}\n{breaker.aggregated_diagnosis(name)}".strip()
+            marked["retryable"] = False
+        if error_val:
+            marked["error"] = error_val
+        return marked
+
     async def _handle_tools_call(self, params: dict[str, Any]) -> types.CallToolResult:
         """分发 tools/call 到已注册 handler（保留旧分发语义，供单测直调）。
 
@@ -420,6 +512,36 @@ class McpServer:
             return await self._dispatch_tools_call(name, arguments)
         finally:
             reset_reverse_call_identity(identity_token)
+
+    async def _invoke_tool_handler(self, name: str, handler: Any, kwargs: dict[str, Any]) -> Any:
+        """工具 handler 调用：协程函数直接 await，同步函数下放线程池。"""
+        return await self._invoke_callable(name, handler, **kwargs)
+
+    async def _invoke_callable(self, lock_key: str, handler: Any, *args: Any, **kwargs: Any) -> Any:
+        """调用可能同步阻塞的 handler，不冻住事件循环。
+
+        同步 handler 直接在事件循环执行时，长阻塞（评估器 subprocess、目录
+        全扫等）会冻住合宿宿主心跳；watchdog 30s 判停滞后整组 ``os._exit``，
+        同宿无关成员（如 llm 服务）在飞调用全部 ``response channel closed``。
+        下放线程池保证事件循环持续打点；按 ``lock_key``（合宿为 plugin_id）
+        的异步串行锁保持单插件内「同步 handler 天然排队」的既有语义。
+        """
+        if inspect.iscoroutinefunction(handler):
+            return await handler(*args, **kwargs)
+        async with self._handler_lock(lock_key):
+            result = await asyncio.to_thread(handler, *args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _handler_lock(self, lock_key: str) -> asyncio.Lock:
+        """同步 handler 串行锁：合宿工具名 ``{plugin_id}.{tool}`` 按插件聚合。"""
+        key = lock_key.split(".", 1)[0] if "." in lock_key else lock_key
+        lock = self._handler_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._handler_locks[key] = lock
+        return lock
 
     async def _dispatch_tools_call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         """tools/call 主体（身份绑定后）：约定分发 → 工具表分发。"""
@@ -461,31 +583,31 @@ class McpServer:
                 pass
             except TypeError as e:
                 logger.warning("[mcp] 工具 %s 参数绑定失败: %s | kwargs=%s", name, e, list(kwargs))
-                return types.CallToolResult(
-                    content=[
-                        types.TextContent(
-                            type="text",
-                            text=json.dumps(
-                                {
-                                    "success": False,
-                                    "error": f"参数不匹配: {e}",
-                                    "error_code": "INVALID_ARGUMENTS",
-                                },
-                                default=str,
-                            ),
-                        )
-                    ],
-                    is_error=True,
-                )
-            result = td.handler(**kwargs)
-            if asyncio.iscoroutine(result):
-                result = await result
+                # 结构化失败出口过 env_face 增强 + 熔断计数（防线③，与异常
+                # 出口同签名——参数绑定失败是确定性失败，必计入）。
+                return self._tool_failure_result(name, "INVALID_ARGUMENTS", f"参数不匹配: {e}")
+            try:
+                result = await self._invoke_tool_handler(name, td.handler, kwargs)
+            except Exception as exc:
+                # 工具契约增强（用户裁定 2026-11-15）：失败返回必须自包含「在哪执行
+                # + 这错意味着什么 + 怎么修」——单点包装（一处修全部工具受益），
+                # 内核零改动。不吞异常语义：错误文本原样保留，仅追加执行面档案与
+                # 命中修复提示。熔断计数与标记见 _tool_failure_result（防线③）。
+                return self._tool_failure_result(name, "TOOL_EXECUTION_FAILED", f"{type(exc).__name__}: {exc}")
 
         # ToolResult 等携带 to_dict() 的结果对象必须序列化为 JSON 对象
         # （内核 invoker 按 content[0].text 的 JSON 对象解析 success/output/metadata），
         # 否则 default=str 会退化成字符串，丢失结构。
         if hasattr(result, "to_dict") and callable(result.to_dict):
             result = result.to_dict()
+
+        # 业务级失败信封（success: False）：env_face 增强 + 熔断计数/标记
+        # （防线③①+③②）；其余完成态（含非 dict 业务数据——内核包 success
+        # 信封）按成功清零同签名计数。
+        if isinstance(result, dict) and result.get("success") is False:
+            result = self._mark_business_failure(name, result)
+        else:
+            self._breaker().record_success(name)
 
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(result, default=str))],
@@ -526,9 +648,9 @@ class McpServer:
         handler = self._steps.get(step_name)
         if handler is None:
             raise StepNotFoundError(step_name, declared_steps=sorted(self._steps))
-        result = handler(arguments.get("state"), arguments.get("config"))
-        if asyncio.iscoroutine(result):
-            result = await result
+        result = await self._invoke_callable(
+            f"step:{step_name}", handler, arguments.get("state"), arguments.get("config")
+        )
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(result, default=str))],
             is_error=False,

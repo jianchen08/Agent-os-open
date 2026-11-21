@@ -1,0 +1,37 @@
+"recruit" => {
+let treasury = treasury_cell(w);
+let aid = w.entities.spawn("代理人", Some(&treasury), None);
+```
+and recruit ctx:
+```
+e.ctx.insert("region".into(), treasury.clone());
+```
+Wait — recruit block borrows: `let aid = w.entities.spawn(...)` then `w.entities.get_mut(&aid)` — treasury is a String local, fine. But there's a borrow issue: `treasury_cell(w)` needs &w — called before get_mut. Inside match arm of light_mandate, `w` is &mut World; treasury_cell(w) takes &World — reborrow OK.
+But grain_gift: `w.material.spawn_at(..., &treasury, ...)` — spawn_at signature: (kind, amount, region, ?, ?, owner) — earlier calls pass &cell where cell: String → &String coerces to &str. treasury_cell(w) borrows w immutably while spawn_at needs &mut w.material — treasury is an owned String computed before, so no overlap. Good.
+annex:
+```rust
+let treasury = treasury_cell(w);
+let paid = w.material.consume_from_cell(&treasury, "库银", claim_cost);
+if paid + 1e-9 < claim_cost {
+if paid > 0.0 { w.material.spawn_at("库银", paid, &treasury, None, None, Some("朝廷")); }
+return Err(format!("国库不足：收编需 {claim_cost} 实有 {paid:.1}"));
+}
+```
+refund spot:
+```rust
+w.material.spawn_at("库银", claim_cost, &treasury, None, None, Some("朝廷"));
+```
+web.rs qing branch — exact text from read (with CRLF):
+```
+if st.scenario == "qing-v1" {
+let (data, rb, th) = crate::qing::model::assets();
+let w = st.worlds.get_mut(&cur).unwrap();
+let qs = st.qst.get_mut(&cur).expect("qing 场景态在册");
+crate::qing::world::step_year(w, qs, data, rb, th);
+let (wmean, umean) = cont_means(&st.worlds[&cur]);
+```
+Insert between step_year and cont_means:
+```
+// MF-18：qing 步进接入玩法常驻段（天命积累/营建转化/
+// 开局国库播种——qing 建造与天命不再是死链；失地段
+// 在 tick_standing 内按 scenario 跳过）

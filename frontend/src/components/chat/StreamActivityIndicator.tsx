@@ -11,8 +11,9 @@ import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
 import type { ReactNode } from 'react'
 
-/** 计时刷新粒度：1s（与 InteractionCard 等待计时同款粒度） */
-const TICK_MS = 1000
+/** 计时刷新粒度：0.1s——一位小数秒的小数位按此节奏跳动，满 1s 秒位才进
+ *  （2026-11-07 用户纠偏：有小数点就该小数位动，1s 粒度下小数位恒静止） */
+const TICK_MS = 100
 
 /** 统一转圈图标（思考中/执行中/压缩中共用形态） */
 export function StreamSpinner({ className }: { className?: string }): ReactNode {

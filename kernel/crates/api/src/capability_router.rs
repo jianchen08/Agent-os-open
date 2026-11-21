@@ -78,9 +78,16 @@ pub struct KernelCapabilityRouter {
     streaming_declaration_lookup: Option<StreamingDeclarationLookupFn>,
     /// 强制注入工具声明并集查询（P1-5 声明化，见 [`ForceIncludeToolsLookupFn`]）。
     force_include_tools_lookup: Option<ForceIncludeToolsLookupFn>,
-    /// 工具面遮挡名单查询（BUG-51 注册门禁，见 [`ShadowedPluginIdsLookupFn`]）。
-    /// None = 未装配 → 不遮挡（兼容旧装配/测试）。
+    /// 工具面遮挡名单查询（BUG-51 注册门禁）：() → 当前处于「验证未完成
+    /// （verify_incomplete）/ 验证失败终态（verify_failed）」的插件 id 集合。
+    /// ADR 2026-11-12 起**不再遮挡工具面**，消费点改为 `tool-executor.invoke`
+    /// 的插件级调用拦截（临时不可用，如实说明插件可能仍可用）。实现方读契约
+    /// 账本现值。None = 未装配（不拦截，兼容旧装配/测试）。
     shadowed_plugin_ids_lookup: Option<ShadowedPluginIdsLookupFn>,
+    /// 声明↔实现漂移被拒工具查询（ADR 2026-11-12，见
+    /// [`RejectedToolNamesLookupFn`]）：工具级调用拦截（保留声明 schema 在面，
+    /// 调用显式失败）。None = 未装配（不拦截，兼容旧装配/测试）。
+    rejected_tool_names_lookup: Option<RejectedToolNamesLookupFn>,
     /// 工具连续失败告警器：同一工具名在调用侧连续返回
     /// success=false（参数校验失败/执行错误）达到阈值即告警——把"同一工具
     /// 连续 N 次失败"这个信号汇总成一条可操作的告警，避免空转无人察觉。
@@ -141,6 +148,65 @@ where
         .collect()
 }
 
+/// 按调用方身份解析 `capabilities.streaming` 声明（合宿宿主键 → 成员归约）。
+///
+/// 与 `state_writes_for_caller` 同源问题：反调 `_plugin_id` 是进程身份，
+/// 合宿时是 `group:<group>:<slot>`，manifest 里只有成员 id——精确匹配必然
+/// miss，声明闸 fail-closed 把该进程的流式事件全部丢弃（2026-11-10 实测：
+/// `group:light:1` 的 `plugin_error` 当日 9 次全被拒，用户可见的截断/降级
+/// 提醒一条没到前端）。
+///
+/// 归约口径（进程身份共享，无法再按成员区分事件）：
+/// - `conduit` 取**全体成员都声明**——它是"整个进程都是引擎器官"的强语义，
+///   混装组（如 light 组同时含 conduit 的 tool_core 与普通 llm_service）
+///   不得把整组升格为 conduit，否则事件命名空间要求会被换成内核 `a_` id；
+/// - `events` / `part_types` 取并集；任一成员未声明镜头（None = 契约全集
+///   均可发射）则归约结果同样不设限；
+/// - `persist` 任一声明 true 即 true。
+pub fn streaming_declaration_for_caller<F>(
+    entries: &[(String, Option<agentos_core::traits::StreamingCapability>)],
+    host_key_of: F,
+    caller: &str,
+) -> Option<agentos_core::traits::StreamingCapability>
+where
+    F: Fn(&str) -> String,
+{
+    if let Some((_, decl)) = entries.iter().find(|(id, _)| id == caller) {
+        return decl.clone();
+    }
+    let members: Vec<&agentos_core::traits::StreamingCapability> = entries
+        .iter()
+        .filter(|(id, _)| host_key_of(id) == caller)
+        .filter_map(|(_, decl)| decl.as_ref())
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    Some(agentos_core::traits::StreamingCapability {
+        conduit: members.iter().all(|decl| decl.conduit),
+        events: merge_streaming_lists(members.iter().map(|decl| decl.events.as_deref())),
+        part_types: merge_streaming_lists(members.iter().map(|decl| decl.part_types.as_deref())),
+        persist: members.iter().filter_map(|decl| decl.persist).max(),
+    })
+}
+
+/// 声明镜头并集：任一成员为 None（不设限）即不设限，否则按序去重合并。
+fn merge_streaming_lists<'a, I>(lists: I) -> Option<Vec<String>>
+where
+    I: Iterator<Item = Option<&'a [String]>>,
+{
+    let mut merged: Vec<String> = Vec::new();
+    for list in lists {
+        let items = list?;
+        for item in items {
+            if !merged.iter().any(|existing| existing == item) {
+                merged.push(item.clone());
+            }
+        }
+    }
+    Some(merged)
+}
+
 pub use crate::routes::ExportFields;
 
 /// 管道恢复派发闭包：(pipeline_id, thread_id, user_id, state_overlay) → 拉起一轮续跑。
@@ -179,12 +245,26 @@ pub type StreamingDeclarationLookupFn =
 /// None/空 = 无声明，零强制注入（fail-closed）。
 pub type ForceIncludeToolsLookupFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
-/// 工具面遮挡名单查询闭包（BUG-51 注册门禁）：() → 当前处于「验证未完成
+/// 工具调用拦截名单查询闭包（BUG-51 注册门禁）：() → 当前处于「验证未完成
 /// （verify_incomplete）/ 验证失败终态（verify_failed）」的插件 id 集合。
-/// tool-surface.schemas 对名单内插件的工具一律不透出（强制注入也不得复活），
-/// 直至账本复验通过（ok）自动转正。实现方读契约账本现值。None = 未装配
-/// （不遮挡，兼容旧装配/测试）。
+/// ADR 2026-11-12 起不再遮挡工具面（声明 schema 恒进面，prompt 前缀缓存稳定），
+/// 消费点改为 `tool-executor.invoke` 插件级调用拦截（临时不可用，如实说明插件
+/// 可能仍可用）。实现方读契约账本现值。None = 未装配（不拦截，兼容旧装配/测试）。
 pub type ShadowedPluginIdsLookupFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+/// 声明↔实现漂移被拒工具查询闭包（ADR 2026-11-12）：() → 账本现值判定为
+/// 声明漂移（`g2_consistency ∈ {drift, sanitized}`）且被拒的
+/// `(plugin_id, tool_name)` 清单。这些工具的声明 schema 保留在工具面（失败桩），
+/// 调用时 `tool-executor.invoke` 显式失败（`TOOL_DECLARATION_MISMATCH`）且不得到达
+/// sidecar；复验通过（账本 ok）即自动清空。None = 未装配（不拦截，兼容旧装配/测试）。
+pub type RejectedToolNamesLookupFn = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
+
+/// 工具调用错误码：声明与实现不一致（G2 判定漂移，工具保留声明 schema 在面、
+/// 调用显式失败，ADR 2026-11-12）。
+pub const ERR_TOOL_DECLARATION_MISMATCH: &str = "TOOL_DECLARATION_MISMATCH";
+
+/// 工具调用错误码：插件校验未完成/校验失败终态（临时不可用，插件可能实际可用）。
+pub const ERR_TOOL_TEMPORARILY_UNAVAILABLE: &str = "TOOL_TEMPORARILY_UNAVAILABLE";
 
 /// 调用路径注册表自愈闭包（BUG-37）：(tool_name) → 重注册后的工具描述符。
 ///
@@ -314,6 +394,7 @@ impl KernelCapabilityRouter {
             streaming_declaration_lookup: None,
             force_include_tools_lookup: None,
             shadowed_plugin_ids_lookup: None,
+            rejected_tool_names_lookup: None,
             tool_failure_tracker: None,
             export_fields_lookup: None,
             state_writes_lookup: None,
@@ -364,9 +445,15 @@ impl KernelCapabilityRouter {
         self
     }
 
-    /// 注入工具面遮挡名单查询（BUG-51 注册门禁）。
+    /// 注入工具调用拦截名单查询（BUG-51 注册门禁，插件级临时不可用）。
     pub fn with_shadowed_plugin_ids_lookup(mut self, lookup: ShadowedPluginIdsLookupFn) -> Self {
         self.shadowed_plugin_ids_lookup = Some(lookup);
+        self
+    }
+
+    /// 注入声明↔实现漂移被拒工具查询（ADR 2026-11-12，工具级调用显式失败）。
+    pub fn with_rejected_tool_names_lookup(mut self, lookup: RejectedToolNamesLookupFn) -> Self {
+        self.rejected_tool_names_lookup = Some(lookup);
         self
     }
 
@@ -598,15 +685,16 @@ impl KernelCapabilityRouter {
     ///   声明并集，无视白名单）注入；空白名单 = agent 声明零工具，仅强制
     ///   注入集合返回；白名单条目等于插件 id 时该插件全部工具注入（一行
     ///   接入配法）；
-    /// - 遮挡名单（BUG-51 注册门禁）内插件的工具一律不透出——G2 观测失败
-    ///   （verify_incomplete）与复验超限（verify_failed）插件的工具是必败面，
-    ///   声明注册保留（服务/HTTP 面不受影响），LLM 面先遮挡，复验通过（账本
-    ///   ok）自动转正；优先级高于白名单与强制注入；
+    /// - **G2 判定/观测失败不遮挡工具面**（ADR 2026-11-12）：`sanitized`/`drift`
+    ///   工具的声明 schema 保留在面（失败桩），`verify_incomplete`/
+    ///   `verify_failed` 插件同理——工具数组不因校验态变化，prompt 前缀缓存
+    ///   稳定；调用时经 `tool-executor.invoke` 显式失败（错误码/原因/修复指引），
+    ///   复验通过（账本 ok）自动放行；
     /// - input_schema 非 object 的工具不注入（LLM 严格校验 parameters 是
     ///   object；注册路径已对缺 schema 工具按 {} 补注册，本过滤只拦注册后
     ///   被改写成非 object 的极端形态）；
     /// - 契约表不过滤：凡声明 output_schema/render 的工具都产生条目
-    ///   （tool_core 按 tool_name 查表校验，与被过滤的 schema 面解耦）。
+    ///   （tool_core 按 tool_name 查表校验，与 schema 面解耦）。
     async fn handle_tool_surface_schemas(&self, params: &Value) -> Result<Value, McpError> {
         let Some(registry) = self.registry.as_ref() else {
             return Err(McpError::Protocol {
@@ -631,12 +719,9 @@ impl KernelCapabilityRouter {
             .as_ref()
             .map(|lookup| lookup().into_iter().collect())
             .unwrap_or_default();
-        // BUG-51 注册门禁：遮挡名单 = 验证未完成/验证失败插件 id（账本现值）。
-        let shadowed: std::collections::HashSet<String> = self
-            .shadowed_plugin_ids_lookup
-            .as_ref()
-            .map(|lookup| lookup().into_iter().collect())
-            .unwrap_or_default();
+        // 注意：G2 校验态（sanitized/drift/verify_incomplete/verify_failed）
+        // 不参与工具面过滤（ADR 2026-11-12）——声明 schema 恒进面（失败桩），
+        // 调用拦截在 tool-executor.invoke（账本现值）。
         let all_tools = registry.list_tools();
         // F-min 属地替换（设计文档 §53）：调用方可传 workspace（任务工作空间
         // 原样路径）；同名多实例工具按属地解析为宿主实例描述符（工具名不变，
@@ -668,7 +753,6 @@ impl KernelCapabilityRouter {
                     || wanted_plugin_ids.contains(t.plugin_id.as_str())
                     || force_include.contains(&t.name)
             })
-            .filter(|t| !shadowed.contains(&t.plugin_id))
             .filter(|t| t.input_schema.is_object())
             .map(|t| {
                 json!({
@@ -1547,12 +1631,44 @@ impl KernelCapabilityRouter {
             .ok_or_else(|| McpError::Protocol {
                 message: "pipeline-state.update 需要 _plugin_id（插件上下文调用）".to_string(),
             })?;
-        let fields = params
-            .get("fields")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| McpError::Protocol {
-                message: "pipeline-state.update 缺少 fields 对象参数".to_string(),
-            })?;
+        // 参数面：键缺省与键类型错严格区分（审查 MF1）——fields 存在必须为
+        // 对象、delete_keys 存在必须为数组，类型不符显式拒绝；静默降级成缺省
+        // 会把删除/upsert 意图整段吞掉还返回 updated（假成功）。null 仍是合法
+        // 值不解释为删除；缺省空 = 纯 upsert 调用，行为完全不变。
+        let fields = match params.get("fields") {
+            None => None,
+            Some(v) => {
+                let obj = v.as_object().ok_or_else(|| McpError::Protocol {
+                    message: "pipeline-state.update fields 必须是对象".to_string(),
+                })?;
+                Some(obj.clone())
+            }
+        };
+        let delete_keys = match params.get("delete_keys") {
+            None => Vec::new(),
+            Some(v) => v
+                .as_array()
+                .ok_or_else(|| McpError::Protocol {
+                    message: "pipeline-state.update delete_keys 必须是数组".to_string(),
+                })?
+                .iter()
+                .map(|k| {
+                    k.as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .ok_or_else(|| McpError::Protocol {
+                            message: "pipeline-state.update delete_keys 元素必须是非空字符串"
+                                .to_string(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        if fields.is_none() && delete_keys.is_empty() {
+            return Err(McpError::Protocol {
+                message: "pipeline-state.update 需要 fields 对象或 delete_keys 数组".to_string(),
+            });
+        }
+        let fields = fields.unwrap_or_default();
         // 声明制校验：只认调用方 manifest `state.writes`（精确键/前缀通配）。
         // 未装配查询器或插件无声明 = 无持久写权限（fail-closed）。
         let declared = self
@@ -1570,27 +1686,146 @@ impl KernelCapabilityRouter {
                 });
             }
         }
+        // delete_keys 同规声明制（与 upsert 共用 state.writes 校验面）：未声明
+        // 整批拒绝（先校验后执行，无部分删除半态）。
+        for k in &delete_keys {
+            if !writable.contains(k) {
+                return Err(McpError::Protocol {
+                    message: format!(
+                        "pipeline-state.update delete_keys 键未在 manifest state.writes 声明（plugin={plugin_id}），收到: {k}"
+                    ),
+                });
+            }
+        }
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         // ① 冷路径先行（B6 写序倒置：DB 权威、内存是缓存）——批量事务 upsert
         //    （upsert_state_fields）全成才 commit，任一失败整体回滚且内存不留
         //    新值，消灭「内存新值 + DB 半套」的分代态（首键失败重启后旧值复活）。
         if let Some(store) = &self.store {
-            store
-                .upsert_state_fields(pipeline_id, &tenant_id, fields)
-                .await
-                .map_err(|e| McpError::Protocol {
-                    message: format!("pipeline-state.update 持久化失败: {e}"),
-                })?;
-        }
-        // ② 热路径：内存 registry（未注册则跳过——冷管道由表行兜底）。
-        // DB 批量成功后才写内存；store 缺席（无持久化装配）时内存即唯一落点。
-        let registry = agentos_session::pipeline_state_registry::global_registry();
-        if let Some(entry) = registry.get(&tenant_id, pipeline_id) {
-            let mut e = entry.write();
-            if let Some(obj) = e.state.as_object_mut() {
-                for (k, v) in fields {
-                    obj.insert(k.clone(), v.clone());
+            if !fields.is_empty() {
+                store
+                    .upsert_state_fields(pipeline_id, &tenant_id, &fields)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("pipeline-state.update 持久化失败: {e}"),
+                    })?;
+            }
+            // 键真删（同一 DB 权威落点）：幂等，不存在的键跳过；返回实际删除
+            // 的键，not_found = 请求键 − 实际删除键。
+            let mut deleted: Vec<String> = Vec::new();
+            if !delete_keys.is_empty() {
+                deleted = store
+                    .delete_state_fields(pipeline_id, &tenant_id, &delete_keys)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("pipeline-state.update 删除持久化失败: {e}"),
+                    })?;
+            }
+            // ② 热路径：内存 registry（未注册则跳过——冷管道由表行兜底）。
+            // DB 批量成功后才写内存；store 缺席（无持久化装配）时内存即唯一落点。
+            // 删除必须同步 obj.remove——内存不删，下次任意写操作会把内存旧值
+            // 刷回 DB，被删键复活（双落点设计的特征缺陷）。按请求键全集清理
+            //（remove 不存在的键是 no-op）：DB 无行而内存有的陈旧缓存键
+            //（如装配前写入的）也一并清掉，不留复活种子（缓存一致性维护，
+            // 不改变 DB 权威口径的 deleted/not_found 上报）。
+            let registry = agentos_session::pipeline_state_registry::global_registry();
+            if let Some(entry) = registry.get(&tenant_id, pipeline_id) {
+                let mut e = entry.write();
+                if let Some(obj) = e.state.as_object_mut() {
+                    for (k, v) in &fields {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                    for k in &delete_keys {
+                        obj.remove(k);
+                    }
                 }
+            }
+            if !delete_keys.is_empty() {
+                // ③ 审计 trace（update 单一路径约束：所有 state 变更经 update 留痕）。
+                // 引擎侧 journal diff 只覆盖插件 state_updates 的 merge 路径，capability
+                // 反调 update 不经过它——删除在此显式补 TraceEntry（发起方/目标管道/
+                // 删除键全量可追溯）。仅记实际删除的键（请求了但不存在的不留痕）。
+                if !deleted.is_empty() {
+                    store
+                        .append_trace(agentos_core::types::TraceEntry {
+                            trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
+                            pipeline_id: pipeline_id.to_string(),
+                            seq: 0,
+                            plugin_id: plugin_id.to_string(),
+                            patch_type: agentos_core::types::PatchType::StateUpdate,
+                            patch_data: json!({
+                                "action": "delete_keys",
+                                "deleted_keys": deleted,
+                            }),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        })
+                        .await
+                        .map_err(|e| McpError::Protocol {
+                            message: format!("pipeline-state.update 删除审计落迹失败: {e}"),
+                        })?;
+                }
+                // ④ 响应单一出口（审查 MF2）：含 delete_keys 的调用恒定返回完整
+                // 契约体——deleted=DB 实际删除集、not_found=请求集−实删集；
+                // 全 not_found（deleted 为空）不退化成 {status, pipeline_id}。
+                let not_found: Vec<String> = delete_keys
+                    .iter()
+                    .filter(|k| !deleted.contains(k))
+                    .cloned()
+                    .collect();
+                if !not_found.is_empty() {
+                    warn!(
+                        pipeline_id = %pipeline_id,
+                        plugin = %plugin_id,
+                        keys = ?not_found,
+                        "pipeline-state.update delete_keys 含不存在的键（幂等跳过）"
+                    );
+                }
+                return Ok(json!({
+                    "status": "updated",
+                    "pipeline_id": pipeline_id,
+                    "deleted": deleted,
+                    "not_found": not_found,
+                }));
+            }
+        } else {
+            // store 缺席：内存即唯一落点——fields 照常插入、delete_keys 照常移除
+            //（与原「仅内存」行为完全对齐，纯 upsert 调用零变化）。
+            let registry = agentos_session::pipeline_state_registry::global_registry();
+            let mut removed: Vec<String> = Vec::new();
+            if let Some(entry) = registry.get(&tenant_id, pipeline_id) {
+                let mut e = entry.write();
+                if let Some(obj) = e.state.as_object_mut() {
+                    for (k, v) in &fields {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                    // 诚实上报（审查 MF2 分支③）：deleted = 内存实际删除集
+                    //（remove 返回 Some），不存在/未命中的键如实进 not_found
+                    //——不得把不存在的键谎报为 deleted。
+                    removed = delete_keys
+                        .iter()
+                        .filter(|k| obj.remove(k.as_str()).is_some())
+                        .cloned()
+                        .collect();
+                }
+            }
+            if !delete_keys.is_empty() {
+                let not_found: Vec<String> = delete_keys
+                    .iter()
+                    .filter(|k| !removed.contains(k))
+                    .cloned()
+                    .collect();
+                warn!(
+                    pipeline_id = %pipeline_id,
+                    plugin = %plugin_id,
+                    keys = ?not_found,
+                    "pipeline-state.update delete_keys 无持久化装配，仅内存删除（无 DB 真删与持久审计）"
+                );
+                return Ok(json!({
+                    "status": "updated",
+                    "pipeline_id": pipeline_id,
+                    "deleted": removed,
+                    "not_found": not_found,
+                }));
             }
         }
         Ok(json!({"status": "updated", "pipeline_id": pipeline_id}))

@@ -197,7 +197,7 @@ system_prompt: |
 
   ### ⑤ 生成任务链可视化 HTML
 
-  16. 写完所有任务文件后，通过 bash_execute 调用技能脚本生成可视化 HTML：
+  16. 写完所有任务文件后，通过 bash 调用技能脚本生成可视化 HTML：
 
   ```bash
   python skills/skill-task-chain-viewer/scripts/generate_task_chain_html.py --title "{项目名称}"
@@ -234,7 +234,7 @@ static_vars:
         ## 下级 Agent 映射
         | 阶段 | Agent | 说明 | Goal 应包含 | 产出物路径 | 推荐指标 |
         |------|-------|------|------------|-----------|----------|
-        | 调研 | research_agent | 调研方案、分析需求。**复杂调研可拆分为多个 research_agent 任务并行执行，每个聚焦一个独立方向** | 调研目标 + 调研范围 | docs/{title}_research_report.md | file_check（一般任务）, semantic_check(重要任务) |
+        | 调研 | research_agent | 调研方案、分析需求。**复杂调研可拆分为多个 research_agent 任务并行执行，每个聚焦一个独立方向** | 调研目标 + 调研范围 | docs/{title}_research_report.md | file_check |
         | 环境准备 | environment_setup_agent | 安装依赖、下载模板、准备环境 | 需要准备的环境目标 + 项目上下文 | reports/*_environment_status.md | file_check |
 
     - name: 领域方案技能索引
@@ -284,7 +284,7 @@ static_vars:
 
         将 docs/tasks/ 下的任务文件和 docs/project/ 下的项目文档汇总生成可交互的 HTML 页面，供用户审查项目全貌。
 
-        **调用方式**（通过 bash_execute）：
+        **调用方式**（通过 bash 工具）：
         ```bash
         python skills/skill-task-chain-viewer/scripts/generate_task_chain_html.py --title "项目名称"
         ```
@@ -313,9 +313,13 @@ tool_ids:
   - memory
   - file_read
   - file_write
-  - bash_execute
+  - bash
+  - log
+  - input
+  - kill
   - human_interaction
   - resource_search
+  - call_tool
 hard_constraints:
   - 禁止使用 task_submit 创建编码、测试、文件创建、代码实现等执行类子任务。task_submit 仅允许派发给 research_agent（调研）、environment_setup_agent（环境准备）和打样验证（经用户确认后，可派发给 mode_coding/code_writer 等 L3 执行者做小规模验证，打样产出仅为参考材料）
   - 方案确认后的任务链执行由上层 L1 Agent 负责，你不得代为执行
@@ -327,7 +331,7 @@ hard_constraints:
   - 检查点设计必须作为独立产出物输出，包含类型、触发条件、通过标准
   - 打样必须经用户确认后才能执行，打样产出仅为参考材料
   - file_write 仅限写入方案产出物：`docs/project/` 项目文档、`docs/{title}_solution.md` 方案总纲、`docs/tasks/` 任务文件、`docs/{title}_checkpoints.md` 检查点。禁止写源码、配置及产出物之外的任何文件
-  - bash_execute 仅限调用 skill-task-chain-viewer 的生成脚本产出任务链可视化 HTML。禁止用于修改代码、执行测试/构建、安装依赖、git 操作等一切执行类动作；执行类需求一律写入任务文件交执行者处理
+  - bash 仅限调用 skill-task-chain-viewer 的生成脚本产出任务链可视化 HTML（log/input/kill 仅限管理该脚本进程）。禁止用于修改代码、执行测试/构建、安装依赖、git 操作等一切执行类动作；执行类需求一律写入任务文件交执行者处理
   - 必须先查 static_vars 中的「领域方案技能索引」匹配 Skill，索引无匹配时才用 resource_search 动态搜索，仍无匹配则请示用户确认拆分方式。选中 Skill 后严格按其「产出物拆分约定」组织产出
 soft_constraints:
   - 方案探索时优先调用 research_agent 获取信息

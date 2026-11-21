@@ -18,7 +18,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PKG = Path(__file__).resolve().parents[1]
-_SHARED = _PKG.parents[1]  # plugins/shared/
+_SHARED = _PKG.parent  # plugins/shared/（_root_api 等共享模块所在）
 
 
 def _load(name: str, mod_name: str) -> Any:
@@ -102,7 +102,7 @@ class TestTodoCrud:
     ])
     def test_enum_and_range_validation(self, store: Any, patch: dict) -> None:
         todo, _ = store.create("todo", {"title": "A"})
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"(须为|不得为空)"):
             store.update("todo", todo["id"], patch)
 
     def test_persistence_roundtrip(self, tmp_path: Path) -> None:
@@ -390,7 +390,7 @@ class TestEventStateMachine:
         assert event["status"] == "planned"
 
     def test_event_invalid_status_rejected(self, store: Any) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="event.status 须为"):
             store.create("event", {"title": "例会", "at": "2026-10-13 10:00", "status": "bogus"})
 
     def test_accept_todo_sets_doing_and_preauthorized(self, store: Any) -> None:
@@ -488,10 +488,231 @@ class TestFocusDurationConfig:
 
     def test_invalid_duration_rejected(self, store: Any) -> None:
         todo, _ = store.create("todo", {"title": "专注"})
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="focus 时长须为 1-1440"):
             store.start_focus(todo["id"], 0)
 
     def test_invalid_config_keeps_previous(self, store: Any) -> None:
         store.set_focus_default_minutes(40)
         store.set_focus_default_minutes("bogus")
         assert store.focus_default_minutes() == 40
+
+
+class TestDeleteFace:
+    """P0②治理前置面：公开删除（记账可撤销；undo 恢复原记录）。"""
+
+    def test_delete_removes_and_undo_restores(self, store: Any) -> None:
+        todo, _ = store.create("todo", {"title": "锻炼30分钟"})
+        deleted, op_id = store.delete("todo", todo["id"])
+        assert deleted["title"] == "锻炼30分钟"
+        assert store.get("todo", todo["id"]) is None
+        store.undo(op_id)
+        restored = store.get("todo", todo["id"])
+        assert restored is not None
+        assert restored["title"] == "锻炼30分钟"
+
+    def test_delete_event_same_semantics(self, store: Any) -> None:
+        event, _ = store.create("event", {"title": "投递周", "at": "2026-10-12 10:00"})
+        _, op_id = store.delete("event", event["id"])
+        assert store.get("event", event["id"]) is None
+        store.undo(op_id)
+        assert store.get("event", event["id"]) is not None
+
+    def test_delete_missing_raises(self, store: Any) -> None:
+        with pytest.raises(KeyError):
+            store.delete("todo", "missing_id")
+
+    def test_delete_notifies_observer(self, store: Any) -> None:
+        seen: list[tuple[str, str]] = []
+        store.set_on_change(lambda entity, key, before, after: seen.append((entity, key)))
+        todo, _ = store.create("todo", {"title": "x"})
+        store.delete("todo", todo["id"])
+        assert ("todo", todo["id"]) in seen
+
+
+class TestReminderMode:
+    """P0④提醒模式：缺省 direct；合法值 direct/agent_classified；双实体同轨。"""
+
+    def test_create_todo_defaults_direct(self, store: Any) -> None:
+        todo, _ = store.create("todo", {"title": "华为刷题", "repeat": "daily"})
+        assert todo["reminder_mode"] == "direct"
+
+    def test_create_event_defaults_direct(self, store: Any) -> None:
+        event, _ = store.create("event", {"title": "周会", "at": "2026-10-12 10:00"})
+        assert event["reminder_mode"] == "direct"
+
+    def test_explicit_agent_classified_persists(self, store: Any) -> None:
+        todo, _ = store.create("todo", {"title": "x", "reminder_mode": "agent_classified"})
+        assert todo["reminder_mode"] == "agent_classified"
+
+    def test_invalid_value_rejected_on_create(self, store: Any) -> None:
+        with pytest.raises(ValueError, match="reminder_mode 须为"):
+            store.create("todo", {"title": "x", "reminder_mode": "yolo"})
+
+    def test_invalid_value_rejected_on_update(self, store: Any) -> None:
+        todo, _ = store.create("todo", {"title": "x"})
+        with pytest.raises(ValueError, match="reminder_mode 须为"):
+            store.update("todo", todo["id"], {"reminder_mode": "yolo"})
+
+
+class TestAckReminder:
+    """P0④direct 弹卡确认面：确认坐标=<=now 最近一次发生（due 不推进）；幂等。"""
+
+    def test_ack_targets_current_occurrence_and_keeps_due(self, store: Any) -> None:
+        clock = FakeClock("2026-10-12T20:00:00")  # 19:30 已过 → 待确认坐标=10-12 19:30
+        store2 = pim_store.PimStore(store.data_dir, clock=clock)
+        todo, _ = store2.create(
+            "todo", {"title": "华为刷题", "repeat": "daily", "due": "2026-10-12 19:30"}
+        )
+        acked = store2.ack_reminder("todo", todo["id"])
+        assert acked["reminder_ack_for"] == "2026-10-12 19:30"
+        assert acked["due"] == "2026-10-12 19:30"  # due 恒持基准坐标，不推进
+
+    def test_ack_before_due_time_is_noop(self, store: Any) -> None:
+        todo, _ = store.create(
+            "todo", {"title": "华为刷题", "repeat": "daily", "due": "2026-10-12 19:30"}
+        )
+        acked = store.ack_reminder("todo", todo["id"])  # now=09:00 未到点：无可确认
+        assert "reminder_ack_for" not in acked or not acked["reminder_ack_for"]
+
+    def test_ack_next_day_targets_new_occurrence(self, tmp_path: Path) -> None:
+        clock = FakeClock("2026-10-12T20:00:00")
+        store2 = pim_store.PimStore(tmp_path / "data", clock=clock)
+        todo, _ = store2.create(
+            "todo", {"title": "运动", "repeat": "daily", "due": "2026-10-12 18:00"}
+        )
+        first = store2.ack_reminder("todo", todo["id"])
+        assert first["reminder_ack_for"] == "2026-10-12 18:00"
+        clock.advance_days(1)
+        clock.now = clock.now.replace(hour=20)
+        second = store2.ack_reminder("todo", todo["id"])
+        assert second["reminder_ack_for"] == "2026-10-13 18:00"  # 滚动到新一次
+        assert second["due"] == "2026-10-12 18:00"
+
+    def test_ack_non_repeat_targets_due_itself(self, store: Any) -> None:
+        todo, _ = store.create("todo", {"title": "一次性事", "due": "2026-10-12 09:00"})
+        acked = store.ack_reminder("todo", todo["id"])
+        assert acked["reminder_ack_for"] == "2026-10-12 09:00"
+        assert acked["due"] == "2026-10-12 09:00"
+
+    def test_ack_idempotent_same_target(self, tmp_path: Path) -> None:
+        clock = FakeClock("2026-10-12T20:00:00")
+        store2 = pim_store.PimStore(tmp_path / "data", clock=clock)
+        todo, _ = store2.create(
+            "todo", {"title": "运动", "repeat": "daily", "due": "2026-10-12 18:00"}
+        )
+        first = store2.ack_reminder("todo", todo["id"])
+        second = store2.ack_reminder("todo", todo["id"])
+        assert second == first  # 同一目标重复确认零变化（防双击）
+
+    def test_ack_missing_raises(self, store: Any) -> None:
+        with pytest.raises(KeyError):
+            store.ack_reminder("todo", "missing_id")
+
+    def test_ack_event_targets_current_at(self, tmp_path: Path) -> None:
+        clock = FakeClock("2026-10-12T08:00:00")  # 07:00 已过
+        store2 = pim_store.PimStore(tmp_path / "data", clock=clock)
+        event, _ = store2.create(
+            "event", {"title": "冥想", "repeat": "daily", "at": "2026-10-12 07:00"}
+        )
+        acked = store2.ack_reminder("event", event["id"])
+        assert acked["reminder_ack_for"] == "2026-10-12 07:00"
+        assert acked["at"] == "2026-10-12 07:00"
+
+
+class TestEffectiveOccurrence:
+    """P0④direct 弹卡判定坐标（计算字段不落盘；<=now 最近一次发生，后端单源）。"""
+
+    def test_daily_past_due_rolls_to_last_occurrence(self, tmp_path: Path) -> None:
+        clock = FakeClock("2026-10-13T20:00:00")  # 12/13 两天的 19:30 都已过
+        store2 = pim_store.PimStore(tmp_path / "data", clock=clock)
+        todo, _ = store2.create(
+            "todo", {"title": "华为刷题", "repeat": "daily", "due": "2026-10-12 19:30"}
+        )
+        effective = store2.effective_occurrence(todo)
+        assert effective["_occurrence_effective"] == "2026-10-13 19:30"  # 折叠到最近一次
+        assert effective["due"] == "2026-10-12 19:30"  # 基准坐标不动
+        persisted = store2.get("todo", todo["id"])
+        assert persisted is not None and "_occurrence_effective" not in persisted  # 不落盘
+
+    def test_daily_future_due_has_no_effective_yet(self, store: Any) -> None:
+        todo, _ = store.create(
+            "todo", {"title": "作息", "repeat": "daily", "due": "2026-10-12 23:50"}
+        )
+        effective = store.effective_occurrence(todo)
+        assert not effective["_occurrence_effective"]  # now=09:00 未到点 → 不弹
+
+    def test_non_repeat_passthrough_due(self, store: Any) -> None:
+        todo, _ = store.create("todo", {"title": "x", "due": "2026-10-12 08:30"})
+        effective = store.effective_occurrence(todo)
+        assert effective["_occurrence_effective"] == "2026-10-12 08:30"
+
+    def test_event_uses_at_field(self, tmp_path: Path) -> None:
+        clock = FakeClock("2026-10-12T08:00:00")
+        store2 = pim_store.PimStore(tmp_path / "data", clock=clock)
+        event, _ = store2.create(
+            "event", {"title": "晨会", "repeat": "daily", "at": "2026-10-12 07:00"}
+        )
+        effective = store2.effective_occurrence(event)
+        assert effective["_occurrence_effective"] == "2026-10-12 07:00"
+
+    def test_ack_for_matches_effective_semantics(self, tmp_path: Path) -> None:
+        """性质断言：弹卡判定两端同源——ack 坐标 == effective 坐标时不再弹。"""
+        clock = FakeClock("2026-10-12T20:00:00")
+        store2 = pim_store.PimStore(tmp_path / "data", clock=clock)
+        todo, _ = store2.create(
+            "todo", {"title": "运动", "repeat": "daily", "due": "2026-10-12 18:00"}
+        )
+        acked = store2.ack_reminder("todo", todo["id"])
+        effective = store2.effective_occurrence(acked)
+        assert acked["reminder_ack_for"] == effective["_occurrence_effective"]
+
+class TestDiffCoverageGapsR4:
+    """R4 回归审查 M6 收尾：补 diff-coverage 剩余 4 缺行（pim_store.py:313/:838-840）。
+
+    - :313 mark_reminded 对不存在 key 早退（幂等防御面，此前无测）；
+    - :838-840 _flush_journal_month：journal 记录经 undo 路径触发整月落盘（恢复 +
+      删除双向，走真实文件系统断言落盘产物）。
+    """
+
+    def test_mark_reminded_missing_key_noop(self, store: Any, tmp_path: Any) -> None:
+        # :313 早退分支：key 不存在时静默 noop（不写盘不报错），存在时才落盘
+        store.mark_reminded("todo", "nonexistent", "2026-10-12 09:00")
+        assert store.get("todo", "nonexistent") is None
+
+    def test_undo_journal_restore_and_delete_flush_month_file(
+        self, store: Any, tmp_path: Any
+    ) -> None:
+        # :838-840：journal 经 op/undo 面触发 _flush_journal_month 真实落盘
+        pim_store_mod = sys.modules.get("mode_personal_test_pim_store")
+        data_dir = store.data_dir
+
+        # 建卡 → 写 journal → undo journal 写入（恢复路径，before 非空 → 恢复 + flush）
+        store.create("todo", {"title": "J"})
+        _rec, jop = store.upsert_journal("2026-11-12", {"highlight": "first"})
+        month_file = data_dir / "journal_202611.jsonl"
+        assert month_file.is_file()  # upsert 即落盘整月
+        assert "2026-11-12" in month_file.read_text(encoding="utf-8")
+
+        # undo 写入（before 为 None → 删除路径）：:838-840 flush 整月落盘
+        store.undo(jop)
+        assert month_file.is_file()
+        assert store.list_journal("2026-11") == []  # 该日记录已回滚
+
+        # 恢复路径（before 非空）：第二实例先建两条同月 journal，undo 其一 →
+        # 回滚该日 + flush 整月，另一条保留（flush 必须重写含剩余记录的整月文件）
+        store2 = type(store)(tmp_path / "data2", clock=store._clock)
+        _r2, jop2 = store2.upsert_journal("2026-11-12", {"mood": "ok"})
+        _r3, jop3 = store2.upsert_journal("2026-11-13", {"mood": "next"})
+        store2.undo(jop2)
+        f2 = store2.data_dir / "journal_202611.jsonl"
+        assert f2.is_file()
+        assert "2026-11-13" in f2.read_text(encoding="utf-8")
+        assert "mood\": \"ok" not in f2.read_text(encoding="utf-8")
+        assert store2.list_journal("2026-11") == [{"mood": "next", "date": "2026-11-13"}]
+
+    def test_undo_journal_twice_alternates_state(self, store: Any, tmp_path: Any) -> None:
+        # 恢复/删除双向幂等：同一 journal op 连续 undo 在两态间翻转
+        _rec, jop = store.upsert_journal("2026-11-12", {"highlight": "x"})
+        assert store.list_journal("2026-11") != []
+        store.undo(jop)
+        assert store.list_journal("2026-11") == []

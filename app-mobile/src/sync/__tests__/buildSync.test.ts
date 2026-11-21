@@ -70,7 +70,7 @@ describe('build-sync 漂移闸', () => {
     expect(result.stderr).toContain('缺失')
   })
 
-  it('在库产物冒烟：IIFE 于 jsdom 可执行、暴露 LingxiSync、重复注入幂等', () => {
+  it('在库产物冒烟：IIFE 于 jsdom 可执行、暴露 LingxiSync、无浮窗、重复注入幂等', () => {
     const bundle = readFileSync(bundledAsset, 'utf8')
     // jsdom 的 localStorage 受 opaque origin 限制，探测写入失败会触发模块停用路径
     // （fail-closed 设计）；本冒烟锁主路径，先换装内存存储再注入。
@@ -89,13 +89,15 @@ describe('build-sync 漂移闸', () => {
       },
     })
     new Function(bundle)()
-    const api = (window as unknown as { LingxiSync?: { engine: unknown; panel: unknown } }).LingxiSync
+    const api = (window as unknown as { LingxiSync?: { engine: unknown } }).LingxiSync
     expect(api).toBeDefined()
     expect(api?.engine).toBeDefined()
-    expect(api?.panel).toBeDefined()
-    expect(document.querySelectorAll('#lingxi-sync-chip')).toHaveLength(1)
-    // 幂等护栏：重复注入（MainActivity 每次页面加载都会执行）不重复挂载。
+    // 壳侧零 UI（浮动状态面板已移除）：状态面唯一可见面在共享前端设置中枢。
+    expect(document.querySelectorAll('#lingxi-sync-chip')).toHaveLength(0)
+    expect(document.querySelectorAll('#lingxi-sync-panel-host')).toHaveLength(0)
+    // 幂等护栏：重复注入（MainActivity 每次页面加载都会执行）不重建 API。
     new Function(bundle)()
-    expect(document.querySelectorAll('#lingxi-sync-chip')).toHaveLength(1)
+    const apiAgain = (window as unknown as { LingxiSync?: { engine: unknown } }).LingxiSync
+    expect(apiAgain).toBe(api)
   })
 })

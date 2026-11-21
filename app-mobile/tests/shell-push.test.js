@@ -149,7 +149,7 @@ assert.strictEqual(api.currentBase(), null, '无用户设置且无注入 = 无�
 sandboxWindow.LINGXI_SHELL_CONFIG = { apiBase: 'http://shellcfg.example' };
 
 /* 11b. 防残留锁：壳层脚本不得再内置硬编码基址（基址唯一来源=构建期注入） */
-assert.ok(!source.includes('162.14.69.153'), '壳层不得残留硬编码云基址');
+assert.ok(!source.includes('203.0.113.153'), '壳层不得残留硬编码云基址');
 
 /* 11c. tokenKeyFor：refresh token 按后端分键（与前端 shellApiBase.refreshTokenStorageKey
  * 同契约）——默认档（当前基址=构建期注入）裸键；自定义后端 refresh_token@<base> */

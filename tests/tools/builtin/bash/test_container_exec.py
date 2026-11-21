@@ -1,8 +1,8 @@
 # @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """容器路径后台执行测试 — TDD 红灯。
 
-覆盖目标：`use_docker=True` 的 bash_execute 也能像本地路径一样
-"execute 超时返回 status=running+pid → continue 轮询 → terminate 容器内杀"。
+覆盖目标：容器路径（_container_id）的 bash 工具也能像本地路径一样
+"前台超时返回 status=running+handle → log(block) 轮询 → kill 容器内杀"。
 
 实现路径：`ProcessManager.start_process` 接受 `container_id` 参数，
 有 container_id 时用 `docker exec` 起进程；命令包装成 `echo $$; exec <cmd>`，
@@ -29,7 +29,7 @@ from agentos_plugin_sdk.process_runtime import (
     ProcessManager,
 )
 from agentos_plugin_sdk.process_runtime.backends import _get_container_backend
-from tool import BashTool
+from tool import BashTool, decode_handle
 
 pytestmark = pytest.mark.unit
 
@@ -498,9 +498,9 @@ async def test_get_container_backend_caches_by_container_id():
 
 @pytest.mark.asyncio
 async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
-    """BashTool.execute 收到 _container_id → start_process 被调用时带 container_id。
+    """bash 工具收到 _container_id → start_process 被调用时带 container_id。
 
-    0.2 契约（tool.py _handle_execute）：inputs._container_id 透传到
+    0.2 契约（tool.py run_command）：inputs._container_id 透传到
     ProcessManager.start_process 的 container_id 形参。
     """
     tool = BashTool()
@@ -523,7 +523,7 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
     tool.process_manager.get_summary = lambda pid: {"exit_code": 0, "summary": []}  # type: ignore[assignment]
     tool.process_manager.get_output = lambda pid: "done"  # type: ignore[assignment]
 
-    result = await tool.execute({
+    result = await tool.run_command({
         "command": "echo hi",
         "_container_id": "cid_xyz",
     })
@@ -535,7 +535,7 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
 
 @pytest.mark.asyncio
 async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
-    """BashTool.execute 无 _container_id → start_process 的 container_id 应为 None（回归）。"""
+    """bash 工具无 _container_id → start_process 的 container_id 应为 None（回归）。"""
     tool = BashTool()
     captured: dict = {}
 
@@ -553,7 +553,7 @@ async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
     tool.process_manager.get_summary = lambda pid: {"exit_code": 0, "summary": []}  # type: ignore[assignment]
     tool.process_manager.get_output = lambda pid: "done"  # type: ignore[assignment]
 
-    await tool.execute({"command": "echo hi"})
+    await tool.run_command({"command": "echo hi"})
 
     assert captured.get("container_id") is None
 
@@ -565,14 +565,14 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
     用 `rm -rf /`（SecurityChecker 判 safe=False 直接拦截）验证：
     无 container_id 时被拦返回 failure，有 container_id 时放行走到 start_process。
 
-    0.2 契约（tool.py _handle_execute 的 is_isolated 分支）：容器隔离
+    0.2 契约（tool.py run_command 的 is_isolated 分支）：容器隔离
     模式跳过内部 SecurityChecker。
     """
     dangerous_cmd = "rm -rf /"
 
     # 1) 无 container_id：应被 SecurityChecker 拦截
     tool1 = BashTool()
-    result1 = await tool1.execute({"command": dangerous_cmd})
+    result1 = await tool1.run_command({"command": dangerous_cmd})
     assert not result1.success, "无 container_id 时 rm -rf / 应被安全检查拦截"
     assert "安全检查" in (result1.error or "") or "SECURITY" in (result1.error_code or "")
 
@@ -594,7 +594,7 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
     tool2.process_manager.get_summary = lambda pid: {"exit_code": 0, "summary": []}  # type: ignore[assignment]
     tool2.process_manager.get_output = lambda pid: "done"  # type: ignore[assignment]
 
-    result2 = await tool2.execute({"command": dangerous_cmd, "_container_id": "cid"})
+    result2 = await tool2.run_command({"command": dangerous_cmd, "_container_id": "cid"})
 
     # 有 container_id 时必须真的走到 start_process（跳过了安全检查）
     assert start_called, "有 _container_id 时应跳过安全检查，直接调 start_process"
@@ -609,10 +609,11 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
 
 @pytest.mark.asyncio
 async def test_container_execute_running_continue_completed_cycle(tmp_path):
-    """完整链路：execute(超时→running) → continue(完成→completed)，pid 一致。
+    """完整链路：bash(超时→running) → log(block=true)(完成→completed)，handle 一致。
 
-    用真实 ProcessManager + 真实 BashTool.execute，mock 的只有 docker exec
-    （返回"还活着"的 fake process）。验证容器路径的轮询行为和本地路径一致。
+    用真实 ProcessManager + 真实 bash 工具（run_command/read_log），mock 的只有
+    docker exec（返回"还活着"的 fake process）。验证容器路径的轮询行为和本地
+    路径一致。2026-11-07 四工具重构：handle 取代 pid。
     """
     tool = BashTool()
     # 容器内 pid=100，host pid=42；进程"还活着"（stream 阻塞，wait 立即返回 0）
@@ -622,20 +623,21 @@ async def test_container_execute_running_continue_completed_cycle(tmp_path):
         "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
-        # 1) execute：timeout 极小，进程还活着 → 返回 running
-        result1 = await tool.execute({
+        # 1) bash：timeout 极小，进程还活着 → 返回 running
+        result1 = await tool.run_command({
             "command": "sleep 100",
             "_container_id": "cid",
             "timeout": 0.1,  # 极小，立即触发超时
         })
 
-    assert result1.success, f"execute 应成功返回 running，error: {result1.error}"
+    assert result1.success, f"bash 应成功返回 running，error: {result1.error}"
     data1 = result1.output
     assert data1["status"] == "running", f"第一次应返回 running，实际: {data1['status']}"
-    pid = data1["pid"]
-    assert pid == 42, f"pid 应是 host pid 42，实际: {pid}"
+    handle = data1["handle"]
+    pid = decode_handle(handle)[0]
+    assert pid == 42, f"handle 解码 pid 应是 host pid 42，实际: {pid}"
 
-    # 2) 模拟进程在 continue 期间结束：手动改 status
+    # 2) 模拟进程在 log 等待期间结束：手动改 status
     info = tool.process_manager.get_process_info(pid)
     assert info is not None
     assert isinstance(info.backend, ContainerProcessBackend)
@@ -645,26 +647,25 @@ async def test_container_execute_running_continue_completed_cycle(tmp_path):
     tool.process_manager.get_summary = lambda p: {"exit_code": 0, "summary": [], "elapsed_seconds": 1.5}  # type: ignore[assignment]
     tool.process_manager.get_output = lambda p: "done"  # type: ignore[assignment]
 
-    # 3) continue：进程已完成 → 返回 completed
-    result2 = await tool.execute({
-        "action": "continue",
-        "pid": pid,
-        "timeout": 5,
+    # 3) log(block=true)：进程已完成 → 返回 completed
+    result2 = await tool.read_log({
+        "handle": handle,
+        "block": True,
     })
 
-    assert result2.success, f"continue 应成功，error: {result2.error}"
+    assert result2.success, f"log(block=true) 应成功，error: {result2.error}"
     data2 = result2.output
-    assert data2["status"] == "completed", f"continue 应返回 completed，实际: {data2['status']}"
-    assert data2["pid"] == pid, "continue 返回的 pid 应与 execute 一致"
+    assert data2["status"] == "completed", f"log 应返回 completed，实际: {data2['status']}"
+    assert data2["handle"] == handle, "log 返回的 handle 应与 bash 一致"
     assert data2["exit_code"] == 0
 
 
 @pytest.mark.asyncio
 async def test_container_execute_timeout_does_not_kill_process(tmp_path):
-    """execute 超时返回 running 后，容器内进程未被 docker exec kill（只有 terminate 才杀）。
+    """bash 前台超时返回 running 后，容器内进程未被 docker exec kill（只有 kill 工具才杀）。
 
-    验证：mock backend._run_cmd 记录所有调用，execute 超时返回 running 期间
-    不应有 kill 命令；只有显式 terminate 才触发 kill。
+    验证：mock backend._run_cmd 记录所有调用，前台超时返回 running 期间
+    不应有 kill 命令；只有显式 kill 工具才触发 kill。
     """
     tool = BashTool()
     fake_proc = _make_fake_process(host_pid=42, container_pid=100, keep_open=True)
@@ -679,8 +680,8 @@ async def test_container_execute_timeout_does_not_kill_process(tmp_path):
         "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
-        # execute 超时返回 running
-        result = await tool.execute({
+        # bash 前台超时返回 running
+        result = await tool.run_command({
             "command": "sleep 100",
             "_container_id": "cid",
             "timeout": 0.1,
@@ -693,20 +694,22 @@ async def test_container_execute_timeout_does_not_kill_process(tmp_path):
     assert isinstance(info.backend, ContainerProcessBackend)
     info.backend._run_cmd = fake_run_cmd  # type: ignore[attr-defined]
 
-    # execute 超时期间不应有任何 kill 调用（"kill" 现在在 sh -c 字符串里）
+    # 前台超时期间不应有任何 kill 调用（"kill" 现在在 sh -c 字符串里）
     def _is_kill_call(c: list) -> bool:
         return any("kill" in str(part) for part in c)
 
     kill_calls = [c for c in run_cmd_calls if _is_kill_call(c)]
     assert not kill_calls, (
-        f"execute 超时返回 running 期间不应杀进程，但有 kill 调用: {kill_calls}"
+        f"前台超时返回 running 期间不应杀进程，但有 kill 调用: {kill_calls}"
     )
 
-    # 显式 terminate 才触发 kill
-    await tool.execute({"action": "terminate", "pid": 42, "_container_id": "cid"})
+    # 显式 kill 工具才触发 kill（handle 编解码取回 pid）
+    handle = result.output["handle"]
+    assert decode_handle(handle)[0] == 42
+    await tool.terminate({"handle": handle, "_container_id": "cid"})
 
     kill_calls = [c for c in run_cmd_calls if _is_kill_call(c)]
-    assert len(kill_calls) == 1, f"terminate 应触发一次 kill，实际: {kill_calls}"
+    assert len(kill_calls) == 1, f"kill 工具应触发一次 kill，实际: {kill_calls}"
     args = kill_calls[0]
     assert args[:3] == ["docker", "exec", "cid"]
     cmd_str = " ".join(args)

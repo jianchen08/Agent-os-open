@@ -1,15 +1,15 @@
 # @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入
-"""L1 主 agent bash_execute 路由测试。
+"""L1 主 agent bash 路由测试。
 
 核心契约：
-- L1 主 agent（agent_level 缺省或 <=1）的 bash_execute 一律走 host，
+- L1 主 agent（agent_level 缺省或 <=1）的 bash 一律走 host，
   不进容器。主 agent 没有任务工作空间（直接在 project_root 操作），
   强制进容器会因无 workspace 被 tool_core 拒绝（报"工作空间未解析"）。
 - 子任务（L2+）不受影响，仍按 policy/metadata 决策走容器或 host。
 
-背景：bash_execute 工具级 policy 写死 isolation=isolated，且 isolation_guard
+背景：bash 工具级 policy 写死 isolation=isolated，且 isolation_guard
 原决策只看 policy + 任务 isolation_level，不看 agent 层级，导致 L1 主 agent
-的 bash_execute 被错误路由进容器。
+的 bash 被错误路由进容器。
 """
 import sys
 import tempfile
@@ -38,7 +38,7 @@ from plugin import IsolationGuard, set_env_caller  # noqa: E402
 
 
 def _make_guard(docker_available: bool = True) -> IsolationGuard:
-    """构造 IsolationGuard，并让 decider 对 bash_execute 返回 container 策略。"""
+    """构造 IsolationGuard，并让 decider 对 bash 返回 container 策略。"""
     with patch("isolation.decider.IsolationDecider"):
         guard = IsolationGuard(config={"docker_available": docker_available})
     mock_policy = MagicMock()
@@ -65,7 +65,7 @@ def _make_ctx(agent_level: str | None = None, workspace: str | None = None) -> P
     """构造 tool_execute 上下文，可选注入 agent_level / workspace。"""
     state: dict = {
         StateKeys.CORE_TYPE: "tool_execute",
-        StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "ls"}}],
+        StateKeys.RAW_TOOL_CALLS: [{"name": "bash", "args": {"command": "ls"}}],
     }
     if agent_level is not None:
         state[StateKeys.AGENT_LEVEL] = agent_level
@@ -104,16 +104,16 @@ class TestIsMainAgent:
 
 
 # ============================================================================
-# 2. L1 主 agent bash_execute 路由到 host
+# 2. L1 主 agent bash 路由到 host
 # ============================================================================
 
 
 class TestL1RoutesToHost:
-    """L1 主 agent 的 bash_execute 一律走 host，不进容器。"""
+    """L1 主 agent 的 bash 一律走 host，不进容器。"""
 
     @pytest.mark.asyncio
-    async def test_l1_bash_execute_routes_to_host(self):
-        """L1 + bash_execute + docker 可用 → host（不被塞进容器）。"""
+    async def test_l1_bash_routes_to_host(self):
+        """L1 + bash + docker 可用 → host（不被塞进容器）。"""
         guard = _make_guard(docker_available=True)
         result = await guard.execute(_make_ctx("L1"))
 
@@ -150,7 +150,7 @@ class TestL1RoutesToHost:
 
 
 class TestSubtaskUnaffected:
-    """L2+ 子任务的 bash_execute 仍按 policy/metadata 决策。"""
+    """L2+ 子任务的 bash 仍按 policy/metadata 决策。"""
 
     @pytest.mark.asyncio
     async def test_l2_goes_to_docker_when_available(self):

@@ -94,26 +94,39 @@ _fallback_chain_map: dict[str, list[str]] = {}
 _provider_conf_map: dict[str, dict[str, Any]] = {}
 
 
-def get_provider_prefix(provider_name: str) -> str:
+def _resolve_prefix(type_map: dict[str, str], provider_name: str) -> str:
+    """按给定映射表解析 provider 上游前缀；未声明即 fail-closed 抛配置错误。"""
+    if provider_name in type_map:
+        return type_map[provider_name]
+    if not provider_name:
+        # 调用方（adapter/keypool 直连）以空 provider 表示"无前缀直连模型"
+        return ""
+    raise ValueError(
+        f"前缀映射缺失: provider '{provider_name}' 未在 llm.yaml "
+        "providers.<name>.type 配置（不回退 provider 名充当上游前缀）"
+    )
+
+
+def get_provider_prefix(
+    provider_name: str, provider_type_map: dict[str, str] | None = None
+) -> str:
     """获取 provider 对应的上游类型前缀（从配置动态读取）。
 
     fail-closed（兜底反模式审查 P8）：未在 llm.yaml providers.<name>.type
     配置的 provider 显式抛配置错误——provider 名本身不是合法上游前缀，
     静默回退会把配置错误推迟成上游 API 的隐蔽 404/路由失败。
+
+    ``provider_type_map``：构建期显式传入"本代新表"（``build_router`` 先建
+    新表再整体替换引用，构建中的 model_list 必须按新表解析前缀，不能读还在
+    生效的上一代表）；None = 读当前生效表（默认读面，仅此面有懒加载兜底）。
     """
-    if provider_name in _provider_type_map:
-        return _provider_type_map[provider_name]
-    if not provider_name:
-        # 调用方（adapter/keypool 直连）以空 provider 表示"无前缀直连模型"
-        return ""
-    # 映射缺失：懒加载重建一次，仍未命中即配置错误
-    _ensure_provider_type_map_loaded()
-    if provider_name not in _provider_type_map:
-        raise ValueError(
-            f"前缀映射缺失: provider '{provider_name}' 未在 llm.yaml "
-            "providers.<name>.type 配置（不回退 provider 名充当上游前缀）"
-        )
-    return _provider_type_map[provider_name]
+    if provider_type_map is not None:
+        return _resolve_prefix(provider_type_map, provider_name)
+    if provider_name not in _provider_type_map and provider_name:
+        # 映射缺失：懒加载重建一次，仍未命中即配置错误（_resolve_prefix fail-closed）
+        _ensure_provider_type_map_loaded()
+    return _resolve_prefix(_provider_type_map, provider_name)
+
 
 
 def _ensure_provider_type_map_loaded() -> None:
@@ -134,9 +147,11 @@ def _ensure_provider_type_map_loaded() -> None:
         logger.warning("[Router] 懒加载 provider_type_map 失败", exc_info=True)
 
 
-def _provider_model_string(provider: str, model_name: str) -> str:
-    """计算 provider 前缀形态的模型标识字符串。"""
-    prefix = get_provider_prefix(provider)
+def _provider_model_string(
+    provider: str, model_name: str, provider_type_map: dict[str, str] | None = None
+) -> str:
+    """计算 provider 前缀形态的模型标识字符串（构建期传本代新表）。"""
+    prefix = get_provider_prefix(provider, provider_type_map)
     return f"{prefix}/{model_name}"
 
 
@@ -210,8 +225,13 @@ def _parse_provider_keys(
 def build_model_list(
     model_loader: Any,
     provider_keys: dict[str, list[KeySlot]],
+    provider_type_map: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """从 llm.yaml 构建 Router model_list。"""
+    """从 llm.yaml 构建 Router model_list。
+
+    ``provider_type_map``：构建期传入本代新表（prefix 解析按新表 fail-closed）；
+    None 读当前生效表（直调测试面）。
+    """
     llm_data = model_loader.load_llm_data()
     models_section = llm_data.get("models", {})
 
@@ -232,7 +252,7 @@ def build_model_list(
         if isinstance(prov_conf, dict) and prov_conf.get("via") == "plugin":
             continue
 
-        provider_model = _provider_model_string(provider, model_name)
+        provider_model = _provider_model_string(provider, model_name, provider_type_map)
         slots = provider_keys.get(provider)
 
         # 模型级凭证覆盖（如 deepseek-chat 有自己的 api_key）
@@ -314,8 +334,16 @@ def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
 
 
 def build_router(model_loader: Any) -> None:
-    """构建 None 实例。"""
-    global _key_pools, _model_to_provider, _provider_type_map  # noqa: PLW0602
+    """按注入配置重建全部路由侧效应表：先建新表，最后一代表整体替换引用。
+
+    读侧无空窗（审计 2026-11-12 P2-12）：``reset_router`` 只丢单例槽位不清表，
+    本函数在本地建完一代完整表后才逐表整体赋值（不 ``clear()`` 原地清空）——
+    配置切换窗口内的在途调用读到的是上一代完整表，而不是空表（空表会让
+    ``get_provider_prefix`` 懒加载读到新配置后 ``ValueError("前缀映射缺失")``）。
+    """
+    global _key_pools, _model_to_provider, _model_to_name  # noqa: PLW0603
+    global _provider_type_map, _plugin_provider_routes  # noqa: PLW0603
+    global _fallback_chain_map, _provider_conf_map  # noqa: PLW0603
 
     llm_data = model_loader.load_llm_data()
 
@@ -323,16 +351,15 @@ def build_router(model_loader: Any) -> None:
     # （域名并集从本份 llm.yaml providers api_base 现场派生，直连白名单不另设表）。
     disable_llm_proxy(_direct_hosts_from_llm_data(llm_data))
 
-
-    # 从 providers.type 字段构建 provider → 上游前缀映射
-    _provider_type_map.clear()
-    _provider_conf_map.clear()
+    # 从 providers.type 字段构建 provider → 上游前缀映射（本地新表）
+    provider_conf_map: dict[str, dict[str, Any]] = {}
+    provider_type_map: dict[str, str] = {}
     for provider_name, provider_conf in llm_data.get("providers", {}).items():
         if not isinstance(provider_conf, dict):
             continue
-        _provider_conf_map[provider_name] = dict(provider_conf)
+        provider_conf_map[provider_name] = dict(provider_conf)
         if "type" in provider_conf:
-            _provider_type_map[provider_name] = provider_conf["type"]
+            provider_type_map[provider_name] = provider_conf["type"]
             logger.info(
                 "[Router] provider %s → upstream prefix: %s",
                 provider_name,
@@ -340,40 +367,64 @@ def build_router(model_loader: Any) -> None:
             )
 
     provider_keys = _parse_provider_keys(llm_data)
-    model_list = build_model_list(model_loader, provider_keys)
+    # 前缀按新表解析（不能读还在生效的上一代表）
+    model_list = build_model_list(model_loader, provider_keys, provider_type_map)
     fallbacks = build_fallbacks(model_loader)
     # 兜底链展平（主模型 id → 兜底 id 列表）：provider 插件分支网关侧兜底消费
-    _fallback_chain_map.clear()
+    fallback_chain_map: dict[str, list[str]] = {}
     for entry in fallbacks:
         for primary, fb_ids in entry.items():
-            _fallback_chain_map[primary] = list(fb_ids)
+            fallback_chain_map[primary] = list(fb_ids)
 
-    # 构建 model_id → provider 映射
-    _model_to_provider.clear()
-    # 构建 model_id → model_name 映射（KeyPoolAdapter 直连时反查真实模型名用）
-    _model_to_name.clear()
+    # 构建 model_id → provider 映射 / model_id → model_name 映射
+    # （KeyPoolAdapter 直连时反查真实模型名用）
+    model_to_provider: dict[str, str] = {}
+    model_to_name: dict[str, str] = {}
     for model_id, model_conf in llm_data.get("models", {}).items():
         provider = model_conf.get("provider", "")
         model_name = model_conf.get("model_name", model_id)
         if provider:
-            _model_to_provider[model_id] = provider
-        _model_to_name[model_id] = model_name
+            model_to_provider[model_id] = provider
+        model_to_name[model_id] = model_name
 
-    # 构建 model_id → provider 插件路由（2026-11-04 网关化第二步）：
-    # providers.<name>.via=plugin 的模型改调 llm_provider.<type>.* 契约方，
-    # 传输在插件、路由/池化/兜底/用量留网关（ADR 2026-11-04）。
-    _plugin_provider_routes.clear()
+    # 构建 model_id → provider 插件路由（2026-11-04 网关化第二步；批 1 方言键
+    # 正规化，ADR 2026-11-18-llm-two-tier-plugin-convergence）：providers.<name>.
+    # via=plugin 的模型改调 llm_provider.<方言键>.* 契约方，传输在插件、
+    # 路由/池化/兜底/用量留网关（ADR 2026-11-04）。
+    # 键位与方言表对齐：路由键取 providers.<name>.type 方言键（provider_type
+    # 遗留字段在场时优先兼容保留）；provider 名不再是合法路由键——方言键与
+    # 遗留字段双缺即构建期 ValueError（fail-closed，与 get_provider_prefix
+    # 同一纪律，不回退 provider 名充当方言键）。异常在末尾整体替换引用之前
+    # 抛出，上一代完整表原样可读（读侧无空窗，审计 2026-11-12 P2-12 同款）。
+    plugin_provider_routes: dict[str, dict[str, str]] = {}
     providers_section = llm_data.get("providers", {})
-    for model_id, provider in _model_to_provider.items():
+    for model_id, provider in model_to_provider.items():
         conf = providers_section.get(provider)
         if isinstance(conf, dict) and conf.get("via") == "plugin":
-            _plugin_provider_routes[model_id] = {
-                "provider_type": str(conf.get("provider_type") or provider),
-            }
+            dialect_key = str(
+                conf.get("provider_type") or provider_type_map.get(provider) or ""
+            )
+            if not dialect_key:
+                raise ValueError(
+                    f"provider '{provider}' 声明 via=plugin 但未配置方言键"
+                    "（providers.<name>.type，provider_type 遗留字段亦缺）——"
+                    "provider 名不是合法路由键，fail-closed（批 1 方言键正规化）"
+                )
+            plugin_provider_routes[model_id] = {"provider_type": dialect_key}
 
     # 构建 KeyPools（仅用于统计展示）
+    key_pools: dict[str, KeyPool] = {}
     for prov_name, slots in provider_keys.items():
-        _key_pools[prov_name] = KeyPool(slots, pool_id=prov_name)
+        key_pools[prov_name] = KeyPool(slots, pool_id=prov_name)
+
+    # 一代表建成后整体替换引用（不 clear 原地清空：读侧见旧代或新代，绝不见空表）
+    _provider_conf_map = provider_conf_map
+    _provider_type_map = provider_type_map
+    _fallback_chain_map = fallback_chain_map
+    _model_to_provider = model_to_provider
+    _model_to_name = model_to_name
+    _plugin_provider_routes = plugin_provider_routes
+    _key_pools = key_pools
 
     # 2026-11-04 网关化：薄客户端直连 + 网关级兜底链（_fallback_chain_map）；
     # model_list 保留仅作部署清点日志。本函数只做侧效应
@@ -447,21 +498,20 @@ def get_or_create_router(model_loader: Any) -> None:
 
     Router 对象已随 2026-11-04 网关化退役（ADR 2026-11-04-llm-default-
     gateway-and-provider-plugins）：本函数只灌侧效应表，恒无返回值；
-    ``_router_instance`` 保留为恒 None 的兼容槽位（reset_router 清空语义不变）。
+    ``_router_instance`` 保留为恒 None 的兼容槽位。
     """
     build_router(model_loader)
 
 
 def reset_router() -> None:
-    """重置 Router/Adapter 模块级单例，使配置变更后重新构建。"""
+    """重置 Router/Adapter 模块级单例槽位，使配置变更后重新构建。
+
+    映射表**不在此清空**：下一代由 ``build_router`` 先建新表再整体替换引用，
+    读侧在重建落定前仍解析上一代完整表。清空式重置会让配置切换窗口内的并发
+    管道命中空表（审计 2026-11-12 P2-12 的「前缀映射缺失」失败一次根因）；
+    ``server._ensure_adapter`` 在配置变更后置空 adapter，下一次调用先重建再路由。
+    """
     global _router_instance, _adapter_instance  # noqa: PLW0603
     _router_instance = None
     _adapter_instance = None
-    _key_pools.clear()
-    _model_to_provider.clear()
-    _model_to_name.clear()
-    _provider_type_map.clear()
-    _plugin_provider_routes.clear()
-    _fallback_chain_map.clear()
-    _provider_conf_map.clear()
     logger.info("[Router] 模块级单例已重置")

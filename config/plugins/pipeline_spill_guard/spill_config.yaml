@@ -2,8 +2,9 @@
 # spill_guard 大输出兜底配置
 #
 # 职责：工具大结果（> max_inline_bytes）统一兜底——原文存文件 + UTF-8 安全
-# 头尾提取 + 语义增强（错误/警告/进度行）+ 定位符返回。agent 需要细节时经
-# spill_retrieve 工具按 tool_call_id 取回完整原文。
+# 头尾提取 + 语义增强（错误/警告/进度行）+ 存档路径引导。agent 需要细节时
+# 用 file_read（offset/limit/tail 分段）或 enhanced_search（检索）直接读存档
+# 文件（ADR 2026-11-18-spill-file-face-direct-read；专用取回工具已退役）。
 #
 # 存储隔离：spill 原文存文件系统（base_path），不进记忆库——避免 5MB 走
 # JSON-RPC/chunk，且不污染 hindsight.recall 语义检索。
@@ -18,8 +19,8 @@ spill:
   # 默认 10KB：约 2.5K token，单条工具结果占上下文的合理上限。
   max_inline_bytes: 10240
 
-  # 预览头/尾各占 (max_inline_bytes - 定位符预留) 的比例（0-1 开区间）。
-  # 0.35 + 0.35 = 70% 给头尾预览，剩余留给语义块与定位符，整体不超上限。
+  # 预览头/尾各占 (max_inline_bytes - 引导预留) 的比例（0-1 开区间）。
+  # 0.35 + 0.35 = 70% 给头尾预览，剩余留给语义块与引导，整体不超上限。
   head_fraction: 0.35
   tail_fraction: 0.35
 
@@ -31,15 +32,24 @@ spill:
   # ── 原文存储 ──
   # 基准路径（相对内核进程工作目录，即项目根；同 ./data/memory 约定）。
   # 可用环境变量 AGENTOS_SPILL_BASE 显式覆盖（绝对路径部署场景）。
-  # 布局：{base_path}/{pipeline_id}/{tool_call_id}，按 pipeline 隔离，
-  # 管道结束由 spill_retrieve 的 on_pipeline_end 钩子整目录清理。
+  # 布局：{base_path}/{pipeline_id}/{tool_call_id}，按 pipeline 隔离；管道结束
+  # 由 spill_guard 自身的 on_pipeline_end 钩子整目录清理（可选关闭）。
   base_path: ./data/spill
 
-  # gzip 压缩（5MB 文本 → 约 1/10 体积；读侧按 gzip magic 自动识别）。
-  compression: true
+  # 存档文件数全局上限（跨管道；0 = 不限）。超限按最老 mtime 淘汰——崩溃
+  # 管道的残留（无人触发钩子清理）也被兜住（2026-11-18 用户裁定）。
+  max_files: 100
+
+  # 管道结束清理开关：false = 保留存档（只靠 max_files 封顶淘汰）。
+  cleanup_on_pipeline_end: true
+
+  # gzip 压缩默认关闭：存档要供 file_read/enhanced_search 直接读，gzip 会被
+  # file_read 按二进制拒绝、检索工具无法匹配。显式 true 仅用于「取回走
+  # tool_cache_writer 回读、无直读需求」的特殊部署（读侧按 gzip magic 识别）。
+  compression: false
   compression_level: 6
 
-  # 跳过兜底的工具名列表。spill_retrieve 自身始终跳过（防 取回→spill→再取回
-  # 死循环，对齐 DSH 对 read 工具的同类豁免）。bash 如已靠 log_compressor
-  # 压到阈值内则自然透传，无需在此豁免。
+  # 跳过兜底的工具名列表（配置豁免面）。防死循环不在此：file_read 直读
+  # spill 存档本体的结果由插件按 base 路径前缀自动豁免（防 读档→spill→再读
+  # 递归）。bash 如已靠 log_compressor 压到阈值内则自然透传，无需豁免。
   skip_tools: []

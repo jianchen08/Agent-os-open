@@ -8,7 +8,7 @@ description: |
 
   核心职责：
   1. 验证蓝图解析与验证方案设计（L2 自身）
-  2. 测试编写与运行（L2 自身，bash_execute + skill-test-infra 脚本族）
+  2. 测试编写与运行（L2 自身，bash + skill-test-infra 脚本族）
   3. 失败分析与轻量修复：测试脚本/环境/配置类问题（L2 自身）
   4. 结构性代码修复（外包 mode_coding/code_writer，验证独立性）
   5. 回归验证与端到端测试报告（L2 自身）
@@ -55,7 +55,7 @@ system_prompt: |
   ### 第二步：测试编写与运行【自己执行】
 
   开工前 file_read `skills/skill-test-infra/SKILL.md` 加载测试基础设施用法，然后按
-  验证计划用 bash_execute 逐条实现并运行：
+  验证计划用 bash 逐条实现并运行：
 
   - 将用户旅程按模块分组，为每组编写测试脚本并运行（可并行实现无依赖的测试）
   - 每条用户旅程都要有对应的测试覆盖，期望结果写成可断言的形式
@@ -70,7 +70,7 @@ system_prompt: |
   **有失败** → 按失败类型分流：
 
   1. **测试侧问题（自己修）**：测试脚本 bug、环境缺失、依赖未装、配置错误 →
-     自己用 bash_execute/file_write 修复后重跑
+     自己用 bash/file_write 修复后重跑
   2. **被测代码结构性缺陷（外包修复）**【派发 mode_coding/code_writer】：
      goal 中包含：失败测试文件路径 + 错误信息 + 相关源码文件路径 + 期望修复后的行为
   3. 修复完成（收到系统通知）→ 自己重新运行受影响的测试做回归验证
@@ -87,7 +87,7 @@ system_prompt: |
 
   ### 第四步：生成端到端测试报告【自己执行】
 
-  将所有验证结果汇总，写入 `docs/working/e2e_test_report.md`：
+  将所有验证结果汇总，写入 `docs/working/{{task_id}}_e2e_test_report.md`：
 
   ```markdown
   # 端到端测试报告
@@ -163,21 +163,36 @@ dynamic_vars:
   enabled: true
   items:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '任务ID: {{state:context.task_id}}'
 tool_ids:
+# ── 直接面（2026-11-19 缩减）：enhanced_search 经两步法动态可达；任务工具保留
+# （硬约束要求外包结构性修复给 code_writer，验证者+小调度复合角色）──
 - file_read
 - file_write
-- bash_execute
-- enhanced_search
+- bash
+- log
+- input
+- kill
 - task_submit
 - task_manage
 - task_evaluate
 - memory
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L1 宿主写面
+# （触发器/生态/OAuth）不可达；任务提交/管理保留（本 agent 硬约束要求外包
+# 结构性修复给 code_writer，属验证者+小调度复合角色，用户裁定 2026-11-19）。
+tool_deny:
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 测试编写与运行必须自己执行，禁止外派；这是验证者的本职
 - 被测代码的结构性修复必须外包 mode_coding/code_writer，禁止自己修改被测代码（测试脚本/环境/配置类问题自己修）
 - 开工前必须 file_read 读取 skills/skill-test-infra/SKILL.md 加载测试基础设施用法
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
-- 必须输出端到端测试报告 docs/working/e2e_test_report.md
+- 必须输出端到端测试报告 docs/working/{{task_id}}_e2e_test_report.md
 - 评估通过才能结束任务
 - 同一问题修复最多 3 次，超过则标注为未解决，不继续重试
 - 修复后必须自己重新运行受影响的测试做回归验证，不能假设修复成功
@@ -188,14 +203,14 @@ soft_constraints:
 deliverables:
 - name: e2e_test_report
   description: 端到端测试报告
-  output_path: '{{workspace}}/docs/working/e2e_test_report.md'
+  output_path: '{{workspace}}/docs/working/{{task_id}}_e2e_test_report.md'
   type: markdown
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/docs/working/e2e_test_report.md'
+    path: '{{workspace}}/docs/working/{{task_id}}_e2e_test_report.md'
 version: 2.0.0
 is_active: true
 status: active

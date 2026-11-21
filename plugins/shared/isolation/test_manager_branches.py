@@ -552,11 +552,18 @@ class TestInitFallbacks:
         else:
             monkeypatch.setitem(sys.modules, "hardware_profile", None)  # import 即失败
         mod = _load_manager()
-        # 钉 CONTAINER 后端为 docker：仓库真身 isolation_config.yaml 已启用
-        # wsl_native（占 CONTAINER 槽），不钉则真身配置渗入、断言对象漂移。
-        # 钉 docker 后端：linux_native 默认启用会接管 CONTAINER 槽（ADR 2026-10-12）
-        monkeypatch.setattr(mod, "_load_provider_config", lambda: {"docker": {}, "linux_native": {"enabled": False}})
-        mgr = mod.IsolationManager()
+        # 钉 CONTAINER 后端为 docker：2026-11-13 裁定 Docker 仅显式 opt-in、
+        # wsl_native 在 nt 缺省启用——显式 override 三后端各就各位，真身配置
+        # 不渗入、断言对象不漂移（旧 _load_provider_config 打桩面已删除）。
+        mgr = mod.IsolationManager(
+            providers_config_override={
+                "providers": {
+                    "docker": {"enabled": True},
+                    "linux_native": {"enabled": False},
+                    "wsl_native": {"enabled": False},
+                }
+            }
+        )
         assert mgr._resource_profile["tier"] == "low(fallback)"
         assert mgr._resource_profile["max_environments"] == 3
         # 保守配额传导：内存 256m 而非默认 512m
@@ -1453,7 +1460,8 @@ class TestWslNativePlatformGate:
     参数化断言 CONTAINER 槽位上的 provider 类型（可观察行为）：
     - enabled + os.name="nt" → WslNativeProvider；
     - enabled + os.name="posix" → 平台门让位（Linux 默认落 LinuxNative，
-      macOS 落 Docker，ADR 2026-10-12 修订）。
+      macOS 落 Docker（2026-11-13 裁定 Docker 仅显式 opt-in，cfg 带显式
+      cua.enabled），ADR 2026-10-12 修订）。
     平台判定走全局 os 模块属性（manager 内 ``os.name`` 调用时读取），
     monkeypatch os.name 即可覆盖双平台；linux 门钉模块级
     ``_is_linux_platform``（stub 环境无 pathlib 投毒面）。
@@ -1482,7 +1490,9 @@ class TestWslNativePlatformGate:
         monkeypatch.setattr(os, "name", platform)
         mod = _load_manager()
         monkeypatch.setattr(mod, "_is_linux_platform", lambda: is_linux)
-        providers = mod._create_providers_from_config({"wsl_native": {"enabled": True}})
+        providers = mod._create_providers_from_config(
+            {"wsl_native": {"enabled": True}, "cua": {"enabled": True}}
+        )
         slot = providers[IsolationLevel.CONTAINER]
         wsl_cls = sys.modules["providers.wsl_native_provider"].WslNativeProvider
         docker_cls = sys.modules["providers.docker_provider"].DockerProvider
@@ -1533,7 +1543,7 @@ class TestLinuxNativePlatformGate:
             monkeypatch,
             os_name="posix",
             is_linux=True,
-            cfg={"linux_native": {"enabled": False}},
+            cfg={"linux_native": {"enabled": False}, "cua": {"enabled": True}},
         )
         docker_cls = sys.modules["providers.docker_provider"].DockerProvider
         assert isinstance(slot, docker_cls)
@@ -1569,7 +1579,8 @@ class TestLinuxNativePlatformGate:
             monkeypatch,
             os_name="posix",
             is_linux=False,
-            cfg={"linux_native": {"enabled": True}},
+            # macOS 无原生后端：Docker 仅显式 opt-in（2026-11-13 裁定）
+            cfg={"linux_native": {"enabled": True}, "cua": {"enabled": True}},
         )
         docker_cls = sys.modules["providers.docker_provider"].DockerProvider
         assert isinstance(slot, docker_cls)
@@ -1585,6 +1596,6 @@ class TestLinuxNativePlatformGate:
                 monkeypatch,
                 os_name="posix",
                 is_linux=False,
-                cfg={"linux_native": {"enabled": True}},
+                cfg={"linux_native": {"enabled": True}, "cua": {"enabled": True}},
             )
         assert any("linux_native" in r.message and "非 Linux" in r.message for r in caplog.records)

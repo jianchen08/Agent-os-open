@@ -1,10 +1,12 @@
 # @feature: FP-0.2.〇 插件生态 | @ci: python-test
-"""依赖闭包同步闸测试：单插件同步撞上跨插件版本错位的拦截面。
+"""依赖闭包同步闸测试：单插件同步撞上跨插件依赖缺口的拦截面。
 
 2026-10-17 装机事故形态：task_submit v1.1.3 ``from _root_api import
 WORKSPACE_PREPARE_PHASE`` × _root_api 未随同更新（生效副本旧版无符号）→
-生产 ImportError 合宿组全灭。闸在同步时复现生产解析（BuiltinFirst 选生效
-副本 → 真实 import → hasattr 逐符号验证），fail-closed。
+生产 ImportError 合宿组全灭。闸在同步时复现生产解析（分级单副本：用户目录
+副本即运行期真值，Tier2 依赖探测用户副本、Tier1 共享件探测种子副本 →
+真实 import → hasattr 逐符号验证），fail-closed。双源版本仲裁已退役
+（ADR 2026-11-07 §2.5），生效副本判定不再比版本。
 """
 
 from __future__ import annotations
@@ -90,9 +92,12 @@ def test_closure_ok_when_all_symbols_present(tmp_path: Path) -> None:
     assert check_import_closure(src, user_plugins, install_roots=[builtin_root]) is None
 
 
-def test_user_newer_dep_copy_wins_and_supplies_symbol(tmp_path: Path) -> None:
-    """用户副本严格更大且补齐符号 → 用户副本为生效副本，闸绿（防拟合对照：
-    用户持平内置时内置赢、闸应红）。"""
+def test_user_dep_copy_is_effective_probe_target(tmp_path: Path) -> None:
+    """用户目录有依赖副本即探测它（运行期真值，版本无关）→ 符号齐全闸绿。
+
+    防拟合对照见 test_user_dep_copy_missing_symbol_gate_red：探测对象切换
+    不改变 fail-closed 缺符号判定。
+    """
     builtin_root = _make_install_root(tmp_path / "install", "1.0.0", ["A"])
     src = _make_src(tmp_path, "from dep_api import A, B\n")
     user_plugins = tmp_path / "user" / "plugins"
@@ -102,13 +107,13 @@ def test_user_newer_dep_copy_wins_and_supplies_symbol(tmp_path: Path) -> None:
     assert check_import_closure(src, user_plugins, install_roots=[builtin_root]) is None
 
 
-def test_user_equal_version_builtin_wins_gate_red(tmp_path: Path) -> None:
-    """用户副本持平内置（1.0.0）→ BuiltinFirst 内置赢（无 B）→ 闸红。"""
-    builtin_root = _make_install_root(tmp_path / "install", "1.0.0", ["A"])
+def test_user_dep_copy_missing_symbol_gate_red(tmp_path: Path) -> None:
+    """用户副本缺被引符号（即便种子副本有）→ 闸红：运行期装的就是它。"""
+    builtin_root = _make_install_root(tmp_path / "install", "1.0.0", ["A", "B"])
     src = _make_src(tmp_path, "from dep_api import A, B\n")
     user_plugins = tmp_path / "user" / "plugins"
     user_plugins.mkdir(parents=True)
-    _user_dep(user_plugins, "1.0.0", ["A", "B"])
+    _user_dep(user_plugins, "1.0.0", ["A"])
 
     reason = check_import_closure(src, user_plugins, install_roots=[builtin_root])
 

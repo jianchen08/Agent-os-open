@@ -15,7 +15,9 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 from pathlib import Path
+from typing import Any
 
 from agentos_plugin_sdk.fs_utils import force_rmtree
 
@@ -39,6 +41,29 @@ _GITIGNORE_MINIMAL = (
 _SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data", _TASK_RUNTIME_DIR})
 _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
 _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
+# worktree add 在大型仓库/并发 I/O 下可能超过 30s：默认放宽，可经 workspace 配置覆盖。
+_DEFAULT_WORKTREE_ADD_TIMEOUT = 120
+# index.lock 视为陈旧的年龄阈值（秒）：活锁（并发 git 正在持有）不得删除。
+_DEFAULT_INDEX_LOCK_STALE_SECS = 120
+# 所有 git 调用（含其子进程）统一关闭自动 gc/维护：commit 后不得在后台
+# repack 大型对象库（与并发 checkout/status 抢 I/O、放大 30s 级超时）。
+# 走 GIT_CONFIG_* 环境变量而非 argv，保持 _run_git 的 argv 形状不变
+# （调用方/测试按 argv[:2] 识别子命令）。
+_GIT_NO_MAINTENANCE = {"gc.auto": "0", "maintenance.auto": "false"}
+
+
+def _git_env() -> dict[str, str]:
+    """当前环境副本 + 关闭自动 gc/维护的 GIT_CONFIG_* 注入（子进程继承）。"""
+    env = os.environ.copy()
+    try:
+        base = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except ValueError:
+        base = 0
+    for offset, (key, value) in enumerate(_GIT_NO_MAINTENANCE.items(), start=base):
+        env[f"GIT_CONFIG_KEY_{offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{offset}"] = value
+    env["GIT_CONFIG_COUNT"] = str(base + len(_GIT_NO_MAINTENANCE))
+    return env
 
 
 def _cross_mount_mounts(stderr: str) -> str | None:
@@ -127,6 +152,7 @@ class _GitOpsMixin:
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                env=_git_env(),
             )
             if r.returncode != 0:
                 err_parts = []
@@ -161,23 +187,65 @@ class _GitOpsMixin:
                 self._merge_locks[project_root] = threading.Lock()
             return self._merge_locks[project_root]
 
+    def _ws_config(self) -> dict[str, Any]:
+        """workspace 配置子树（缺省空字典，宿主/测试未注入时安全）。"""
+        cfg = getattr(self, "_config", None)
+        if not isinstance(cfg, dict):
+            return {}
+        ws = cfg.get("workspace")
+        return ws if isinstance(ws, dict) else {}
+
+    def _worktree_add_timeout(self) -> int:
+        """worktree add 单次超时（秒，可经 workspace.worktree_add_timeout_seconds 覆盖）。"""
+        raw = self._ws_config().get("worktree_add_timeout_seconds", _DEFAULT_WORKTREE_ADD_TIMEOUT)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = _DEFAULT_WORKTREE_ADD_TIMEOUT
+        return max(_GIT_TIMEOUT, min(value, 3600))
+
     def _ensure_git_user(self, cwd: Path):
         """配置 workspace 的 git 用户信息"""
         self._run_git("config", "user.email", "agent@agent-os.local", cwd=cwd)
         self._run_git("config", "user.name", "Agent OS", cwd=cwd)
 
     def _remove_index_lock(self, cwd: Path) -> bool:
-        """Remove stale git index.lock if it exists. Returns True if a lock was removed."""
+        """移除**陈旧** index.lock（活锁不删——并发 git 正在持有时删除会破坏锁协议）。
+
+        陈旧判定 = mtime 距现在超过 workspace.index_lock_stale_seconds
+        （默认 120s）。并发 task_submit 场景下，兄弟任务刚创建/正在持有的锁
+        必须保留，否则会出现「删活锁 → 对方 git 失败 → 无限重试」。
+        """
         lock_path = cwd / ".git" / "index.lock"
-        if lock_path.exists():
-            try:
-                lock_path.unlink()
-                logger.info("[WorkspaceLifecycle] Removed stale index.lock: %s", lock_path)
-                return True
-            except OSError as e:
-                logger.warning("[WorkspaceLifecycle] Failed to remove index.lock %s: %s", lock_path, e)
-                return False
-        return False
+        try:
+            st = lock_path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            logger.warning("[WorkspaceLifecycle] stat index.lock 失败 %s: %s", lock_path, e)
+            return False
+        try:
+            stale_secs = int(
+                self._ws_config().get("index_lock_stale_seconds", _DEFAULT_INDEX_LOCK_STALE_SECS)
+            )
+        except (TypeError, ValueError):
+            stale_secs = _DEFAULT_INDEX_LOCK_STALE_SECS
+        age = time.time() - st.st_mtime
+        if age < stale_secs:
+            logger.warning(
+                "[WorkspaceLifecycle] index.lock 在位且未超陈旧阈值（%.0fs < %ss），按活锁保留: %s",
+                age,
+                stale_secs,
+                lock_path,
+            )
+            return False
+        try:
+            lock_path.unlink()
+            logger.info("[WorkspaceLifecycle] Removed stale index.lock: %s", lock_path)
+            return True
+        except OSError as e:
+            logger.warning("[WorkspaceLifecycle] Failed to remove index.lock %s: %s", lock_path, e)
+            return False
 
     def _resolve_main_branch(self, cwd: Path) -> str:
         """动态检测仓库的主分支名，优先尝试 main，回退到实际 HEAD 所在分支。
@@ -357,24 +425,25 @@ class _GitOpsMixin:
         return True
 
     def _git_add_commit_if_dirty(self, cwd: Path, message: str) -> str | None:
-        """暂存并提交变更（如果有），返回 commit hash 或 None。
+        """只暂存并提交**已跟踪文件**的 diff（tracked-only），返回 commit hash 或 None。
 
-        先用 git status --porcelain 检查是否有变更，无变更直接返回，避免无条件
-        执行 git add -A（遍历整个项目添加所有文件到 index，大项目耗时 5-15s）。
-        有变更时才执行 git add -A + commit。
+        不看 untracked：构建产物/日志/临时目录不得随 auto-save 入库（历史教训：
+        `git add -A` 曾把 llvm-cov 的 exe/pdb 等 1,960 个文件提交进仓库，撑大
+        对象库并触发全库 repack）。untracked 独立于 git，不受 worktree/merge
+        流程影响，无需暂存。
         """
         self._remove_index_lock(cwd)
 
-        rc, status, _ = self._run_git("status", "--porcelain", cwd=cwd)
+        rc, status, _ = self._run_git("status", "--porcelain", "-uno", cwd=cwd)
         if rc != 0 or not status.strip():
             return None
 
         self._ensure_gitignore(cwd)
 
-        rc, _, _ = self._run_git("add", "-A", cwd=cwd)
+        rc, _, _ = self._run_git("add", "-u", cwd=cwd)
         if rc != 0:
             self._remove_index_lock(cwd)
-            rc, _, _ = self._run_git("add", "-A", cwd=cwd)
+            rc, _, _ = self._run_git("add", "-u", cwd=cwd)
             if rc != 0:
                 return None
 
@@ -449,8 +518,15 @@ class _GitOpsMixin:
 
         常见失败原因：之前 worktree 清理不彻底，.git/worktrees 下残留引用，
         导致 git 认为路径状态不一致。prune 可清除这些失效引用。
+
+        超时/IO（rc<0）先认领「内容已完整落地、只差收尾解锁」的 worktree
+        （`git worktree add` 在 30s/120s 边界被杀的唯一安全恢复面），认领
+        失败才按原契约 fail-closed，保留分支与现场。
         """
-        rc, _, stderr = self._run_git("worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
+        add_timeout = self._worktree_add_timeout()
+        rc, _, stderr = self._run_git(
+            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path, timeout=add_timeout
+        )
         if rc == 0:
             self._link_worktree_dependencies(ws_dir, repo_path)
             self._normalize_worktree_gitdir_links(ws_dir, repo_path)
@@ -461,7 +537,9 @@ class _GitOpsMixin:
             # （可能已创建、可能没有）。绝不能盲目走 prune + branch -D + rmtree：
             # 若本任务为重派发、branch 已含上一轮提交，这里会摧毁可恢复的工作
             # （与 _git_init_and_initial_commit 的 .git 擦除同构：rc<0 误判为可清理）。
-            # 失败闭合，抛错让上层重新派发整个 worktree 创建。
+            # 先尝试认领「已完整落地」的现场；认领不到才失败闭合。
+            if self._reclaim_completed_worktree(repo_path, branch, ws_dir, task_id):
+                return
             raise RuntimeError(
                 f"git worktree add 瞬态失败（rc={rc}，疑似超时/IO），拒绝 branch -D 以防数据丢失: "
                 f"task_id={task_id}, branch={branch}, error={stderr}"
@@ -499,11 +577,109 @@ class _GitOpsMixin:
             shutil.rmtree(str(ws_dir), onerror=_remove_readonly)
         self._run_git("branch", "-D", branch, cwd=repo_path)
 
-        rc, _, stderr = self._run_git("worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
+        rc, _, stderr = self._run_git(
+            "worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path, timeout=add_timeout
+        )
         if rc != 0:
             raise RuntimeError(f"git worktree add 失败（prune 后重试仍失败）: task_id={task_id}, error={stderr}")
         self._link_worktree_dependencies(ws_dir, repo_path)
         self._normalize_worktree_gitdir_links(ws_dir, repo_path)
+
+    def _worktree_entries(self, repo_path: Path) -> list[dict[str, str]]:
+        """解析 `git worktree list --porcelain` 为条目字典列表（失败返回空）。"""
+        rc, out, _ = self._run_git("worktree", "list", "--porcelain", cwd=repo_path)
+        if rc != 0:
+            return []
+        entries: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in out.splitlines():
+            if not line.strip():
+                if current:
+                    entries.append(current)
+                    current = {}
+                continue
+            key, _, value = line.partition(" ")
+            current[key] = value.strip()
+        if current:
+            entries.append(current)
+        return entries
+
+    def _find_worktree_entry(self, repo_path: Path, ws_dir: Path) -> dict[str, str] | None:
+        """按路径（Windows 大小写归一）定位 worktree 注册条目。"""
+        try:
+            target = os.path.normcase(str(Path(ws_dir).resolve()))
+        except OSError:
+            return None
+        for entry in self._worktree_entries(repo_path):
+            raw = entry.get("worktree")
+            if not raw:
+                continue
+            try:
+                current = os.path.normcase(str(Path(raw).resolve()))
+            except OSError:
+                continue
+            if current == target:
+                return entry
+        return None
+
+    def _unlock_worktree(self, repo_path: Path, ws_dir: Path) -> None:
+        """解除 worktree 的 locked 标记（git 收尾前被杀的残留）。"""
+        rc, _, err = self._run_git("worktree", "unlock", str(ws_dir), cwd=repo_path)
+        if rc == 0:
+            logger.info("[WorkspaceLifecycle] worktree 已解锁: %s", ws_dir)
+            return
+        # 兜底：git 版本/路径形态差异时直接移除 admin 侧 locked 标记。
+        admin_locked = repo_path / ".git" / "worktrees" / ws_dir.name / "locked"
+        try:
+            admin_locked.unlink()
+        except OSError:
+            logger.warning(
+                "[WorkspaceLifecycle] worktree 解锁失败（admin locked 标记未移除）: ws=%s error=%s",
+                ws_dir,
+                err,
+            )
+        else:
+            logger.info("[WorkspaceLifecycle] worktree 已解锁（admin locked 标记移除）: %s", ws_dir)
+
+    def _reclaim_completed_worktree(
+        self, repo_path: Path, branch: str, ws_dir: Path, task_id: str
+    ) -> bool:
+        """认领「内容已完整落地、只差收尾解锁」的 worktree（超时/IO 失败面）。
+
+        判定三件套：注册条目存在且 branch 匹配 / worktree 内 HEAD 可解析 /
+        tracked 工作面干净（`status --porcelain -uno` 为空 = checkout 已完整，
+        不是半截）。三件全中才认领；任一不中返回 False，由调用方 fail-closed。
+        """
+        try:
+            if not ws_dir.is_dir() or not (ws_dir / ".git").exists():
+                return False
+            entry = self._find_worktree_entry(repo_path, ws_dir)
+            if entry is None or entry.get("branch") != f"refs/heads/{branch}":
+                return False
+            rc, _, _ = self._run_git("rev-parse", "--verify", "HEAD", cwd=ws_dir)
+            if rc != 0:
+                return False
+            rc, status, _ = self._run_git("status", "--porcelain", "-uno", cwd=ws_dir)
+            if rc != 0 or status.strip():
+                return False
+            logger.warning(
+                "[WorkspaceLifecycle] worktree add 超时但工作树已完整落地，认领并解锁"
+                "（不判失败、不删分支）: task_id=%s, branch=%s, path=%s",
+                task_id,
+                branch,
+                ws_dir,
+            )
+            self._unlock_worktree(repo_path, ws_dir)
+            self._link_worktree_dependencies(ws_dir, repo_path)
+            self._normalize_worktree_gitdir_links(ws_dir, repo_path)
+            return True
+        except Exception:  # noqa: BLE001 — 认领是恢复路径，任何异常都按未认领处理
+            logger.warning(
+                "[WorkspaceLifecycle] 认领超时 worktree 失败（按未认领处理）: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+            return False
 
     def _normalize_worktree_gitdir_links(self, ws_dir: Path, repo_path: Path) -> None:
         """归一 worktree 双向 gitdir 链接：ws 侧相对（跨 OS 侧可读），admin 侧绝对。

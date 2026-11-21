@@ -89,7 +89,7 @@ def _reset_module_injections(tool_module, tmp_path_factory, monkeypatch):
     yield
     tool_module._chat_sender = None
     tool_module._agent_registry_lookup = None
-    tool_module._state_reader = None
+    tool_module.set_state_reader(None)
 
 
 def make_tool(tool_module):
@@ -279,7 +279,7 @@ async def test_read_state_rows_reader_crash_returns_none(tool_module, monkeypatc
     def boom():
         raise RuntimeError("pipeline-state 不可用")
 
-    monkeypatch.setattr(tool_module, "_state_reader", boom)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", boom)
     tool = tool_module.TaskSubmitTool()
     assert await tool._read_state_rows() is None
 
@@ -291,7 +291,7 @@ async def test_dependency_check_fail_closed_when_state_bridge_down(tool_module, 
     def boom():
         raise RuntimeError("桥断")
 
-    monkeypatch.setattr(tool_module, "_state_reader", boom)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", boom)
     tool, _ = make_tool(tool_module)
     result = await tool.execute(base_inputs(parent_agent_level=1, dependencies=["dep000000001"]))
     assert not result.success
@@ -397,8 +397,7 @@ def test_normalize_acceptance_criteria_non_dict_reset_to_empty(tool_module, bad)
 
 def test_partial_invalid_metric_ids_pruned_valid_kept(tool_module, monkeypatch):
     """部分 key 非法 → 剔除无效项保留有效项（降级不阻断）。"""
-    monkeypatch.setattr(
-        tool_module, "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
     )
     normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
         {
@@ -413,8 +412,7 @@ def test_partial_invalid_metric_ids_pruned_valid_kept(tool_module, monkeypatch):
 
 def test_all_invalid_metric_ids_rejected(tool_module, monkeypatch):
     """全部 key 非法 → INVALID_METRIC_ID 拒绝（不静默清空后提交）。"""
-    monkeypatch.setattr(
-        tool_module, "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
     )
     normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria({"nope": {}})
     assert normalized == {}
@@ -424,8 +422,7 @@ def test_all_invalid_metric_ids_rejected(tool_module, monkeypatch):
 
 def test_validate_metric_ids_empty_criteria_passthrough(tool_module, monkeypatch):
     """空验收标准直通（valid 集合在场也不产生剔除记录）。"""
-    monkeypatch.setattr(
-        tool_module, "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
     )
     filtered, invalid = tool_module._validate_metric_ids({})
     assert filtered == {}
@@ -434,9 +431,7 @@ def test_validate_metric_ids_empty_criteria_passthrough(tool_module, monkeypatch
 
 def test_metric_without_required_schema_passes(tool_module, monkeypatch):
     """指标定义无 required → 不校验参数（纯数据驱动，无 schema 即无硬约束）。"""
-    monkeypatch.setattr(
-        tool_module,
-        "_load_metric_definitions",
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions",
         lambda: {"free_metric": {"name": "free_metric", "input_schema": {}}},
     )
     result = tool_module._validate_required_metric_params({"free_metric": {}})
@@ -445,9 +440,7 @@ def test_metric_without_required_schema_passes(tool_module, monkeypatch):
 
 def test_metric_non_dict_config_treated_as_missing_params(tool_module, monkeypatch):
     """指标配置为非 dict → 按空参数处理，必填字段判缺失拒绝（fail-closed）。"""
-    monkeypatch.setattr(
-        tool_module,
-        "_load_metric_definitions",
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions",
         lambda: {"file_check": {"input_schema": {"required": ["path"]}}},
     )
     result = tool_module._validate_required_metric_params({"file_check": "garbage"})
@@ -531,7 +524,7 @@ async def test_l1_unknown_parent_task_id_rejected(tool_module):
 )
 async def test_l1_parent_exists_in_state_channel(tool_module, monkeypatch, rows, parent_id):
     """父任务存在性以 state 为唯一通道：行命中即放行（task = pipeline）。"""
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     assert await tool._validate_parent_task_id(1, parent_id) is True
 
@@ -539,7 +532,7 @@ async def test_l1_parent_exists_in_state_channel(tool_module, monkeypatch, rows,
 @pytest.mark.asyncio
 async def test_parent_exists_in_state_bridge_down_returns_false(tool_module, monkeypatch):
     """state 桥不可用（读取返回非 list）→ 兜底判不存在（False）。"""
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: None)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: None)
     tool = tool_module.TaskSubmitTool()
     assert await tool._parent_exists_in_state("ghost00000000") is False
 
@@ -575,7 +568,7 @@ async def test_project_binding_resolves_workspace_via_service(tool_module, monke
         raise AssertionError(f"unexpected method: {method}")
 
     monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
 
     result = await tool.execute(
@@ -602,7 +595,7 @@ async def test_project_folder_missing_rejected(tool_module, monkeypatch, tmp_pat
         raise AssertionError(f"unexpected method: {method}")
 
     monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, _ = make_tool(tool_module)
     result = await tool.execute(base_inputs(parent_agent_level=1, project_id="proj00000003"))
     assert not result.success
@@ -612,8 +605,7 @@ async def test_project_folder_missing_rejected(tool_module, monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_l2_child_project_inheritance_without_parent_row(tool_module, monkeypatch):
     """父任务行不在 state 聚合（单跳读无命中）→ 子任务不挂项目（独立链）。"""
-    monkeypatch.setattr(
-        tool_module, "_state_reader", lambda: [{"pipeline_id": "other000000001"}]
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [{"pipeline_id": "other000000001"}]
     )
     tool, captured = make_tool(tool_module)
     result = await tool.execute(base_inputs(parent_agent_level=2, task_id="parent-task-1"))
@@ -659,7 +651,7 @@ async def test_inherit_retired_mode_ignored_or_empty_is_plain_task(
     2026-10-20 用户裁定：inherit_mode 撤下（pipe 是空壳，上下文重新开始即
     重新开始）。旧调用方仍在传该键时按忽略处理并留 WARN，不打断在跑路径。
     """
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, inherit_from=inherit_from, inherit_mode=inherit_mode)
@@ -689,7 +681,7 @@ async def test_inherit_source_found_in_state_copies_coordinate(tool_module, monk
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(task_id="parent_p", inherit_from="srcpipe000001")
@@ -707,8 +699,7 @@ async def test_inherit_source_missing_rejected_not_degraded(tool_module, monkeyp
     旧实现对 pipe 继承源缺失只降级为「对话历史为空」——静默降级会让人以为
     继承了其实没继承。
     """
-    monkeypatch.setattr(
-        tool_module, "_state_reader", lambda: [{"pipeline_id": "unrelated000001"}]
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [{"pipeline_id": "unrelated000001"}]
     )
     tool, _ = make_tool(tool_module)
     result = await tool.execute(
@@ -738,7 +729,7 @@ async def test_inherit_foreign_project_rejected(tool_module, monkeypatch, tmp_pa
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = await tool._resolve_inherit_coordinate(
         "xcontainer123", {"parent_ws_meta": {"path": str(base), "project_root": str(base)}}
@@ -761,7 +752,7 @@ async def test_inherit_workspace_vanished_rejected(tool_module, monkeypatch, tmp
             "task.ws_meta": json.dumps({"path": str(vanished), "mode": "plain"}),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
     meta, fail = await tool._resolve_inherit_coordinate("vanished12345")
     assert meta is None
@@ -774,9 +765,7 @@ async def test_inherit_workspace_vanished_rejected(tool_module, monkeypatch, tmp
 @pytest.mark.asyncio
 async def test_ambiguous_dependency_short_id_kept_then_rejected(tool_module, monkeypatch):
     """歧义短 id 依赖保真保留原样 → 依赖存在性校验判缺失拒绝（不猜测改写）。"""
-    monkeypatch.setattr(
-        tool_module,
-        "_state_reader",
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader",
         lambda: [{"pipeline_id": "dup0000000001"}, {"pipeline_id": "dup0000000002"}],
     )
     tool, _ = make_tool(tool_module)
@@ -789,8 +778,7 @@ async def test_ambiguous_dependency_short_id_kept_then_rejected(tool_module, mon
 @pytest.mark.asyncio
 async def test_non_string_dependency_kept_verbatim(tool_module, monkeypatch):
     """非字符串依赖项原样保留（不做解析不改写）→ 存在性校验判缺失拒绝。"""
-    monkeypatch.setattr(
-        tool_module, "_state_reader", lambda: [{"pipeline_id": "real0000000001"}]
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [{"pipeline_id": "real0000000001"}]
     )
     tool, _ = make_tool(tool_module)
     result = await tool.execute(base_inputs(parent_agent_level=1, dependencies=[42]))
@@ -1141,7 +1129,7 @@ async def test_dispatch_execution_context_carries_mode(
     全面板零呈现（BUG-61 根因）。用例取同包配对（批 B8 闸②：mode ≠ 目标
     归属包在门口即拒，透传语义只对合法组合成立）。
     """
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     # 面板派发形态 = L1 根任务（mode_* _issue_args 同口径）
     result = await tool.execute(
@@ -1157,7 +1145,7 @@ async def test_dispatch_execution_context_without_mode_has_no_key(
     tool_module, monkeypatch, mode_value
 ):
     """未声明 mode（缺键/空串/空白）→ execution_context 不带 mode 键（零注入语义）。"""
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     overrides = {} if mode_value is None else {"mode": mode_value}
     result = await tool.execute(base_inputs(parent_agent_level=1, **overrides))
@@ -1171,7 +1159,7 @@ async def test_dispatch_execution_context_without_mode_has_no_key(
 def test_load_metric_definitions_missing_file_returns_empty(tool_module, monkeypatch, tmp_path):
     """指标定义文件缺失 → 空表（fail-open：不阻断提交，不编造指标）。"""
     monkeypatch.setattr(
-        tool_module, "_metrics_config_path", lambda: tmp_path / "no_such_metrics.yaml"
+        sys.modules["acceptance"], "_metrics_config_path", lambda: tmp_path / "no_such_metrics.yaml"
     )
     assert tool_module._load_metric_definitions() == {}
     # 空表语义：不产生合法指标集合（校验跳过）
@@ -1180,9 +1168,7 @@ def test_load_metric_definitions_missing_file_returns_empty(tool_module, monkeyp
 
 def test_build_evaluation_criteria_prompt_renders_known_metric(tool_module, monkeypatch):
     """已知指标按定义展开：说明 + 评估参数 JSON + 固定标题。"""
-    monkeypatch.setattr(
-        tool_module,
-        "_load_metric_definitions",
+    monkeypatch.setattr(sys.modules["prompts"], "_load_metric_definitions",
         lambda: {
             "file_check": {
                 "name": "file_check",
@@ -1210,7 +1196,7 @@ def test_build_evaluation_criteria_prompt_renders_known_metric(tool_module, monk
 def test_build_evaluation_criteria_prompt_unknown_degrades_to_empty(
     tool_module, monkeypatch, definitions, criteria
 ):
-    monkeypatch.setattr(tool_module, "_load_metric_definitions", lambda: definitions)
+    monkeypatch.setattr(sys.modules["prompts"], "_load_metric_definitions", lambda: definitions)
     assert tool_module._build_evaluation_criteria_prompt(criteria) == ""
     # 无验收标准同样不生成说明
     assert tool_module._build_evaluation_criteria_prompt({}) == ""
@@ -1267,8 +1253,7 @@ async def test_l2_without_injected_task_id_cannot_create_root(tool_module):
 @pytest.mark.asyncio
 async def test_all_invalid_metric_ids_rejected_at_execute(tool_module, monkeypatch):
     """execute 级：验收标准全部 key 非法 → 短路返回 INVALID_METRIC_ID。"""
-    monkeypatch.setattr(
-        tool_module, "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
+    monkeypatch.setattr(sys.modules["acceptance"], "_load_metric_definitions", lambda: {"file_check": {"name": "file_check"}}
     )
     tool, _ = make_tool(tool_module)
     result = await tool.execute(
@@ -1304,7 +1289,7 @@ async def test_root_task_inherits_workspace_from_source(tool_module, monkeypatch
             ),
         }
     ]
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: rows)
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, inherit_from="wsrc000000001")
@@ -1379,8 +1364,7 @@ async def test_submitted_by_level_written_to_birth_state(tool_module, submitter_
 @pytest.mark.asyncio
 async def test_dependency_short_id_resolves_and_passes_check(tool_module, monkeypatch):
     """唯一前缀命中 → 依赖解析为全 id 并通过存在性校验（出生 state 带全 id）。"""
-    monkeypatch.setattr(
-        tool_module, "_state_reader", lambda: [{"pipeline_id": "real0000000001"}]
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [{"pipeline_id": "real0000000001"}]
     )
     tool, captured = make_tool(tool_module)
     result = await tool.execute(base_inputs(parent_agent_level=1, dependencies=["real"]))
@@ -1391,8 +1375,7 @@ async def test_dependency_short_id_resolves_and_passes_check(tool_module, monkey
 @pytest.mark.asyncio
 async def test_parent_exists_in_state_no_match_returns_false(tool_module, monkeypatch):
     """state 行在场但无命中（pipeline_id / task.owned.* 均不匹配）→ 判不存在。"""
-    monkeypatch.setattr(
-        tool_module, "_state_reader", lambda: [{"pipeline_id": "other000000001"}]
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [{"pipeline_id": "other000000001"}]
     )
     tool = tool_module.TaskSubmitTool()
     assert await tool._validate_parent_task_id(1, "ghost00000000") is False
@@ -1431,7 +1414,7 @@ async def test_plan_state_gate_rejects_non_whitelisted_executor(
         raise AssertionError(f"unexpected method: {method}")
 
     monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, _ = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, project_id="proj00000009")
@@ -1473,7 +1456,7 @@ async def test_plan_state_gate_allows_research_dispatch(tool_module, monkeypatch
     _stub_project_service(
         monkeypatch, tool_module, {"proj00000009": str(folder)}, {"proj00000009": "plan"}
     )
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(
@@ -1494,7 +1477,7 @@ async def test_plan_state_gate_inactive_on_running_project(tool_module, monkeypa
     _stub_project_service(
         monkeypatch, tool_module, {"proj00000009": str(folder)}, {"proj00000009": "running"}
     )
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, project_id="proj00000009")
@@ -1558,7 +1541,7 @@ async def test_plan_state_gate_baseline_only_mode_key_rejected(
 ):
     """仅基线（出厂六包零声明 = 注册零贡献）→ 模式执行者仍拒（fail-closed）。"""
     _plan_state_project(monkeypatch, tmp_path / "plan_gate_b4_baseline", tool_module)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, _captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, project_id="proj00000011")
@@ -1581,7 +1564,7 @@ async def test_plan_state_gate_registered_contribution_allowed(
         "mode: mixed\nname: M\nplanning_executors: [mode_coding/code_writer]\n",
     )
     _plan_state_project(monkeypatch, tmp_path / "plan_gate_b4_contrib", tool_module)
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, project_id="proj00000011")
@@ -1688,7 +1671,7 @@ async def test_mode_gate_registered_mode_passes_and_dispatches(
 ):
     """登记内 mode + 归属一致 → 两闸全过，链路继续走完（显式 mode ∈ 集合）。"""
     _mode_gate_project(monkeypatch, tool_module, tmp_path / "mode_gate_pass", ["coding"])
-    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    monkeypatch.setattr(sys.modules["acceptance"], "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(

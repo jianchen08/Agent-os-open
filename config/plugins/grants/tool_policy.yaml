@@ -1,0 +1,455 @@
+# grants 工具动作级分级策略表（v1，P1 按 LLM 工具面实扫精化）
+# 设计真值：ADR 2026-11-19-grants-ledger-and-tool-classification（D2 动作级 effect 分级）
+#           + docs/working/grants账本执行方案_20261119.md §6
+#           + docs/working/grants账本落点与工具分级调研_20261119.md §3.4/§3.5
+#
+# 口径：
+# - 键 = tool.action（多动作工具逐 action 列，动作位取 action/operation/op 参数值；
+#   命令执行类固定 execute）；单动作工具用整工具键；bash 按「规则面优先」只落
+#   bash.execute 一键。
+# - 未分类 = deny（fail-closed，ADR D2）：defaults.uncategorized 恒 deny，
+#   表数据不可改写；键集穷尽由 P1.5 CI 覆盖门禁兜底。
+# - verdict 枚举：auto | task_grant | domain_grant | per_call_approval | deny。
+#   被 final_approval: true 规则覆盖的任何键，执法上恒逐次人审且 grant 不豁免
+#   （ADR D3 红线；规则面优先，本表不重写该语义）。
+# - P1 精化（2026-11-19 实扫 manifests capabilities.tools 全量 73 工具）：补
+#   log/input、媒体生成、channel_*、ui_bridge、feedback_ledger、
+#   proposal、oauth、dsh 桥、eval/探针、review get_report、browser 截图/控制台、
+#   http.handle 等；多动作工具动作位与 manifest 枚举逐一核对。
+version: 1
+defaults:
+  uncategorized: deny
+
+tools:
+  # ── read（auto：读自己的记忆/工作空间/任务面）─────────────────────────────
+  memory.retrieve:
+    effect: read
+    verdict: auto
+  memory.list:
+    effect: read
+    verdict: auto
+  memory.get_context:
+    effect: read
+    verdict: auto
+  file_read:
+    effect: read
+    verdict: auto
+    notes: 工作空间内读；锚外路径由位置闸（写区/读排除）优先裁决（调研 §3.6）
+  enhanced_search:
+    effect: read
+    verdict: auto
+  project.query:
+    effect: read
+    verdict: auto
+  project.list:
+    effect: read
+    verdict: auto
+  task_manage.get:
+    effect: read
+    verdict: auto
+  pim.query:
+    effect: read
+    verdict: auto
+  doc_extract_text:
+    effect: read
+    verdict: auto
+  browser_snapshot:
+    effect: read
+    verdict: auto
+  resource_search:
+    effect: read
+    verdict: auto
+    notes: 动态工具检索/引入面——引入 ≠ 使用 ≠ 授权；调用目标按目标键另行分级
+  github_ops.list_issues:
+    effect: read
+    verdict: auto
+  github_ops.get_issue:
+    effect: read
+    verdict: auto
+  github_ops.list_prs:
+    effect: read
+    verdict: auto
+  github_ops.repo_stats:
+    effect: read
+    verdict: auto
+  resource_merge.prepare:
+    effect: read
+    verdict: auto
+  resource_merge.git_status:
+    effect: read
+    verdict: auto
+  resource_merge.git_diff:
+    effect: read
+    verdict: auto
+  resource_merge.git_log:
+    effect: read
+    verdict: auto
+  log:
+    effect: read
+    verdict: auto
+    notes: bash 面 log 拉模式读（AGENTS 执行契约四单词工具之一）
+  feedback_ledger.list:
+    effect: read
+    verdict: auto
+  browser_take_screenshot:
+    effect: read
+    verdict: auto
+  browser_console_messages:
+    effect: read
+    verdict: auto
+  dsh.tool.list:
+    effect: read
+    verdict: auto
+    notes: DSH 适配器工具列举（只读清单）
+  read_execution_detail:
+    effect: read
+    verdict: auto
+  review_ops.get_report:
+    effect: read
+    verdict: auto
+  review_improvement:
+    effect: write
+    verdict: task_grant
+    notes: 审查改进用例写入（review_service 任务域内数据面）
+  oauth.status:
+    effect: read
+    verdict: auto
+  ui_describe:
+    effect: read
+    verdict: task_grant
+    notes: 读屏类（phone_control.tree 同构，设备屏幕敏感）
+  eval_query:
+    effect: read
+    verdict: auto
+    notes: 进化评测面（mode_evolution 数据服务）
+
+  # ── write（task_grant：工作空间内可逆写）─────────────────────────────────
+  memory.store:
+    effect: write
+    verdict: task_grant
+  memory.import_text:
+    effect: write
+    verdict: task_grant
+  memory.import_file:
+    effect: write
+    verdict: task_grant
+  memory.update:
+    effect: write
+    verdict: task_grant
+  file_write.write:
+    effect: write
+    verdict: task_grant
+    notes: 工作空间内可逆；锚外路径由位置闸优先
+  file_write.search_replace:
+    effect: write
+    verdict: task_grant
+  file_write.insert:
+    effect: write
+    verdict: task_grant
+  file_write.append:
+    effect: write
+    verdict: task_grant
+  file_write.delete_lines:
+    effect: write
+    verdict: task_grant
+    notes: 行级编辑，文件版本可逆
+  create_directory:
+    effect: write
+    verdict: task_grant
+  copy_file:
+    effect: write
+    verdict: task_grant
+  move_file:
+    effect: write
+    verdict: task_grant
+  doc_convert:
+    effect: write
+    verdict: task_grant
+  pim.capture:
+    effect: write
+    verdict: task_grant
+  pim.op:
+    effect: write
+    verdict: task_grant
+    notes: op undo 可逆（调研 §3.5）
+  task_submit:
+    effect: write
+    verdict: task_grant
+    notes: 创建任务/派发（委派语义的 mandate 契约 P2 承接）
+  task_manage.change:
+    effect: write
+    verdict: task_grant
+  task_manage.continue:
+    effect: write
+    verdict: task_grant
+  task_manage.stop:
+    effect: write
+    verdict: task_grant
+    notes: 停止可再继续，可逆
+  task_evaluate.evaluate_single:
+    effect: write
+    verdict: task_grant
+  task_evaluate.auto_complete:
+    effect: write
+    verdict: task_grant
+  trigger_setup.setup:
+    effect: write
+    verdict: task_grant
+    notes: 建提醒/触发器（调研 §3.5 notify 位）
+  trigger_setup.cancel:
+    effect: write
+    verdict: task_grant
+  trigger_setup.update:
+    effect: write
+    verdict: task_grant
+  review_ops.trigger:
+    effect: write
+    verdict: task_grant
+  feedback_ledger.append:
+    effect: write
+    verdict: task_grant
+  feedback_ledger.update_status:
+    effect: write
+    verdict: task_grant
+  proposal.submit:
+    effect: write
+    verdict: task_grant
+    notes: 进化提案入 staging（写面经提案管道，直接写主仓由冻结面拒）
+  proposal.reject:
+    effect: write
+    verdict: task_grant
+  image_generate:
+    effect: write
+    verdict: task_grant
+  music_generate:
+    effect: write
+    verdict: task_grant
+  tts_generate:
+    effect: write
+    verdict: task_grant
+  video_generate:
+    effect: write
+    verdict: task_grant
+  ecosystem_translate:
+    effect: write
+    verdict: task_grant
+    notes: 生态包转换入 staging；apply 才是安装动作（另档）
+  eval_summarize:
+    effect: write
+    verdict: task_grant
+    notes: 进化评测汇总（评测轮数据写）
+
+  # ── destructive / state gate（per_call_approval：不可逆或人审门）──────────
+  memory.delete:
+    effect: write
+    verdict: per_call_approval
+    notes: 删记忆不可逆（调研 §3.5）
+  delete_file:
+    effect: write
+    verdict: per_call_approval
+    notes: 不可逆
+  task_manage.delete:
+    effect: write
+    verdict: per_call_approval
+    notes: 任务删除不可逆
+  project.transition:
+    effect: write
+    verdict: per_call_approval
+    notes: 方案冻结/解冻状态门，人审（调研 §3.5）
+  github_ops.create_comment:
+    effect: external_side_effect
+    verdict: per_call_approval
+    notes: 已有规则面覆盖，逐次
+
+  # ── bash（规则面优先：危险/网络命令由 security_check 规则面裁决）──────────
+  bash:
+    effect: execute
+    verdict: task_grant
+    notes: >-
+      规则面优先：安全命令基线 task_grant；危险命令（dangerous_commands/
+      final_approval）与网络命令（ssrf/出网规则）由 security_check
+      security_rules.yaml 在规则匹配阶段优先裁决——grant 不豁免 block 与
+      final_approval（ADR D3 红线）。运行时动作位派生 execute
+      （command_in_container 固定），经整工具键回落命中本条。
+  kill:
+    effect: execute
+    verdict: task_grant
+    notes: bash 面 kill（handle 取代 pid，工作空间进程树）
+  input:
+    effect: execute
+    verdict: task_grant
+    notes: bash 面 input（向工作空间进程 stdin 注入，命令面同族）
+  eval_run_heldout:
+    effect: execute
+    verdict: task_grant
+    notes: 进化评测跑题（评测轮任务域内）
+  eval_echo:
+    effect: execute
+    verdict: task_grant
+    notes: 评测探针
+  eval_broken:
+    effect: execute
+    verdict: task_grant
+    notes: 评测探针（故障注入件）
+  eval_sleep:
+    effect: execute
+    verdict: task_grant
+    notes: 评测探针（时延）
+  e2e_probe_echo:
+    effect: execute
+    verdict: task_grant
+    notes: 生命周期探针
+  hello_pack:
+    effect: execute
+    verdict: task_grant
+    notes: 打包冒烟探针
+
+  # ── network（domain_grant：出网面）───────────────────────────────────────
+  browser_navigate:
+    effect: network
+    verdict: domain_grant
+  web_operate.get:
+    effect: network
+    verdict: domain_grant
+  web_operate.fetch:
+    effect: network
+    verdict: domain_grant
+  web_operate.post:
+    effect: network
+    verdict: domain_grant
+    notes: SSRF 规则面优先仍拦（调研 §3.6）
+
+  # ── channel_*（external_side_effect：对外消息面，domain_grant）───────────
+  dingtalk.send_message:
+    effect: external_side_effect
+    verdict: domain_grant
+  feishu.send_message:
+    effect: external_side_effect
+    verdict: domain_grant
+  feishu.send_card:
+    effect: external_side_effect
+    verdict: domain_grant
+  qq.send_message:
+    effect: external_side_effect
+    verdict: domain_grant
+  wecom.send_message:
+    effect: external_side_effect
+    verdict: domain_grant
+
+  # ── external_side_effect（domain_grant：浏览器操作）──────────────────────
+  browser_click:
+    effect: external_side_effect
+    verdict: domain_grant
+  browser_type:
+    effect: external_side_effect
+    verdict: domain_grant
+    notes: 提交/支付类逐次——规则面优先（调研 §3.5）
+
+  # ── device_control（设备面：读 task_grant，操作逐次人审）─────────────────
+  phone_control.tree:
+    effect: read
+    verdict: task_grant
+    notes: 设备屏幕敏感（调研 §3.5）
+  phone_control.screenshot:
+    effect: read
+    verdict: task_grant
+  phone_control.click:
+    effect: device_control
+    verdict: per_call_approval
+    notes: 付款/密码/验证码面逐次人审
+  phone_control.input:
+    effect: device_control
+    verdict: per_call_approval
+  phone_control.key:
+    effect: device_control
+    verdict: per_call_approval
+
+  # ── execute（跑插件代码/改配置/合并回滚：per_call_approval）──────────────
+  plugin_verify:
+    effect: execute
+    verdict: per_call_approval
+    notes: 跑插件代码（调研 §3.5）
+  ecosystem_apply:
+    effect: write
+    verdict: per_call_approval
+    notes: 改配置/装生态
+  resource_merge.merge:
+    effect: execute
+    verdict: per_call_approval
+    notes: 合并不可逆
+  resource_merge.rollback:
+    effect: execute
+    verdict: per_call_approval
+  resource_merge.git_commit:
+    effect: execute
+    verdict: per_call_approval
+  resource_merge.git_merge_abort:
+    effect: execute
+    verdict: per_call_approval
+  resource_merge.cleanup:
+    effect: execute
+    verdict: per_call_approval
+    notes: 资源合并清理类（调研 §3.5 不可逆位）
+  proposal.apply:
+    effect: write
+    verdict: per_call_approval
+    notes: 提案应用=改配置/装生态（ecosystem_apply 同档）
+  oauth.authorize:
+    effect: external_side_effect
+    verdict: per_call_approval
+    notes: OAuth 授权流（凭据面，逐次人审）
+  oauth.paste_callback:
+    effect: external_side_effect
+    verdict: per_call_approval
+    notes: OAuth 授权流粘贴回调完成面（凭据面，逐次人审；与 oauth.authorize 同档）
+  dsh.tool.call:
+    effect: execute
+    verdict: per_call_approval
+    notes: DSH 外部桥转发（目标工具不可展开判定，fail-safe 逐次）
+
+  # ── ui_bridge（device_control：触用户设备 UI 面，逐次人审）───────────────
+  ui_act.navigate:
+    effect: device_control
+    verdict: per_call_approval
+  ui_act.set_collapsed:
+    effect: device_control
+    verdict: per_call_approval
+  ui_act.open_page:
+    effect: device_control
+    verdict: per_call_approval
+  ui_act.highlight:
+    effect: device_control
+    verdict: per_call_approval
+    notes: ui_act 四动作均触用户桌面 UI（设备面），逐次人审（D3 高风险类）
+
+  # ── admin（deny：管理面普通 agent 拒；管理员走 tool_ids 既有面）──────────
+  db_admin:
+    effect: admin
+    verdict: deny
+  user_admin:
+    effect: admin
+    verdict: deny
+  debug_center:
+    effect: admin
+    verdict: deny
+  http.handle:
+    effect: admin
+    verdict: deny
+    notes: >-
+      端点处理器工具名（各管理插件的 http_endpoints handler 共名）——LLM 直达
+      一律拒；端点由内核 dispatcher 调用不经本执法面，本键只兜 resource_search
+      / call_tool 动态直达面。
+
+  # ── 动态转发壳（防伪造 target：未展开直达一律逐次人审）────────────────────
+  call_tool:
+    effect: execute
+    verdict: per_call_approval
+    notes: >-
+      P1 按 _effective_tool_call 展开目标工具后按目标键分级；本键只兜住
+      未展开直达（fail-safe 收缩面）。
+
+  # ── interaction（审批通道本身）───────────────────────────────────────────
+  human_interaction:
+    effect: external_side_effect
+    verdict: auto
+    notes: 审批通道本身，限流由通道面承载（调研 §3.5）

@@ -44,23 +44,51 @@ public class MainActivity extends BridgeActivity {
         // 壳自建插件须在 super.onCreate（Bridge 初始化）前注册
         registerPlugin(ShellIntentsPlugin.class);
         registerPlugin(KernelHostPlugin.class);
+        registerPlugin(ShellSpeechPlugin.class);
         super.onCreate(savedInstanceState);
         configureImmersiveWindow();
         exposeSystemBarInsetsToPage();
         injectShellPushScriptOnPageLoaded();
         // 硬件返回键 = WebView 历史回退；无历史则走默认行为退出应用。
         // Capacitor 8 核心不再内置返回键处理（App 插件已移出核心包），由壳自行实现。
+        // P1-8 浮层优先语义（移动端视觉优化批，MuMu 实测：浮窗/popover 打开时
+        // 按 back 直接回退/退出）：回退/退出之前先问页面——派发 lingxi-back-press
+        // 事件给前端协调器（androidBackBridge），detail.consumed=true（浮层已关）
+        // 则本按消费不回退；页面无浮层/无协调器（consumed=false）回退既有语义，
+        // 行为与改前完全一致。evaluateJavascript 派发是同步遍历监听器（监听器
+        // 同步置位 consumed），结果经回调回 UI 线程裁决。
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
                 Bridge bridge = MainActivity.this.bridge;
                 WebView webView = bridge != null ? bridge.getWebView() : null;
-                if (webView != null && webView.canGoBack()) {
-                    webView.goBack();
-                } else {
+                if (webView == null) {
                     setEnabled(false);
                     getOnBackPressedDispatcher().onBackPressed();
+                    return;
                 }
+                final WebView wv = webView;
+                webView.evaluateJavascript(
+                        "(function(){try{"
+                                + "var d={consumed:false};"
+                                + "window.dispatchEvent(new CustomEvent('lingxi-back-press',{detail:d}));"
+                                + "return d.consumed?'consumed':'pass';"
+                                + "}catch(e){return 'pass';}})()",
+                        result -> {
+                            boolean consumed = result != null && result.contains("consumed");
+                            if (consumed) {
+                                return; // 浮层已关，本按不回退
+                            }
+                            // 未消费：既有语义（历史回退 → 无历史退出）
+                            wv.post(() -> {
+                                if (wv.canGoBack()) {
+                                    wv.goBack();
+                                } else {
+                                    setEnabled(false);
+                                    getOnBackPressedDispatcher().onBackPressed();
+                                }
+                            });
+                        });
             }
         });
     }

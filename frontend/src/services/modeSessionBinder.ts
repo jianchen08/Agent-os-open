@@ -12,23 +12,23 @@
  * （缺省共享 autonomous，与无声明同语义），不阻断。
  */
 
-import { fetchModesRegistry, type ModeDeclaration } from '@/services/api/modes'
 import { MODE_ROLEPLAY_ENDPOINTS } from '@/services/api/endpoints.generated'
-import { getPresetTheme, validateThemeConfig } from '@/services/themeService'
+import { fetchModesRegistry, type ModeDeclaration } from '@/services/api/modes'
+import {
+  savePipelineBinding,
+} from '@/services/pipelineExecutionOptions'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
-import { getModePanelTarget } from '@/services/schema/modePanel'
 import { isModeIdShape, primaryModeTag } from '@/services/schema/modeOptions'
+import { getModePanelTarget } from '@/services/schema/modePanel'
 import {
   loadSessionExecutionOptions,
   saveSessionExecutionOptions,
 } from '@/services/sessionExecutionOptions'
+import { getPresetTheme, validateThemeConfig } from '@/services/themeService'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import {
-  savePipelineBinding,
-} from '@/services/pipelineExecutionOptions'
-import { useAgentTabStore } from '@/stores/agentTabStore'
 import { openPluginPage } from '@/services/workspacePanelOpener'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionThemeStore } from '@/stores/sessionThemeStore'

@@ -26,7 +26,6 @@ import {
   Trash2,
 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import {
   Dialog,
   DialogContent,
@@ -42,9 +41,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
 import { useVirtualWindow } from '@/hooks/useVirtualWindow'
 import { cn } from '@/lib/utils'
-import { sortSessionsByRecency } from '@/stores/sessionListStore'
 import {
   assignSessionToGroup,
   createSessionGroup,
@@ -53,6 +52,7 @@ import {
   unassignSession,
   type SessionGroup,
 } from '@/services/sessionGroups'
+import { sortSessionsByRecency } from '@/stores/sessionListStore'
 import { sanitizeSessionTitle } from '@/utils/sessionTitle'
 import {
   groupSessionsByWorkspace,

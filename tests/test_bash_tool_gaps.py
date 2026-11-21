@@ -6,16 +6,19 @@
   手动后台化降级；
 - _compact_result_data：信号终止附加 terminated_by_signal；
 - _check_owner：无身份调用 / 无归属进程两拒绝分支；
-- execute 分发：未知 action、command 缺失；
-- execute 执行链：日志不可写时的 SUMMARY_ERROR、工作目录不存在时的
+- bash 执行链：command 缺失、日志不可写时的 SUMMARY_ERROR、工作目录不存在时的
   EXECUTION_FAILED（真实子进程 spawn 失败）；
-- continue：磁盘日志 IO 故障、磁盘日志越权、内存完成态非零退出、
+- log(block=true)：磁盘日志 IO 故障、磁盘日志越权、内存完成态非零退出、
   等待轮询完成后非零/零退出（真实子进程）；
-- terminate/input/read_log：MISSING_PID / MISSING_INPUT / PROCESS_NOT_FOUND、
-  input 越权与禁字输入失败（真实子进程）、read_log 磁盘 IO 故障。
+- kill/input/log：MISSING_HANDLE / MISSING_TEXT / PROCESS_NOT_FOUND、
+  input 越权与禁字输入失败（真实子进程）、log 磁盘 IO 故障。
 
 打桩边界：无——子进程全部真实拉起（python -c 短命/定时退出进程），
 文件操作落 tmp_path；owner 越权经 session_id 注入参数走真实校验链。
+
+2026-11-07 四工具重构（ADR T2）：execute/continue/terminate/input/read_log
+五 action 退役 → run_command/read_log(block)/send_input/terminate 四方法；
+pid 参数退役 → handle（encode_handle 构造）。
 """
 
 from __future__ import annotations
@@ -55,9 +58,14 @@ _evict_foreign_bare_modules()
 if str(_BASH_DIR) not in sys.path or sys.path[0] != str(_BASH_DIR):
     sys.path.insert(0, str(_BASH_DIR))
 
-from agentos_plugin_sdk.process_runtime import ProcessInfo  # noqa: E402
-from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
-from tool import BashTool, SecurityChecker, describe_exit_code  # noqa: E402
+from tool import BashTool, SecurityChecker, describe_exit_code, encode_handle  # noqa: E402
+
+from agentos_plugin_sdk.process_runtime import (  # noqa: E402
+    BackendUnhealthyError,
+    ProcessInfo,
+    ProcessManager,
+    SpawnFirstLineTimeoutError,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -124,7 +132,9 @@ class TestSecurityCheckerAllowedList:
 
     def test_no_allowlist_skips_gate(self):
         safe, warning, message = SecurityChecker().check("python -c 'print(1)'")
-        assert safe is True and warning is False and message is None
+        assert safe is True
+        assert warning is False
+        assert message is None
 
 
 class TestSecurityCheckerCautionAndBackground:
@@ -163,13 +173,17 @@ class TestCompactResultDataSignal:
         [(137, "信号 9 (SIGKILL) 终止"), (143, "信号 15 (SIGTERM) 终止"), (129, "信号 1 (SIGHUP) 终止")],
     )
     def test_signal_exit_appends_terminated_by_signal(self, exit_code, expected):
-        data = BashTool._compact_result_data(pid=7, output="out", summary_obj={}, exit_code=exit_code)
+        data = BashTool._compact_result_data(
+            handle="bs1.sig.7777", output="out", summary_obj={}, exit_code=exit_code
+        )
         assert data["terminated_by_signal"] == expected
         assert describe_exit_code(exit_code) == expected
 
     @pytest.mark.parametrize("exit_code", [0, 1, 124, None])
     def test_non_signal_exit_has_no_signal_field(self, exit_code):
-        data = BashTool._compact_result_data(pid=7, output="out", summary_obj={}, exit_code=exit_code)
+        data = BashTool._compact_result_data(
+            handle="bs1.sig.7777", output="out", summary_obj={}, exit_code=exit_code
+        )
         assert "terminated_by_signal" not in data
 
 
@@ -191,34 +205,25 @@ class TestCheckOwner:
             assert fragment in err
 
 
-# ───────────────────────────── execute 分发 ─────────────────────────────
+# ───────────────────────────── bash 执行链 ─────────────────────────────
 
 
-class TestExecuteDispatch:
-    async def test_unknown_action_rejected(self, tool):
-        result = await tool.execute({"action": "reboot", "pid": "not-an-int"})
-        assert result.success is False
-        assert result.error_code == "INVALID_ACTION"
-        assert "未知的 action" in result.error
-
+class TestBashEntry:
     async def test_execute_without_command_rejected(self, tool):
-        result = await tool.execute({"action": "execute"})
+        result = await tool.run_command({})
         assert result.success is False
         assert result.error_code == "MISSING_COMMAND"
 
 
-# ───────────────────────────── execute 执行链 ─────────────────────────────
-
-
 class TestExecuteFailurePaths:
-    async def test_unwritable_log_dir_reports_summary_error(self, tool, tmp_path):
-        """日志链路不可写 + 进程已清：摘要无从获取 → SUMMARY_ERROR（628 行）。"""
+    async def test_unwritable_log_dir_degrades_with_handle(self, tool, tmp_path):
+        """日志链路不可写 + 进程已清：摘要无从获取 → 降级信封（handle+degraded），不裸失败。"""
         blocker = tmp_path / "blocker"
         blocker.write_text("i am a file", encoding="utf-8")
         ws = tmp_path / "ws"
         ws.mkdir()
 
-        result = await tool.execute(
+        result = await tool.run_command(
             {
                 "command": _py_cmd("print('ignored')"),
                 "workspace": str(ws),
@@ -227,15 +232,19 @@ class TestExecuteFailurePaths:
             }
         )
 
-        assert result.success is False
-        assert result.error_code == "SUMMARY_ERROR"
+        # 观测失败 ≠ 调用失败：命令已执行完，输出链路坏 → 如实降级
+        assert result.success is True
+        assert result.output["degraded"] == "summary_unavailable"
+        assert result.output["handle"], "handle 必须回传（log 重读凭据）"
+        assert result.output["status"] == "completed"
+        assert "exit_code" not in result.output, "退出码未知不得伪造"
 
     async def test_spawn_failure_reports_execution_failed(self, tool, tmp_path):
-        """working_dir 不存在：spawn 抛错被收口为 EXECUTION_FAILED（633-634 行）。"""
+        """working_dir 不存在：spawn 抛错被收口为 EXECUTION_FAILED。"""
         ws = tmp_path / "ws"
         ws.mkdir()
 
-        result = await tool.execute(
+        result = await tool.run_command(
             {
                 "command": "echo hi",
                 "workspace": str(ws),
@@ -247,26 +256,69 @@ class TestExecuteFailurePaths:
         assert result.error_code == "EXECUTION_FAILED"
         assert "执行命令失败" in result.error
 
+    async def test_spawn_first_line_timeout_maps_to_spawn_no_first_line(
+        self, tool, tmp_path, monkeypatch
+    ):
+        """首行门控用尽重试：SPAWN_NO_FIRST_LINE + 宿主 pid/日志元数据可诊断。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
 
-# ───────────────────────────── continue 各分支 ─────────────────────────────
+        async def fake_start(**kwargs):
+            raise SpawnFirstLineTimeoutError(
+                attempt=2,
+                max_attempts=2,
+                timeout=15.0,
+                host_pid=4242,
+                log_file=tmp_path / "logs" / "bash_4242.log",
+            )
+
+        monkeypatch.setattr(tool.process_manager, "start_process", fake_start)
+        result = await tool.run_command({"command": "echo hi", "workspace": str(ws)})
+
+        assert result.success is False
+        assert result.error_code == "SPAWN_NO_FIRST_LINE"
+        assert "host_pid=4242" in result.error
+        assert "attempt 2/2" in result.error
+
+    async def test_backend_unhealthy_maps_to_backend_unhealthy(self, tool, tmp_path, monkeypatch):
+        """探测失败/熔断：BACKEND_UNHEALTHY + 可操作排查指引（不 spawn）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        async def fake_start(**kwargs):
+            raise BackendUnhealthyError(
+                reason="spawn 首行超时（15.0s）且后端健康探测未通过（probe=False）",
+                backend_key="wsl_native:distro=Ubuntu",
+            )
+
+        monkeypatch.setattr(tool.process_manager, "start_process", fake_start)
+        result = await tool.run_command({"command": "echo hi", "workspace": str(ws)})
+
+        assert result.success is False
+        assert result.error_code == "BACKEND_UNHEALTHY"
+        assert "wsl -d Ubuntu --exec true" in result.error
+        assert "Restart-Service WSLService" in result.error
 
 
-class TestContinuePaths:
+# ───────────────────────────── log(block=true) 各分支 ─────────────────────────────
+
+
+class TestLogBlockTruePaths:
     async def test_log_io_error_surfaced(self, tool):
-        """磁盘日志存在但读不出（目录占位）→ LOG_FILE_IO_ERROR（658-659 行）。"""
+        """磁盘日志存在但读不出（目录占位）→ LOG_FILE_IO_ERROR。"""
         (tool.process_manager.log_dir / "bash_400.log").mkdir()
 
-        result = await tool.execute({"action": "continue", "pid": 400})
+        result = await tool.read_log({"handle": encode_handle(400, None), "block": True})
 
         assert result.success is False
         assert result.error_code == "LOG_FILE_IO_ERROR"
 
     async def test_disk_log_owner_mismatch_rejected(self, tool):
-        """磁盘日志归属他 会话：continue 越权被拒（666 行）。"""
+        """磁盘日志归属他会话：log(block=true) 越权被拒。"""
         _write_log(tool.process_manager.log_dir, 401, "echo hi", "sess-a", "hi\n")
 
-        result = await tool.execute(
-            {"action": "continue", "pid": 401, "session_id": "sess-b"}
+        result = await tool.read_log(
+            {"handle": encode_handle(401, "sess-a"), "block": True, "session_id": "sess-b"}
         )
 
         assert result.success is False
@@ -276,8 +328,8 @@ class TestContinuePaths:
         """同会话磁盘降级：success + source=file（对照组）。"""
         _write_log(tool.process_manager.log_dir, 402, "echo hi", "sess-a", "hi\n")
 
-        result = await tool.execute(
-            {"action": "continue", "pid": 402, "session_id": "sess-a"}
+        result = await tool.read_log(
+            {"handle": encode_handle(402, "sess-a"), "block": True, "session_id": "sess-a"}
         )
 
         assert result.success is True
@@ -285,7 +337,7 @@ class TestContinuePaths:
         assert result.output["output"] == "hi"
 
     async def test_memory_completed_nonzero_exit_fails(self, tool):
-        """内存完成态 + 非零退出：COMMAND_FAILED 带失败摘要（696-700 行）。"""
+        """内存完成态 + 非零退出：COMMAND_FAILED 带失败摘要。"""
         log_file = _write_log(tool.process_manager.log_dir, 310, "failing", None, "boom\n")
         tool.process_manager.active_processes[310] = ProcessInfo(
             pid=310,
@@ -296,7 +348,7 @@ class TestContinuePaths:
             exit_code=3,
         )
 
-        result = await tool.execute({"action": "continue", "pid": 310, "timeout": 1})
+        result = await tool.read_log({"handle": encode_handle(310, None), "block": True})
 
         assert result.success is False
         assert result.error_code == "COMMAND_FAILED"
@@ -315,14 +367,14 @@ class TestContinuePaths:
             exit_code=137,
         )
 
-        result = await tool.execute({"action": "continue", "pid": 311, "timeout": 1})
+        result = await tool.read_log({"handle": encode_handle(311, None), "block": True})
 
         assert result.success is False
         assert "信号 9 (SIGKILL) 终止" in result.error
         assert result.metadata["terminated_by_signal"] == "信号 9 (SIGKILL) 终止"
 
     async def test_wait_loop_completion_nonzero_exit_fails(self, tool, tmp_path):
-        """等待轮询期间进程失败退出：COMMAND_FAILED（755-759 行）。
+        """等待轮询期间进程失败退出：COMMAND_FAILED。
 
         注入真实子进程 + 不挂日志读取任务：真实链路里 _on_output_task_done
         的即时清理与轮询循环存在竞态（清理先到时 proc_info 被弹出，退出码
@@ -347,8 +399,8 @@ class TestContinuePaths:
             metadata={"owner": "sess-a"},
         )
         try:
-            result = await tool.execute(
-                {"action": "continue", "pid": proc.pid, "timeout": 10, "session_id": "sess-a"}
+            result = await tool.read_log(
+                {"handle": encode_handle(proc.pid, "sess-a"), "block": True, "session_id": "sess-a"}
             )
 
             assert result.success is False
@@ -360,78 +412,75 @@ class TestContinuePaths:
                 await proc.wait()
 
     async def test_wait_loop_completion_success_returns_output(self, tool, tmp_path):
-        """等待轮询期间进程正常退出：success + output（755 行的零退出对照组）。"""
+        """等待轮询期间进程正常退出：success + output（零退出对照组）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
 
-        started = await tool.execute(
-            {"command": _sleep_exit(30, 0), "workspace": str(ws), "timeout": 5}
+        started = await tool.run_command(
+            {"command": _sleep_exit(8, 0), "workspace": str(ws), "timeout": 5}
         )
         assert started.output["status"] == "running"
-        pid = started.output["pid"]
+        handle = started.output["handle"]
 
-        result = await tool.execute(
-            {"action": "continue", "pid": pid, "timeout": 45, "workspace": str(ws)}
-        )
+        # block=true 等待上限 = min(默认 30s, MAX_TIMEOUT)，8s 进程在上限内完成
+        result = await tool.read_log({"handle": handle, "block": True, "workspace": str(ws)})
 
         assert result.success is True
         assert result.output["status"] == "completed"
         assert result.output["exit_code"] == 0
 
 
-# ───────────────────────────── terminate / input / read_log ─────────────────────────────
+# ───────────────────────────── kill / input / log 守卫 ─────────────────────────────
 
 
 class TestTerminateAndInputGuards:
-    async def test_terminate_without_pid_rejected(self, tool):
-        result = await tool.execute({"action": "terminate"})
+    async def test_terminate_without_handle_rejected(self, tool):
+        result = await tool.terminate({})
         assert result.success is False
-        assert result.error_code == "MISSING_PID"
+        assert result.error_code == "MISSING_HANDLE"
 
-    async def test_input_without_pid_rejected(self, tool):
-        result = await tool.execute({"action": "input"})
+    async def test_input_without_handle_rejected(self, tool):
+        result = await tool.send_input({})
         assert result.success is False
-        assert result.error_code == "MISSING_PID"
+        assert result.error_code == "MISSING_HANDLE"
 
     async def test_input_without_text_rejected(self, tool):
-        result = await tool.execute({"action": "input", "pid": 424242})
+        result = await tool.send_input({"handle": encode_handle(424242, None)})
         assert result.success is False
-        assert result.error_code == "MISSING_INPUT"
+        assert result.error_code == "MISSING_TEXT"
 
     async def test_input_unknown_process_rejected(self, tool):
-        result = await tool.execute({"action": "input", "pid": 424242, "input_text": "hi"})
+        result = await tool.send_input({"handle": encode_handle(424242, None), "text": "hi"})
         assert result.success is False
         assert result.error_code == "PROCESS_NOT_FOUND"
 
     async def test_input_owner_mismatch_rejected(self, tool, tmp_path):
-        """运行中进程归属他会话：input 越权被拒（849 行，真实子进程）。"""
+        """运行中进程归属他会话：input 越权被拒（真实子进程）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
-        started = await tool.execute(
+        started = await tool.run_command(
             {"command": _sleep_exit(30, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 10}
         )
         assert started.output["status"] == "running"
-        pid = started.output["pid"]
+        handle = started.output["handle"]
 
-        result = await tool.execute(
-            {"action": "input", "pid": pid, "input_text": "hello", "session_id": "sess-b"}
-        )
+        result = await tool.send_input({"handle": handle, "text": "hello", "session_id": "sess-b"})
 
         assert result.success is False
         assert result.error_code == "PROCESS_FORBIDDEN"
 
     async def test_input_forbidden_char_fails_send(self, tool, tmp_path):
-        """运行中进程收到禁字输入：INPUT_FAILED（862 行，真实子进程）。"""
+        """运行中进程收到禁字输入：INPUT_FAILED（真实子进程）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
-        started = await tool.execute(
+        started = await tool.run_command(
             {"command": _sleep_exit(30, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 10}
         )
         assert started.output["status"] == "running"
-        pid = started.output["pid"]
+        handle = started.output["handle"]
 
-        result = await tool.execute(
-            {"action": "input", "pid": pid, "input_text": "bad\x00input", "session_id": "sess-a"}
+        result = await tool.send_input(
+            {"handle": handle, "text": "bad\x00input", "session_id": "sess-a"}
         )
 
         assert result.success is False
@@ -439,17 +488,15 @@ class TestTerminateAndInputGuards:
         assert "禁止字符" in result.error
 
     async def test_input_owner_match_succeeds(self, tool, tmp_path):
-        """同会话向运行中进程发送输入：success（849 行对照组）。"""
+        """同会话向运行中进程发送输入：success（对照组）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
-        started = await tool.execute(
+        started = await tool.run_command(
             {"command": _sleep_exit(30, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 10}
         )
-        pid = started.output["pid"]
+        handle = started.output["handle"]
 
-        result = await tool.execute(
-            {"action": "input", "pid": pid, "input_text": "hello", "session_id": "sess-a"}
-        )
+        result = await tool.send_input({"handle": handle, "text": "hello", "session_id": "sess-a"})
 
         assert result.success is True
         assert result.output["message"] == "输入已发送"
@@ -457,19 +504,21 @@ class TestTerminateAndInputGuards:
 
 class TestReadLogPaths:
     async def test_read_log_io_error_surfaced(self, tool):
-        """磁盘日志存在但读不出（目录占位）→ LOG_FILE_IO_ERROR（918-919 行）。"""
+        """磁盘日志存在但读不出（目录占位）→ LOG_FILE_IO_ERROR。"""
         (tool.process_manager.log_dir / "bash_500.log").mkdir()
 
-        result = await tool.execute({"action": "read_log", "pid": 500})
+        result = await tool.read_log({"handle": encode_handle(500, None), "block": False})
 
         assert result.success is False
         assert result.error_code == "LOG_FILE_IO_ERROR"
 
     async def test_read_log_owner_mismatch_rejected(self, tool):
-        """磁盘日志归属他会话：read_log 越权被拒（对照链路）。"""
+        """磁盘日志归属他会话：log 越权被拒（对照链路）。"""
         _write_log(tool.process_manager.log_dir, 501, "echo hi", "sess-a", "hi\n")
 
-        result = await tool.execute({"action": "read_log", "pid": 501, "session_id": "sess-b"})
+        result = await tool.read_log(
+            {"handle": encode_handle(501, "sess-a"), "session_id": "sess-b"}
+        )
 
         assert result.success is False
         assert result.error_code == "PROCESS_FORBIDDEN"

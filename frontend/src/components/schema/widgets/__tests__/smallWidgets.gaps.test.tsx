@@ -6,9 +6,9 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { EditorWidget } from '../EditorWidget'
-import { markdownMemoComparator } from '@/components/shared/markdown/shared'
 import { SessionSearch } from '@/components/session/SessionSearch'
+import { markdownMemoComparator } from '@/components/shared/markdown/shared'
+import { EditorWidget } from '../EditorWidget'
 
 describe('EditorWidget — stub 双形态', () => {
   it('无 props：占位渲染，无 JSON 块', () => {

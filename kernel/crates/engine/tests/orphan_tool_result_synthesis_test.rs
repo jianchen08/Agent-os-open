@@ -608,8 +608,10 @@ async fn synthesis_is_not_repeated_for_healed_orphans() {
     }
 }
 
-/// messages ops 落表恒失败的 StorageBackend（只注入合成通道故障；其余全
-/// 默认/空实现）。必选方法集对齐 persist_retry_test::FlakyStorage 现役口径。
+/// 合成通道落表恒失败的 StorageBackend（只注入 role=tool 合成消息的 op 故障；
+/// 插件侧 assistant op 正常放行——插件 messages op 自 DB-first 起为硬失败，
+/// 会先于合成点终止 run，注入必须限定合成消息。其余全默认/空实现）。
+/// 必选方法集对齐 persist_retry_test::FlakyStorage 现役口径。
 struct MessagesOpFailStore {
     ops_failed: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -620,8 +622,17 @@ impl agentos_core::traits::StorageBackend for MessagesOpFailStore {
         &self,
         _pipeline_id: &str,
         _tenant_id: &str,
-        _ops: &[Value],
+        ops: &[Value],
     ) -> Result<(), agentos_core::types::StorageError> {
+        let is_synthetic = ops.iter().any(|op| {
+            op.get("msg")
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                == Some("tool")
+        });
+        if !is_synthetic {
+            return Ok(());
+        }
         self.ops_failed
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Err(agentos_core::types::StorageError::Database(
@@ -804,8 +815,8 @@ async fn synthesis_write_failure_degrades_softly() {
         "终态不受合成失败影响"
     );
     assert!(
-        ops_failed.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "llm_core 消息 op 与合成 op 均尝试落表（失败注入两处命中）"
+        ops_failed.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "合成消息 op 尝试落表（失败注入命中；插件侧 assistant op 正常放行）"
     );
     assert!(
         metrics.snapshot().persist_failures >= 1,

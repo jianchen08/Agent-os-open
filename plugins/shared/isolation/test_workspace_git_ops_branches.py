@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -131,9 +132,12 @@ class TestRootFallbackAndGitDetail:
 
 class TestLockAndBranch:
     def test_remove_index_lock_oserror_returns_false(self, host: _GitOpsHost, tmp_path: Path) -> None:
-        """lock 清理遇到 OSError（如目录占位）→ False，不抛异常。"""
+        """陈旧锁清理遇到 OSError（如目录占位）→ False，不抛异常。"""
         (tmp_path / ".git").mkdir()
-        (tmp_path / ".git" / "index.lock").mkdir()  # 目录不可 unlink → OSError
+        lock = tmp_path / ".git" / "index.lock"
+        lock.mkdir()  # 目录不可 unlink → OSError
+        old = time.time() - 3600
+        os.utime(lock, (old, old))  # 先过陈旧阈值，才会走到 unlink
         assert host._remove_index_lock(tmp_path) is False
 
     def test_resolve_main_branch_prefers_existing_main(self, tmp_path: Path) -> None:
@@ -219,7 +223,9 @@ class TestLockRetryFamilies:
 
         def _add_lock_fails(self: Any, *args: str, **kwargs: Any) -> tuple[int, str, str]:
             if args[:2] == ("add", "-A"):
-                lock.write_text("", encoding="utf-8")  # 失败即持锁（重试前被清）
+                lock.write_text("", encoding="utf-8")  # 失败即持锁（陈旧判定后可重试清理）
+                old = time.time() - 3600
+                os.utime(lock, (old, old))
                 return 1, "", "fatal: Unable to create index.lock"
             return real_run(self, *args, **kwargs)
 
@@ -237,6 +243,8 @@ class TestLockRetryFamilies:
         def _commit_lock_fails(self: Any, *args: str, **kwargs: Any) -> tuple[int, str, str]:
             if args[0] == "commit":
                 lock.write_text("", encoding="utf-8")
+                old = time.time() - 3600
+                os.utime(lock, (old, old))
                 return 1, "", "fatal: Unable to create index.lock"
             return real_run(self, *args, **kwargs)
 
@@ -246,13 +254,13 @@ class TestLockRetryFamilies:
     def test_dirty_commit_add_failure_returns_none(
         self, host: _GitOpsHost, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        """脏检测提交：add -A 两次失败 → None（与无变更不可混淆由调用方处理）。"""
+        """脏检测提交：tracked-only add -u 两次失败 → None（与无变更不可混淆由调用方处理）。"""
         repo = _init_repo(tmp_path / "repo-dirty-add")
         (repo / "README.md").write_text("dirty", encoding="utf-8")  # 有脏改动才会走到 add
         real_run = _MOD._GitOpsMixin._run_git
 
         def _add_fails(self: Any, *args: str, **kwargs: Any) -> tuple[int, str, str]:
-            if args[:2] == ("add", "-A"):
+            if args[:2] == ("add", "-u"):
                 return 1, "", "add failed"
             return real_run(self, *args, **kwargs)
 

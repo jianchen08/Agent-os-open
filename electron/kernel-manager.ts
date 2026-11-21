@@ -168,6 +168,8 @@ export interface KernelResourcePaths {
   pluginsDir: string;
   /** 出厂配置种子根（resources/config，config ownership ADR 语义） */
   configRoot: string;
+  /** MXC 执行器（resources/mxc/x64/wxc-exec.exe；非 Windows 为 undefined） */
+  mxcExe?: string;
 }
 
 /**
@@ -188,6 +190,12 @@ export function kernelResourcePaths(
     kernelDir,
     pluginsDir: path.join(resourcesPath, "plugins", "shared"),
     configRoot: path.join(resourcesPath, "config"),
+    // MXC 原生隔离后端执行器（extraResources: build/mxc-runtime → resources/mxc）。
+    // 非 Windows 不供应（MXC ProcessContainer/WSLC 均 Windows 专属）。
+    mxcExe:
+      platform === "win32"
+        ? path.join(resourcesPath, "mxc", "x64", "wxc-exec.exe")
+        : undefined,
   };
 }
 
@@ -269,14 +277,16 @@ export function resolvePackagedConfigRootDir(
 /**
  * 出厂配置树播种（幂等）：把包内 `resources/config` 整树播种到用户空间配置根。
  *
- * 两段裁决（ADR 2026-10-24-config-seed-version-arbitration）：
- * - **非受管文件**（无有效顶层 `version:` 声明）：copy-if-missing——仅补缺失，
- *   绝不覆盖既有内容（用户空间是活跃真值，用户在 storage/授权名单/插件配置
- *   上的改动都在这里，出厂树只补洞）；
- * - **受管出厂默认**（yaml 顶层 `version:` 为点分整数）：版本裁决——用户副本
- *   版本**严格大于**包内版本才保留，否则（持平/更低/无版本/不可解析）包内
- *   覆盖。受管是包侧逐文件自声明的：包内文件不带有效 version 即不入受管面，
- *   语义与旧版逐字节一致。
+ * 两段裁决（ADR 2026-10-24-config-seed-version-arbitration +
+ * ADR 2026-11-09-seed-version-content-assets）：
+ * - **非受管文件**（yaml 无有效顶层 `version:`、md 无有效首行
+ *   `<!-- seed-version: N -->`）：copy-if-missing——仅补缺失，绝不覆盖既有
+ *   内容（用户空间是活跃真值，用户在 storage/授权名单/插件配置上的改动都在
+ *   这里，出厂树只补洞）；
+ * - **受管出厂默认**（yaml 顶层 `version:` / md 首行 seed-version 标记为点分
+ *   整数）：版本裁决——用户副本版本**严格大于**包内版本才保留，否则（持平/
+ *   更低/无版本/不可解析）包内覆盖。受管是包侧逐文件自声明的：包内文件不带
+ *   有效版本声明即不入受管面，语义与旧版逐字节一致。
  *
  * 为什么覆盖裁决放播种步而非内核读侧：读侧只认一个根（ADR
  * 2026-10-17-installed-config-root-user-space，半配置不失效）保持不变；
@@ -334,21 +344,21 @@ export function seedConfigTree(
   return result;
 }
 
-/** 受管出厂默认判定后是否覆盖用户副本（包内未声明有效 version = 永不覆盖）。 */
+/** 受管出厂默认判定后是否覆盖用户副本（包内未声明有效版本 = 永不覆盖）。 */
 function shouldOverwriteManaged(
   fsMod: Pick<typeof fs, "existsSync" | "readFileSync">,
   packageFile: string,
   userFile: string,
 ): boolean {
-  if (!/\.(yaml|yml)$/i.test(packageFile)) {
+  if (!/\.(yaml|yml|md)$/i.test(packageFile)) {
     return false;
   }
   let pkgVersion: number[] | null;
   let userVersion: number[] | null;
   try {
-    pkgVersion = topLevelVersion(fsMod.readFileSync(packageFile, "utf-8"));
+    pkgVersion = assetVersion(packageFile, fsMod.readFileSync(packageFile, "utf-8"));
     userVersion = fsMod.existsSync(userFile)
-      ? topLevelVersion(fsMod.readFileSync(userFile, "utf-8"))
+      ? assetVersion(userFile, fsMod.readFileSync(userFile, "utf-8"))
       : null;
   } catch {
     // 读失败（编码/占用等）不覆盖——播种失败面留给既有 try/catch 语义
@@ -358,6 +368,34 @@ function shouldOverwriteManaged(
     return false;
   }
   return !versionStrictlyGreater(userVersion ?? [], pkgVersion);
+}
+
+/** 资产版本：yaml 顶层 `version:`；md 首行 `<!-- seed-version: N -->`。 */
+function assetVersion(filePath: string, text: string): number[] | null {
+  if (/\.(yaml|yml)$/i.test(filePath)) {
+    return topLevelVersion(text);
+  }
+  if (/\.md$/i.test(filePath)) {
+    return markdownSeedVersion(text);
+  }
+  return null;
+}
+
+/**
+ * markdown 内容资产的版本声明：第一个非空行必须是
+ * `<!-- seed-version: N -->`（点分整数，HTML 注释不污染渲染）。
+ * 标记不在首行/缺席/不可解析一律 null（= 该 md 维持 copy-if-missing）。
+ */
+function markdownSeedVersion(text: string): number[] | null {
+  const first = text
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .find((line) => line.trim() !== "");
+  if (!first) {
+    return null;
+  }
+  const m = /^<!--\s*seed-version:\s*(\d+(?:\.\d+)*)\s*-->$/.exec(first.trim());
+  return m ? m[1].split(".").map(Number) : null;
 }
 
 /**
@@ -409,11 +447,6 @@ function versionStrictlyGreater(user: number[], pkg: number[]): boolean {
  * - AGENTOS_CONFIG_USERS_DIR：授权名单真值钉用户空间（ADR 2026-09-24 决策5，
  *   恒为 `<userRoot>/config/users`）——经 seedConfigTree 随配置树首次播种，
  *   授权卡永久项写用户空间，升级不丢；ambient 显式设置优先；
- * - AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin：双源同 id 裁决置内置优先——装机版
- *   用户空间的共享插件副本是旧安装/旧迁移遗留（陈旧/扁平布局/.venv 缺失），
- *   不得压过包内版本匹配的新版（BUG-55，ADR
- *   2026-09-20-packaged-dual-source-adjudication）；用户根仍承载内置没有的
- *   额外插件；
  * - AGENTOS_PLUGIN_VENV_AUTOPROVISION=1：boot 后台对缺 .venv 的 Python sidecar
  *   跑 `uv sync` 自愈（打包资源排除 .venv 且装机链没有 dev launcher；同 ADR
  *   决策②；uv 缺席/失败仅 warn 降级）；
@@ -437,8 +470,22 @@ export function buildKernelEnv(
     AGENTOS_BIND: "127.0.0.1",
     AGENTOS_KERNEL_PORT: String(KERNEL_PORT),
     AGENTOS_PLUGINS_DIR: paths.pluginsDir,
+    // MXC 执行器（装机随包 resources/mxc/x64）：isolation 插件按此 env 解析；
+    // ambient 显式设置优先（用户可指向自备执行器）。缺文件时 provider 按
+    // 执行器缺失 fail-closed，不静默回落其它隔离后端。
+    ...(paths.mxcExe && !envValue(base, "AGENTOS_MXC_EXECUTOR")
+      ? { AGENTOS_MXC_EXECUTOR: paths.mxcExe }
+      : {}),
+    // 用户根显式注入（2026-11-08 装机实证缺口）：分级单副本模型刀 1 起内核
+    // user_root() 只认本 env（零回落），缺注入 → 用户空间整链死——插件 venv
+    // 登记处（plugin-venvs/，spawn 兜底 + autoprovision 落点 + 合宿共享 venv
+    // 回退）恒 None，装机 sidecar 在平版胜者落用户目录时全线
+    // VENV_INTERPRETER_MISSING。解析真源 = dbPath 的父目录（dbPath 即
+    // resolvePackagedDbPath 的 `<userRoot>/agentos_kernel.db`，单一推导点）。
+    ...(dbPath && !envValue(base, "AGENTOS_USER_ROOT")
+      ? { AGENTOS_USER_ROOT: path.dirname(dbPath) }
+      : {}),
     AGENTOS_CONFIG_ROOT: envValue(base, "AGENTOS_CONFIG_ROOT") ?? configRoot ?? paths.configRoot,
-    AGENTOS_PLUGIN_SOURCE_PRIORITY: "builtin",
     AGENTOS_PLUGIN_VENV_AUTOPROVISION: "1",
     AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS: PLUGIN_IDLE_TIMEOUT_SECS,
     // token 签名密钥持久化（每安装身份一份）：不注入时内核每进程随机签名，
@@ -1321,4 +1368,105 @@ export function applyOfflineVenvEnv(input: {
     result.wheelhouseShipped = true;
   }
   return result;
+}
+
+// ── dev 形态实例启动配置（ADR 2026-11-07-plugin-tiered-single-copy-model 刀 1+2）──
+// 分级单副本模型：插件三根（Tier1/Tier2/共享）全部**显式配置**，内核零推导零
+// 回落——缺失即拒绝启动（fail-closed）。dev 实例三根同指仓内 plugins/shared
+// （ADR §2.2 退化配置，显式写明），用户数据面钉 user_root；配置文件落用户空间
+// （`<userRoot>/config/kernel/instance.yaml`，dev user_root = <repo>\user_root，
+// gitignored、工作区还原不抹），内核经 AGENTOS_INSTANCE_CONFIG 拿**配置文件路
+// 径**（内容在文件里，env 不承载目录推导）。装机形态的配置文件写入归刀 3 安装
+// 器卡——本模块不动装机 spawn 面（buildKernelEnv/ensurePackagedKernelRunning
+// 原样，缺配置文件的装机内核按 fail-closed 拒启，属模型切换期的既定过渡态）。
+
+/** 实例启动配置文件路径的交付载体 env（与内核 agentos_plugin_loader 同名同值）。 */
+export const INSTANCE_CONFIG_ENV = "AGENTOS_INSTANCE_CONFIG";
+
+/** 实例启动配置文件名（内核缺省位 `<config_root>/kernel/instance.yaml` 同名）。 */
+export const INSTANCE_CONFIG_FILENAME = "instance.yaml";
+
+/** 实例启动配置 schema 版本（与内核 INSTANCE_CONFIG_SCHEMA 同值）。 */
+export const INSTANCE_CONFIG_SCHEMA = 1;
+
+/** dev 实例启动配置解析产物：配置文件落点 + 三根。 */
+export interface DevInstanceConfig {
+  /** 配置文件绝对路径（<userRoot>/config/kernel/instance.yaml）。 */
+  configPath: string;
+  /** Tier1 根（安全级，应用目录只读；dev=仓内 shared）。 */
+  tier1Root: string;
+  /** Tier2 根（解包用户目录；dev=仓内 shared 退化配置）。 */
+  tier2Root: string;
+  /** 共享根（_libs/_host 等；dev=仓内 shared）。 */
+  sharedRoot: string;
+}
+
+/** fs 注入面（写实例配置用；测试注入假 fs）。 */
+type DevConfigFs = Pick<typeof fs, "mkdirSync" | "writeFileSync">;
+
+/**
+ * dev 三根解析（纯函数）：三根同指仓内 plugins/shared（ADR §2.2 dev 退化配置）。
+ */
+export function devPluginRoots(repoRoot: string): {
+  tier1Root: string;
+  tier2Root: string;
+  sharedRoot: string;
+} {
+  const shared = path.join(repoRoot, "plugins", "shared");
+  return { tier1Root: shared, tier2Root: shared, sharedRoot: shared };
+}
+
+/**
+ * dev 实例配置 yaml 文本（纯函数）：三根单引号包裹（Windows 反斜杠路径在
+ * 单引号 YAML 标量里字面保留，无双引号转义面）。
+ */
+export function buildDevInstanceConfigYaml(roots: {
+  tier1Root: string;
+  tier2Root: string;
+  sharedRoot: string;
+}): string {
+  return [
+    "# dev 实例启动配置（electron kernel-manager dev 链写入；ADR 2026-11-07",
+    "# plugin-tiered-single-copy-model）：三根显式配置，内核零推导零回落。",
+    `schema: ${INSTANCE_CONFIG_SCHEMA}`,
+    `tier1_root: '${roots.tier1Root}'`,
+    `tier2_root: '${roots.tier2Root}'`,
+    `shared_root: '${roots.sharedRoot}'`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * 写 dev 实例启动配置（副作用层，幂等覆盖）：落点 =
+ * `<userRoot>/config/kernel/instance.yaml`（用户空间，dev user_root gitignored，
+ * 工作区还原不抹机器本位路径）。
+ */
+export function writeDevInstanceConfig(input: {
+  repoRoot: string;
+  userRoot: string;
+  fsMod?: DevConfigFs;
+}): DevInstanceConfig {
+  const fsMod = input.fsMod ?? fs;
+  const roots = devPluginRoots(input.repoRoot);
+  const configDir = path.join(input.userRoot, "config", "kernel");
+  const configPath = path.join(configDir, INSTANCE_CONFIG_FILENAME);
+  fsMod.mkdirSync(configDir, { recursive: true });
+  fsMod.writeFileSync(configPath, buildDevInstanceConfigYaml(roots), "utf-8");
+  return { configPath, ...roots };
+}
+
+/**
+ * dev 内核 env：把实例启动配置文件路径与三根交付给内核（分级单副本模型的
+ * env 载体面）。其余变量原样继承（不修改传入的 base 对象）。
+ */
+export function buildDevKernelEnv(
+  base: NodeJS.ProcessEnv,
+  dev: DevInstanceConfig,
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    [INSTANCE_CONFIG_ENV]: dev.configPath,
+    AGENTOS_PLUGINS_DIR: dev.tier1Root,
+    AGENTOS_PLUGIN_TIER2_ROOT: dev.tier2Root,
+  };
 }

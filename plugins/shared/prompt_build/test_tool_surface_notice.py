@@ -1,9 +1,9 @@
 # @feature: FP-0.2.〇 管道引擎 | @ci: python-coverage
-"""prompt_build 工具面缩水通告注入测试（卡4①：数组缩水显式告知）。
+"""prompt_build 工具面缩水通告注入测试（卡4①：真缺席显式告知）。
 
-契约：tool_schema 每轮把「声明但当前不可用」的工具写入
+契约：tool_schema 每轮把「声明但真正不在工具面」的工具写入
 state["tool_surface.unavailable"]；_build_dynamic_vars 读到非空表时在
-dynamic_vars 消息追加模型可读通告行——数组缩水不再无声，模型无需盲猜
+dynamic_vars 消息追加模型可读通告行——真缺失不再无声，模型无需盲猜
 「上轮还能用的 file 工具这轮没了」（2026-10-17 装机事故定因之一）。
 零配置 dynamic_vars 的 agent 也必须收到通告（早退 return None 在通告
 判定之后，不能吞掉故障告知）。
@@ -61,7 +61,7 @@ def _dynamic_vars_content(state: dict[str, Any], config: dict[str, Any] | None =
 
 class TestToolSurfaceNoticeInjection:
     def test_unavailable_tools_appended_to_configured_vars(self) -> None:
-        """有配置动态变量且工具缩水 → 通告行并入，含「本轮不可用」与工具名。"""
+        """有配置动态变量且工具缩水 → 通告行并入，含「不在本轮工具面」与工具名。"""
         content = _dynamic_vars_content(
             state={
                 "context.dynamic_vars": [{"type": "timestamp", "name": "当前时间"}],
@@ -69,7 +69,7 @@ class TestToolSurfaceNoticeInjection:
             },
         )
         assert content is not None
-        assert "本轮不可用" in content
+        assert "不在本轮工具面" in content
         assert "file_read" in content
         assert "human_interaction" in content
         # 通告是工具面事实，禁止替模型做「已恢复」类编造引导
@@ -81,8 +81,20 @@ class TestToolSurfaceNoticeInjection:
             state={"tool_surface.unavailable": ["file_read"]},
         )
         assert content is not None
-        assert "本轮不可用" in content
+        assert "不在本轮工具面" in content
         assert "file_read" in content
+
+    def test_unavailable_notice_matches_adr_wording(self) -> None:
+        """文案与 ADR 2026-11-12 一致：真缺席才提示「不在工具面」+ 原因层。"""
+        content = _dynamic_vars_content(
+            state={"tool_surface.unavailable": ["file_read"]},
+        )
+        assert content is not None
+        assert "未注册/插件未启用/提供方不可用" in content
+        assert "不要规划或调用" in content
+        # G2 失败桩不在本通告面：不得出现调用期失败文案，
+        # 避免模型把「可调用但会显式失败」误读成「不可调用」。
+        assert "声明与实现不一致" not in content
 
     def test_no_unavailable_key_no_notice(self) -> None:
         """state 无该键（老内核/未触发缩水）→ 行为零变化，无通告字样。"""
@@ -90,7 +102,7 @@ class TestToolSurfaceNoticeInjection:
             state={"context.dynamic_vars": [{"type": "timestamp", "name": "当前时间"}]},
         )
         assert content is not None
-        assert "本轮不可用" not in content
+        assert "不在本轮工具面" not in content
 
     def test_empty_unavailable_list_no_notice(self) -> None:
         """空表（工具面完好）→ 不注入通告（性质：通告只由缺席触发）。"""
@@ -101,7 +113,7 @@ class TestToolSurfaceNoticeInjection:
             },
         )
         assert content is not None
-        assert "本轮不可用" not in content
+        assert "不在本轮工具面" not in content
 
     def test_zero_vars_and_no_shrink_returns_none(self) -> None:
         """零配置变量且无缩水 → 维持零兜底契约（返回 None 不注入）。"""
@@ -116,4 +128,4 @@ class TestToolSurfaceNoticeInjection:
             },
         )
         assert content is not None
-        assert "本轮不可用" not in content
+        assert "不在本轮工具面" not in content

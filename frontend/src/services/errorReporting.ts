@@ -125,9 +125,14 @@ class ErrorReportingService {
         // 统一错误信封来源（config/kernel/error_codes.json）：通知中心渲染来源标签，
         // 调用方经 context.source 显式传入（client.ts 从 apiError.source 透传）。
         errorSource: context.source as ErrorSource | undefined,
-        // 一律自动消失（SERVER 10s / 其余 6s）：瞬时失败（如内核重启窗口）
-        // 常驻挂屏会误导用户以为服务持续不可用，且无恢复机制清除。
-        autoDismissMs: isServerError ? 10000 : 6000,
+        // 服务类失败常驻（2026-11-18 装机事故批次 3）：连接毒化期 73 分钟内
+        // 每次取票失败各报一条、10s 即逝，用户全程不知失联根因。同 mergeKey
+        // 更新在既有条目上（高频失败合并为单条），WS 重连成功时随连接类存量
+        // 一并清除（notificationStore.clearConnectionErrorNotifications）。
+        // 非服务类操作反馈（6s 自动消失）保持既有行为不变。
+        ...(isServerError
+          ? { mergeKey: 'svc-request-failed' }
+          : { autoDismissMs: 6000 }),
       })
     }
   }

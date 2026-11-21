@@ -7,7 +7,7 @@
  * 契约（FormWidget.triggerVisibleLabel）：仅去括注留裸档名。
  * 全称承载在菜单项/可访问名，两者只服务触发器可见文案。
  */
-import { compactTriggerLabel, triggerVisibleLabel } from '@/components/schema/widgets/FormWidget'
+import { compactTriggerLabel, triggerVisibleLabel } from '@/components/schema/widgets/compactTriggerLabels'
 
 describe('compactTriggerLabel 窄屏收口文案', () => {
   it.each([

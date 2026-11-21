@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import acp_ledger  # noqa: F401 — 模块面访问 _os_data_dir/_user_data_dir（对齐断言）
+import acp_ledger  # noqa: F401 — 模块面访问 _user_data_dir（对齐断言）
 import pytest
 import user_space
 from acp_ledger import TIMELINE_CAP, USER_DATA_DIR_ENV, WALL_CLASSES, QuotaLedger, default_ledger_path
@@ -141,24 +141,10 @@ class TestUserSpaceCopyAlignment:
         monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
         monkeypatch.delenv(USER_DATA_DIR_ENV, raising=False)
 
-    def test_os_data_dir_same_output(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """OS 数据目录三组输入逐一比对（APPDATA 显式 / XDG 显式 / 全缺省）。"""
-        monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
-        assert acp_ledger._os_data_dir() == user_space._os_data_dir()
-
-        monkeypatch.delenv("APPDATA", raising=False)
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-        assert acp_ledger._os_data_dir() == user_space._os_data_dir()
-
-        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-        assert acp_ledger._os_data_dir() == user_space._os_data_dir()
-
     def test_user_data_dir_precedence_same_output(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """三级优先（DATA_DIR > USER_ROOT > OS 兜底）两面逐一比对。"""
+        """两级优先（DATA_DIR > USER_ROOT）两面逐一比对，未设两面同 None（零回落）。"""
         monkeypatch.setenv(USER_DATA_DIR_ENV, str(tmp_path / "d"))
         assert acp_ledger._user_data_dir() == user_space.user_data_dir() == tmp_path / "d"
 
@@ -171,5 +157,7 @@ class TestUserSpaceCopyAlignment:
         )
 
         monkeypatch.delenv("AGENTOS_USER_ROOT")
-        # OS 兜底：可推导时同根；不可推导时两面同为 None（同 None 也是契约）
-        assert acp_ledger._user_data_dir() == user_space.user_data_dir()
+        # 零回落：APPDATA/XDG 存在也不参与推导，两面同为 None
+        monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+        assert acp_ledger._user_data_dir() is None
+        assert user_space.user_data_dir() is None

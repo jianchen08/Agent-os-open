@@ -72,10 +72,15 @@ def tool_result_entry(
 
 
 def serialize_for_content(data: Any) -> str:
-    """结果数据 → 消息 content 文本（YAML，语义对齐 tool_core Rust 侧）。
+    """结果数据 → 消息 content 文本（语义对齐 tool_core Rust 侧）。
 
+    - 文本直通（ADR 2026-11-09-tool-result-content-verbatim）：**任何工具**的
+      文本载荷都以原文逐字进上下文——``data`` 本身是字符串，或对象含字符串
+      ``content`` 字段（文本载荷统一键）。YAML 块标量会给每行强制加缩进，
+      模型从渲染文本复制片段回写 ``search_replace`` 必带多余空格而恒失败
+      （任务 2393a90baea9 实证 8 次 ``old_str not found``）；
     - None → 空串（避免 "null" 进上下文）；
-    - 其余 → YAML 块风格、键排序（对齐 serde_json BTreeMap 键序）；
+    - 其余（结构化结果）→ YAML 块风格、键排序（对齐 serde_json BTreeMap 键序）；
       pyyaml 对纯标量附加的文档结束标记 ``...`` 剥离，对齐 serde_yaml
       （其标量输出不带文档结束标记）；
     - YAML 无法表示的值（自定义对象等，缓存可存任意 Python 对象）回落
@@ -84,6 +89,12 @@ def serialize_for_content(data: Any) -> str:
     """
     if data is None:
         return ""
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict):
+        text = data.get("content")
+        if isinstance(text, str):
+            return text
     try:
         dumped = str(yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=True))
     except yaml.YAMLError:

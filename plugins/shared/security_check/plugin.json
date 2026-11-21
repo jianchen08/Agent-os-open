@@ -5,10 +5,16 @@
     "human-interaction",
     "project.load_zones",
     "project.add_zone",
-    "project.remove_zone"
+    "project.remove_zone",
+    "grants.policy",
+    "grants.policy.classify",
+    "grants.ledger",
+    "grants.ledger.authorize",
+    "grants.ledger.request",
+    "grants.ledger.consume"
   ],
   "name": "Security Check",
-  "version": "1.1.5",
+  "version": "1.3.2",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -96,7 +102,8 @@
     ]
   },
   "export_fields": [
-    "task.authorized_write_zones"
+    "task.authorized_write_zones",
+    "task.approved_signatures"
   ],
   "state": {
     "volatile_keys": [
@@ -105,15 +112,19 @@
     "reads": [
       "core_type",
       "execution_contexts",
+      "lineage.parent_pipeline_id",
       "messages_tail:50",
       "pipeline_id",
       "project_root",
       "raw_tool_calls",
       "pre_decided_results",
       "session_id",
+      "task.approved_signatures",
       "task.authorized_write_zones",
       "thread_id",
-      "workspace"
+      "workspace",
+      "user_id",
+      "context.agent_name"
     ]
   },
   "permissions": {},
@@ -151,6 +162,46 @@
       "auth": "user",
       "handler_capability": "http.handle",
       "description": "查询会话当前权限模式（键 session_id）"
+    },
+    {
+      "route_id": "pipeline_permission_mode_get",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/permission_mode/pipeline",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "列出管道级权限档覆盖表（审批卡「本管道后续免审批」授予的旁路条目）"
+    },
+    {
+      "route_id": "pipeline_permission_mode_revoke",
+      "method": "DELETE",
+      "path": "/ext/pipeline_security_check/permission_mode/pipeline",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "撤销某管道的权限档覆盖（body: pipeline_id；幂等，子树血缘链随即恢复弹卡）"
+    },
+    {
+      "route_id": "whitelist_get",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/whitelist",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "列出永久免审批白名单（命令精确指纹）"
+    },
+    {
+      "route_id": "whitelist_remove",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/whitelist/remove",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "移除永久免审批白名单条目（body: signature；幂等）"
+    },
+    {
+      "route_id": "audit_query",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/audit",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "审计台账查询（mode_switch / whitelist_add / whitelist_remove；可按 pipeline_id/session_id 过滤）"
     },
     {
       "route_id": "zone_policy_get",

@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Tool Cache Writer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -42,7 +42,8 @@
       "_full_tool_results",
       "pipeline_id",
       "user_id",
-      "session_id"
+      "session_id",
+      "tool_results"
     ]
   }
 }

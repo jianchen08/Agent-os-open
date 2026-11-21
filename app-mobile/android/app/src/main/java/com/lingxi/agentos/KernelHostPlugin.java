@@ -373,7 +373,12 @@ public class KernelHostPlugin extends Plugin {
         // 外挂 loader（Termux memfd 版，app 域安全）：proot 的 extract_loader 自解包
         // 路径在 untrusted_app_27 被 SELinux 拒 ioctl → 瞬死；PROOT_LOADER env 指向
         // 随 jniLibs 分发的 loader 后自解包不再触发（2026-11-01 真机实证）。
-        pb.environment().put("PROOT_LOADER", SeedInstaller.nativeLibDir(ctx) + "/libproot_loader.so");
+        // 仅 arm64 包分发该 loader；x86_64 走 proot 内置 extract_loader——对不存在
+        // 的文件注入 PROOT_LOADER 会让 proot execve 直接 ENOENT（MuMu 2026-11-09 实证）。
+        File prootLoader = new File(SeedInstaller.nativeLibDir(ctx), "libproot_loader.so");
+        if (prootLoader.isFile()) {
+            pb.environment().put("PROOT_LOADER", prootLoader.getAbsolutePath());
+        }
         pb.redirectErrorStream(true);
         pb.redirectOutput(log);
         stackProcess = pb.start();

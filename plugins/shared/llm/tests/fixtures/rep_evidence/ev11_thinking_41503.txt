@@ -1,0 +1,31 @@
+e("朝廷"));\r\n` — unique (claim_cost).
+web.rs snapshot: need exact text around `let lit = ...` and the jobj entries. From the 438-486 dump (tr -d '\r'), indentation:
+```
+// v5 玩法扩展（game.rs：建造/天命/人物/吞并/整合——前端九大面的数据源）
+("game", {
+let lit = crate::game::mandates_lit(w);
+```
+So `let lit` line = 14 spaces. And jobj entries at 18 spaces:
+```
+jobj(&[
+("mandate", jnum(crate::game::mandate_acc_public(w))),
+("lit", jarr(&lit.iter().map(|x| jq(x)).collect::<Vec<_>>())),
+("lost", jarr(&lost_str)),
+("chars", jarr(&chars)),
+("buildings", jarr(&buildings)),
+("integrating", jarr(&integ)),
+("control", jarr(&rebels_by_region)),
+```
+I'll anchor: `                  ("buildings", jarr(&buildings)),\r\n` → append mandates line after. Uniqueness: "buildings" jarr appears once. And `              let lit = crate::game::mandates_lit(w);\r\n` unique.
+But wait — where exactly to compute mandates_spec? Put right after the `let lit` line, before `let lost`. Actually cleaner: insert after `let control...` hmm — the rebels_by_region is computed before jobj. Any point inside the block before jobj works. After `let lit` line is fine.
+web.rs qing branch: need exact bytes. Lines 582-592:
+```
+if st.scenario == "qing-v1" {\r\n
+let (data, rb, th) = crate::qing::model::assets();\r\n
+let w = st.worlds.get_mut(&cur).unwrap();\r\n
+let qs = st.qst.get_mut(&cur).expect("qing 场景态在册");\r\n
+crate::qing::world::step_year(w, qs, data, rb, th);\r\n
+let (wmean, umean) = cont_means(&st.worlds[&cur]);\r\n
+let brew = st.qst[&cur].years.last().map(|y| y.brew).unwrap_or(0.0);\r\n
+let tick = st.worlds[&cur].tick;\r\n
+st.series.entry(cur).or_default()\r\n

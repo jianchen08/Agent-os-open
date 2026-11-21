@@ -1,0 +1,37 @@
+} 银={:.2}（Transfer 国库@京畿→营造银@{cell}，两半同额走账）", spec.cost));`
+new: `          "BUILD {building_id}@{cell} 银={:.2}（Transfer 国库@{tre}→营造银@{cell}，两半同额走账）", spec.cost));`
+P4: tick_construction settle (anchor exact from sed 110-135):
+old:
+```
+if let Some(e) = w.entities.get_mut(&id) {
+e.kind = "建筑".into();
+}
+w.material.ledger.push(format!("DONE {building}@{region}（{name} 建成，效果激活）"));
+```
+new: with settle block inserted (as above).
+P5: grain_gift/recruit:
+old:
+```
+"grain_gift" => {
+w.material.spawn_at("库银", 300.0, "京畿", None, None, Some("天命"));
+w.material.ledger.push("SPAWN 库银@京畿 n=300 owner=天命（词条：点石成金）".into());
+}
+"recruit" => {
+let aid = w.entities.spawn("代理人", Some("京畿"), None);
+```
+new with tre: need `let tre = treasury_cell(w);` — where? light_mandate start: anchor `pub fn light_mandate(w: &mut World, id: &str) -> Result<u64, String> {\n    ensure_mandate_state(w);` → add `let tre = treasury_cell(w);` after ensure. Then replace spawn lines with &tre, recruit spawn Some(&tre), ctx region tre.
+old2 (ctx): `                e.ctx.insert("region".into(), "京畿".into());` → `                e.ctx.insert("region".into(), tre.clone());`
+P6: work pair (exact old from my rewrite — need to verify exact text; I wrote it in the big rewrite as:
+```
+("work", true) => {
+let earn = 0.15 * (0.5 + integrity);
+// 走账铁律 MF#2：得银必有源头——本区仓粮对价扣出（双记账对）
+let taken = w.material.consume_from_cell(&region, "仓粮", earn * 2.0);
+if taken + 1e-9 < earn * 2.0 {
+note = "营生未成（本区产出不足对价，无账可记）".into();
+} else {
+if let Some(e) = w.entities.get_mut(eid) {
+e.fields.insert("随身银".into(),
+e.fields.get("随身银").copied().unwrap_or(0.0) + earn);
+}
+note = format!("营生得钱 {:.2}（双记账：本区仓粮 {:.2} 对价扣 ↔ 随身银入）", earn, earn * 2.0);

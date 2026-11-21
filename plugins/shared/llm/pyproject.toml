@@ -7,6 +7,9 @@ dependencies = [
     "agentos-plugin-sdk>=0.2.0",
     "pyyaml",
     "httpx",
+    # 流式退化循环检测引擎（_llm_streaming.py 消费，ADR
+    # 2026-11-12-degen-detector-simurg-adoption；检测行为锚定 1.0.4 vetting）。
+    "simurg>=1.0.4,<2",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：

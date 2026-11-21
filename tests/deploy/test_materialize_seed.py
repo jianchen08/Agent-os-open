@@ -280,3 +280,45 @@ def test_pycache_artifacts_excluded_from_face_and_idempotent(tmp_path):
         sys.argv = old
     assert rc2 == 0
     assert not os.path.exists(str(tmp_path / "again.tar.zst")), "pyc 在场也须零重写"
+
+
+def test_runtime_trees_excluded_from_face_and_idempotent(tmp_path):
+    """运行期/开发期写入面两侧同律排除（2026-11-20 启动优化 A 对应烘焙侧）：
+    .venv*（前缀匹配）/__pycache__/.audit_tmp/data/tests 目录整棵子树不入面
+    摘要（真源文件照常），幂等不随运行期写入破功。"""
+    import os
+
+    seed = str(tmp_path / "seed.tar.zst")
+    entries = base_entries()
+    entries += [
+        # venv 供给（前缀匹配：.venv-x 形态）
+        ("opt/agentos/plugins/shared/llm/.venv-x/bin/python.exe", b"PYEXE", None, tarfile.REGTYPE),
+        ("opt/agentos/plugins/shared/llm/.venv/lib/site.py", b"SITE", None, tarfile.REGTYPE),
+        # 运行期审计暂存（2026-11-19 装机打穿实证条目）
+        ("opt/agentos/plugins/shared/_host/.audit_tmp/audit_ledger.json", b"{}", None, tarfile.REGTYPE),
+        # 插件运行数据（hindsight data/ 形态）
+        ("opt/agentos/plugins/shared/llm_core/data/kb/chunk.bin", b"KB", None, tarfile.REGTYPE),
+        # 开发面 tests（2026-11-20 dsh_adapter 打穿实证条目）
+        ("opt/agentos/plugins/shared/llm/tests/test_llm.py", b"def t():\n pass\n", None, tarfile.REGTYPE),
+    ]
+    _compress(entries, seed)
+    rc, out = run_ms(tmp_path, seed, ["--bake-discovery-cache"])
+    assert rc == 0
+    _, cache_raw = read_entry(out, CACHE_ENTRY)
+    cache = json.loads(cache_raw.decode("utf-8"))
+    assert not any(
+        ms.is_runtime_face_artifact(k) for k in cache["files"]
+    ), "运行期/开发期写入面条目不得入面摘要（kernel 走查同律排除）"
+    assert "shared/llm/plugin.json" in cache["files"], "真源文件照常入摘要"
+    assert "shared/llm_core/sub/deep.py" in cache["files"]
+    # 幂等：摘要与运行期写入树无关，含树种子二次烘焙零重写
+    argv = ["materialize_seed.py", "--seed", out, "--out",
+            str(tmp_path / "again.tar.zst"), "--bake-discovery-cache"]
+    old = sys.argv
+    sys.argv = argv
+    try:
+        rc2 = ms.main()
+    finally:
+        sys.argv = old
+    assert rc2 == 0
+    assert not os.path.exists(str(tmp_path / "again.tar.zst")), "运行期树在场也须零重写"

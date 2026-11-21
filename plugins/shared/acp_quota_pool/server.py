@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """acp_quota_pool —— ACP 额度池插件壳（sidecar 入口，薄）。
 
-载荷 = 技能包本体（SKILL.md + scripts/，路由与派发口径）+ CPA 网关生命周期
-托管（on_load 健康检查→不在则静默拉起→复验，见 ``acp_gateway``）。播种与
-网关逻辑单源在独名模块（``acp_seed`` / ``acp_gateway`` / ``acp_console_page``，
+载荷 = 技能包本体（SKILL.md + scripts/，路由与派发口径）+ CPA 网关探活
+（on_load 健康检查→不在则如实报告移交面，见 ``acp_gateway``；拉起职责
+2026-11-21 单点化到 llm_provider_gateway 插件）。播种与网关逻辑单源在
+独名模块（``acp_seed`` / ``acp_gateway`` / ``acp_console_page``，
 防 ``import server`` 跨插件碰撞——实证记录在案）；本入口只做接线：on_load
 与 MCP 服务面（http.handle 承载 /ext/acp_quota_pool/** 三路由）。
 """
@@ -51,9 +52,10 @@ def _html_response(html: str) -> dict[str, Any]:
 
 
 async def _gateway_ensure() -> dict[str, Any]:
-    """网关生命周期入口（on_load 与页面「拉起网关」按钮共用一段逻辑）。
+    """网关探活入口（on_load 与控制台页状态检查共用一段逻辑）。
 
-    配置非法/探活失败均显式降级为结果字段（加载与端点不因网关缺失而 5xx）。
+    配置非法/探活失败均显式降级为结果字段（加载与端点不因网关缺失而 5xx）；
+    网关不在时返回 handoff（拉起职责在 llm_provider_gateway 插件）。
     """
     try:
         config = read_gateway_config(plugin.get_config())
@@ -73,11 +75,11 @@ async def _gateway_ensure() -> dict[str, Any]:
 
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
-    """播种技能载荷（降级策略见 acp_seed）+ 网关生命周期托管（不在则拉起）。"""
+    """播种技能载荷（降级策略见 acp_seed）+ 网关探活（不在则移交提示）。"""
     result = seed_with_degradation(user_root(), Path(__file__).resolve().parent)
     logger.info("[acp_quota_pool] 技能播种结果: %s", result)
     gateway = await _gateway_ensure()
-    logger.info("[acp_quota_pool] 网关托管结果: %s", gateway)
+    logger.info("[acp_quota_pool] 网关探活结果: %s", gateway)
 
 
 @plugin.tool(
@@ -93,7 +95,7 @@ async def _on_load(params: dict[str, Any]) -> None:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for /ext/acp_quota_pool/** (gateway lifecycle + console page)",
+    description="HTTP endpoint handler for /ext/acp_quota_pool/** (gateway probe + console page)",
 )
 async def http_handle(
     path: str = "",

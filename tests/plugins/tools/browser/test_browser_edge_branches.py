@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ sys.path.insert(0, str(BROWSER_PLUGIN))
 from tool import BrowserTool  # noqa: E402
 
 from agentos_plugin_sdk import bridge_client as bc  # noqa: E402
+from agentos_plugin_sdk import bridge_gateway as bgw  # noqa: E402
 from agentos_plugin_sdk.bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 
 
@@ -60,17 +62,20 @@ class TestDockerGatewayProbe:
 
 
 class TestProjectRootProbe:
-    def test_finds_env_upward(self, tmp_path, monkeypatch):
+    def test_finds_gateway_marker_upward(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(bgw.PROJECT_ROOT_ENV, raising=False)
         sub = tmp_path / "a" / "b"
         sub.mkdir(parents=True)
-        (tmp_path / ".env").write_text("X=1\n", encoding="utf-8")
+        marker = tmp_path.joinpath(*bgw.GATEWAY_REL)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("# gateway\n", encoding="utf-8")
         monkeypatch.chdir(sub)
-        root = bc._find_project_root()
-        assert root == str(tmp_path)
+        assert bgw.project_root() == str(tmp_path)
 
-    def test_no_env_returns_empty(self, tmp_path, monkeypatch):
+    def test_no_marker_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(bgw.PROJECT_ROOT_ENV, raising=False)
         monkeypatch.chdir(tmp_path)
-        assert bc._find_project_root() == ""
+        assert bgw.project_root() == ""
 
 
 class TestCandidatesFallback:
@@ -260,19 +265,31 @@ class TestContainerNoContainerId:
 class TestFindProjectRootBoundary:
     @pytest.mark.asyncio
     async def test_root_reached_returns_empty(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(bgw.PROJECT_ROOT_ENV, raising=False)
         monkeypatch.chdir(tmp_path)
-        # cwd 无 .env 且已到根 → 返回 ""
-        assert bc._find_project_root() == ""
+        # cwd 无网关锚点且已到根 → 返回 ""
+        assert bgw.project_root() == ""
 
 
 class TestTokenRaiseBranch:
     @pytest.mark.asyncio
-    async def test_no_token_anywhere_raises(self, monkeypatch, tmp_path):
+    async def test_no_token_without_root_raises_fail_visible(self, monkeypatch):
         monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
-        monkeypatch.setattr(bc, "_find_project_root", lambda: str(tmp_path))  # 空目录无 .env
-        with pytest.raises(BridgeClientError) as e:
+        monkeypatch.setattr(bgw, "project_root", lambda: "")  # 无根可定位：凭据无处落盘共享
+        with pytest.raises(bgw.BridgeGatewayError) as e:
             BridgeClient({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"})
-        assert "AGENTOS_BRIDGE_TOKEN" in str(e.value)
+        # fail-visible：报错带可行动指引（指回 PROJECT_ROOT_ENV 设置项）
+        assert bgw.PROJECT_ROOT_ENV in str(e.value)
+
+    @pytest.mark.asyncio
+    async def test_no_token_self_generates_with_gateway_root(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
+        monkeypatch.setattr(bgw, "project_root", lambda: str(tmp_path))  # 可定位根：允许落盘
+        c = BridgeClient({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"})
+        # 新契约：凭据缺失不再抛 BridgeClientError——进程内自生成令牌并与网关
+        # 同源（env setdefault 共享同一凭据），网关侧 fail-closed（401）由调用方报错承载
+        assert c._token
+        assert os.environ.get(bgw.TOKEN_KEY) == c._token
 
 
 class TestServerLoadBrowserToolFresh:
@@ -357,10 +374,10 @@ class TestDirectTransportHttpErrorBodyParse:
 class TestFindProjectRootTraversal:
     @pytest.mark.asyncio
     async def test_parent_chain_exhausted(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(bgw.PROJECT_ROOT_ENV, raising=False)
         monkeypatch.chdir(tmp_path)
-        # 根的 parent == cur → 走 return ""（265-269 行）
-        result = bc._find_project_root()
-        assert result == ""
+        # 根的 parent == cur → 走兜底 ""
+        assert bgw.project_root() == ""
 
 
 class TestGatewayDetectionLinux:
@@ -416,11 +433,11 @@ class TestGatewayDetectionEdgeBranches:
 class TestFindProjectRootAtRoot:
     @pytest.mark.asyncio
     async def test_drive_root_no_env(self, monkeypatch, tmp_path):
-        # cwd 恰为根：parent == cur → 267 行 return ""
-        monkeypatch.setattr(bc, "os", bc.os)
+        # cwd 恰为根：parent == cur → 走兜底 ""
+        monkeypatch.delenv(bgw.PROJECT_ROOT_ENV, raising=False)
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(bc.os.path, "dirname", lambda p: p)  # parent == cur
-        assert bc._find_project_root() == ""
+        monkeypatch.setattr(bgw.os.path, "dirname", lambda p: p)  # parent == cur
+        assert bgw.project_root() == ""
 
 
 class TestGatewayDetectionOSError:

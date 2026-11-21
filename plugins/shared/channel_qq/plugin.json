@@ -117,7 +117,7 @@
           "name": "ws_port",
           "label": "反向 WS 监听端口",
           "type": "number",
-          "default": 8080
+          "default": 8081
         },
         {
           "name": "http_api_url",

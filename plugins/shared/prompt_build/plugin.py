@@ -41,7 +41,7 @@ import sys
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError
 
 from _libs.pipeline_base.plugin import IInputPlugin, PluginContext, PluginResult
@@ -50,6 +50,20 @@ from contributions import ContributionEngine
 from agentos_plugin_sdk.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class ResolvedTarget(NamedTuple):
+    """{ {path:...}} / persona 缺省路径的解析结果（路径 + 失败原因）。
+
+    reason ∈ {"", "empty", "no_pack_root", "no_system_root", "escape"}；
+    path 为 None 时按 reason 区分"没配"（empty）/ "根不可得"（no_*_root）/
+    "越界被拒"（escape，已在解析层 ERROR 留痕）——三者的日志文案不同，
+    免得运维按"文件不存在"去查一个其实是被安全检查挡下的路径。
+    """
+
+    path: Path | None
+    reason: str
+
 
 # ═══════════════════════════════════════════════════════════
 # 模块级依赖注入（由 server.py 的 on_load 注入，测试直接赋值）
@@ -805,17 +819,20 @@ class PromptBuildPlugin(IInputPlugin):
                 matches = PLACEHOLDER_PATTERN.findall(placeholder_text)
                 result_parts = []
                 for match in matches:
-                    resolved = await self._resolve_placeholder(ctx, match)
-                    if resolved:
-                        result_parts.append(resolved)
+                    piece = await self._resolve_placeholder(ctx, match)
+                    if piece:
+                        result_parts.append(piece)
                 content = "\n".join(result_parts)
 
         elif var_type == "path":
-            # path 类型：文件注入（base=系统项目根；`./` 前缀=模式包根，
-            # 见 _resolve_target_path）。绝对路径直接使用。
+            # path 类型：文件注入（base=系统项目根；`./` 前缀=模式包根；
+            # 绝对路径须落在允许根内，越界拒收——边界全在 _resolve_target）。
             file_path = var_def.get("path", "")
-            target = self._resolve_target_path(ctx, file_path)
-            if target is not None and target.is_file():
+            # resolve 链（realpath + 允许根 stat，网络挂载盘上可秒级）下放线程池
+            # ——async handler 内同步路径解析盲区（2026-11-16 方案文档 P1 配方）。
+            resolved = await asyncio.to_thread(self._resolve_target, ctx, file_path)
+            target = resolved.path
+            if target is not None and await asyncio.to_thread(target.is_file):
                 try:
                     text = await asyncio.to_thread(target.read_text, "utf-8")
                     tag_name = target.stem
@@ -827,16 +844,18 @@ class PromptBuildPlugin(IInputPlugin):
                         file_path,
                         e,
                     )
-            elif target is not None and target.is_dir():
+            elif target is not None and await asyncio.to_thread(target.is_dir):
                 # 目录 → 遍历读取
                 dir_content = await self._read_dir_entries(target, var_def.get("extensions"))
                 if dir_content:
                     content = f'<files dir="{file_path}">\n{dir_content}\n</files>'
-            else:
+            elif resolved.reason != "escape":
                 # 配置声明的注入路径不存在 = 注入落空，非空 path 须 warning 留痕
                 # （与本插件"未识别占位符""memory_service 缺失致知识注入落空"同口径）。
                 # `./` 包内相对形态失败单列（包根缺失/包内目标不存在），
                 # 与系统根形态的"文件/目录不存在"可辨。
+                # 越界（escape）不走本分支：解析层已 ERROR 留痕，再报
+                # "不存在"会把安全检查拦截误导成配置路径写错。
                 log_missing = logger.warning if file_path.strip() else logger.debug
                 if file_path.startswith("./"):
                     log_missing(
@@ -849,13 +868,14 @@ class PromptBuildPlugin(IInputPlugin):
                         ctx.state.get("context.agent_pack_root", ""),
                     )
                 else:
+                    system_root = await asyncio.to_thread(self._system_root)
                     log_missing(
                         "[%s] path 类型变量解析失败（文件/目录不存在），知识注入落空"
                         " | name=%s | path=%s | system_root=%s",
                         self.name,
                         var_name,
                         file_path,
-                        self._system_root(),
+                        system_root,
                     )
 
         elif var_type in ("reference", "content", ""):
@@ -910,6 +930,8 @@ class PromptBuildPlugin(IInputPlugin):
         """读取目录下所有顶层文件内容（接收已解析的 Path 对象）。
 
         非递归读取顶层文件，按文件名排序，extensions 过滤，每文件 10MB 上限。
+        目录枚举 + 逐文件 stat/读取整段提取为同步体一次下放线程池（async
+        handler 内同步文件 I/O 盲区——2026-11-16 方案文档 P1 配方）。
 
         Args:
             target: 已解析的目录 Path 对象。
@@ -918,9 +940,13 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             拼接后的文件内容字符串。
         """
+        ext_set = {e.lower() for e in extensions} if extensions else None
+        return await asyncio.to_thread(self._read_dir_entries_sync, target, ext_set)
+
+    def _read_dir_entries_sync(self, target: Path, ext_set: set[str] | None) -> str:
+        """目录读取同步体（线程池内执行）：枚举/过滤/读取/拼接一次跑完。"""
         if not target.is_dir():
             return ""
-        ext_set = {e.lower() for e in extensions} if extensions else None
         max_size = 10 * 1024 * 1024
         parts: list[str] = []
         try:
@@ -937,7 +963,7 @@ class PromptBuildPlugin(IInputPlugin):
                 if entry.stat().st_size > max_size:
                     logger.debug("[%s] 跳过超大文件 | file=%s", self.name, entry.name)
                     continue
-                text = await asyncio.to_thread(entry.read_text, "utf-8")
+                text = entry.read_text("utf-8")
             except (OSError, UnicodeDecodeError, ValueError) as e:
                 logger.debug("[%s] 文件读取失败 | file=%s | error=%s", self.name, entry.name, e)
                 continue
@@ -972,39 +998,101 @@ class PromptBuildPlugin(IInputPlugin):
         return None
 
     def _resolve_target_path(self, ctx: PluginContext, rel_path: str) -> Path | None:
-        """把相对路径解析为最终目标 Path。
+        """把路径解析为最终目标 Path（越界/不可解析 → None）。
 
         `./` 前缀 = 包内相对形态：相对该 agent 所属模式包目录（context_build
         经模式包注册表命中时写入 state.context.agent_pack_root）解析——包私有
         物料随包分发，不落系统 config/ 树；无包根键/包根为空 → None。其余相对
         路径统一以系统项目根（_system_root）解析——配置声明的注入路径
         （config/...、docs/...、skills/...）都相对系统仓库根，不随任务/会话
-        工作空间漂移。绝对路径原样使用。解析后不存在 → None（由调用方
-        warning 留痕）。
+        工作空间漂移。绝对路径同样须落在允许根内（见 _resolve_target）。
+
+        边界与留痕全在 [`_resolve_target`]；本方法是"只要解析结果"的薄壳。
 
         Args:
             ctx: 插件执行上下文（`./` 形态读 state.context.agent_pack_root）
             rel_path: 相对或绝对路径
 
         Returns:
-            解析后的 Path，无法解析则返回 None
+            解析后的 Path，无法解析或越界则返回 None
+        """
+        return self._resolve_target(ctx, rel_path).path
+
+    @staticmethod
+    def _pack_root(ctx: PluginContext) -> Path | None:
+        """模式包根（state.context.agent_pack_root）；缺失/空 → None。"""
+        pack_root = str(ctx.state.get("context.agent_pack_root", "") or "")
+        return Path(pack_root) if pack_root else None
+
+    def _contained(
+        self, candidate: Path, roots: tuple[Path | None, ...], display: str
+    ) -> ResolvedTarget:
+        """把 candidate 归一化后校验是否落在 roots 任一子树内（越界 → 拒收 + ERROR）。
+
+        归一化用 `Path.resolve()`：消掉 `..` 段与符号链接，保证比较的是真实
+        目标而不是字面串——`{{path:../../secret}}` 与"根内符号链接指向根外"
+        两种形态都因此被收在同一判据下。
+
+        Args:
+            candidate: 待校验路径（已按基准根拼接）
+            roots: 允许根集合（None 项跳过）
+            display: 配置里的原始写法（留痕用）
+
+        Returns:
+            ResolvedTarget：落在根内给归一化路径，越界给 reason="escape"
+        """
+        resolved = candidate.resolve()
+        allowed: list[Path] = []
+        for root in roots:
+            if root is None:
+                continue
+            try:
+                root_resolved = root.resolve()
+            except OSError:  # 包根/系统根不可达时不据此放宽边界
+                continue
+            allowed.append(root_resolved)
+            if resolved == root_resolved or root_resolved in resolved.parents:
+                return ResolvedTarget(resolved, "")
+        logger.error(
+            "[%s] 路径越界，已拒绝注入（fail-closed）| path=%s | 解析结果=%s | 允许根=%s",
+            self.name,
+            display,
+            resolved,
+            ", ".join(str(r) for r in allowed) or "(无可用根)",
+        )
+        return ResolvedTarget(None, "escape")
+
+    def _resolve_target(self, ctx: PluginContext, rel_path: str) -> ResolvedTarget:
+        """解析路径并强制边界（`{{path:...}}` / persona 缺省路径的唯一解析点）。
+
+        允许根：`./` 形态只允许模式包根；其余相对路径只允许系统项目根；
+        绝对路径须落在系统项目根或模式包根内。越界一律拒收（返回 None +
+        ERROR 留痕），不静默退化为空、不回落 CWD。
+
+        Args:
+            ctx: 插件执行上下文
+            rel_path: 相对或绝对路径
+
+        Returns:
+            ResolvedTarget(path, reason)：reason ∈ {"", "empty", "no_pack_root",
+            "no_system_root", "escape"}
         """
         if not rel_path or not rel_path.strip():
-            return None
-        p = Path(rel_path)
+            return ResolvedTarget(None, "empty")
+        raw = rel_path.strip()
+        p = Path(raw)
         if p.is_absolute():
-            return p
-        if rel_path.startswith("./"):
-            # 包内相对形态：包根缺失按不可解析处理（调用方按包内形态留痕）
-            pack_root = str(ctx.state.get("context.agent_pack_root", "") or "")
-            if not pack_root:
-                return None
-            return Path(pack_root) / rel_path[2:]
+            return self._contained(p, (self._system_root(), self._pack_root(ctx)), raw)
+        if raw.startswith("./"):
+            pack_root = self._pack_root(ctx)
+            if pack_root is None:
+                return ResolvedTarget(None, "no_pack_root")
+            return self._contained(pack_root / raw[2:], (pack_root,), raw)
 
         root = self._system_root()
         if root is None:
-            return None
-        return root / rel_path
+            return ResolvedTarget(None, "no_system_root")
+        return self._contained(root / raw, (root,), raw)
 
     async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:
         """解析单个 {{占位符}} 并返回替换内容。
@@ -1038,8 +1126,10 @@ class PromptBuildPlugin(IInputPlugin):
             if override.strip():
                 return override
             default_path = str(params.get("persona", "") or "")
-            target = self._resolve_target_path(ctx, default_path)
-            if target is not None and target.is_file():
+            # resolve 链下放线程池（同 path 类型变量，2026-11-16 P1 配方）。
+            resolved = await asyncio.to_thread(self._resolve_target, ctx, default_path)
+            target = resolved.path
+            if target is not None and await asyncio.to_thread(target.is_file):
                 try:
                     return await asyncio.to_thread(target.read_text, "utf-8")
                 except Exception as e:  # noqa: BLE001 — 读失败降级空串（不阻断管道）
@@ -1050,6 +1140,10 @@ class PromptBuildPlugin(IInputPlugin):
                         e,
                     )
                     return ""
+            if resolved.reason == "escape":
+                # 越界已在解析层 ERROR 留痕（明确错误 + 拒绝注入）；
+                # 此处不再叠加"不可读"的误导性 warning。
+                return ""
             logger.warning(
                 "[%s] persona 缺省路径不可读且无接管文本，已替换为空串 | path=%s",
                 self.name,
@@ -1068,7 +1162,7 @@ class PromptBuildPlugin(IInputPlugin):
             # {{workspace}} / {{project_root}} = 实际项目目录（系统根，配置注入
             # 基准与 _resolve_target_path 同源）。state.workspace / state.project_root
             # 是任务/会话工作区（工具读写面），提示词语义要的是前者。
-            pr = self._system_root()
+            pr = await asyncio.to_thread(self._system_root)
             return str(pr) if pr else ""
 
         if var_type == "session_workspace":
@@ -1104,7 +1198,7 @@ class PromptBuildPlugin(IInputPlugin):
             roots = ctx.state.get("project_roots")
             if isinstance(roots, list) and roots:
                 agents_md = Path(str(roots[0])) / "AGENTS.md"
-                if agents_md.is_file():
+                if await asyncio.to_thread(agents_md.is_file):
                     try:
                         text: str | None = await asyncio.to_thread(agents_md.read_text, "utf-8")
                     except (OSError, ValueError) as e:
@@ -1569,7 +1663,7 @@ class PromptBuildPlugin(IInputPlugin):
                         from pathlib import Path  # noqa: PLC0415
 
                         p = Path(file_path)
-                        if p.exists():
+                        if await asyncio.to_thread(p.exists):
                             return await asyncio.to_thread(p.read_text, "utf-8")
                     except Exception as e:
                         logger.warning("[%s] 路由嵌套变量文件读取失败 | path=%s | error=%s", self.name, file_path, e)
@@ -1631,15 +1725,16 @@ class PromptBuildPlugin(IInputPlugin):
                     parts.append(part)
 
         # 工具面缩水通告（卡4①）：tool_schema 每轮写入的
-        # tool_surface.unavailable 非空 → 追加模型可读通告行。数组缩水显式
-        # 告知，模型不必盲猜「上轮还能用的 file 工具这轮没了」（2026-10-17
-        # 装机事故定因之一）；工具恢复即空表、通告自愈消失。非列表脏值忽略，
-        # 不许坏键阻断动态变量构建。
+        # tool_surface.unavailable 非空 → 追加模型可读通告行。**只对真正不在
+        # 工具面的声明工具**（未注册/插件未启用/提供方不可用）——G2 判定失败
+        # 的失败桩 schema 保留在面、调用时显式失败（ADR 2026-11-12），不得注入
+        # 「不要规划或调用」误导模型放弃既定计划。工具恢复即空表、通告自愈
+        # 消失。非列表脏值忽略，不许坏键阻断动态变量构建。
         unavailable = ctx.state.get("tool_surface.unavailable")
         if isinstance(unavailable, list) and unavailable:
             names = "、".join(str(t) for t in unavailable)
             parts.append(
-                f"- 工具面对账: 以下工具本轮不可用：{names}。"
+                f"- 工具面对账: 以下声明工具不在本轮工具面（未注册/插件未启用/提供方不可用）：{names}。"
                 "不要规划或调用这些工具；依赖它们的步骤如实说明受阻，"
                 "禁止编造其调用结果。"
             )

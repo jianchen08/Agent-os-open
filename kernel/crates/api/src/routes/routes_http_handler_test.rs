@@ -55,6 +55,7 @@ fn base_manifest(id: &str, plugin_type: PluginType) -> PluginManifest {
         export_fields: vec![],
         aux_venvs: Vec::new(),
         provides: None,
+        visibility: Default::default(),
     }
 }
 
@@ -1009,20 +1010,19 @@ async fn pipelines_runs_with_db_returns_seeded_run() {
 fn pending_record(pipeline_id: &str, id: &str, cmid: &str) -> PendingInputRecord {
     PendingInputRecord {
         id: id.to_string(),
-        pipeline_id: pipeline_id.to_string(),
         tenant_id: "default".to_string(),
-        user_id: "u1".to_string(),
-        content: "排队输入".to_string(),
-        thread: "thread-pi".to_string(),
-        source: PendingInputSource::Trigger,
-        agent_id: "agentos".to_string(),
-        route_id: pipeline_id.to_string(),
-        thinking_strength: String::new(),
-        client_message_id: cmid.to_string(),
-        execution_context: None,
-        state_overlay: None,
-        pipeline_config_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        request: agentos_core::types::DispatchRequest {
+            thread_id: "thread-pi".to_string(),
+            user_id: "u1".to_string(),
+            pipeline_id: pipeline_id.to_string(),
+            content: "排队输入".to_string(),
+            client_message_id: cmid.to_string(),
+            source: PendingInputSource::Trigger,
+            execution_context: None,
+            state_overlay: None,
+            pipeline_config_id: None,
+        },
     }
 }
 
@@ -1050,7 +1050,6 @@ async fn pending_inputs_list_without_store_404_and_seeded_items_shape() {
     StorageBackend::enqueue_pending_input(
         store.as_ref(),
         "default",
-        "pipe_pi_a",
         &pending_record("pipe_pi_a", "pi_1", ""),
     )
     .await
@@ -1058,7 +1057,6 @@ async fn pending_inputs_list_without_store_404_and_seeded_items_shape() {
     StorageBackend::enqueue_pending_input(
         store.as_ref(),
         "default",
-        "pipe_pi_a",
         &pending_record("pipe_pi_a", "pi_2", "http_cmid_1"),
     )
     .await
@@ -1116,7 +1114,6 @@ async fn pending_inputs_update_success_persists_content() {
     StorageBackend::enqueue_pending_input(
         store.as_ref(),
         "default",
-        "pipe_pi_c",
         &pending_record("pipe_pi_c", "pi_ok", "http_cmid_2"),
     )
     .await
@@ -1134,7 +1131,7 @@ async fn pending_inputs_update_success_persists_content() {
     let rows = StorageBackend::list_pending_inputs(store.as_ref(), "default", "pipe_pi_c")
         .await
         .unwrap();
-    assert_eq!(rows[0].content, "修改后的内容", "修改应落库");
+    assert_eq!(rows[0].request.content, "修改后的内容", "修改应落库");
 }
 
 /// 捕获型 EventSink（同 chat_send_handler tests 构造）：记录全部文本帧。
@@ -1160,7 +1157,6 @@ async fn pending_inputs_clear_success_persists_and_emits_event() {
         StorageBackend::enqueue_pending_input(
             store.as_ref(),
             "default",
-            "pipe_pi_clear",
             &pending_record("pipe_pi_clear", id, ""),
         )
         .await
@@ -2287,8 +2283,10 @@ async fn plugins_status_surfaces_verify_failure_reason() {
         manifest: manifests[0].clone(),
         rejected_tools: Vec::new(),
         drift: false,
+        soft_drift: false,
         spawn_failed: true,
         smoke_failed: false,
+        stub_armed: false,
     };
     state.contract_states.upsert(PluginContractState::derived(
         &manifests[0],
@@ -2299,8 +2297,10 @@ async fn plugins_status_surfaces_verify_failure_reason() {
         manifest: manifests[1].clone(),
         rejected_tools: vec!["t1".to_string()],
         drift: true,
+        soft_drift: false,
         spawn_failed: false,
         smoke_failed: false,
+        stub_armed: false,
     };
     state.contract_states.upsert(PluginContractState::derived(
         &manifests[1],
@@ -2331,59 +2331,6 @@ async fn plugins_status_surfaces_verify_failure_reason() {
         "漂移插件不走 error 面（有专属净化标示）"
     );
     assert_eq!(find("vp_ok")["error"], serde_json::Value::Null);
-}
-
-// ── D4（审查总册 P1-15）：source-arbitration 端点（未生效 id 清单告警面） ──
-
-#[tokio::test]
-async fn plugins_source_arbitration_surfaces_ineffective_user_copies() {
-    let builtin = tempfile::tempdir().unwrap();
-    let user = tempfile::tempdir().unwrap();
-    let mk = |root: &std::path::Path, id: &str, version: &str| {
-        let dir = root.join(id);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("plugin.json"),
-            format!(
-                r#"{{"id":"{id}","name":"{id}","version":"{version}","plugin_type":"tool","language":"python","host_type":"in_process","entry":"m","capabilities":{{}},"requires_services":[],"permissions":{{}},"priority":100}}"#
-            ),
-        )
-        .unwrap();
-    };
-    // 用户副本 v 前缀 strip 后仍更旧 → 内置赢、入册（总册 v0.2.0 场景形状）
-    mk(builtin.path(), "stale", "1.0.0");
-    mk(user.path(), "stale", "v0.2.0");
-
-    let loader = agentos_plugin_loader::PluginLoaderImpl::new(
-        builtin.path(),
-        Some(user.path().to_path_buf()),
-    )
-    .with_dual_source_policy(agentos_plugin_loader::DualSourcePolicy::BuiltinFirst);
-    use agentos_core::traits::PluginLoader as _;
-    loader.discover(&[]).await.unwrap();
-
-    let mut state = AppState::new();
-    state.plugin_loader = Some(std::sync::Arc::new(loader));
-    let resp = crate::routes::plugins_source_arbitration_handler(axum::extract::State(state)).await;
-    assert_eq!(resp.0["policy"], "builtin");
-    assert_eq!(resp.0["count"], 1);
-    let entry = &resp.0["ineffective_user_copies"][0];
-    assert_eq!(entry["plugin_id"], "stale");
-    assert_eq!(entry["user_version"], "v0.2.0", "v 前缀版本原样透出");
-    assert_eq!(entry["builtin_version"], "1.0.0");
-    assert_eq!(
-        entry["version_unparseable"], false,
-        "v 前缀经宽容解析不算 unparseable"
-    );
-}
-
-#[tokio::test]
-async fn plugins_source_arbitration_without_loader_returns_default() {
-    let state = AppState::new();
-    let resp = crate::routes::plugins_source_arbitration_handler(axum::extract::State(state)).await;
-    assert_eq!(resp.0["policy"], "user", "loader 未装配回落默认策略标签");
-    assert_eq!(resp.0["count"], 0);
-    assert_eq!(resp.0["ineffective_user_copies"], json!([]));
 }
 
 #[tokio::test]

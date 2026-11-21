@@ -102,13 +102,21 @@ class _ScriptedManager:
         self.task_starts: list[tuple[Any, ...]] = []
         self.session_starts: list[str] = []
 
-    def on_task_start(self, task_id: str, source_path: str, task_data: dict[str, Any]) -> Any:
+    def on_task_start(
+        self,
+        task_id: str,
+        source_path: str,
+        task_data: dict[str, Any],
+        mode_packages: list[Any] | None = None,  # noqa: ARG002 —— 契约形参
+    ) -> Any:
         self.task_starts.append((task_id, source_path, task_data))
         if self.error is not None:
             raise self.error
         return self.ws_meta
 
-    def on_session_start(self, ws_root: str) -> None:
+    def on_session_start(
+        self, ws_root: str, mode_packages: list[Any] | None = None  # noqa: ARG002
+    ) -> None:
         self.session_starts.append(ws_root)
         if self.session_error is not None:
             raise self.session_error
@@ -142,13 +150,21 @@ class _ScriptedManager:
         self.task_starts: list[tuple[Any, ...]] = []
         self.session_starts: list[str] = []
 
-    def on_task_start(self, task_id: str, source_path: str, task_data: dict[str, Any]) -> Any:
+    def on_task_start(
+        self,
+        task_id: str,
+        source_path: str,
+        task_data: dict[str, Any],
+        mode_packages: list[Any] | None = None,  # noqa: ARG002 —— 契约形参
+    ) -> Any:
         self.task_starts.append((task_id, source_path, task_data))
         if self.error is not None:
             raise self.error
         return self.ws_meta
 
-    def on_session_start(self, ws_root: str) -> None:
+    def on_session_start(
+        self, ws_root: str, mode_packages: list[Any] | None = None  # noqa: ARG002
+    ) -> None:
         self.session_starts.append(ws_root)
         if self.session_error is not None:
             raise self.session_error
@@ -294,12 +310,14 @@ class TestExecutionContextTaskTree:
     @pytest.fixture(autouse=True)
     def _reset_cache(self, plugin_mod: Any) -> Any:
         plugin_mod._state_rows_cache = []
+        token = plugin_mod._current_pipeline_state.set(None)
         yield
         plugin_mod._state_rows_cache = []
+        plugin_mod._current_pipeline_state.reset(token)
 
     def _tree(self, plugin_mod: Any, state: dict[str, Any]) -> Any:
         p = _plugin(plugin_mod)
-        p._last_state = state
+        plugin_mod._current_pipeline_state.set(state)
         return plugin_mod._ExecutionContextTaskTree(p)
 
     def test_row_missing_and_not_current_returns_none(self, plugin_mod: Any) -> None:
@@ -469,14 +487,24 @@ class TestExecuteDispatch:
         assert not result.state_updates
         assert manager.task_starts == [], "exit 不得触发任何服务动作"
 
-    async def test_execute_records_last_state_for_sync_readers(self, plugin_mod: Any) -> None:
-        """execute 把本 state 记为 _last_state（_ExecutionContextTaskTree 的读源）。"""
+    async def test_execute_binds_state_for_sync_readers(self, plugin_mod: Any) -> None:
+        """execute 把本 state 绑定到 ContextVar（_ExecutionContextTaskTree 的读源），
+        返回后复位（不残留到下一轮/其他调用）。"""
         p = _plugin(plugin_mod, _ScriptedManager())
-        state = {"current_phase": "main", "task.id": "rec"}
+        state = {"current_phase": "init", "task.id": "rec"}
+        observed: dict[str, Any] = {}
+
+        async def _capture(ctx: Any) -> Any:  # noqa: ARG001
+            observed["bound"] = plugin_mod._current_pipeline_state.get()
+            return plugin_mod.PluginResult()
+
+        p._bootstrap = _capture  # type: ignore[method-assign]
 
         await p.execute(_ctx(plugin_mod, state))
 
-        assert p._last_state is state
+        assert observed["bound"] is not None
+        assert observed["bound"].get("task.id") == "rec"
+        assert plugin_mod._current_pipeline_state.get() is None
 
 
 # ═══════════════ bootstrap 幂等与重建 ═══════════════

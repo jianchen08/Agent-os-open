@@ -137,6 +137,106 @@ fn rss_mb_of_pid(pid: u32) -> Option<u64> {
     }
 }
 
+/// 本进程之外的内核实例样本（孤儿观测载荷，main.rs mem 维护循环 WARN 消费）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignKernelInstance {
+    pub pid: u32,
+    /// 可执行文件名（枚举快照原值）。
+    pub exe: String,
+    /// 进程创建时刻（UTC RFC3339；OpenProcess/GetProcessTimes 失败为 None）。
+    pub started_at: Option<String>,
+    /// 父进程 pid（枚举快照内不可见 = 父已退或系统进程，None）。
+    pub parent_pid: Option<u32>,
+}
+
+/// 内核可执行文件名判定（纯函数，枚举与单测同一口径）：剥 `.exe` 后缀 +
+/// 大小写不敏感等于 "agentos-kernel"。
+pub fn is_kernel_exe_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    stem == "agentos-kernel"
+}
+
+/// 纯判定（进程枚举可 mock，单测面）：从进程快照 `(pid, parent_pid, exe_name)`
+/// 列表筛出本进程之外的 agentos-kernel 实例，父 pid 就近查快照。
+///
+/// 消费方 = 孤儿内核观测（run 生命周期防线④，ADR
+/// 2026-11-17-run-lifecycle-defense-lines）：非空 = 本进程外还有第二个内核
+/// （任务侧裸拉/残留形态）。**只观测不处置**——进程管理不属观测面（误杀
+/// 在用实例裁定禁止；scratch 内核是合法测试车道）。
+pub fn foreign_kernel_instances(
+    self_pid: u32,
+    entries: &[(u32, u32, String)],
+) -> Vec<ForeignKernelInstance> {
+    entries
+        .iter()
+        .filter(|(pid, _, name)| *pid != self_pid && is_kernel_exe_name(name))
+        .map(|(pid, parent, name)| ForeignKernelInstance {
+            pid: *pid,
+            exe: name.clone(),
+            started_at: None,
+            parent_pid: entries
+                .iter()
+                .find(|(other_pid, _, _)| other_pid == parent)
+                .map(|(found_pid, _, _)| *found_pid),
+        })
+        .collect()
+}
+
+/// 采样本进程外的内核实例（孤儿观测，main.rs mem 维护循环每拍消费）。
+/// 启动时刻经 GetProcessTimes 补齐（打开失败留 None，fail-soft）；
+/// 非 Windows 平台恒空（与 [`capture`] 平台面一致）。
+#[cfg(windows)]
+pub fn capture_foreign_kernels() -> Vec<ForeignKernelInstance> {
+    let entries = process_entries();
+    let mut out = foreign_kernel_instances(std::process::id(), &entries);
+    for instance in &mut out {
+        instance.started_at = process_start_time_rfc3339(instance.pid);
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn capture_foreign_kernels() -> Vec<ForeignKernelInstance> {
+    Vec::new()
+}
+
+/// 进程创建时刻（UTC RFC3339；FILETIME 100ns 自 1601-01-01 → SystemTime）。
+/// 打开失败/查询失败返回 None（fail-soft，不拖垮观测面）。
+#[cfg(windows)]
+fn process_start_time_rfc3339(pid: u32) -> Option<String> {
+    use std::mem;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return None;
+        }
+        let mut creation: FILETIME = mem::zeroed();
+        let mut exit: FILETIME = mem::zeroed();
+        let mut kernel: FILETIME = mem::zeroed();
+        let mut user: FILETIME = mem::zeroed();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let filetime_100ns =
+            ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        // 1601-01-01 → 1970-01-01 的 100ns 间隔（Windows epoch → Unix epoch）。
+        const EPOCH_DIFF_100NS: u64 = 11_644_473_600_000_000;
+        let unix_100ns = filetime_100ns.saturating_sub(EPOCH_DIFF_100NS);
+        let secs = unix_100ns / 10_000_000;
+        chrono::DateTime::from_timestamp(secs as i64, 0)
+            .map(|utc| utc.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +263,59 @@ mod tests {
         assert_eq!(snapshot.sidecars_max_mb(), Some(462));
         assert_eq!(FamilySnapshot::default().sidecars_max_mb(), None);
         assert_eq!(FamilySnapshot::default().sidecars_total_mb(), 0);
+    }
+
+    // ── 孤儿内核观测（run 生命周期防线④，mock 进程枚举）──
+
+    #[test]
+    fn kernel_exe_name_matches_case_insensitive_and_strips_exe() {
+        assert!(is_kernel_exe_name("agentos-kernel.exe"));
+        assert!(is_kernel_exe_name("agentos-kernel"));
+        assert!(is_kernel_exe_name("AGENTOS-KERNEL.EXE"));
+        assert!(!is_kernel_exe_name("agentos-kernel2.exe"));
+        assert!(!is_kernel_exe_name("灵汐助手.exe"));
+        assert!(!is_kernel_exe_name("python.exe"));
+        assert!(!is_kernel_exe_name(""));
+    }
+
+    #[test]
+    fn foreign_kernel_detection_with_mocked_entries() {
+        let entries = vec![
+            (100u32, 50u32, "agentos-kernel.exe".to_string()), // self
+            (200u32, 100u32, "agentos-kernel.exe".to_string()), // 裸拉内核（父=self）
+            (300u32, 999u32, "agentos-kernel.exe".to_string()), // 孤儿（父已退）
+            (400u32, 100u32, "python.exe".to_string()),        // sidecar，非内核
+            (500u32, 100u32, "agentos-kernel2.exe".to_string()), // 同名异件，非内核
+        ];
+        let foreign = foreign_kernel_instances(100, &entries);
+        assert_eq!(foreign.len(), 2, "self 排除 + 非内核名排除后剩两实例");
+        let pids: Vec<u32> = foreign.iter().map(|f| f.pid).collect();
+        assert_eq!(pids, vec![200, 300]);
+        // 父 pid 就近查快照：200 的父=self(100) 在场；300 的父=999 不在 → None。
+        assert_eq!(foreign[0].parent_pid, Some(100));
+        assert_eq!(foreign[1].parent_pid, None);
+        assert_eq!(foreign[0].exe, "agentos-kernel.exe");
+        // 采集时序面（started_at）由平台采集补齐，纯判定面恒 None 占位。
+        assert_eq!(foreign[0].started_at, None);
+    }
+
+    #[test]
+    fn foreign_kernel_none_when_only_self() {
+        let entries = vec![(100u32, 0u32, "agentos-kernel.exe".to_string())];
+        assert!(foreign_kernel_instances(100, &entries).is_empty());
+        assert!(foreign_kernel_instances(1, &[]).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_foreign_kernels_smoke_shape() {
+        // 真实进程面冒烟：本测试进程外的内核实例一般不存在（CI/dev 环境偶有
+        // 并行构建内核除外），只断言枚举链路不炸、形状合法。
+        let foreign = capture_foreign_kernels();
+        for instance in &foreign {
+            assert!(is_kernel_exe_name(&instance.exe));
+            assert!(instance.parent_pid != Some(std::process::id()));
+        }
     }
 
     #[cfg(windows)]

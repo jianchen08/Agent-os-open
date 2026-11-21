@@ -40,6 +40,13 @@ vi.mock('@/utils/indexedDbStorage', () => ({
     setItem: storageSet,
     removeItem: storageRemove,
   },
+  // 延迟序列化 storage 工厂（2026-11-12 store 持久化换用）：测试退化为同一套
+  // 直写 mock——flush 语义不在此验证（由 indexedDbStorage.deferred.test 覆盖）
+  createDeferredIndexedDbStorage: () => ({
+    getItem: storageGet,
+    setItem: storageSet,
+    removeItem: storageRemove,
+  }),
 }))
 
 const PIPE = 'pipe-gap-001'
@@ -518,13 +525,15 @@ describe('pipelineMessageStore 分支缺口', () => {
       expect((store.getMessages(PIPE).find((m) => m.id === 'm-text')?.parts as MessagePart[])[0].content).toBe('aB')
     })
 
-    it('finalizeMessage：text → done、error 工具保持 error、streaming 工具 → done、system 原样（1300/1303/1306）', () => {
+    it('finalizeMessage：text → done、error 工具保持 error、无结果工具卡不收口、system 原样（1300/1303/1306）', () => {
       const store = seed()
       store.finalizeMessage('nope', 'm-text')
       store.finalizeMessage(PIPE, 'm-mix')
       const parts = store.getMessages(PIPE).find((m) => m.id === 'm-mix')?.parts as MessagePart[]
       expect(parts[0].state).toBe('error')
-      expect(parts[1].state).toBe('done')
+      // 2026-11-18 用户裁定（契约迁移，非改判据）：终态只由 tool_result 写入——
+      // 无结果工具卡在轮末 finalizeMessage 后保持原在途状态，不得强制 done
+      expect(parts[1].state).toBe('streaming')
       expect(parts[2].type).toBe('system')
       expect((parts[2] as { content?: string }).content).toBe('n')
 
@@ -574,32 +583,22 @@ describe('pipelineMessageStore 分支缺口', () => {
       expect(merged.bottomCursorsByPipeline).toEqual({ keep: 5 })
     })
 
-    it('partialize：仅保留持久化集合内的管道元数据；缺省记录回退空对象（1384）', () => {
+    it('partialize：恒等引用登记（零拷贝）——快照裁剪移至 storage finalize（延迟序列化）', () => {
       const options = usePipelineMessageStore.persist.getOptions()
       const base = usePipelineMessageStore.getInitialState()
       const state = {
         ...base,
-        messagesByPipeline: { p1: [makeMsg('d1', 1)], pDrop: [makeMsg('d2', 2)] },
+        messagesByPipeline: { p1: [makeMsg('d1', 1)] },
         pipelines: { p1: { pipelineId: 'p1', sessionId: 's', level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 } },
-        pipelineSessionMap: { p1: 's' },
-        topCursorsByPipeline: { p1: 1 },
-        bottomCursorsByPipeline: { p1: 1 },
-        hasMoreOlderByPipeline: { p1: true },
         activePipelineId: 'p1',
         streamingState: { p1: { isStreaming: true, messageId: 'd1' } },
-        isLoadingOlderByPipeline: { p1: true },
-        reconciledByPipeline: { p1: true },
       } as never
-      const partial = options.partialize?.(state) as Record<string, unknown>
-      expect(Object.keys(partial.messagesByPipeline as object).sort()).toEqual(['p1', 'pDrop'])
-      expect(Object.keys(partial.pipelines as object)).toEqual(['p1'])
-      expect(partial.activePipelineId).toBe('p1')
-      expect(partial.streamingState).toBeUndefined()
-      expect(partial.reconciledByPipeline).toBeUndefined()
-
-      const bare = options.partialize?.({ ...base, pipelines: undefined, pipelineSessionMap: undefined } as never) as Record<string, unknown>
-      expect(bare.pipelines).toEqual({})
-      expect(bare.pipelineSessionMap).toEqual({})
+      // 2026-11-12 延迟序列化路径：partialize 只登记引用（不拷贝不裁剪，运行时
+      // 状态原样保留）——每次 setState 的全量 trim+stringify 是渲染进程内存突刺
+      // 主因，已移到 storage 的节流 flush（经 buildPersistedSnapshot 裁剪，
+      // 裁剪契约见 pipelineMessageSnapshot.test）。
+      const partial = options.partialize?.(state)
+      expect(partial).toBe(state)
     })
 
     it('rehydrate 完成回调：清理旧 localStorage key（有则删、无则跳过）', async () => {

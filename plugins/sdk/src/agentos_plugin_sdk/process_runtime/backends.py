@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -224,6 +225,36 @@ class WslNativeProcessBackend(ContainerProcessBackend):
     def _exec_prefix(self, container_id: str) -> list[str]:
         return [*_wsl_transport(self.backend), "--exec", "bash"]
 
+    async def probe_health(self) -> bool | None:
+        """发行版拉起级健康探测：``wsl -d <distro> [(-u user)] --exec true``。
+
+        不能用 ``wsl --status`` 做探测：2026-11-17 事故中 WSLService 已 wedged，
+        但 ``--status`` 仍返回正常（它只查服务配置、不拉起发行版），据此判定
+        健康会误判并让重试继续挂死。探测超时即判不可用，探测进程本身走宿主级
+        收尾（不依赖传输通道）。
+        """
+        argv = [*_wsl_transport(self.backend), "--exec", "true"]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError as e:
+            logger.warning("[WslNative] 健康探测 spawn 失败: %s", e)
+            return False
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=10.0)
+        except TimeoutError:
+            logger.warning("[WslNative] 健康探测超时（10s），判定后端不可用")
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+            return False
+        return rc == 0
+
 
 # wsl_native 后端缓存（按后端配置 JSON 键单例）
 _wsl_native_backends: dict[str, WslNativeProcessBackend] = {}
@@ -236,4 +267,44 @@ def _get_wsl_native_backend(backend: dict[str, Any]) -> WslNativeProcessBackend:
     if instance is None:
         instance = WslNativeProcessBackend(backend)
         _wsl_native_backends[key] = instance
+    return instance
+
+
+class MxcNativeProcessBackend(LocalProcessBackend):
+    """MXC 执行器进程后端：宿主级整树杀 + 宿主内存采样。
+
+    与 wsl_native/容器的关键差异：每条命令 = 一个 MXC 执行器宿主子进程
+    （一次 containment 会话），没有可在沙箱内寻址的常驻 pid——杀灭与内存
+    采样都作用在宿主执行器进程树上（LocalProcessBackend 同实现，psutil
+    递归杀，防执行器留下的后代变孤儿）。
+    """
+
+    def __init__(self, backend: dict[str, Any]) -> None:
+        self.backend = dict(backend)
+
+    async def probe_health(self) -> bool | None:
+        """执行器在位探测（不拉起沙箱，避免健康检查自身触发 containment）。"""
+        executor = str(self.backend.get("executor", "") or "")
+        if not executor:
+            return False
+        if "/" in executor or "\\" in executor:
+            from pathlib import Path  # noqa: PLC0415
+
+            return await asyncio.to_thread(Path(executor).is_file)
+        import shutil  # noqa: PLC0415
+
+        return await asyncio.to_thread(shutil.which, executor) is not None
+
+
+# mxc_native 后端缓存（按后端配置 JSON 键单例）
+_mxc_native_backends: dict[str, MxcNativeProcessBackend] = {}
+
+
+def _get_mxc_native_backend(backend: dict[str, Any]) -> MxcNativeProcessBackend:
+    """获取/创建 mxc_native 进程后端（按配置内容缓存单例）。"""
+    key = repr(sorted((str(k), str(v)) for k, v in backend.items()))
+    instance = _mxc_native_backends.get(key)
+    if instance is None:
+        instance = MxcNativeProcessBackend(backend)
+        _mxc_native_backends[key] = instance
     return instance

@@ -14,10 +14,12 @@
 | motivation | ✓ | 症状证据（引用签名簇）+ 可证伪假设 |
 | effect_probe | ✓ | 生效性探针：运行时如何证明改动生效（state 键 / 日志行 / counter） |
 | base_hash | — | 基于的主仓当前文件 sha256（file_read 后自算；新文件豁免） |
+| round_id | — | 本轮回顾的 run_id（`eval_summarize` 返回的 `run_id`）；**可选**软关联键——用于把提案挂回它所属的那一轮回顾工作流节点。无轮次上下文时留空串（历史账/手工提案），空串显式表示「无轮次归属」，不得以时间就近推断匹配 |
 
 ## 二、八条静态校验（proposal(action='submit') 自动执行，不过即拒）
 
-1. **schema 完整**：必填字段齐全、change_type 合法。
+1. **schema 完整**：必填字段齐全、change_type 合法（`round_id` 可选，不参与校验——
+   由 `proposal(action='submit')` handler 从当前工作流自动回填，agent 无需手填）。
 2. **冻结面**：B 部类路径 + 安全红线文件——触碰即拒（清单见 material_registry.md，代码同步于 proposal.py `FROZEN_PREFIXES`）。
 3. **路径白名单**：仅 material_registry.md A 部类前缀（proposal.py `EVOLVABLE_PREFIXES`，含 `skills/` 技能物料）。
 4. **原子性**：一次一个文件、一个维度；禁止多文件捆绑。

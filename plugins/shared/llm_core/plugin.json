@@ -2,10 +2,11 @@
   "id": "pipeline_llm_core",
   "host_group": "llm",
   "name": "LLM Core",
-  "version": "1.4.0",
+  "version": "1.7.0",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
+  "visibility": "private",
   "entry": "python server.py",
   "invoke_entry": "llm_core.execute",
   "mcp": {
@@ -14,6 +15,59 @@
   "capabilities": {
     "metrics_class": "llm",
     "tools": [],
+    "services": [
+      {
+        "name": "llm_adapter.execute",
+        "description": "LLM adapter service face (pipeline_llm_core role 2): two exits — wire (dialect routing + wire execution + stream consumption) or gateway (in-process relay to llm.complete_stream; production pipeline path). Returns the llm.complete_stream-shaped aggregate plus 'dialect' on the wire route (partial snapshot on interruption/cancel).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "Model id (llm.yaml models key; model_name forms are normalized)"
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Chat messages array"
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Optional tool schemas for function calling"
+            },
+            "stream": {
+              "type": "boolean",
+              "description": "True = SSE streaming (production path); False = non-streaming"
+            },
+            "dialect": {
+              "type": "string",
+              "description": "Explicit dialect key; empty = resolve from providers.<name>.type"
+            },
+            "params": {
+              "type": "object",
+              "description": "Sampling/thinking params (override llm.yaml model default_params)"
+            },
+            "route": {
+              "type": "string",
+              "enum": [
+                "wire",
+                "gateway"
+              ],
+              "description": "Exit route: wire = dialect wire execution (default, service face); gateway = same-host in-process relay to llm.complete_stream (production pipeline path)"
+            }
+          },
+          "required": [
+            "model",
+            "messages"
+          ]
+        }
+      }
+    ],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
@@ -40,11 +94,11 @@
     "track.total_tokens",
     "context_window",
     "track.messages_chars_at_llm",
-    "track.model_context_window"
+    "track.model_context_window",
+    "thinking_strength"
   ],
   "state": {
     "volatile_keys": [
-      "thinking_strength",
       "core_type",
       "core_plugin"
     ],
@@ -63,7 +117,10 @@
       "llm_empty_streak",
       "iteration",
       "track.llm_usage",
-      "track.messages_chars"
+      "track.messages_chars",
+      "tool_ids",
+      "llm_loop_streak",
+      "llm_loop_last_hash"
     ]
   },
   "requires_services": [
@@ -119,6 +176,7 @@
         "id": "thinking_strength",
         "type": "form",
         "space": "chat-input",
+        "frame_field": "thinking_strength",
         "props": {
           "title": "思考强度",
           "icon": "brain",

@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Stop Check",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
@@ -43,7 +43,9 @@
       "should_stop",
       "task.id",
       "timeout_seconds",
-      "tool_results"
+      "tool_results",
+      "track.llm_usage",
+      "task_status"
     ]
   }
 }

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.request
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -111,6 +112,15 @@ class BridgeApp:
                 }
                 self.policy.audit(upstream, caller, session_key, method, "", "allow", "", 0.0)
                 return 200, body_out
+            # 首转发前确保持久浏览器就绪：浏览器由后台线程拉起，若在 CDP 就绪前就
+            # 让上游 initialize，playwright-mcp 会以 ECONNREFUSED 失败（冷启动首调
+            # 竞态）。此处阻塞到就绪（有上限 15s）；失败不阻断——让上游握手把可见
+            # 错误报出来（fail-soft 语义不变），不影响非浏览器上游。
+            if self.live.enabled and upstream == self.live.upstream:
+                try:
+                    self.live.ensure_started()
+                except BrowserLiveError as e:
+                    print(f"[mcp-bridge] 浏览器未就绪，首个转发将交给上游报错: {e}", flush=True)
             session = self.manager.get_or_create(upstream, session_key, [spec.command] + spec.args, spec.cwd)
             key = (upstream, session_key)
             handshaken = key in self._handshaken
@@ -215,7 +225,16 @@ def make_handler(app: BridgeApp):
 
         def do_GET(self) -> None:
             if self.path == "/health":
-                self._send(200, {"status": "ok", "sessions": app.manager.session_count()})
+                # auth=false 表示"活着但没凭据"（fail-closed 下所有调用都会 401）：
+                # 客户端据此判定未就绪并自愈，而不是把 401 当配置错误甩给用户。
+                self._send(
+                    200,
+                    {
+                        "status": "ok",
+                        "sessions": app.manager.session_count(),
+                        "auth": app.policy.credential_configured(),
+                    },
+                )
                 return
             if self.path.split("?")[0] == "/browser/live-ticket":
                 session_key = (self.headers.get("X-Bridge-Session") or "").strip() or "default"
@@ -279,6 +298,17 @@ def make_server(config: dict | None = None, config_path: str | None = None) -> T
     )
 
 
+
+def _self_port_healthy(bind: str, port: int) -> bool:
+    """本端口上是否已有健康网关（bind 失败时判定"有人在跑"而非故障）。"""
+    host = "127.0.0.1" if bind in ("0.0.0.0", "", "::") else bind
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=2) as resp:  # noqa: S310 — 本机自检
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
 def serve() -> None:
     """启动网关（阻塞）。sweep 线程周期回收空闲会话；浏览器后台拉起。"""
     config = load_config()
@@ -295,7 +325,23 @@ def serve() -> None:
         app.start_browser_background()
     bind = str(config.get("bind", "127.0.0.1"))
     port = int(config.get("port", 8765))
-    server = ThreadingHTTPServer((bind, port), make_handler(app))
+    try:
+        server = ThreadingHTTPServer((bind, port), make_handler(app))
+    except OSError as exc:
+        # 端口已被别的网关占着（跨 WSL/Windows 双环境常见：同一 /mnt 工作区的
+        # fcntl.flock 与 msvcrt.locking 互不识别，锁不能互斥）→ 若那个网关是健康的，
+        # 本进程安静退出即可，不该把并发双起渲染成故障。
+        if _self_port_healthy(bind, port):
+            print(f"[mcp-bridge] {bind}:{port} 已有健康网关在跑，本进程退出", flush=True)
+            raise SystemExit(0) from exc
+        # bind 失败必须给可行动原因：Windows 上 10013 多为端口落在系统保留区间
+        # （Hyper-V/WinNAT 动态端口池）或权限不足，用户看到裸 traceback 无法自救。
+        raise SystemExit(
+            f"[mcp-bridge] 无法监听 {bind}:{port}：{exc}。"
+            f"排查：1) 端口是否被占用（netstat -ano | findstr :{port}）；"
+            f"2) Windows 保留端口区间（netsh int ipv4 show excludedportrange protocol=tcp）；"
+            f"3) 换端口（config/bridge/bridge.yaml 的 port）或收紧 bind"
+        ) from exc
     print(f"[mcp-bridge] listening on {bind}:{port}, audit={app.policy.audit_dir}", flush=True)
     try:
         server.serve_forever()

@@ -41,15 +41,39 @@ from agentos_plugin_sdk.tool_result_protocol import (
 
 logger = logging.getLogger(__name__)
 
-# 参数削减效果观测（2026-10-19）：per-(tool, action, outcome) 进程级计数器。
+# 参数削减效果观测（2026-10-19）：per-(tool, action, outcome) 计数器。
 # outcome ∈ pass / schema_fixed / prefill_rejected——「少填参数 → 调用更准」的
 # 度量面；快照随每轮 state_updates["tool_action_stats"] 出口可查。
-_ACTION_STATS: Counter[tuple[str, str, str]] = Counter()
+#
+# 计数按管道 state 累加（基线上轮快照 + 本轮增量再写回），不落进程级全局：
+# 模块级计数器被同进程内并行/交错执行的管道共享，快照会把别的管道的键带进
+# 本管道（2026-11-12 实证：另一管道 todo 原文出现在本管道 tool_action_stats）。
+_ACTION_STAT_KEY_SEP = "|"
 
 
-def _reset_action_stats() -> None:
-    """测试夹具：清零进程级计数器。"""
-    _ACTION_STATS.clear()
+def _action_stat_key(tool_name: str, action: str, outcome: str) -> str:
+    """统计快照键：``tool|action|outcome``（tuple 键过不了 MCP/JSON 边界）。"""
+    return _ACTION_STAT_KEY_SEP.join((tool_name, action, outcome))
+
+
+def _seeded_action_stats(previous: Any) -> Counter[str]:
+    """以本管道上一轮快照为基线构造本轮计数器。
+
+    只收非空字符串键与正整数计数（JSON 边界往返后的合法形态）；其余形态
+    丢弃——统计是观测面，畸形残留不得炸掉校验步骤。
+    """
+    stats: Counter[str] = Counter()
+    if isinstance(previous, dict):
+        for key, value in previous.items():
+            if (
+                isinstance(key, str)
+                and key
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+            ):
+                stats[key] = value
+    return stats
 
 
 def _action_of(args: Any) -> str:
@@ -175,6 +199,12 @@ _SYSTEM_INJECT_KEYS = frozenset({
     "parent_ws_meta",
     "parent_agent_level",
     "agent_config_id",
+    # 仅 file_read 注入（R20/R21 视觉规格），但注入方键全集必须被豁免集覆盖：
+    # 漂移守卫两侧相碰，漏同步会让后续严格工具误拒。R21 起注入键由
+    # llm_vision_max_side（单边）换轨 llm_vision_max_pixels（总像素口径），
+    # 与注入方 _NATIVE_INJECT_KEYS 同步。
+    "llm_vision_max_side",
+    "llm_vision_max_pixels",
 })
 
 
@@ -308,6 +338,8 @@ class ToolSchemaValidator(IInputPlugin):
         all_fix_messages: list[dict[str, Any]] = []
         pre_entries: list[dict[str, Any]] = []
         state_updates: dict[str, Any] = {}
+        # 本轮统计基线 = 本管道上一轮快照（ctx.state 按管道隔离，跨管道不可见）
+        action_stats = _seeded_action_stats(ctx.state.get("tool_action_stats"))
 
         # 本轮输出是否被 max_tokens 截断（finish_reason=length，由 llm_core 写入）。
         # 截断时 tool_call 的 arguments 可能不完整 → 校验缺失字段时给出「文件太大」
@@ -351,7 +383,7 @@ class ToolSchemaValidator(IInputPlugin):
                     )
                 )
                 validated_calls.append(tc)
-                _ACTION_STATS[(tool_name, _action_of(args), "prefill_rejected")] += 1
+                action_stats[_action_stat_key(tool_name, _action_of(args), "prefill_rejected")] += 1
                 logger.warning(
                     "[%s] 截断 tool_call %s 已预填拒绝结果，丢失字段: %s",
                     self.name,
@@ -389,10 +421,10 @@ class ToolSchemaValidator(IInputPlugin):
                         )
                     )
                     validated_calls.append(tc)
-                    _ACTION_STATS[(tool_name, _action_of(args), "prefill_rejected")] += 1
+                    action_stats[_action_stat_key(tool_name, _action_of(args), "prefill_rejected")] += 1
                 else:
                     validated_calls.append(tc)
-                    _ACTION_STATS[(tool_name, _action_of(args), "prefill_rejected")] += 1
+                    action_stats[_action_stat_key(tool_name, _action_of(args), "prefill_rejected")] += 1
                 continue
 
             input_schema = (
@@ -473,7 +505,7 @@ class ToolSchemaValidator(IInputPlugin):
                         )
                     )
                     validated_calls.append(tc)
-                    _ACTION_STATS[(tool_name, _action_of(args), "prefill_rejected")] += 1
+                    action_stats[_action_stat_key(tool_name, _action_of(args), "prefill_rejected")] += 1
                     logger.warning(
                         "[%s] Schema validation failed, blocked call | tool=%s | errors=%s | truncated=%s",
                         self.name,
@@ -485,10 +517,10 @@ class ToolSchemaValidator(IInputPlugin):
                 fixed_tc = dict(tc)
                 fixed_tc["args"] = fixed_args
                 validated_calls.append(fixed_tc)
-                _ACTION_STATS[(tool_name, _action_of(fixed_args), "schema_fixed")] += 1
+                action_stats[_action_stat_key(tool_name, _action_of(fixed_args), "schema_fixed")] += 1
             else:
                 validated_calls.append(tc)
-                _ACTION_STATS[(tool_name, _action_of(args), "pass")] += 1
+                action_stats[_action_stat_key(tool_name, _action_of(args), "pass")] += 1
 
         if schema_errors:
             state_updates["schema_errors"] = schema_errors
@@ -503,13 +535,12 @@ class ToolSchemaValidator(IInputPlugin):
         # 按 pre_decided_results 命中跳过执行并统一整形配对消息），
         # 确保下游插件拿到的是经过验证和修复的数据
         state_updates[StateKeys.RAW_TOOL_CALLS] = validated_calls
-        # 观测快照：进程级聚合计数（单调），供「削减前后调用形变率」对比。
-        # 键字符串化（"tool|action|outcome"，工具名是标识符不含 |，无碰撞）：
-        # tuple 键过不了 MCP/JSON 边界，会把整个 step 的 state_updates 拖炸
-        # （2026-10-19 幽灵续跑改判事故 §4.4）。仅观测用途，无下游消费方。
-        state_updates["tool_action_stats"] = {
-            "|".join(k): v for k, v in _ACTION_STATS.items()
-        }
+        # 观测快照：本管道内累计计数（上轮快照 + 本轮增量，单调），供「削减
+        # 前后调用形变率」对比。键字符串化（"tool|action|outcome"，工具名是
+        # 标识符不含 |，无碰撞）：tuple 键过不了 MCP/JSON 边界，会把整个 step
+        # 的 state_updates 拖炸（2026-10-19 幽灵续跑改判事故 §4.4）。仅观测
+        # 用途，无下游消费方；按管道 state 隔离，不跨 pipeline 泄漏。
+        state_updates["tool_action_stats"] = dict(action_stats)
 
         return PluginResult(state_updates=state_updates)
 

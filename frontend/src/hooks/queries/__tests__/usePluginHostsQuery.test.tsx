@@ -11,9 +11,9 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import type { QueryClient } from '@tanstack/react-query'
 import type * as hostsMod from '../usePluginHostsQuery'
 import type * as runtimeMod from '../usePluginRuntimeQuery'
+import type { QueryClient } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
 const mockGetPluginHosts = vi.fn()

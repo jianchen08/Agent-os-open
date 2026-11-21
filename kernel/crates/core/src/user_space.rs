@@ -6,7 +6,7 @@
 //! 风险面内，而用户空间不受影响。
 //!
 //! ```text
-//! <USER_ROOT>/                 # 默认 dirs::data_dir()/agentos（按 OS 不同）
+//! <USER_ROOT>/                 # AGENTOS_USER_ROOT 显式生效（零回落，ADR 2026-11-07）
 //! ├── plugins/                 # 用户插件根（覆盖内置根：同 id 用户赢）
 //! ├── config/                  # 用户配置层（镜像 factory config/ 相对路径）
 //! ├── data/                    # 运行时数据（多租户树 / uploads / DB）
@@ -44,12 +44,15 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// 用户空间根：`AGENTOS_USER_ROOT` > OS 标准目录（`dirs::data_dir()/agentos`）。
+/// 用户空间根：`AGENTOS_USER_ROOT` 显式生效；未设（含空白值）= `None`。
 ///
-/// 用 `data_dir()` 而非 `data_local_dir()`：`%LOCALAPPDATA%` 不随用户漫游，
-/// 而配置与密钥应当跟用户走。
+/// **零回落**（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2）：用户根
+/// 一律来自实例启动配置的交付链（env 仅作为安装器/启动链写入配置的载体），
+/// 不再做 OS 标准目录推导——缺省回落 `%APPDATA%\agentos`（= 装机用户空间）
+/// 正是 dev 扫到装机目录陈旧副本的事故机制根，已删除。用户空间不可用 = 各
+/// 分区解析返回 `None`，消费方按各自语义降级。
 pub fn user_root() -> Option<PathBuf> {
-    env_path(USER_ROOT_ENV).or_else(|| dirs::data_dir().map(|d| d.join("agentos")))
+    env_path(USER_ROOT_ENV)
 }
 
 /// 用户配置层根：`AGENTOS_USER_CONFIG_DIR` > `<USER_ROOT>/config`。
@@ -101,8 +104,8 @@ pub fn user_plugin_venvs_dir() -> Option<PathBuf> {
 /// - **单一解析器**：读与写必须走同一个本函数，禁止两侧各自拼路径（那正是
 ///   单真值 ADR 的实证根因：用户值写盘了、插件读的却是另一份）。
 ///
-/// 返回 `None` 仅当用户层不可用（无 OS data dir）且 factory 路径也拼不出来；
-/// 生产环境下 `factory_root` 必为绝对路径，故实际总能返回 `Some`。
+/// 返回 `None` 仅当用户层不可用（`AGENTOS_USER_ROOT` 未设，零回落）且 factory
+/// 路径也拼不出来；生产环境下 `factory_root` 必为绝对路径，故实际总能返回 `Some`。
 pub fn resolve_config_path(factory_root: &Path, rel: &str) -> Option<PathBuf> {
     let rel_norm = rel.replace('\\', "/");
     let rel_trimmed = rel_norm.strip_prefix("config/").unwrap_or(&rel_norm);
@@ -986,6 +989,23 @@ mod tests {
         assert_eq!(user_data_dir().unwrap(), user.join("data"));
         assert_eq!(user_plugin_venvs_dir().unwrap(), user.join("plugin-venvs"));
         assert_eq!(user_root().unwrap(), user);
+    }
+
+    /// 零回落（ADR 2026-11-07-plugin-tiered-single-copy-model §2.2）：用户根
+    /// 一律显式交付——env 未设/空白 = `None`，绝不推导 OS 标准目录
+    /// （`%APPDATA%\agentos` 回落 = dev 扫到装机目录陈旧副本的事故机制根）。
+    #[test]
+    fn user_root_requires_explicit_env_no_os_fallback() {
+        let _lock = tests_guard();
+
+        let _g = EnvGuard::set(USER_ROOT_ENV, "D:/explicit/user-root");
+        assert_eq!(user_root().unwrap(), PathBuf::from("D:/explicit/user-root"));
+
+        std::env::remove_var(USER_ROOT_ENV);
+        assert!(user_root().is_none(), "未设 = None（不做 OS 目录推导）");
+
+        let _g2 = EnvGuard::set(USER_ROOT_ENV, "   ");
+        assert!(user_root().is_none(), "空白值视同未设");
     }
 
     #[test]

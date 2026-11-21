@@ -120,8 +120,8 @@ import { useChatInputStore } from '../stores/chatInputStore'
 import { useInteractionStore, type PendingInteraction } from '../stores/interactionStore'
 import { useNotificationStore } from '../stores/notificationStore'
 import { usePendingInputStore } from '../stores/pendingInputStore'
-import { usePipelineMessageStore } from '../stores/pipelineMessageStore'
 import { usePersonaPossessStore } from '../stores/personaPossessStore'
+import { usePipelineMessageStore } from '../stores/pipelineMessageStore'
 import { useSessionListStore } from '../stores/sessionListStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useUIStore } from '../stores/uiStore'
@@ -234,6 +234,22 @@ describe('HomePage 连接类 effect', () => {
     usePipelineMessageStore.setState({ activePipelineId: 'p1' })
     await renderHome()
     expect(mockWs.sendActiveThread).toHaveBeenCalledWith('s1', 'p1')
+  })
+
+  it('恢复活跃会话失败：只记日志不传播（best-effort 恢复，不阻塞启动）', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const rejecting = vi.fn(() => Promise.reject(new Error('恢复源炸了')))
+    useSessionListStore.setState({ restoreActiveSessionIfNeeded: rejecting } as never)
+    updateSessionsCache(() => [
+      { id: 's1', title: '新会话', updatedAt: new Date().toISOString(), pipelineIds: ['p1'] } as never,
+    ])
+    try {
+      await renderHome()
+      await waitFor(() => expect(rejecting).toHaveBeenCalled())
+      expect(errSpy).toHaveBeenCalledWith('[router] 恢复活跃会话失败:', expect.any(Error))
+    } finally {
+      errSpy.mockRestore()
+    }
   })
 
   it('_status 订阅注册 _status 主题回调，回调写 wsStatus；卸载时解除订阅', async () => {
@@ -640,10 +656,12 @@ describe('handleSendMessage', () => {
     expect((opts as { agentId?: string }).agentId).toBe('mode_roleplay/card_luna')
   })
 
-  it('5s 落定超时终局：宿主订阅 timeout outcome 驱动既有停止链（sendCancel 出站）', async () => {
-    // store 层「超时判死产 timeout outcome」由 chatInputStore 契约测试覆盖；
-    // 此处钉宿主接线（2026-11-04 用户裁定「超时=消息坏了，应该停止run」）：
-    // 新 timeout outcome 出现 → 走 handleStopGenerate 同链出站停止帧
+  it('5s 落定超时终局：timeout 不再驱动停止链（2026-11-18 修订：停止权交还用户）', async () => {
+    // 2026-11-04 裁定曾要求宿主订阅 timeout outcome 驱动 handleStopGenerate
+    // 出站停止帧；2026-11-18 用户裁定修订：超时≠消息已坏（ack 受理另有宽限
+    // 窗口），停止 run 交还用户手按。宿主层不再订阅 timeout 自动 sendCancel，
+    // 超时报错由 useSendOutcomeConsumer 操作点呈现（该层与 store 层各有专属
+    // 契约测试）；此处钉集成点不再有停止帧出站。
     useChatInputStore.setState({ sendOutcomes: [], sendInFlightByPipeline: {}, drafts: {} })
     await renderHomeWithSession()
     await act(async () => {
@@ -663,8 +681,11 @@ describe('handleSendMessage', () => {
         }
       })
     })
-    await waitFor(() => expect(mockWs.sendCancel).toHaveBeenCalled())
-    expect(mockWs.sendCancel).toHaveBeenCalledWith('s1', undefined, 'p1')
+    // 订阅链跑一轮（宏任务冲刷）后断无停止帧出站
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(mockWs.sendCancel).not.toHaveBeenCalled()
   })
 })
 

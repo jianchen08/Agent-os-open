@@ -515,7 +515,7 @@ class TestDispatchInstructionRichness:
         无合法集合可查时跳过 key 校验，不阻断提交。
         """
         monkeypatch.setattr(
-            mod,
+            sys.modules["acceptance"],
             "_metrics_config_path",
             lambda: Path("Z:/nonexistent/evaluation_metrics.yaml"),
         )

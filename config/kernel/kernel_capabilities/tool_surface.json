@@ -4,7 +4,7 @@
   "capabilities": [
     {
       "method": "schemas",
-      "description": "按 tool_ids 白名单过滤注册表工具。白名单命中 + 框架强制工具（spill_retrieve，兜底闭环必需）注入；input_schema 非 object 的工具不注入。contracts 不过滤——凡声明 output_schema/render 的工具都产生条目（tool_core 按 tool_name 查表校验）。",
+      "description": "按 tool_ids 白名单过滤注册表工具。白名单命中 + 插件 force_include_tools 声明并集的框架强制工具注入；input_schema 非 object 的工具不注入。contracts 不过滤——凡声明 output_schema/render 的工具都产生条目（tool_core 按 tool_name 查表校验）。",
       "input_schema": {
         "type": "object",
         "properties": {

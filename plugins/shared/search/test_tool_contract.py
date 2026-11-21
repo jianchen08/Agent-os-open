@@ -306,8 +306,17 @@ class TestResourceTypeRouting:
 
     def test_tool_only_keys(self, rs: Any, repo: Path) -> None:
         out = _run(rs, resource_type="tool")
-        assert set(out) == {"tool_h", "tool_d", "tool_c"}
+        # 表格式键不变 + 结构化定义键同批出口（tool_defs 族，动态面唯一依据）
+        assert set(out) == {
+            "tool_h", "tool_d", "tool_c",
+            "tool_defs", "tool_defs_count", "tool_defs_errors",
+        }
         assert out["tool_c"] == 3  # system 型/空 tools/坏 json 不出现
+        # mini 仓 manifest 未声明 input_schema → 定义全数 fail-closed 拒收，
+        # 表格式行仍保留（工具确实活着），错误项逐条可查
+        assert out["tool_defs"] == []
+        assert out["tool_defs_count"] == 0
+        assert {e["reason"] for e in out["tool_defs_errors"]} == {"input_schema_missing"}
 
     def test_skill_only_keys(self, rs: Any, skills: list) -> None:
         out = _run(rs, resource_type="skill")
@@ -496,6 +505,54 @@ class TestDetailedMode:
             "config_id", "agent_name", "agent_description", "level", "source",
         ]
         assert len(out["agent_d"][0]) == 5
+
+    def test_detailed_returns_real_input_schema_definition(
+        self, rs: Any, repo: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """detailed 模式返回**含真实 input_schema** 的可执行定义项（动态面唯一依据）。
+
+        方案 §11 批 2 判据 5：定义项必须携带 manifest 声明的真实
+        ``input_schema``（不是 ``{}`` 占位、不是字符串化 schema），且
+        ``output_schema``/``render`` 同源带出、``plugin_id`` 取内核可解析 id。
+        """
+        body: dict[str, Any] = {
+            "id": "schema_rich_plugin",  # ≠ 目录名，锁「不按目录名解析」
+            "plugin_type": "tool",
+            "capabilities": {"tools": [{
+                "name": "schema_rich_tool",
+                "description": "a tool with a real contract",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "depth": {"type": "integer"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                "output_schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                "render": {"card": "read"},
+            }]},
+        }
+        d = repo / "plugins" / "schema_rich"
+        d.mkdir()
+        (d / "plugin.json").write_text(json.dumps(body), encoding="utf-8")
+        _install_tool_surface([_live_item("schema_rich_tool", plugin_id="schema_rich_plugin")])
+
+        out = _run(rs, resource_type="tool", query="schema_rich", mode="detailed")
+
+        defs = {d_["name"]: d_ for d_ in out["tool_defs"]}
+        assert "schema_rich_tool" in defs, out.get("tool_defs_errors")
+        definition = defs["schema_rich_tool"]
+        # 真实 schema 原样保真（性质断言：结构逐键相等，不是 {} 占位/字符串）
+        assert definition["input_schema"] == body["capabilities"]["tools"][0]["input_schema"]
+        assert definition["input_schema"]["required"] == ["path"]
+        assert definition["input_schema"]["additionalProperties"] is False
+        assert isinstance(definition["input_schema"], dict)
+        assert definition["output_schema"]["properties"]["ok"]["type"] == "boolean"
+        assert definition["render"]["card"] == "read"
+        assert definition["plugin_id"] == "schema_rich_plugin"
+        assert definition["plugin_id"] != "schema_rich", "定义不得带目录名作路由目标"
+        # 表格键与定义同源：tool_schema 列是该条声明的 schema（不是空 dict 字符串）
+        assert out["tool_defs_count"] == len(out["tool_defs"]) == 1
+        assert out["tool_defs_errors"] == []
 
 
 class TestRobustness:
@@ -936,3 +993,171 @@ class TestSkillManagerIntegration:
         out = _run(rs, resource_type="skill", mode="detailed", limit=3)
         assert out["skill_h"] == ["skill_name", "skill_description", "skill_content"]
         assert any(row[2].strip() for row in out["skill_d"])
+
+
+class TestConcurrentFaces:
+    """并发化改造的行为契约（2026-11-19 搜索性能修复）。
+
+    串行时代的可见输出（id 序、limit 截断、失败信封优先序）必须逐位保持，
+    同时断并发性本身：①三资源面的首个外部调用在任一面完成前全部发出
+    （串行退化 = 护栏轮询超时 → 面失败信封，本测试红）；②skill 正文兜底与
+    agent detailed 补全的成批取数并发窗 > 1（串行退化恒为 1）。
+    """
+
+    def test_faces_issue_concurrently(self, rs: Any, repo: Path) -> None:
+        """三面护栏桩：任一面完成前，三面的首个外部调用必须都已发出。"""
+        impl = sys.modules["resource_search_tool_impl"]
+        issued = {"agent": False, "tool": False, "skill": False}
+
+        async def gate(key: str) -> None:
+            issued[key] = True
+            for _ in range(300):  # ~0.3s 护栏：串行退化下永远凑不齐 → 显式失败
+                if all(issued.values()):
+                    return
+                await asyncio.sleep(0.001)
+            raise AssertionError(f"资源面未并发发起: issued={issued}")
+
+        async def agent_stub(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+            await gate("agent")
+            return {
+                "success": True,
+                "data": {"items": [_agg("alpha_agent", "Alpha Agent", "helper")], "total": 1},
+            }
+
+        async def tool_stub() -> dict[str, Any]:
+            await gate("tool")
+            return {"items": [_live_item("download_file")], "total": 1}
+
+        async def skill_stub(method: str, args: dict[str, Any]) -> dict[str, Any]:
+            await gate("skill")
+            if method == "list":
+                return {"items": [_skill_item("one", "One Skill", "the first skill")]}
+            return {"found": False}
+
+        impl.set_agent_service_caller(agent_stub)
+        impl.set_tool_surface_caller(tool_stub)
+        impl.set_skill_service_caller(skill_stub)
+        out = _run(rs, resource_type="all")
+        assert {"agent_c", "tool_c", "skill_c"} <= set(out)
+
+    def test_skill_body_fallback_concurrent_window(self, rs: Any) -> None:
+        """正文兜底取数并发窗 > 1（串行实现恒为 1）；命中集与串行语义一致。"""
+        impl = sys.modules["resource_search_tool_impl"]
+        state = {"inflight": 0, "max": 0}
+        items = [_skill_item(f"s{i}", f"Skill {i}", f"generic description {i}") for i in range(6)]
+        contents = {f"s{i}": f"body text with needle {i}" for i in range(6)}
+
+        async def stub(method: str, args: dict[str, Any]) -> dict[str, Any]:
+            state["inflight"] += 1
+            state["max"] = max(state["max"], state["inflight"])
+            await asyncio.sleep(0.01)
+            state["inflight"] -= 1
+            if method == "list":
+                return {"items": items}
+            sid = str(args.get("skill_id"))
+            if sid in contents:
+                return {"found": True, "skill": {**items[int(sid[1:])], "content": contents[sid]}}
+            return {"found": False}
+
+        impl.set_skill_service_caller(stub)
+        out = _run(rs, resource_type="skill", query="needle")
+        assert out["skill_c"] == 6
+        assert [row[0] for row in out["skill_d"]] == [f"Skill {i}" for i in range(6)]
+        assert state["max"] > 1, f"兜底取数未并发（max_inflight={state['max']}）"
+
+    def test_skill_body_fallback_order_and_limit(self, rs: Any) -> None:
+        """id 序组装 + limit 截断与串行时代逐位一致（两组区分输入）。
+
+        语料：c1 正文命中、c2 无命中、c3 正文命中、c4 元数据命中、c5 正文
+        命中（id 序 c1<c2<c3<c4<c5；元数据命中不触发兜底取数）。
+        """
+        items = [
+            _skill_item("c1", "C One", "plain"),
+            _skill_item("c2", "C Two", "plain"),
+            _skill_item("c3", "C Three", "plain"),
+            _skill_item("c4", "C Four", "needle in description"),
+            _skill_item("c5", "C Five", "plain"),
+        ]
+        contents = {"c1": "needle in body", "c3": "another needle", "c5": "third needle"}
+        calls = _install_skill_service(items, contents=contents)
+        out = _run(rs, resource_type="skill", query="needle")
+        assert out["skill_c"] == 4
+        assert [row[0] for row in out["skill_d"]] == ["C One", "C Three", "C Four", "C Five"]
+        out2 = _run(rs, resource_type="skill", query="needle", limit=2)
+        assert [row[0] for row in out2["skill_d"]] == ["C One", "C Three"]
+        # 通配查询零兜底取数（契约保持：无 get 调用）
+        calls.clear()
+        _run(rs, resource_type="skill", query="*")
+        assert not [c for c in calls if c[0] == "get"]
+
+    def test_agent_detailed_concurrent_window(self, rs: Any) -> None:
+        """detailed 模式 agent.get 补全并发窗 > 1；metrics 列逐行呈现。"""
+        impl = sys.modules["resource_search_tool_impl"]
+        state = {"inflight": 0, "max": 0}
+        items = [
+            _agg(f"agent_{i}", f"Agent {i}", f"desc {i}", level="L1") for i in range(5)
+        ]
+        configs = {
+            f"agent_{i}": {"recommended_metrics": [{"metric_id": f"m{i}"}]}
+            for i in range(5)
+        }
+
+        async def stub(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+            state["inflight"] += 1
+            state["max"] = max(state["max"], state["inflight"])
+            await asyncio.sleep(0.01)
+            state["inflight"] -= 1
+            if tool_name == "agent.list":
+                return {"success": True, "data": {"items": items, "total": len(items)}}
+            aid = str(args.get("agent_id"))
+            if aid in configs:
+                return {"success": True, "data": {"found": True, "config": configs[aid]}}
+            return {"success": True, "data": {"found": False, "config": None}}
+
+        impl.set_agent_service_caller(stub)
+        out = _run(rs, resource_type="agent", mode="detailed")
+        assert out["agent_c"] == 5
+        assert [f"推荐评估: m{i}" in row[-1] for i, row in enumerate(out["agent_d"])] == [True] * 5
+        assert state["max"] > 1, f"agent.get 补全未并发（max_inflight={state['max']}）"
+
+    def test_face_failure_priority_agent_first(self, rs: Any, repo: Path, skills: list) -> None:
+        """agent/tool/skill 三面同败 → 失败信封取 agent 面（原串行短路顺序）。"""
+        impl = sys.modules["resource_search_tool_impl"]
+
+        async def agent_down(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+            return {"success": False, "error": "agent_manager down"}
+
+        async def skill_down(method: str, args: dict[str, Any]) -> dict[str, Any]:
+            return {"error": "skill_manager down"}
+
+        impl.set_agent_service_caller(agent_down)
+        impl.set_tool_surface_caller(_failing_tool_surface)
+        impl.set_skill_service_caller(skill_down)
+        result = asyncio.run(rs.execute({"resource_type": "all"}))
+        assert result.success is False
+        assert result.error_code == "agent_registry_unavailable"
+        assert "agent_manager down" in (result.error or "")
+
+    def test_face_failure_priority_tool_over_skill(self, rs: Any, repo: Path, skills: list) -> None:
+        """agent 面成功、tool/skill 同败 → 失败信封取 tool 面。"""
+        impl = sys.modules["resource_search_tool_impl"]
+
+        async def skill_down(method: str, args: dict[str, Any]) -> dict[str, Any]:
+            return {"error": "skill_manager down"}
+
+        impl.set_agent_service_caller(_empty_agent_service)
+        impl.set_tool_surface_caller(_failing_tool_surface)
+        impl.set_skill_service_caller(skill_down)
+        result = asyncio.run(rs.execute({"resource_type": "all"}))
+        assert result.success is False
+        assert result.error_code == "tool_surface_unavailable"
+
+
+async def _failing_tool_surface() -> dict[str, Any]:
+    raise RuntimeError("tools endpoint down")
+
+
+async def _empty_agent_service(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if tool_name == "agent.list":
+        return {"success": True, "data": {"items": [], "total": 0}}
+    return {"success": True, "data": {"found": False, "config": None}}

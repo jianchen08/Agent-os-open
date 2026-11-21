@@ -1,0 +1,19 @@
+{
+  "name": "godot-segment-video",
+  "private": true,
+  "version": "1.0.0",
+  "description": "灵汐 AgentOS · Godot 段 产品演示片（Remotion）",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "still": "remotion still src/index.ts GodotSegmentPromo",
+    "render": "remotion render src/index.ts GodotSegmentPromo out/godot_segment.mp4"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/noto-sans-sc": "^5.3.1",
+    "@remotion/cli": "^4.0.400",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "remotion": "^4.0.400"
+  }
+}

@@ -1,3 +1,9 @@
+---
+doc_id: 20261116-guide-streaming-protocol
+type: standard
+status: active
+---
+
 # 流式事件协议（Streaming Protocol）
 
 > 面向**想给灵汐 AgentOS 0.2 提供实时流式能力**的插件开发者，以及维护消息链路的前端/内核工程师。

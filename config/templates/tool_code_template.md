@@ -1,3 +1,4 @@
+<!-- seed-version: 1 -->
 # 内置工具代码模板
 
 > 本模板详细说明创建内置工具所需的全部文件和配置。
@@ -519,7 +520,7 @@ def get_tool_definition() -> Tool:
 |------|---------------------|------|
 | `file_read` | `["read:/etc/", "read:/sys/"]` | 读取敏感路径标记为危险 |
 | `file_write` | `["write:/etc/", "delete_lines:"]` | 写入敏感路径/删除行标记为危险 |
-| `bash_execute` | `["rm -rf", "format", "shutdown"]` | 破坏性命令标记为危险 |
+| `bash` | `["rm -rf", "format", "shutdown"]` | 破坏性命令标记为危险 |
 | `enhanced_search` | `[]` | 无危险操作 |
 | `fetch` | `[]` | 无危险操作 |
 
@@ -529,7 +530,7 @@ def get_tool_definition() -> Tool:
 
 ```
 匹配规则：
-1. 获取工具的命令输入字段（如 bash_execute → command 字段）
+1. 获取工具的命令输入字段（如 bash → command 字段）
 2. 如果输入字段值中包含 dangerous_operations 中的字符串 → 匹配
 3. 如果没有命令输入字段，检查参数名是否以危险操作开头
    例：参数名 "write:/etc/config" 匹配 "write:/etc/"
@@ -546,7 +547,7 @@ def get_tool_definition() -> Tool:
 
 2. 工具是否可能执行破坏性操作？
    └─ 是 → 添加具体操作标识
-   └─ 例：file_write → "delete_lines:", bash_execute → "rm -rf"
+   └─ 例：file_write → "delete_lines:", bash → "rm -rf"
 
 3. 工具只做纯计算/查询？
    └─ 是 → dangerous_operations: []

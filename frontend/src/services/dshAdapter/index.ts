@@ -19,6 +19,7 @@ import { getSchema } from '@/services/api/schema'
 import { loggers } from '@/utils/logger'
 import { DSH_RENDER_CARDS } from '@/utils/renderCardVocabulary.generated'
 import { addRenderIntent, type ToolRenderIntent } from '@/utils/renderIntent'
+import { syncClientUiPages } from './clientHost'
 
 /** dsh_adapter 插件 contributes.dsh_adapter 块（plugin.json 同构）。 */
 export interface DshAdapterInfo {
@@ -39,6 +40,8 @@ export interface DshRendererContribution {
 export interface DshAdapterLoadResult {
   loaded: boolean
   renderersRegistered: number
+  /** 本次按 client-ui 清单动态注册/注销的槽位页数 */
+  clientUiPages: { registered: number; removed: number }
   failures: string[]
   info: DshAdapterInfo | null
 }
@@ -53,7 +56,13 @@ const VALID_CARDS: readonly ToolRenderIntent['card'][] = DSH_RENDER_CARDS
  * loadRenderIntents，这里只做 contributes 兜底 + 版本记录读取）。
  */
 export async function loadDshAdapterContributions(): Promise<DshAdapterLoadResult> {
-  const result: DshAdapterLoadResult = { loaded: false, renderersRegistered: 0, failures: [], info: null }
+  const result: DshAdapterLoadResult = {
+    loaded: false,
+    renderersRegistered: 0,
+    clientUiPages: { registered: 0, removed: 0 },
+    failures: [],
+    info: null,
+  }
   let contributes: Array<Record<string, unknown>> = []
   try {
     const schema = await getSchema() as { plugin_contributes?: Array<Record<string, unknown>> }
@@ -92,6 +101,13 @@ export async function loadDshAdapterContributions(): Promise<DshAdapterLoadResul
         result.failures.push(`renderer ${JSON.stringify(r)}: ${String(error)}`)
       }
     }
+  }
+
+  // 槽位页：按已装/已启用的 client UI 贡献动态注册（安装状态变化即增删）
+  try {
+    result.clientUiPages = await syncClientUiPages()
+  } catch (error) {
+    result.failures.push(`client-ui pages: ${String(error)}`)
   }
 
   if (result.failures.length > 0) {

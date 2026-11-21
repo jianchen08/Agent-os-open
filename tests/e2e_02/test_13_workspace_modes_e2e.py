@@ -56,7 +56,7 @@ _POLL_INTERVAL_SECONDS = 5
 # 单输入的任务指令：明确工具步骤 + 评估引导（提高评估闸门闭合率）。
 TASK_INSTRUCTION = (
     "请严格按顺序完成以下三步，不要做其他事情：\n"
-    "1. 用 bash_execute 工具执行命令：echo E2E_BASH_PROBE_OK > bash_probe.txt\n"
+    "1. 用 bash 工具执行命令：echo E2E_BASH_PROBE_OK > bash_probe.txt\n"
     "2. 用 file_write 工具在当前工作目录创建文件 file_probe.txt，"
     "内容为：E2E_FILE_PROBE_OK\n"
     "3. 完成后调用 task_evaluate 工具进行评估。"
@@ -334,7 +334,7 @@ class TestSubtaskWorkspaceSharing:
                 "title": "e2e 子任务共享验证（父）",
                 "description": (
                     "请调用 task_submit 工具派发一个子任务：标题=子任务共享验证，"
-                    "描述=请用 bash_execute 执行 echo shared-ok，目标 agent=general_agent。"
+                    "描述=请用 bash 执行 echo shared-ok，目标 agent=general_agent。"
                     "派发后汇报子任务 ID。"
                 ),
                 "agent_id": "agentos",

@@ -19,6 +19,11 @@ import {
   getRenderIntent,
   inferRenderIntent,
 } from './renderIntent'
+import {
+  buildTruncatedResultDetailBlock,
+  truncatedSizeLabel,
+  type TruncatedToolResult,
+} from './toolResultTruncate'
 import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 
@@ -288,12 +293,132 @@ function applyCardMeta(
 }
 
 /**
+ * 内容依赖卡判定：卡型的块产出依赖结果全文（old_content/new_content/content），
+ * 结果被数据面截断（超 8KB → 截断标记）后 payload 产不出块，级联会跌落到
+ * chat_card 代码块兜底（纯文本堆砌，diff/打开入口全丢）。此类工具截断态不走
+ * 级联，走 enhanceTruncatedContentCard 一级「加载全文」块。
+ */
+export function isContentDependentRenderCard(toolName: string): boolean {
+  return getRenderIntent(toolName)?.card === 'file_card'
+}
+
+/** file_card 截断态的加载块 label 前缀（总量经 truncatedSizeLabel 保留）。 */
+const TRUNCATED_FILE_CARD_LABEL_PREFIX = '差异对比'
+
+/**
+ * 截断态内容依赖卡（file_card）的条目增强：
+ *
+ * - 详情区**替换**（非追加）为单个一级「差异对比（展开加载全文）」块——
+ *   标准级联在此场景只会产出 chat_card 代码块堆砌（写入内容全文等），
+ *   与载入后的真实 diff 卡形同义重复且抢占首屏；
+ * - 折叠 chip 元信息照常注入（applyCardMeta：标题=文件名、摘要=路径、
+ *   打开入口经 args.path 字段族兜底——结果侧 file/added/removed 已随截断
+ *   丢失，载入回填后由标准渲染链补齐徽标与绝对路径）；
+ * - onExpand 接既有单条回取回填（toolResultBackfill），成功后 part 的
+ *   resultData 恢复全量，重渲染自然落回标准 file_card 管线。
+ */
+export function enhanceTruncatedContentCard(
+  activity: ActivityData,
+  toolCall: MessageToolCall,
+  mark: TruncatedToolResult,
+  onExpand: () => Promise<boolean>,
+  options?: {
+    onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
+  },
+): ActivityData {
+  // details 清空（截断态级联块不可信），meta 面照常派生
+  const stripped: ActivityData = { ...activity, details: [] }
+  const withMeta = applyCardMeta(stripped, activity, toolCall, options)
+  const label = `${TRUNCATED_FILE_CARD_LABEL_PREFIX}（共 ${truncatedSizeLabel(mark.totalBytes)}），展开加载全文`
+  return {
+    ...withMeta,
+    details: [buildTruncatedResultDetailBlock(mark, onExpand, label)],
+  }
+}
+
+/** call_tool 转发壳名（动态工具面单入口，plugins/shared/search） */
+const DYNAMIC_FORWARD_SHELL_TOOL = 'call_tool'
+
+/** call_tool 动态转发卡的条目标注（头部标题旁，区分目标原生调用） */
+const DYNAMIC_FORWARD_SUBTITLE = '经 call_tool 动态转发'
+
+/** 从结果数据包读目标工具名：metadata.target_tool 契约键优先，壳成功路径合并
+ *  进数据包的 tool_name 次之；不可得返回空串。 */
+function readTargetToolFromResultData(resultData: unknown): string {
+  if (typeof resultData !== 'object' || resultData === null) return ''
+  const record = resultData as Record<string, unknown>
+  const metadata = record.metadata
+  if (typeof metadata === 'object' && metadata !== null) {
+    const target = (metadata as Record<string, unknown>).target_tool
+    if (typeof target === 'string' && target) return target
+  }
+  const toolName = record.tool_name
+  return typeof toolName === 'string' ? toolName : ''
+}
+
+/**
+ * call_tool 动态转发目标解析（2026-11-18 用户裁定：前端展示实际被调用的目标
+ * 工具，不是调用工具的工具）。
+ *
+ * 目标名解析链（逐级回退）：
+ * 1. `resultData.metadata.target_tool` —— 后端 tool_results 信封的契约键
+ *    （aaa42f4d9；上行投影到位时直接命中）；
+ * 2. `resultData.tool_name` —— 壳成功路径合并进数据包的目标名（当前 WS 事件
+ *    与冷路径 HTTP 投影实际可观测的形态）；
+ * 3. `tool_args.tool` —— 失败信封（TOOL_NOT_FOUND 等）不携带目标名，声明侧
+ *    目标名是唯一来源；仅在结果已回（终态证据在场）时启用，在途卡不启用。
+ *
+ * 名字不可解析（在途/中断/老数据无目标名）返回 null，调用方保持现状渲染。
+ */
+export function resolveDynamicForwardTarget(
+  toolCall: Pick<MessageToolCall, 'tool_name' | 'tool_args' | 'result' | 'resultData' | 'error'>,
+): { targetTool: string; targetArgs: Record<string, unknown> } | null {
+  if (toolCall.tool_name !== DYNAMIC_FORWARD_SHELL_TOOL) return null
+  const hasTerminalEvidence =
+    toolCall.result != null || toolCall.resultData != null || toolCall.error != null
+  if (!hasTerminalEvidence) return null
+
+  const fromResult = readTargetToolFromResultData(toolCall.resultData)
+  const declared = toolCall.tool_args?.tool
+  const targetTool = fromResult || (typeof declared === 'string' && declared ? declared : '')
+  if (!targetTool) return null
+
+  const forwardedArgs = toolCall.tool_args?.arguments
+  const targetArgs =
+    typeof forwardedArgs === 'object' && forwardedArgs !== null
+      ? (forwardedArgs as Record<string, unknown>)
+      : {}
+  return { targetTool, targetArgs }
+}
+
+/**
+ * call_tool 动态转发展示改写：标题显示目标工具名（原始名，如 snippet_box），
+ * 条目摘要换转发标注，参数区按目标实参重建（外层信封 {tool, arguments} 不进
+ * 卡面）；结果区维持既有结果（壳成功信封的 data 本就是目标输出透传，无外壳）。
+ * 声明级联仍按 call_tool 自身配置运行（不冒充目标原生卡，靠标注区分）。
+ * 2026-11-19 用户裁定追加：置 indirectCall 徽标位——头部渲染「间接调用」标记
+ * （ActivityCard），比摘要行更醒目地表明该卡是经壳转发而非原生直接调用。
+ */
+function applyDynamicForwardDisplay(activity: ActivityData, toolCall: MessageToolCall): ActivityData | null {
+  const resolved = resolveDynamicForwardTarget(toolCall)
+  if (!resolved) return null
+  return {
+    ...activity,
+    title: resolved.targetTool,
+    subtitle: DYNAMIC_FORWARD_SUBTITLE,
+    indirectCall: true,
+    details: inferDefaultDetails({ ...toolCall, tool_args: resolved.targetArgs }),
+  }
+}
+
+/**
  * 使用工具配置增强 ActivityData
  *
  * 在 toolCallToActivity 转换后调用，用工具配置覆盖/增强默认渲染。
- * 各声明分支（render/chat_card/契约/L0）都未产出条目摘要时，按通用对象
- * 字段族兜底推导一句话摘要（form/table 卡与无声明工具的条目信息量对齐
- * file_read/write 卡）。
+ * call_tool 动态转发卡在声明级联后按目标工具改写展示（见
+ * applyDynamicForwardDisplay）。各声明分支（render/chat_card/契约/L0）都未
+ * 产出条目摘要时，按通用对象字段族兜底推导一句话摘要（form/table 卡与无声明
+ * 工具的条目信息量对齐 file_read/write 卡）。
  */
 export function enhanceActivityWithToolConfig(
   activity: ActivityData,
@@ -305,6 +430,8 @@ export function enhanceActivityWithToolConfig(
   },
 ): ActivityData {
   const enhanced = enhanceWithDeclarations(activity, toolCall, options)
+  const forwarded = enhanced.type === 'tool_call' ? applyDynamicForwardDisplay(enhanced, toolCall) : null
+  if (forwarded) return forwarded
   if (enhanced.type !== 'tool_call' || !enhanced.toolName || enhanced.subtitle) {
     return enhanced
   }
@@ -444,7 +571,10 @@ function looksLikePath(value: string): boolean {
 export const TOOL_NAME_ZH: Record<string, string> = {
   file_read: '读取文件',
   file_write: '写入文件',
-  bash_execute: '执行命令',
+  bash: '执行命令',
+  log: '读取命令日志',
+  input: '发送进程输入',
+  kill: '终止进程',
   task_submit: '提交任务',
   task_manage: '任务管理',
   human_interaction: '人工交互',

@@ -17,6 +17,8 @@ GFM task list 契约（方案 r4 §1.2 + 2026-10-24 增量协议裁定）：
 from __future__ import annotations
 
 import re
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Any
 
 # 行首（允许缩进=嵌套子项扁平提取）checkbox 行；完成态 x/X 宽容。
@@ -178,10 +180,79 @@ def parse_html_card_ops(text: str) -> list[dict[str, Any]]:
     return ops if len(ops) >= 2 else []
 
 
+# 尾注剥离（只作用于匹配键空间，存储原文不动）：`→ 已终结`（模型勾选尾注）
+# 与 `— \`任务ID\`（状态）`（派发汇报惯例重述，7fb38fe89e82 实测同条待办
+# 2~3 份副本的根因形态）。ASCII 连字符不剥——正文含 video-shotcraft 类
+# 连字符词，剥了截键误伤；只剥箭头/破折号族。
+_TAIL_NOTE_RE = re.compile(r"\s*(?:→|->|[—–]).*$")
+_MATCH_SIMILARITY = 0.86
+_MATCH_MIN_CHARS = 8
+_TRAILING_PUNCT = "：:;；,，.。、!！?？"
+
+
+def _normalize_match_text(text: str) -> str:
+    """匹配归一化：NFKC、去空白、剥尾注（箭头/破折号族，见 _TAIL_NOTE_RE）。"""
+    s = unicodedata.normalize("NFKC", str(text or ""))
+    s = _TAIL_NOTE_RE.sub("", s)
+    s = re.sub(r"\s+", "", s)
+    return s.strip(_TRAILING_PUNCT)
+
+
+def _match_score(item_text: str, text: str) -> float:
+    """匹配打分：2 精确 / 1.5 前缀或包含 / ≥0.86 相似 / 0 不匹配。"""
+    a = _normalize_match_text(item_text)
+    b = _normalize_match_text(text)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 2.0
+    if a.startswith(b) or (len(b) >= 6 and b in a):
+        return 1.5
+    if len(a) >= _MATCH_MIN_CHARS and len(b) >= _MATCH_MIN_CHARS:
+        ratio = SequenceMatcher(None, a, b).ratio()
+        if ratio >= _MATCH_SIMILARITY:
+            return ratio
+    return 0.0
+
+
 def _matches(item: dict[str, Any], text: str) -> bool:
-    """勾选目标匹配：精确 → 前缀 → 包含（短文本不做包含匹配，防误勾）。"""
-    t = item.get("text", "")
-    return t == text or t.startswith(text) or (len(text) >= 6 and text in t)
+    """勾选目标匹配：归一化后精确 → 前缀 → 包含 → 相似（短文本不做包含匹配）。"""
+    return _match_score(item.get("text", ""), text) > 0
+
+
+def _is_known_item(
+    merged: list[dict[str, Any]], key: str, existing_keys: set[str]
+) -> bool:
+    """新增判重（精确键之外识别「同一待办的重述形态」，1.2.32）：
+
+    - 精确键已在集合（原有判重，收拢到本函数统一出口）；
+    - 相似唯一最优（与勾选面同参：ratio ≥0.86 且与次优差 ≥0.05，双侧
+      ≥_MATCH_MIN_CHARS 才参与）：措辞漂移变体（如差一个「的」）——只用
+      ratio 分，不复用 _match_score（其前缀/包含 1.5 分无长度闸，会吞短
+      真新条目）；
+    - 双向包含（归一化短侧 ≥6 字）：裸标题短重述对长条目——短侧长度闸防
+      3 字短行误吞真新条目（写测试 vs 写测试报告）。
+
+    命中 = 已知项，跳过追加不再新开条目（7fb38fe89e82 实测多副本根因修复）。
+    """
+    if key in existing_keys:
+        return True
+    ratios: list[float] = []
+    for item in merged:
+        other = _normalize_match_text(item.get("text", ""))
+        if not other:
+            continue
+        short, long_ = sorted((other, key), key=len)
+        if len(short) >= 6 and short in long_:
+            return True
+        if len(other) >= _MATCH_MIN_CHARS and len(key) >= _MATCH_MIN_CHARS:
+            ratios.append(SequenceMatcher(None, other, key).ratio())
+    if ratios:
+        ratios.sort(reverse=True)
+        second = ratios[1] if len(ratios) > 1 else 0.0
+        if ratios[0] >= _MATCH_SIMILARITY and ratios[0] - second >= 0.05:
+            return True
+    return False
 
 
 def incremental_merge(
@@ -189,10 +260,14 @@ def incremental_merge(
 ) -> list[dict[str, Any]] | None:
     """散行增量合并（2026-10-24 用户裁定：勾选不按顺序/不重发全表，新增查重追加）。
 
-    - 勾选（done=True）：匹配现有未完成项（精确/前缀/包含）置 done；无
-      匹配且文本不在清单 → 作为已完成项追加（首轮列清单带已完成阶段，
-      不丢）；
-    - 新增（done=False）：text 不在现有集合（整条哈希等价=文本比对）才追加；
+    - 勾选（done=True）：按归一化后精确/前缀/包含/相似匹配现有未完成项置
+      done；相似匹配要求唯一最优（与次优差 ≥0.05，防近重复项抢匹配）；无
+      匹配且归一化文本不在清单 → 作为已完成项追加（首轮列清单带已完成
+      阶段，不丢）；
+    - 新增（done=False）：归一化精确键 + 匹配分兜底（_is_known_item：相似
+      唯一最优 / 双向包含短侧 ≥6 字）都不命中才追加——模型按「标题 —
+      `任务ID`（状态）」汇报惯例重述、措辞漂移变体不再产生副本（7fb38fe89e82
+      实测同条 2~3 份副本根因）；不聚类、不做语义合并（无法靠匹配可靠聚类）；
     - 重复轮幂等：勾选已 done 无害；新增同文本不重复追加；
     - 无 ops 或零有效变更返回 None（停更语义，不刷 updated_at）。
 
@@ -202,27 +277,42 @@ def incremental_merge(
         return None
     merged = [dict(item) for item in current]
     changed = False
-    existing_texts = {i.get("text", "") for i in merged}
+    existing_keys = {
+        key
+        for item in merged
+        if (key := _normalize_match_text(item.get("text", "")))
+    }
     for op in ops:
         text = str(op.get("text", "")).strip()
         if not text:
             continue
+        key = _normalize_match_text(text)
         if op.get("done"):
-            for item in merged:
-                if not item.get("done") and _matches(item, text):
-                    item["done"] = True
-                    changed = True
-                    break
-            else:
-                if text not in existing_texts:
-                    merged.append({"text": text, "done": True})
-                    existing_texts.add(text)
-                    changed = True
-        else:
-            if text not in existing_texts:
-                merged.append({"text": text, "done": False})
-                existing_texts.add(text)
+            scores = sorted(
+                (
+                    (_match_score(item.get("text", ""), text), idx)
+                    for idx, item in enumerate(merged)
+                    if not item.get("done")
+                ),
+                key=lambda pair: (pair[0], -pair[1]),
+                reverse=True,
+            )
+            best = scores[0] if scores else (0.0, -1)
+            second = scores[1][0] if len(scores) > 1 else 0.0
+            matched = best[0] >= 1.5 or (
+                best[0] >= _MATCH_SIMILARITY and best[0] - second >= 0.05
+            )
+            if matched:
+                merged[best[1]]["done"] = True
                 changed = True
+            elif key and key not in existing_keys:
+                merged.append({"text": text, "done": True})
+                existing_keys.add(key)
+                changed = True
+        elif key and not _is_known_item(merged, key, existing_keys):
+            merged.append({"text": text, "done": False})
+            existing_keys.add(key)
+            changed = True
     return merged if changed else None
 
 

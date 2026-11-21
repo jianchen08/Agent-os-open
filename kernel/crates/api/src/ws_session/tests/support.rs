@@ -26,17 +26,7 @@ struct SilentDispatcher;
 impl PipelineDispatcher for SilentDispatcher {
     async fn dispatch_user_input(
         &self,
-        _thread_id: &str,
-        _user_id: &str,
-        _content: &str,
-        _pipeline_id: &str,
-        _thinking_strength: &str,
-        _execution_context: Option<&serde_json::Value>,
-        _state_overlay: Option<&serde_json::Value>,
-        _agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: agentos_core::types::PendingInputSource,
+        _request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -63,17 +53,7 @@ pub(super) struct ErrUserInputDispatcher;
 impl PipelineDispatcher for ErrUserInputDispatcher {
     async fn dispatch_user_input(
         &self,
-        _thread_id: &str,
-        _user_id: &str,
-        _content: &str,
-        _pipeline_id: &str,
-        _thinking_strength: &str,
-        _execution_context: Option<&serde_json::Value>,
-        _state_overlay: Option<&serde_json::Value>,
-        _agent_id: &str,
-        _pipeline_config_id: Option<&str>,
-        _cmid: &str,
-        _source: agentos_core::types::PendingInputSource,
+        _request: agentos_core::types::DispatchRequest,
     ) -> Result<(), String> {
         Err("injected dispatch failure".to_string())
     }

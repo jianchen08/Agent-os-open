@@ -1,13 +1,27 @@
 /** 工具调用事件处理器（start / result） 仅使用 parts[] 统一路径，已移除旧 toolCalls / contentBlocks 兼容代码。 */
-import type { ToolCallPart } from '@/types/messageParts'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
-import { truncateToolResultData } from '@/utils/toolResultTruncate'
 import { loggers } from '@/utils/logger'
+import { truncateToolResultData } from '@/utils/toolResultTruncate'
 import { resolvePipelineId } from '../router'
 import { flushStreamChunkBuffer } from './streamHandler'
-import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
+import {
+  backfillAuthoritativeSequence,
+  ensureMessageSlot,
+  ensureStreamingPlaceholder,
+  extractMessageId,
+  extractThreadId,
+} from './utils'
+import type { ToolCallPart } from '@/types/messageParts'
 
 const _debugLogger = loggers.websocket
+
+/** 宿主消息权威槽位：只读 payload 内层 data.sequence（入口占位行 / 轮次槽位，
+ *  与 stream_start.sequence 同源）。事件信封顶层 sequence 是事件总线计数器，
+ *  严禁当消息序消费（ADR 2026-11-06-round-entry-slot-placeholder）。 */
+function extractEventSequence(eventData: any): number | undefined {
+  const seq = eventData?.data?.sequence
+  return typeof seq === 'number' && Number.isFinite(seq) ? seq : undefined
+}
 
 /** tool_result 缺 success 字段的告警节流（避免流式高频刷屏；30s 至多一条） */
 let _lastMissingSuccessWarnAt = 0
@@ -98,6 +112,10 @@ export function handleToolStart(eventData: any) {
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)
   const msg = msgs.find((m: any) => m.id === messageId)
+  // 宿主消息权威槽位（工具卡容器从第一刻起有排序坐标）：事件携带 seq 时
+  // 落位/补落——工具卡不得住在无 seq 的消息里（中断后恒垫底的根因）。
+  const eventSequence = extractEventSequence(eventData)
+  if (msg) backfillAuthoritativeSequence(pipelineId, messageId, eventSequence)
   if (!msg) {
     // tool_start 到达时消息占位可能不存在（stream_start 断线丢失/乱序/合并改名未命中），
     // 自动创建占位符——对齐 blockHandler 各 delta handler 的
@@ -106,7 +124,7 @@ export function handleToolStart(eventData: any) {
       `[TOOL_START] msg not found, auto-creating placeholder: pipeline=%s msgId=%s tool=%s`,
       pipelineId?.slice(0, 12), messageId?.slice(0, 12), toolName,
     )
-    ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
+    ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData), eventSequence)
   }
 
   // 同 call_id 的卡已存在（block 协议输出阶段建卡 / new_message 映射 / FIXUP）：
@@ -257,6 +275,10 @@ export function handleToolResult(eventData: any) {
   const callId = eventData.call_id || eventData.data?.call_id
   if (!callId) return
 
+  // 结果事件到达即补落宿主权威槽位（工具卡容器不得缺 seq）。
+  const eventSequence = extractEventSequence(eventData)
+  backfillAuthoritativeSequence(pipelineId, messageId, eventSequence)
+
   // 通过 call_id 精确匹配 parts[] 中的 tool_call part 并更新。
   // 直接寻址 miss 时先跨消息按 callId 搜声明卡（契约事件 message_id 晚一轮，
   // 见 findToolCallMessageId 注释）；跨消息也未命中才走 FIXUP 建卡兜底。
@@ -279,6 +301,9 @@ export function handleToolResult(eventData: any) {
       '[TOOL_RESULT] tool_call part not found, FIXUP creating: tool=%s callId=%s msgId=%s',
       toolName, callId?.slice(0, 12), messageId?.slice(0, 12),
     )
+    // 宿主容器也缺失（stream_start/tool_start 双丢）→ 先按权威槽位补建，
+    // 否则 appendPart 无处落笔、工具结果静默蒸发。
+    ensureMessageSlot(pipelineId, messageId, extractThreadId(eventData), eventSequence)
     pipelineStore.getState().appendPart(pipelineId, messageId, {
       type: 'tool_call',
       callId,
@@ -314,6 +339,9 @@ export function handleToolResult(eventData: any) {
       ),
       error: eventData.error ?? eventData.data?.error,
       durationMs: eventData.duration_ms ?? eventData.data?.duration_ms,
+      // 执行中 stdout 缓冲随结果落地释放（单调用上限 64KB 的线性滞留清零，
+      // 2026-11-12 内存修复；结果后的权威视图是 result/resultData）
+      partialOutput: undefined,
     }
     // 当 part 的 name 仍为 fallback "unknown" 且 result 事件携带有效 tool_name 时，回填更新
     if (resultToolName && resultToolName !== 'unknown') {

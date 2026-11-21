@@ -966,10 +966,10 @@ def test_packs_init_ui_pool_shape_edges(rp: Any) -> None:
     ]
 
 
-def test_combos_save_user_root_unavailable_error(rp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_combos_save_user_root_unavailable_error(rp: Any, patch_shared: Any) -> None:
     """用户空间不可得 = 写面如实报错不静默假成功。"""
     _user_card(rp, "card_hero", {"name": "侠客"})
-    monkeypatch.setattr(rp, "_user_combos_dir", lambda: None)
+    patch_shared("_user_combos_dir", lambda: None)  # 消费点在 rp_* 自持绑定
     out = _body_json(_call(rp, f"{_EP}/data/combos/save", "POST", json.dumps(
         {"name": "无处落", "card_id": "card_hero"}, ensure_ascii=False)))
     assert "error" in out
@@ -1005,7 +1005,7 @@ def test_game_page_post_method_404(rp: Any) -> None:
     assert out == {"error": "method not allowed"}
 
 
-def test_game_page_unlocatable_page_file_falls_back(rp: Any, monkeypatch: pytest.MonkeyPatch,
+def test_game_page_unlocatable_page_file_falls_back(rp: Any, patch_shared: Any,
                                                     caplog: pytest.LogCaptureFixture) -> None:
     """判存与取读间文件定位失效（防线分支）= OSError → page_html null + warning。"""
     _user_card(rp, "card_hero", {"name": "农场主", "pack_ids": ["stardew_social"]})
@@ -1018,7 +1018,7 @@ def test_game_page_unlocatable_page_file_falls_back(rp: Any, monkeypatch: pytest
             return None
         return real(pack_dir, rel)
 
-    monkeypatch.setattr(rp, "_pack_rel_path_in_dir", flaky)
+    patch_shared("_pack_rel_path_in_dir", flaky)  # 消费点在 rp_content 自持绑定
     out = _body_json(_call(rp, _PAGE_ROUTE, query={"session_id": "pipe-1"}))
     assert out["page_html"] is None
     assert any("装配失败" in r.getMessage() for r in caplog.records)

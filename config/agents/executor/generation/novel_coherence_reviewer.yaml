@@ -93,8 +93,6 @@ system_prompt: |-
 
   ## 参考规则
 
-
-
 dynamic_vars:
   enabled: true
   items:
@@ -104,6 +102,18 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
+- resource_search
+- call_tool
+# 动态面否决集（ADR 2026-11-18-agent-dynamic-tool-deny-list）：L3 执行者不可达
+# 任务提交/管理（调度权归 L1/L2）与 L1 宿主写面（触发器/生态/OAuth，容器写面
+# 不越界宿主用户根）——搜不到也调不动。
+tool_deny:
+- task_submit
+- task_manage
+- trigger_setup
+- ecosystem_translate
+- ecosystem_apply
+- oauth
 hard_constraints:
 - 必须按四维度（伏笔一致性、角色行为一致性、时间线逻辑、世界观设定违反）逐一审核
 - 每个维度必须独立评分（1-10分），不可遗漏

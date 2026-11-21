@@ -151,6 +151,19 @@ pub struct PluginCtx {
     /// `#[serde(default)]` 仅为 JSON 兼容（测试/日志序列化时缺省为 None）。
     #[serde(default)]
     pub tool_call_json: Option<String>,
+    /// 生命周期钩子语义标记（native 钩子路径，invoker `send_hook_via_execute`）。
+    ///
+    /// 与 `tool_call_json` 同构的约定字段：**同一 `execute` C-ABI 入口，约定
+    /// 字段区分调用语义**。`None` → 原 pipeline/工具语义；`Some(json)` → 本次
+    /// 是**生命周期钩子**，值为 `{"name": hook_name, "tags": {...}}` JSON 字符串
+    /// （如 `{"name": "on_pipeline_end", "tags": {"pipeline_id": "..."}}`）。
+    /// 插件见到本字段走钩子逻辑（如 spill_guard 的 on_pipeline_end 清理存档），
+    /// 返回 `{}`（state_updates 空集，钩子无状态产出）。
+    ///
+    /// 旧插件不认识该字段 → 忽略，按 pipeline 逻辑处理（此时 state_json 为
+    /// `"{}"`，产出空更新，零破坏）。
+    #[serde(default)]
+    pub hook_json: Option<String>,
 }
 
 impl PluginCtx {
@@ -182,6 +195,17 @@ impl PluginCtx {
     /// ```
     pub fn tool_call_value(&self) -> Option<serde_json::Value> {
         self.tool_call_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+    }
+
+    /// 解析 hook_json（插件侧便利方法，生命周期钩子语义）。
+    ///
+    /// - `Some(value)` → 本次 execute 是生命周期钩子，value 形如
+    ///   `{"name": "on_pipeline_end", "tags": {"pipeline_id": "..."}}`；
+    /// - `None` → 原 pipeline/工具语义。
+    pub fn hook_value(&self) -> Option<serde_json::Value> {
+        self.hook_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
     }
@@ -300,6 +324,29 @@ mod tests {
         .unwrap();
         assert!(ctx.tool_call_json.is_none());
         assert!(ctx.tool_call_value().is_none());
+    }
+
+    #[test]
+    fn plugin_ctx_hook_value_parses() {
+        // 钩子语义：hook_json 解析为 {"name": ..., "tags": {...}}。
+        let ctx = PluginCtx {
+            hook_json: Some(r#"{"name": "on_pipeline_end", "tags": {"pipeline_id": "p1"}}"#.into()),
+            ..PluginCtx::default()
+        };
+        let hook = ctx.hook_value().expect("hook 应解析为 Some");
+        assert_eq!(hook["name"], "on_pipeline_end");
+        assert_eq!(hook["tags"]["pipeline_id"], "p1");
+    }
+
+    #[test]
+    fn plugin_ctx_hook_value_none_or_bad_json() {
+        // 非 hook 调用（None）与非法 JSON → None（不 panic）。
+        assert!(PluginCtx::default().hook_value().is_none());
+        let bad = PluginCtx {
+            hook_json: Some("not json".into()),
+            ..PluginCtx::default()
+        };
+        assert!(bad.hook_value().is_none());
     }
 
     struct DummyPlugin {

@@ -5,7 +5,7 @@
   ],
   "name": "Browser Tool",
   "description": "浏览器操作工具——经 MCP Bridge 网关操作宿主机 Playwright 浏览器（隔离任务自动在沙箱内发起调用）；工作区「浏览器」页签直连直播投屏",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
